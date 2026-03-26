@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "bloodhound-eval"
+name = "offensive-reasoning-index"
 version = "0.1.0"
 description = "Benchmark for evaluating AI models on Active Directory attack path analysis"
 requires-python = ">=3.11"
@@ -14,13 +14,13 @@ dependencies = [
 ]
 
 [project.scripts]
-bloodhound-eval = "bloodhound_eval.cli:main"
+ori = "ori.cli:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/bloodhound_eval"]
+packages = ["src/ori"]
 
-[tool.uv]
-dev-dependencies = [
+[dependency-groups]
+dev = [
     "pytest>=8.0",
     "pytest-cov>=5.0",
     "ruff>=0.4",
