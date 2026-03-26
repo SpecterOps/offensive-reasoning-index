@@ -285,6 +285,13 @@ def _serialize_domain(node: ADNode) -> dict:
         "Trusts": node.extra.get("Trusts", []),
         "ChildObjects": node.extra.get("ChildObjects", []),
         "Links": node.extra.get("Links", []),
+        "GPOChanges": node.extra.get("GPOChanges", {
+            "LocalAdmins": [],
+            "RemoteDesktopUsers": [],
+            "DcomUsers": [],
+            "PSRemoteUsers": [],
+            "AffectedComputers": [],
+        }),
         "Aces": _aces(node),
         "IsACLProtected": p.get("isaclprotected", False),
     }

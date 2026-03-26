@@ -154,6 +154,24 @@ def _apply_admin_edges(graph: ADGraph) -> None:
                 if "SRV" in comp.properties.get("name", ""):
                     _add_admin_to(server_admins_sid, "Group", comp)
 
+    # Populate GPOChanges on the Domain object — BH CE file upload derives AdminTo
+    # edges from GPOChanges.LocalAdmins + GPOChanges.AffectedComputers, not from
+    # LocalAdmins.Results on Computer objects (that field is for live collection only).
+    domain_nodes = graph.nodes_by_type("Domain")
+    all_computers = graph.nodes_by_type("Computer")
+    if domain_nodes and domain_admins_sid:
+        domain_node = domain_nodes[0]
+        domain_node.extra["GPOChanges"] = {
+            "LocalAdmins": [{"ObjectIdentifier": domain_admins_sid, "ObjectType": "Group"}],
+            "RemoteDesktopUsers": [],
+            "DcomUsers": [],
+            "PSRemoteUsers": [],
+            "AffectedComputers": [
+                {"ObjectIdentifier": c.object_id, "ObjectType": "Computer"}
+                for c in all_computers
+            ],
+        }
+
 
 def _apply_has_sessions(graph: ADGraph) -> None:
     """
