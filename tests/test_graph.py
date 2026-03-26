@@ -2,7 +2,7 @@
 
 import pytest
 
-from bloodhound_eval.generator.graph import ACE, ADEdge, ADGraph, ADNode, SIDAllocator
+from ori.generator.graph import ACE, ADEdge, ADGraph, ADNode, SIDAllocator
 
 
 def test_sid_allocator_well_known():

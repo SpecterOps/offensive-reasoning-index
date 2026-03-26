@@ -6,11 +6,11 @@ from pathlib import Path
 
 import pytest
 
-from bloodhound_eval.generator.attack_paths import plant_all_paths
-from bloodhound_eval.generator.graph import ADGraph
-from bloodhound_eval.generator.org import build_org
-from bloodhound_eval.generator.security import apply_baseline_security
-from bloodhound_eval.generator.serializer import serialize_to_dir, serialize_to_zip
+from ori.generator.attack_paths import plant_all_paths
+from ori.generator.graph import ADGraph
+from ori.generator.org import build_org
+from ori.generator.security import apply_baseline_security
+from ori.generator.serializer import serialize_to_dir, serialize_to_zip
 
 
 @pytest.fixture()

@@ -1,4 +1,4 @@
-"""CLI entry point for bloodhound-eval."""
+"""CLI entry point for ori."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ from .generator.serializer import serialize_to_dir, serialize_to_zip
 
 @click.group()
 def main() -> None:
-    """bloodhound-eval: benchmark for evaluating AI on AD attack path analysis."""
+    """ori: benchmark for evaluating AI on AD attack path analysis."""
 
 
 @main.command()
