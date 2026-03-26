@@ -360,6 +360,7 @@ def _add_computer(graph: ADGraph, name: str, ou_dn: str, is_dc: bool, ou_sid: st
             "RemoteDesktopUsers": {"Results": [], "Collected": True},
             "DcomUsers": {"Results": [], "Collected": True},
             "PSRemoteUsers": {"Results": [], "Collected": True},
+            "UserRights": [],
         },
     )
     return graph.add_node(node)

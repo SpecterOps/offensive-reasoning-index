@@ -161,6 +161,16 @@ def _apply_admin_edges(graph: ADGraph) -> None:
     def _add_rdp(group_sid: str, comp) -> None:
         graph.add_edge(group_sid, "CanRDP", comp.object_id)
         comp.extra["RemoteDesktopUsers"]["Results"].append({"ObjectIdentifier": group_sid, "ObjectType": "Group"})
+        # UserRights URA entry — BH CE's PostCanRDP requires SeRemoteInteractiveLogonRight
+        # on the Computer object to create CanRDP edges (FetchComputersWithURA path).
+        ur = next(
+            (u for u in comp.extra["UserRights"] if u["Privilege"] == "SeRemoteInteractiveLogonRight"),
+            None,
+        )
+        if ur is None:
+            ur = {"Privilege": "SeRemoteInteractiveLogonRight", "Results": [], "Collected": True, "FailureReason": None, "LocalNames": []}
+            comp.extra["UserRights"].append(ur)
+        ur["Results"].append({"ObjectIdentifier": group_sid, "ObjectType": "Group"})
 
     def _add_dcom(group_sid: str, comp) -> None:
         graph.add_edge(group_sid, "ExecuteDCOM", comp.object_id)

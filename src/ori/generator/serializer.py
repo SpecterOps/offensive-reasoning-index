@@ -213,6 +213,7 @@ def _serialize_computer(node: ADNode) -> dict:
         "RemoteDesktopUsers": node.extra.get("RemoteDesktopUsers", {"Results": [], "Collected": True}),
         "DcomUsers": node.extra.get("DcomUsers", {"Results": [], "Collected": True}),
         "PSRemoteUsers": node.extra.get("PSRemoteUsers", {"Results": [], "Collected": True}),
+        "UserRights": node.extra.get("UserRights", []),
         "Aces": _aces(node),
         "IsACLProtected": p.get("isaclprotected", False),
         "IsDeleted": False,
