@@ -62,7 +62,7 @@ def _create_domain(graph: ADGraph) -> ADNode:
             "name": graph.domain,
             "distinguishedname": domain_dn,
             "domainsid": graph.domain_sid,
-            "functionallevel": 7,  # Windows Server 2016
+            "functionallevel": "Windows Server 2016",
             "highvalue": True,
         },
         extra={
