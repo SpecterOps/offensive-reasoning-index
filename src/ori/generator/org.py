@@ -347,6 +347,15 @@ def _add_computer(graph: ADGraph, name: str, ou_dn: str, is_dc: bool) -> ADNode:
             "lastlogontimestamp": now - graph.rng.randint(0, 7 * 86400),
         },
         contained_by=None,  # Could set to OU TypedPrincipal
-        extra={"AllowedToDelegate": [], "AllowedToAct": [], "HasSIDHistory": [], "Sessions": {"Results": [], "Collected": True}},
+        extra={
+            "AllowedToDelegate": [],
+            "AllowedToAct": [],
+            "HasSIDHistory": [],
+            "Sessions": {"Results": [], "Collected": True},
+            "LocalAdmins": {"Results": [], "Collected": True},
+            "RemoteDesktopUsers": {"Results": [], "Collected": True},
+            "DcomUsers": {"Results": [], "Collected": True},
+            "PSRemoteUsers": {"Results": [], "Collected": True},
+        },
     )
     return graph.add_node(node)

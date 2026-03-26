@@ -137,15 +137,22 @@ def _apply_admin_edges(graph: ADGraph) -> None:
     domain_admins_sid = _sid(graph, "Domain Admins")
     server_admins_sid = _sid(graph, "Server-Admins")
 
+    def _add_admin_to(group_sid: str, group_type: str, comp) -> None:
+        graph.add_edge(group_sid, "AdminTo", comp.object_id)
+        comp.extra["LocalAdmins"]["Results"].append({
+            "ObjectIdentifier": group_sid,
+            "ObjectType": group_type,
+        })
+
     if domain_admins_sid and graph.get_node(domain_admins_sid):
         for comp in graph.nodes_by_type("Computer"):
-            graph.add_edge(domain_admins_sid, "AdminTo", comp.object_id)
+            _add_admin_to(domain_admins_sid, "Group", comp)
 
     if server_admins_sid and graph.get_node(server_admins_sid):
         for comp in graph.nodes_by_type("Computer"):
             if not comp.properties.get("isdc", False):
                 if "SRV" in comp.properties.get("name", ""):
-                    graph.add_edge(server_admins_sid, "AdminTo", comp.object_id)
+                    _add_admin_to(server_admins_sid, "Group", comp)
 
 
 def _apply_has_sessions(graph: ADGraph) -> None:
@@ -162,10 +169,17 @@ def _apply_has_sessions(graph: ADGraph) -> None:
     if not workstations:
         return
 
+    def _add_session(ws, user) -> None:
+        graph.add_edge(ws.object_id, "HasSession", user.object_id)
+        ws.extra["Sessions"]["Results"].append({
+            "UserSID": user.object_id,
+            "ComputerSID": ws.object_id,
+        })
+
     # Regular users get sessions on workstations
     for i, user in enumerate(users[:min(len(users), len(workstations))]):
         ws = workstations[i % len(workstations)]
-        graph.add_edge(ws.object_id, "HasSession", user.object_id)
+        _add_session(ws, user)
 
     # Privileged session on a workstation — common real-world finding
     # DA group contains IT-Admins (a group), so look for IT-Admins user members
@@ -181,7 +195,7 @@ def _apply_has_sessions(graph: ADGraph) -> None:
         da_users = [u for u in da_user_members if u is not None]
         if da_users:
             da_user = graph.rng.choice(da_users)
-            graph.add_edge(target_ws.object_id, "HasSession", da_user.object_id)
+            _add_session(target_ws, da_user)
 
 
 def _apply_default_aces(graph: ADGraph) -> None:
