@@ -121,7 +121,9 @@ class SIDAllocator:
         return sid
 
     def alloc(self, name: str) -> str:
-        """Allocate a new SID for a named object."""
+        """Allocate a new SID for a named object. Raises if already allocated — use get_or_alloc() for idempotent access."""
+        if name in self._allocated:
+            raise ValueError(f"SID already allocated for {name!r} — use get_or_alloc() for idempotent access")
         if name in self.WELL_KNOWN:
             rid = self.WELL_KNOWN[name]
         else:

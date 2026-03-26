@@ -111,7 +111,7 @@ def _apply_default_memberships(graph: ADGraph) -> None:
         if n.properties.get("department") == "IT"
     ]
     it_users_sid = _sid(graph, "IT-Users")
-    for user in it_users:
+    for idx, user in enumerate(it_users):
         if it_users_sid and graph.get_node(it_users_sid):
             graph.add_edge(user.object_id, "MemberOf", it_users_sid)
             g = graph.get_node(it_users_sid)
@@ -120,7 +120,7 @@ def _apply_default_memberships(graph: ADGraph) -> None:
                     {"ObjectIdentifier": user.object_id, "ObjectType": "User"}
                 )
         # First half of IT users are also in IT-Admins
-        if it_admins_sid and graph.get_node(it_admins_sid) and it_users.index(user) < len(it_users) // 2:
+        if it_admins_sid and graph.get_node(it_admins_sid) and idx < len(it_users) // 2:
             graph.add_edge(user.object_id, "MemberOf", it_admins_sid)
             g = graph.get_node(it_admins_sid)
             if g:
@@ -131,44 +131,93 @@ def _apply_default_memberships(graph: ADGraph) -> None:
 
 def _apply_admin_edges(graph: ADGraph) -> None:
     """
-    Domain Admins (via IT-Admins) → AdminTo → all computers.
-    Server-Admins → AdminTo → servers.
+    Apply local admin, RDP, DCOM, and PSRemote edges via GPOChanges on Domain/OU objects.
+
+    BH CE file upload derives these edges from GPOChanges.LocalAdmins/RemoteDesktopUsers/
+    DcomUsers/PSRemoteUsers + GPOChanges.AffectedComputers on Domain and OU objects.
+    LocalAdmins.Results/RemoteDesktopUsers.Results etc. on Computer objects are also
+    populated for consistency but are not read by BH CE during file upload ingest.
+
+    - Domain Admins → AdminTo → all computers          (Domain-level GPOChanges)
+    - IT-Admins → CanRDP/ExecuteDCOM/CanPSRemote → all computers  (Domain-level GPOChanges)
+    - Server-Admins → AdminTo/CanRDP/CanPSRemote → servers only   (Servers OU GPOChanges)
     """
     domain_admins_sid = _sid(graph, "Domain Admins")
     server_admins_sid = _sid(graph, "Server-Admins")
+    it_admins_sid = _sid(graph, "IT-Admins")
 
-    def _add_admin_to(group_sid: str, group_type: str, comp) -> None:
+    all_computers = graph.nodes_by_type("Computer")
+    server_comps = [
+        c for c in all_computers
+        if "SRV" in c.properties.get("name", "") and not c.properties.get("isdc", False)
+    ]
+
+    # --- Graph edges + computer-level Results (for raw JSON consumers) ---
+
+    def _add_admin_to(group_sid: str, comp) -> None:
         graph.add_edge(group_sid, "AdminTo", comp.object_id)
-        comp.extra["LocalAdmins"]["Results"].append({
-            "ObjectIdentifier": group_sid,
-            "ObjectType": group_type,
-        })
+        comp.extra["LocalAdmins"]["Results"].append({"ObjectIdentifier": group_sid, "ObjectType": "Group"})
+
+    def _add_rdp(group_sid: str, comp) -> None:
+        graph.add_edge(group_sid, "CanRDP", comp.object_id)
+        comp.extra["RemoteDesktopUsers"]["Results"].append({"ObjectIdentifier": group_sid, "ObjectType": "Group"})
+
+    def _add_dcom(group_sid: str, comp) -> None:
+        graph.add_edge(group_sid, "ExecuteDCOM", comp.object_id)
+        comp.extra["DcomUsers"]["Results"].append({"ObjectIdentifier": group_sid, "ObjectType": "Group"})
+
+    def _add_psremote(group_sid: str, comp) -> None:
+        graph.add_edge(group_sid, "CanPSRemote", comp.object_id)
+        comp.extra["PSRemoteUsers"]["Results"].append({"ObjectIdentifier": group_sid, "ObjectType": "Group"})
 
     if domain_admins_sid and graph.get_node(domain_admins_sid):
-        for comp in graph.nodes_by_type("Computer"):
-            _add_admin_to(domain_admins_sid, "Group", comp)
+        for comp in all_computers:
+            _add_admin_to(domain_admins_sid, comp)
+
+    if it_admins_sid and graph.get_node(it_admins_sid):
+        for comp in all_computers:
+            _add_rdp(it_admins_sid, comp)
+            _add_dcom(it_admins_sid, comp)
+            _add_psremote(it_admins_sid, comp)
 
     if server_admins_sid and graph.get_node(server_admins_sid):
-        for comp in graph.nodes_by_type("Computer"):
-            if not comp.properties.get("isdc", False):
-                if "SRV" in comp.properties.get("name", ""):
-                    _add_admin_to(server_admins_sid, "Group", comp)
+        for comp in server_comps:
+            _add_admin_to(server_admins_sid, comp)
+            _add_rdp(server_admins_sid, comp)
+            _add_psremote(server_admins_sid, comp)
 
-    # Populate GPOChanges on the Domain object — BH CE file upload derives AdminTo
-    # edges from GPOChanges.LocalAdmins + GPOChanges.AffectedComputers, not from
-    # LocalAdmins.Results on Computer objects (that field is for live collection only).
+    # --- Domain-level GPOChanges (BH CE ingest source of truth) ---
+    # Covers Domain Admins AdminTo + IT-Admins RDP/DCOM/PSRemote on all computers.
     domain_nodes = graph.nodes_by_type("Domain")
-    all_computers = graph.nodes_by_type("Computer")
     if domain_nodes and domain_admins_sid:
-        domain_node = domain_nodes[0]
-        domain_node.extra["GPOChanges"] = {
+        it_admins_entry = (
+            [{"ObjectIdentifier": it_admins_sid, "ObjectType": "Group"}]
+            if it_admins_sid else []
+        )
+        domain_nodes[0].extra["GPOChanges"] = {
             "LocalAdmins": [{"ObjectIdentifier": domain_admins_sid, "ObjectType": "Group"}],
-            "RemoteDesktopUsers": [],
-            "DcomUsers": [],
-            "PSRemoteUsers": [],
+            "RemoteDesktopUsers": it_admins_entry,
+            "DcomUsers": it_admins_entry,
+            "PSRemoteUsers": it_admins_entry,
             "AffectedComputers": [
                 {"ObjectIdentifier": c.object_id, "ObjectType": "Computer"}
                 for c in all_computers
+            ],
+        }
+
+    # --- Servers OU GPOChanges (Server-Admins scoped to servers only) ---
+    servers_ou_sid = _sid(graph, "OU-Servers")
+    servers_ou_node = graph.get_node(servers_ou_sid) if servers_ou_sid else None
+    if servers_ou_node and server_admins_sid and server_comps:
+        sa_entry = [{"ObjectIdentifier": server_admins_sid, "ObjectType": "Group"}]
+        servers_ou_node.extra["GPOChanges"] = {
+            "LocalAdmins": sa_entry,
+            "RemoteDesktopUsers": sa_entry,
+            "DcomUsers": [],
+            "PSRemoteUsers": sa_entry,
+            "AffectedComputers": [
+                {"ObjectIdentifier": c.object_id, "ObjectType": "Computer"}
+                for c in server_comps
             ],
         }
 
