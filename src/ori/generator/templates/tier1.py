@@ -71,7 +71,7 @@ def plant_admin_to(graph: ADGraph) -> PlantedPath:
   (u:User {{name: '{source_user.properties['name']}'}})
   -[*1..]->(c:Computer {{name: '{dc.properties['name']}'}})
 )
-RETURN length(p) AS hops, [r IN relationships(p) | type(r)] AS edges"""
+RETURN p"""
     else:
         path_edges = [
             (source_user.object_id, "MemberOf", it_admins_sid),
@@ -85,7 +85,7 @@ RETURN length(p) AS hops, [r IN relationships(p) | type(r)] AS edges"""
   (u:User {{name: '{source_user.properties['name']}'}})
   -[*1..]->(c:Computer {{name: '{dc.properties['name']}'}})
 )
-RETURN length(p) AS hops, [r IN relationships(p) | type(r)] AS edges"""
+RETURN p"""
 
     planted = PlantedPath(
         template_id="t1_admin_to",
