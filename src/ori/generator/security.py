@@ -33,7 +33,7 @@ def apply_baseline_security(graph: ADGraph) -> None:
 
 def _sid(graph: ADGraph, name: str) -> str | None:
     """Look up SID by name from the allocator's registry."""
-    return graph.sid_alloc._allocated.get(name)
+    return graph.sid_alloc.get(name)
 
 
 def _apply_default_memberships(graph: ADGraph) -> None:

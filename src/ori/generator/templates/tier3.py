@@ -39,7 +39,7 @@ def plant_unconstrained_delegation(graph: ADGraph) -> PlantedPath:
     target_ws.properties["unconstraineddelegation"] = True
 
     # Find an IT-Admin user to plant a session (represents DA connecting to this machine)
-    it_admins_sid = graph.sid_alloc._allocated.get("IT-Admins")
+    it_admins_sid = graph.sid_alloc.get("IT-Admins")
     it_admins_node = graph.get_node(it_admins_sid) if it_admins_sid else None
     da_users = [
         graph.get_node(m["ObjectIdentifier"])
@@ -112,8 +112,8 @@ def plant_constrained_delegation(graph: ADGraph) -> PlantedPath:
         raise RuntimeError("No domain controllers found for t3_constrained_delegation")
     dc = dcs[0]
 
-    domain_users_sid = graph.sid_alloc._allocated.get("Domain Users")
-    da_sid = graph.sid_alloc._allocated.get("Domain Admins")
+    domain_users_sid = graph.sid_alloc.get("Domain Users")
+    da_sid = graph.sid_alloc.get("Domain Admins")
 
     # Create the service account
     svc_sid = graph.sid_alloc.alloc("svc_mssql")

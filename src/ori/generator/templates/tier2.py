@@ -23,10 +23,10 @@ def plant_kerberoast_chain(graph: ADGraph) -> PlantedPath:
 
     Attack: Kerberoast SVC_BACKUP → offline crack → use creds → local admin on servers.
     """
-    server_admins_sid = graph.sid_alloc._allocated.get("Server-Admins")
+    server_admins_sid = graph.sid_alloc.get("Server-Admins")
     server_admins_node = graph.get_node(server_admins_sid) if server_admins_sid else None
-    domain_users_sid = graph.sid_alloc._allocated.get("Domain Users")
-    da_sid = graph.sid_alloc._allocated.get("Domain Admins")
+    domain_users_sid = graph.sid_alloc.get("Domain Users")
+    da_sid = graph.sid_alloc.get("Domain Admins")
 
     servers = [
         c for c in graph.nodes_by_type("Computer")
@@ -134,13 +134,13 @@ def plant_acl_chain(graph: ADGraph) -> PlantedPath:
 
     Attack: exploit GenericAll → AddMember self to Server-Admins → local admin on servers.
     """
-    server_admins_sid = graph.sid_alloc._allocated.get("Server-Admins")
+    server_admins_sid = graph.sid_alloc.get("Server-Admins")
     server_admins_node = graph.get_node(server_admins_sid) if server_admins_sid else None
     if not server_admins_node:
         raise RuntimeError("Server-Admins not found for t2_acl_chain")
 
     # Pick a non-IT, non-privileged user as the attacker
-    it_admins_sid = graph.sid_alloc._allocated.get("IT-Admins")
+    it_admins_sid = graph.sid_alloc.get("IT-Admins")
     it_admins_node = graph.get_node(it_admins_sid) if it_admins_sid else None
     privileged_sids = {
         m["ObjectIdentifier"]
@@ -175,8 +175,8 @@ def plant_acl_chain(graph: ADGraph) -> PlantedPath:
     cypher = (
         f"MATCH p=shortestPath( "
         f"(u:User {{name: '{attacker.properties['name']}'}}) "
-        f"-[*1..]->(c:Computer) "
-        f") WHERE c.name STARTS WITH 'SRV-' RETURN p"
+        f"-[*1..]->(c:Computer {{name: '{target_server.properties['name']}'}}) "
+        f") RETURN p"
     )
 
     planted = PlantedPath(
@@ -213,13 +213,13 @@ def plant_nested_groups(graph: ADGraph) -> PlantedPath:
 
     Attack: the nested membership grants transitive AdminTo on servers.
     """
-    server_admins_sid = graph.sid_alloc._allocated.get("Server-Admins")
+    server_admins_sid = graph.sid_alloc.get("Server-Admins")
     server_admins_node = graph.get_node(server_admins_sid) if server_admins_sid else None
     if not server_admins_node:
         raise RuntimeError("Server-Admins not found for t2_nested_groups")
 
-    domain_users_sid = graph.sid_alloc._allocated.get("Domain Users")
-    da_sid = graph.sid_alloc._allocated.get("Domain Admins")
+    domain_users_sid = graph.sid_alloc.get("Domain Users")
+    da_sid = graph.sid_alloc.get("Domain Admins")
     cn_users_dn = f"CN=Users,{graph.dn.domain_root()}"
 
     # Create two nested groups
@@ -267,7 +267,7 @@ def plant_nested_groups(graph: ADGraph) -> PlantedPath:
     server_admins_node.extra["Members"].append({"ObjectIdentifier": infra_leads_sid, "ObjectType": "Group"})
 
     # Pick a non-IT, non-privileged user and add them to INFRA-TEAM
-    it_admins_sid = graph.sid_alloc._allocated.get("IT-Admins")
+    it_admins_sid = graph.sid_alloc.get("IT-Admins")
     it_admins_node = graph.get_node(it_admins_sid) if it_admins_sid else None
     privileged_sids = {
         m["ObjectIdentifier"]
@@ -291,12 +291,8 @@ def plant_nested_groups(graph: ADGraph) -> PlantedPath:
     infra_team_node.extra["Members"].append(
         {"ObjectIdentifier": source_user.object_id, "ObjectType": "User"}
     )
-    # Also add to Domain Users
-    if domain_users_sid and graph.get_node(domain_users_sid):
-        graph.add_edge(source_user.object_id, "MemberOf", domain_users_sid)
-        graph.get_node(domain_users_sid).extra["Members"].append(
-            {"ObjectIdentifier": source_user.object_id, "ObjectType": "User"}
-        )
+    # Domain Users membership is already applied by apply_baseline_security — skip to avoid
+    # duplicate edges and duplicate Members entries.
 
     # DA has GenericAll on both groups
     for node in (infra_leads_node, infra_team_node):

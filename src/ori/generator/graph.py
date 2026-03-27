@@ -113,6 +113,10 @@ class SIDAllocator:
         self._next_rid = 1100
         self._allocated: dict[str, str] = {}  # name → SID
 
+    def get(self, name: str) -> str | None:
+        """Return existing SID for name, or None if not yet allocated."""
+        return self._allocated.get(name)
+
     def get_or_alloc(self, name: str) -> str:
         """Get existing SID for name or allocate a new one."""
         if name in self._allocated:

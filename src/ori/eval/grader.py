@@ -63,13 +63,29 @@ def grade(
     # Grade by mode
     mode = task.grade_mode
     if mode == "path_exists":
-        correct = len(model_result.nodes) > 0
+        # Model must return at least one result AND include all reference nodes.
+        # Checking only len > 0 would accept any non-empty query (e.g. MATCH (n) RETURN n LIMIT 1).
+        model_nonempty = len(model_result.nodes) > 0
+        if not ref_result.node_names:
+            # Reference returned nothing — planted path not found in BH CE, can't grade
+            correct = False
+            details = "path_exists: reference result is empty — verify BH CE ingest"
+        elif not model_nonempty:
+            correct = False
+            details = f"path_exists: model returned 0 nodes (ref: {len(ref_result.nodes)})"
+        else:
+            # Model must contain all nodes that appear in the reference path
+            correct = ref_result.node_names.issubset(model_result.node_names)
+            details = (
+                f"path_exists: model={len(model_result.node_names)} nodes, "
+                f"ref={len(ref_result.node_names)} nodes, "
+                f"overlap={len(ref_result.node_names & model_result.node_names)}"
+            )
         return GradeResult(
             score=1.0 if correct else 0.0,
             outcome="CORRECT" if correct else "INCORRECT",
             hallucination=False,
-            details=f"path_exists: model returned {len(model_result.nodes)} nodes "
-                    f"(ref: {len(ref_result.nodes)})",
+            details=details,
         )
 
     elif mode == "node_set":

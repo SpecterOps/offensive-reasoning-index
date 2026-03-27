@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -98,7 +99,6 @@ async def run_eval_cli(
         parsed = urlparse(bhce_url)
         domain = parsed.hostname
         if parsed.port:
-            import os
             os.environ["BLOODHOUND_PORT"] = str(parsed.port)
         if parsed.scheme:
             os.environ["BLOODHOUND_SCHEME"] = parsed.scheme

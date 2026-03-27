@@ -20,13 +20,13 @@ def plant_group_membership(graph: ADGraph) -> PlantedPath:
 
     Path: USER → MemberOf → DOMAIN ADMINS
     """
-    da_sid = graph.sid_alloc._allocated.get("Domain Admins")
+    da_sid = graph.sid_alloc.get("Domain Admins")
     if not da_sid:
         raise RuntimeError("Domain Admins not found")
     da_node = graph.get_node(da_sid)
 
     # Exclude users already in IT-Admins (those are covered by t1_admin_to)
-    it_admins_sid = graph.sid_alloc._allocated.get("IT-Admins")
+    it_admins_sid = graph.sid_alloc.get("IT-Admins")
     it_admins_node = graph.get_node(it_admins_sid) if it_admins_sid else None
     privileged_sids = {
         m["ObjectIdentifier"]
@@ -90,7 +90,7 @@ def plant_admin_to(graph: ADGraph) -> PlantedPath:
     a specific representative user for the task.
     """
     # Find a user in IT department who is in IT-Admins
-    it_admins_sid = graph.sid_alloc._allocated.get("IT-Admins")
+    it_admins_sid = graph.sid_alloc.get("IT-Admins")
     if it_admins_sid is None:
         raise RuntimeError("IT-Admins group not found — run build_org first")
 
@@ -118,7 +118,7 @@ def plant_admin_to(graph: ADGraph) -> PlantedPath:
     dc = dcs[0]
 
     # The path goes through Domain Admins (since IT-Admins → MemberOf → Domain Admins → AdminTo → DC)
-    da_sid = graph.sid_alloc._allocated.get("Domain Admins")
+    da_sid = graph.sid_alloc.get("Domain Admins")
     da_node = graph.get_node(da_sid) if da_sid else None
 
     if da_node:
@@ -183,7 +183,7 @@ def plant_has_session(graph: ADGraph) -> PlantedPath:
     # DA typically has IT-Admins as a nested group member, not direct users.
     privileged_user_sids: set[str] = set()
     for group_name in ("Domain Admins", "IT-Admins"):
-        gsid = graph.sid_alloc._allocated.get(group_name)
+        gsid = graph.sid_alloc.get(group_name)
         gnode = graph.get_node(gsid) if gsid else None
         if gnode:
             for m in gnode.extra.get("Members", []):

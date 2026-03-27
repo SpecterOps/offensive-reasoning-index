@@ -18,14 +18,18 @@ class Task:
     metadata: dict = field(default_factory=dict)
 
 
-# Per-template question strings.
+# Per-template question definitions.
+# Each entry is a tuple of:
+#   (question, category, grade_mode, tags, reference_cypher_template | None)
+# reference_cypher_template overrides the planted path's verification_cypher for this task.
+# None means use the planted path's verification_cypher unchanged (correct for path_finding tasks).
 # Placeholders: {source_name}, {target_name}, {domain}
-_TEMPLATE_QUESTIONS: dict[str, list[tuple[str, str, str, list[str]]]] = {
-    # (question, category, grade_mode, tags)
+_TEMPLATE_QUESTIONS: dict[str, list[tuple[str, str, str, list[str], str | None]]] = {
     "t1_admin_to": [
         (
             "What is the attack path from {source_name} to {target_name}? Show the full path.",
             "path_finding", "path_exists", ["admin_to", "member_of"],
+            None,  # use verification_cypher from manifest
         ),
     ],
     "t1_has_session": [
@@ -33,22 +37,29 @@ _TEMPLATE_QUESTIONS: dict[str, list[tuple[str, str, str, list[str]]]] = {
             "Which computers have active sessions from members of the Domain Admins group "
             "or groups nested within it?",
             "enumeration", "node_set", ["has_session", "lateral_movement"],
+            # Returns the computers themselves, not the full path
+            "MATCH (c:Computer)-[:HasSession]->(u:User)-[:MemberOf*1..]->(g:Group"
+            " {{name: 'DOMAIN ADMINS@{domain}'}}) RETURN c",
         ),
         (
             "Find all workstations where a privileged user (Domain Admin or IT Admin) "
             "has an active session.",
             "path_finding", "path_exists", ["has_session"],
+            None,
         ),
     ],
     "t1_group_membership": [
         (
             "Is {source_name} a member of any privileged groups? Show the membership path.",
             "path_finding", "path_exists", ["member_of", "privilege_escalation"],
+            None,
         ),
         (
             "Find all users who are direct members of the Domain Admins group "
             "(not through nested group membership).",
             "enumeration", "node_set", ["member_of", "domain_admins"],
+            # Direct MemberOf only — not transitive
+            "MATCH (u:User)-[:MemberOf]->(g:Group {{name: 'DOMAIN ADMINS@{domain}'}}) RETURN u",
         ),
     ],
     "t2_kerberoast_chain": [
@@ -56,11 +67,13 @@ _TEMPLATE_QUESTIONS: dict[str, list[tuple[str, str, str, list[str]]]] = {
             "Find all Kerberoastable service accounts (hasspn = true) and show their path "
             "to any server computer.",
             "path_finding", "path_exists", ["kerberoasting", "service_accounts"],
+            None,
         ),
         (
             "List all user accounts that have a Service Principal Name (SPN) set, "
             "making them vulnerable to Kerberoasting.",
             "enumeration", "node_set", ["kerberoasting", "spn"],
+            "MATCH (u:User {{hasspn: true}}) RETURN u",
         ),
     ],
     "t2_acl_chain": [
@@ -68,11 +81,13 @@ _TEMPLATE_QUESTIONS: dict[str, list[tuple[str, str, str, list[str]]]] = {
             "Find users with GenericAll rights on any privileged group that has AdminTo "
             "access on servers.",
             "path_finding", "path_exists", ["acl", "generic_all", "admin_to"],
+            None,
         ),
         (
             "Find all ACL-based attack paths where a regular user can reach server admin "
             "access through group rights abuse.",
             "path_finding", "path_exists", ["acl", "privilege_escalation"],
+            None,
         ),
     ],
     "t2_nested_groups": [
@@ -80,11 +95,14 @@ _TEMPLATE_QUESTIONS: dict[str, list[tuple[str, str, str, list[str]]]] = {
             "Find the full attack path from {source_name} to any server computer, "
             "including all nested group membership hops.",
             "path_finding", "path_exists", ["nested_groups", "member_of"],
+            None,
         ),
         (
             "Show the complete group nesting chain that connects INFRA-TEAM@{domain} "
             "to Server-Admins.",
             "path_finding", "path_exists", ["nested_groups"],
+            "MATCH p=(g:Group {{name: 'INFRA-TEAM@{domain}'}})-[:MemberOf*1..]->"
+            "(sa:Group {{name: 'SERVER-ADMINS@{domain}'}}) RETURN p",
         ),
     ],
     "t3_unconstrained_delegation": [
@@ -92,10 +110,12 @@ _TEMPLATE_QUESTIONS: dict[str, list[tuple[str, str, str, list[str]]]] = {
             "Find all non-domain-controller computers that have unconstrained Kerberos "
             "delegation enabled and also have active sessions from privileged users.",
             "path_finding", "path_exists", ["unconstrained_delegation", "kerberos"],
+            None,
         ),
         (
             "Which computers have unconstrained delegation configured? Exclude domain controllers.",
             "enumeration", "node_set", ["unconstrained_delegation"],
+            "MATCH (c:Computer {{unconstraineddelegation: true}}) WHERE NOT c.isdc = true RETURN c",
         ),
     ],
     "t3_constrained_delegation": [
@@ -103,11 +123,13 @@ _TEMPLATE_QUESTIONS: dict[str, list[tuple[str, str, str, list[str]]]] = {
             "Find all service accounts configured with constrained delegation "
             "(trustedtoauth = true) that can delegate access to domain controllers.",
             "path_finding", "path_exists", ["constrained_delegation", "s4u2proxy"],
+            None,
         ),
         (
             "List all accounts with the 'Trust this computer for delegation to specified "
             "services only' (trustedtoauth) flag set.",
             "enumeration", "node_set", ["constrained_delegation"],
+            "MATCH (u:User {{trustedtoauth: true}}) RETURN u",
         ),
     ],
 }
@@ -154,7 +176,7 @@ def generate_tasks(manifest: dict) -> list[Task]:
         source_name = path.get("source_name", path.get("source_node", ""))
         target_name = path.get("target_name", path.get("target_node", ""))
 
-        for i, (q_tmpl, category, grade_mode, tags) in enumerate(
+        for i, (q_tmpl, category, grade_mode, tags, ref_cypher_tmpl) in enumerate(
             _TEMPLATE_QUESTIONS.get(tid, []), start=1
         ):
             question = q_tmpl.format(
@@ -162,13 +184,23 @@ def generate_tasks(manifest: dict) -> list[Task]:
                 target_name=target_name,
                 domain=domain,
             )
+            # Use per-task reference Cypher if defined, otherwise fall back to the
+            # planted path's verification_cypher (correct for path_finding tasks).
+            if ref_cypher_tmpl is not None:
+                reference_cypher = ref_cypher_tmpl.format(
+                    source_name=source_name,
+                    target_name=target_name,
+                    domain=domain,
+                )
+            else:
+                reference_cypher = path["verification_cypher"]
             tasks.append(Task(
                 id=f"{tid}-{i:02d}",
                 template_id=tid,
                 tier=path["tier"],
                 category=category,
                 question=question,
-                reference_cypher=path["verification_cypher"],
+                reference_cypher=reference_cypher,
                 grade_mode=grade_mode,
                 tags=tags,
                 metadata={
@@ -186,13 +218,13 @@ def generate_tasks(manifest: dict) -> list[Task]:
         "global-kerberoastable":
             "MATCH (u:User {hasspn: true}) RETURN u",
         "global-admin-to":
-            f"MATCH p=(g:Group {{name: 'DOMAIN ADMINS@{domain}'}})-[:AdminTo]->(c:Computer) RETURN p",
+            f"MATCH (g:Group {{name: 'DOMAIN ADMINS@{domain}'}})-[:AdminTo]->(c:Computer) RETURN c",
         "global-da-members":
             f"MATCH (u:User)-[:MemberOf*1..]->(g:Group {{name: 'DOMAIN ADMINS@{domain}'}}) RETURN u",
         "global-unconstrained":
             "MATCH (c:Computer {unconstraineddelegation: true}) WHERE NOT c.isdc = true RETURN c",
         "global-privileged-sessions":
-            f"MATCH p=(c:Computer)-[:HasSession]->(u:User)-[:MemberOf*1..]->(g:Group {{name: 'DOMAIN ADMINS@{domain}'}}) RETURN p",
+            f"MATCH (c:Computer)-[:HasSession]->(u:User)-[:MemberOf*1..]->(g:Group {{name: 'DOMAIN ADMINS@{domain}'}}) RETURN c",
     }
 
     for id_suffix, question, category, grade_mode, tags in _GLOBAL_TASKS:

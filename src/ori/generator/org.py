@@ -279,8 +279,8 @@ def _create_computers(
     # Workstations
     ws_ou_dn = ou_map.get("IT/Workstations", ou_map["IT"])
     ws_ou_sid = (
-        graph.sid_alloc._allocated.get("OU-IT-Workstations")
-        or graph.sid_alloc._allocated.get("OU-IT")
+        graph.sid_alloc.get("OU-IT-Workstations")
+        or graph.sid_alloc.get("OU-IT")
     )
     for i in range(1, num_workstations + 1):
         name = f"WS-IT-{i:02d}"
@@ -289,7 +289,7 @@ def _create_computers(
     # Servers
     server_names = ["SRV-FILE-01", "SRV-WEB-01", "SRV-SQL-01", "SRV-APP-01"]
     srv_ou_dn = ou_map["Servers"]
-    srv_ou_sid = graph.sid_alloc._allocated.get("OU-Servers")
+    srv_ou_sid = graph.sid_alloc.get("OU-Servers")
     for i in range(num_servers):
         name = server_names[i] if i < len(server_names) else f"SRV-{i:02d}"
         _add_computer(graph, name, srv_ou_dn, is_dc=False, ou_sid=srv_ou_sid)
@@ -335,7 +335,7 @@ def _add_computer(graph: ADGraph, name: str, ou_dn: str, is_dc: bool, ou_sid: st
         properties={
             "name": f"{name}.{graph.domain}",
             "samaccountname": sam,
-            "distinguishedname": graph.dn.computer(name, ou_dn.split(",")[0]),
+            "distinguishedname": f"CN={name},{ou_dn}",
             "domain": graph.domain,
             "domainsid": graph.domain_sid,
             "enabled": True,
