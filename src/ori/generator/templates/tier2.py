@@ -175,8 +175,8 @@ def plant_acl_chain(graph: ADGraph) -> PlantedPath:
     cypher = (
         f"MATCH p=shortestPath( "
         f"(u:User {{name: '{attacker.properties['name']}'}}) "
-        f"-[*1..]->(c:Computer {{name: '{target_server.properties['name']}'}}) "
-        f") RETURN p"
+        f"-[*1..]->(c:Computer) "
+        f") WHERE c.name STARTS WITH 'SRV-' RETURN p"
     )
 
     planted = PlantedPath(
@@ -315,8 +315,8 @@ def plant_nested_groups(graph: ADGraph) -> PlantedPath:
     cypher = (
         f"MATCH p=shortestPath( "
         f"(u:User {{name: '{source_user.properties['name']}'}}) "
-        f"-[*1..]->(c:Computer {{name: '{target_server.properties['name']}'}}) "
-        f") RETURN p"
+        f"-[*1..]->(c:Computer) "
+        f") WHERE c.name STARTS WITH 'SRV-' RETURN p"
     )
 
     planted = PlantedPath(
