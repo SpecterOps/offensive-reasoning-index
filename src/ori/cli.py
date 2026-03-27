@@ -77,6 +77,25 @@ def generate(
         click.echo(f"  [{path.tier}] {path.template_id}: {path.description[:80]}...")
 
 
+@main.command()
+@click.option("--manifest", "-m", required=True, type=click.Path(exists=True), help="Path to manifest.json")
+@click.option("--model", required=True, help="Model string, e.g. anthropic/claude-sonnet-4-5 or ollama/llama3.1:8b")
+@click.option("--output", "-o", required=True, type=click.Path(), help="Output CSV path")
+@click.option("--concurrency", default=3, show_default=True, help="Max concurrent model calls")
+@click.option("--bhce-url", default=None, help="BH CE base URL (overrides BLOODHOUND_DOMAIN env var)")
+def eval(manifest: str, model: str, output: str, concurrency: int, bhce_url: str | None) -> None:
+    """Run evaluation: generate tasks from manifest, run model, grade results."""
+    import asyncio
+    from .eval.runner import run_eval_cli
+    asyncio.run(run_eval_cli(
+        manifest_path=Path(manifest),
+        model=model,
+        output_path=Path(output),
+        concurrency=concurrency,
+        bhce_url=bhce_url,
+    ))
+
+
 def _build_manifest(graph: ADGraph, seed: int) -> dict:
     """Build the ground-truth manifest for the generated dataset."""
     users = graph.nodes_by_type("User")
@@ -103,7 +122,9 @@ def _build_manifest(graph: ADGraph, seed: int) -> dict:
                 "category": p.category,
                 "description": p.description,
                 "source_node": p.source_node,
+                "source_name": (graph.get_node(p.source_node).properties.get("name", "") if graph.get_node(p.source_node) else ""),
                 "target_node": p.target_node,
+                "target_name": (graph.get_node(p.target_node).properties.get("name", "") if graph.get_node(p.target_node) else ""),
                 "path_edges": [
                     {"source": src, "edge": edge, "target": tgt}
                     for src, edge, tgt in p.path_edges

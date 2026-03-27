@@ -1,0 +1,143 @@
+"""Minimal BloodHound CE API client (HMAC auth + Cypher execution)."""
+
+from __future__ import annotations
+
+import hashlib
+import hmac
+import os
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+
+import httpx
+
+
+@dataclass
+class CypherResult:
+    success: bool
+    nodes: list[dict] = field(default_factory=list)
+    node_names: set[str] = field(default_factory=set)
+    error: str | None = None
+    raw: dict = field(default_factory=dict)
+
+
+class BHCEClient:
+    """
+    Async BloodHound CE client.
+
+    Auth uses HMAC-SHA256 signatures matching the bloodhound_mcp pattern.
+    Reads credentials from env vars: BLOODHOUND_DOMAIN, BLOODHOUND_TOKEN_ID,
+    BLOODHOUND_TOKEN_KEY. These are the same vars used by bloodhound_mcp.
+    """
+
+    def __init__(
+        self,
+        domain: str | None = None,
+        token_id: str | None = None,
+        token_key: str | None = None,
+        scheme: str = "https",
+        port: int = 443,
+    ) -> None:
+        self.domain = domain or os.environ["BLOODHOUND_DOMAIN"]
+        self.token_id = token_id or os.environ["BLOODHOUND_TOKEN_ID"]
+        self.token_key = token_key or os.environ["BLOODHOUND_TOKEN_KEY"]
+        self.scheme = scheme or os.getenv("BLOODHOUND_SCHEME", "https")
+        self.port = port or int(os.getenv("BLOODHOUND_PORT", "443"))
+        self._client = httpx.AsyncClient(timeout=30.0)
+
+    def _sign(self, method: str, path: str, body: bytes = b"") -> dict:
+        """Build HMAC-signed request headers."""
+        request_date = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        body_md5 = hashlib.md5(body).hexdigest()
+        # HMAC message: METHOD + path + date + body_md5
+        msg = "\n".join([method.upper(), path, request_date, body_md5]).encode()
+        sig = hmac.new(self.token_key.encode(), msg, hashlib.sha256).hexdigest()
+        return {
+            "Authorization": f"bhesignature {self.token_id}",
+            "RequestDate": request_date,
+            "Signature": sig,
+            "Content-Type": "application/json",
+        }
+
+    def _url(self, path: str) -> str:
+        base = f"{self.scheme}://{self.domain}"
+        if self.port not in (80, 443):
+            base += f":{self.port}"
+        return base + path
+
+    async def run_cypher(self, query: str) -> CypherResult:
+        """Execute a Cypher query against BH CE and return normalized result."""
+        import json
+        path = "/api/v2/graphs/cypher"
+        body = json.dumps({"query": query, "includeproperties": True}).encode()
+        headers = self._sign("POST", path, body)
+
+        try:
+            resp = await self._client.post(self._url(path), content=body, headers=headers)
+        except httpx.RequestError as e:
+            return CypherResult(success=False, error=f"Request failed: {e}")
+
+        if resp.status_code == 404:
+            # BH CE returns 404 for queries that return no results
+            return CypherResult(success=True, nodes=[], node_names=set(), raw={})
+
+        if resp.status_code == 400:
+            return CypherResult(success=False, error=f"Cypher syntax error: {resp.text}")
+
+        if resp.status_code not in (200, 201):
+            return CypherResult(success=False, error=f"HTTP {resp.status_code}: {resp.text}")
+
+        try:
+            data = resp.json()
+        except Exception as e:
+            return CypherResult(success=False, error=f"JSON parse error: {e}")
+
+        nodes = _extract_nodes(data)
+        names = _extract_node_names(nodes)
+        return CypherResult(success=True, nodes=nodes, node_names=names, raw=data)
+
+    async def get_all_node_names(self) -> set[str]:
+        """Fetch all node names from BH CE for hallucination detection."""
+        result = await self.run_cypher("MATCH (n) RETURN n LIMIT 500")
+        if not result.success:
+            return set()
+        return result.node_names
+
+    async def close(self) -> None:
+        await self._client.aclose()
+
+    async def __aenter__(self) -> "BHCEClient":
+        return self
+
+    async def __aexit__(self, *_) -> None:
+        await self.close()
+
+
+def _extract_nodes(data: dict) -> list[dict]:
+    """Pull node objects out of BH CE's graph/cypher response."""
+    nodes: list[dict] = []
+    # BH CE returns {"data": {"nodes": {...}, "edges": [...]}} or similar
+    if isinstance(data, dict):
+        inner = data.get("data", data)
+        if isinstance(inner, dict):
+            raw_nodes = inner.get("nodes", {})
+            if isinstance(raw_nodes, dict):
+                nodes = list(raw_nodes.values())
+            elif isinstance(raw_nodes, list):
+                nodes = raw_nodes
+        elif isinstance(inner, list):
+            # Some queries return a list directly
+            nodes = inner
+    return nodes
+
+
+def _extract_node_names(nodes: list[dict]) -> set[str]:
+    """Extract name strings from node objects."""
+    names: set[str] = set()
+    for node in nodes:
+        # BH CE node format: {"label": "...", "kind": "...", "properties": {"name": ...}}
+        if isinstance(node, dict):
+            props = node.get("properties", node)
+            name = props.get("name") or props.get("Name")
+            if name:
+                names.add(str(name))
+    return names
