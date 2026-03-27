@@ -10,6 +10,71 @@ from __future__ import annotations
 from ..graph import ACE, ADGraph, PlantedPath
 
 
+def plant_group_membership(graph: ADGraph) -> PlantedPath:
+    """
+    Template: t1_group_membership
+
+    A non-IT user is a direct member of Domain Admins — a classic
+    misconfiguration where an account was added to DA without going through
+    the normal IT-Admins delegation path.
+
+    Path: USER → MemberOf → DOMAIN ADMINS
+    """
+    da_sid = graph.sid_alloc._allocated.get("Domain Admins")
+    if not da_sid:
+        raise RuntimeError("Domain Admins not found")
+    da_node = graph.get_node(da_sid)
+
+    # Exclude users already in IT-Admins (those are covered by t1_admin_to)
+    it_admins_sid = graph.sid_alloc._allocated.get("IT-Admins")
+    it_admins_node = graph.get_node(it_admins_sid) if it_admins_sid else None
+    privileged_sids = {
+        m["ObjectIdentifier"]
+        for m in (it_admins_node.extra.get("Members", []) if it_admins_node else [])
+    }
+    # Also exclude anyone already in DA
+    for m in da_node.extra.get("Members", []):
+        privileged_sids.add(m["ObjectIdentifier"])
+
+    candidates = [
+        u for u in graph.nodes_by_type("User")
+        if u.object_id not in privileged_sids
+        and u.properties.get("department") not in ("IT", None)
+    ]
+    if not candidates:
+        raise RuntimeError("No eligible users for t1_group_membership")
+
+    victim = graph.rng.choice(candidates)
+
+    # Plant: add user directly to Domain Admins
+    graph.add_edge(victim.object_id, "MemberOf", da_sid)
+    da_node.extra["Members"].append({"ObjectIdentifier": victim.object_id, "ObjectType": "User"})
+    victim.properties["admincount"] = True
+
+    cypher = (
+        f"MATCH p=(u:User {{name: '{victim.properties['name']}'}}) "
+        f"-[:MemberOf]->(g:Group {{name: 'DOMAIN ADMINS@{graph.domain}'}}) "
+        f"RETURN p"
+    )
+
+    planted = PlantedPath(
+        template_id="t1_group_membership",
+        tier=1,
+        category="path_finding",
+        description=(
+            f"{victim.properties['name']} ({victim.properties.get('department')} dept) "
+            f"is a direct member of Domain Admins — no IT-Admins delegation path."
+        ),
+        source_node=victim.object_id,
+        target_node=da_sid,
+        path_edges=[(victim.object_id, "MemberOf", da_sid)],
+        verification_cypher=cypher,
+        mitre=["T1078.002"],
+    )
+    graph.plant(planted)
+    return planted
+
+
 def plant_admin_to(graph: ADGraph) -> PlantedPath:
     """
     Template: t1_admin_to
