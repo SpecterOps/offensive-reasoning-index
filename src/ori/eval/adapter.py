@@ -134,9 +134,10 @@ async def _call_provider(
         return resp.content[0].text, resp.usage.input_tokens, resp.usage.output_tokens
 
     elif provider in ("openai", "ollama", "openai-compat", "gemini"):
+        import os
         import openai
         resolved_base = {
-            "ollama": "http://localhost:11434/v1",
+            "ollama": os.getenv("OLLAMA_BASE_URL", "http://localhost:11434") + "/v1",
             "gemini": "https://generativelanguage.googleapis.com/v1beta/openai/",
         }.get(provider, base_url)
         api_key = "ollama" if provider == "ollama" else None

@@ -27,6 +27,7 @@ datasets/
 .DS_Store
 Thumbs.db
 
-# Environment
+# Environment — ignore real credential files, track the example template
 .env
-.env.*
+.env.local
+.env.*.local

@@ -18,6 +18,10 @@ from .generator.serializer import serialize_to_dir, serialize_to_zip
 @click.group()
 def main() -> None:
     """ori: benchmark for evaluating AI on AD attack path analysis."""
+    # Load .env from the current directory (or any parent) on every invocation.
+    # override=False means shell env vars and CI/CD vars take precedence over the file.
+    from dotenv import load_dotenv
+    load_dotenv(override=False)
 
 
 @main.command()
