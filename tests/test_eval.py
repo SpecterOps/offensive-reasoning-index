@@ -81,11 +81,33 @@ def test_extract_nodes_empty():
     assert _extract_nodes({"data": {}}) == []
 
 
-def test_extract_node_names():
+def test_extract_node_names_old_format():
+    """Old BH CE format: name in properties.name"""
     nodes = [
         {"properties": {"name": "DJOHNSON@CORP.LOCAL"}},
         {"properties": {"name": "IT-ADMINS@CORP.LOCAL"}},
         {"properties": {}},          # no name — should be skipped
+    ]
+    names = _extract_node_names(nodes)
+    assert names == {"DJOHNSON@CORP.LOCAL", "IT-ADMINS@CORP.LOCAL"}
+
+
+def test_extract_node_names_new_format():
+    """New BH CE v1.9+ format: name in label field, no properties object"""
+    nodes = [
+        {"label": "DJOHNSON@CORP.LOCAL", "kind": "User", "objectId": "S-1-5-21-1-2-3-100"},
+        {"label": "DC01.CORP.LOCAL", "kind": "Computer", "objectId": "S-1-5-21-1-2-3-101"},
+        {"kind": "Group"},   # no label, no name — should be skipped
+    ]
+    names = _extract_node_names(nodes)
+    assert names == {"DJOHNSON@CORP.LOCAL", "DC01.CORP.LOCAL"}
+
+
+def test_extract_node_names_mixed_format():
+    """Handle mix of old and new formats in same response"""
+    nodes = [
+        {"label": "DJOHNSON@CORP.LOCAL", "kind": "User"},         # new format
+        {"properties": {"name": "IT-ADMINS@CORP.LOCAL"}},          # old format
     ]
     names = _extract_node_names(nodes)
     assert names == {"DJOHNSON@CORP.LOCAL", "IT-ADMINS@CORP.LOCAL"}

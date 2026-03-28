@@ -216,9 +216,11 @@ def plant_has_session(graph: ADGraph) -> PlantedPath:
     if target_ws is None or da_session_user is None:
         raise RuntimeError("No privileged session on workstation found — check security baseline")
 
-    cypher = f"""MATCH (c:Computer)-[:HasSession]->(u:User)
-WHERE c.name = '{target_ws.properties['name']}'
-RETURN c.name AS computer, u.name AS session_user"""
+    cypher = (
+        f"MATCH p=(c:Computer {{name: '{target_ws.properties['name']}'}}) "
+        f"-[:HasSession]->(u:User) "
+        f"RETURN p"
+    )
 
     planted = PlantedPath(
         template_id="t1_has_session",

@@ -73,7 +73,7 @@ class BHCEClient:
         return {
             "Authorization": f"bhesignature {self.token_id}",
             "RequestDate": datetime_formatted,
-            "Signature": base64.b64encode(d.digest()),
+            "Signature": base64.b64encode(d.digest()).decode(),
             "Content-Type": "application/json",
         }
 
@@ -135,12 +135,16 @@ class BHCEClient:
         Fetch all node names from BH CE for hallucination detection.
 
         CySQL doesn't support unlabeled MATCH (n) — query each type separately.
+        Fails closed: if any query fails, returns empty set to disable hallucination
+        checking rather than building a partial allowlist that would cause false positives.
         """
         names: set[str] = set()
         for label in ("User", "Computer", "Group", "Domain", "OU"):
             result = await self.run_cypher(f"MATCH (n:{label}) RETURN n LIMIT 300")
-            if result.success:
-                names |= result.node_names
+            if not result.success:
+                # Fail closed — partial allowlist is worse than no allowlist
+                return set()
+            names |= result.node_names
         return names
 
     async def close(self) -> None:
