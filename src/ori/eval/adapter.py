@@ -55,7 +55,36 @@ async def call_model(
     base_url: str | None = None,
     max_tokens: int = 1024,
 ) -> ModelResponse:
-    """Call the model and return a structured response."""
+    """Call the model and return a structured response.
+
+    Special providers (no API key needed):
+      mock/perfect  — returns the task's reference Cypher verbatim (all tasks should score CORRECT)
+      mock/empty    — returns empty response (all tasks should score INCORRECT/PARSE_FAIL)
+    """
+    # Mock providers — useful for smoke-testing the full pipeline without API keys
+    if model.startswith("mock/"):
+        variant = model.split("/", 1)[1]
+        if variant == "perfect":
+            cypher = task.reference_cypher
+            return ModelResponse(
+                raw_text=cypher, cypher=cypher,
+                tokens_input=0, tokens_output=0,
+                elapsed_seconds=0.0, model=model,
+            )
+        elif variant == "empty":
+            return ModelResponse(
+                raw_text="", cypher=None,
+                tokens_input=0, tokens_output=0,
+                elapsed_seconds=0.0, model=model,
+            )
+        else:
+            return ModelResponse(
+                raw_text="", cypher=None,
+                tokens_input=0, tokens_output=0,
+                elapsed_seconds=0.0, model=model,
+                error=f"Unknown mock variant {variant!r}. Use mock/perfect or mock/empty.",
+            )
+
     domain = task.metadata.get("domain", "CORP.LOCAL")
     system = _SYSTEM_PROMPT.format(domain=domain)
     messages = [{"role": "user", "content": task.question}]
