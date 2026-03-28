@@ -14,21 +14,20 @@ defaults:
   concurrency: 1   # keep at 1 for local Ollama; increase for cloud APIs
 
 models:
-  # ── Local Ollama (10.20.10.230) ────────────────────────────────────────────
-  - model: ollama/hermes3:latest
+  # ── Local Ollama (10.20.10.230) — 3080 10GB / 64GB RAM ───────────────────
+  # Fits in VRAM (~10GB limit):
+  - model: ollama/hermes3:latest          # 4.7 GB
 
-  - model: ollama/llama3.2:latest
+  - model: ollama/llama3.2:latest         # 2.0 GB
 
-  - model: ollama/qwen3:latest
+  - model: ollama/qwen3:latest            # 5.2 GB
 
-  - model: ollama/deepseek-r1:latest
+  - model: ollama/deepseek-r1:latest      # 5.2 GB
 
-  - model: ollama/qwen3-coder:30b-a3b-q4_K_M
-
-  - model: ollama/command-r-plus:latest
-    concurrency: 1   # large model — keep sequential
-
-  - model: ollama/gpt-oss:20b
+  # Too large for 10GB VRAM — comment back in if running CPU offload:
+  # - model: ollama/qwen3-coder:30b-a3b-q4_K_M  # 18 GB
+  # - model: ollama/gpt-oss:20b                  # 13 GB
+  # - model: ollama/command-r-plus:latest        # 59 GB
 
   # ── Cloud APIs ─────────────────────────────────────────────────────────────
   # - model: anthropic/claude-sonnet-4-5
