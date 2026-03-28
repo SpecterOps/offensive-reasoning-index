@@ -82,6 +82,36 @@ async def run_eval(
     return list(results)
 
 
+async def run_eval_cli_bare(
+    manifest_path: Path,
+    model: str,
+    output_path: Path,
+    concurrency: int = 1,
+    bhce_url: str | None = None,
+) -> list[EvalResult]:
+    """Like run_eval_cli but returns results for multi-model comparison."""
+    manifest = json.loads(manifest_path.read_text())
+    tasks = generate_tasks(manifest)
+
+    domain, scheme, port = None, None, None
+    if bhce_url:
+        from urllib.parse import urlparse
+        parsed = urlparse(bhce_url)
+        domain = parsed.hostname
+        if parsed.port:
+            os.environ["BLOODHOUND_PORT"] = str(parsed.port)
+        if parsed.scheme:
+            os.environ["BLOODHOUND_SCHEME"] = parsed.scheme
+
+    async with BHCEClient(domain=domain) as bhce:
+        results = await run_eval(tasks=tasks, model=model, bhce=bhce, concurrency=concurrency)
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    write_csv(results, output_path)
+    print_summary(results, model)
+    return results
+
+
 async def run_eval_cli(
     manifest_path: Path,
     model: str,

@@ -41,6 +41,43 @@ def write_csv(results: list["EvalResult"], output_path: Path) -> None:
             })
 
 
+def print_comparison(all_results: dict[str, list["EvalResult"]]) -> None:
+    """Print a multi-model comparison table."""
+    def _stats(results: list["EvalResult"]) -> dict:
+        total = len(results)
+        correct = sum(1 for r in results if r.grade.score == 1.0)
+        hallucs = sum(1 for r in results if r.grade.hallucination)
+        errors = sum(1 for r in results if r.grade.outcome == "CYPHER_ERROR")
+        parse_fails = sum(1 for r in results if r.grade.outcome == "PARSE_FAIL")
+        tiers = {}
+        for tier in (1, 2, 3):
+            t = [r for r in results if r.task.tier == tier]
+            tiers[tier] = (sum(1 for r in t if r.grade.score == 1.0), len(t)) if t else (0, 0)
+        return {"total": total, "correct": correct, "hallucs": hallucs,
+                "errors": errors, "parse_fails": parse_fails, "tiers": tiers}
+
+    col_w = 36
+    print("\n" + "=" * 100)
+    print("BASELINE COMPARISON")
+    print("=" * 100)
+    header = f"{'Model':<{col_w}} {'Overall':>8} {'Tier1':>7} {'Tier2':>7} {'Tier3':>7} {'Hallucs':>8} {'Errors':>7} {'Fails':>6}"
+    print(header)
+    print("-" * 100)
+
+    for model, results in all_results.items():
+        s = _stats(results)
+        pct = f"{100 * s['correct'] // s['total']}%" if s['total'] else "0%"
+
+        def tp(tier):
+            c, t = s['tiers'][tier]
+            return f"{100*c//t}%" if t else "n/a"
+
+        short_model = model.split("/", 1)[-1][:col_w]
+        print(f"{short_model:<{col_w}} {s['correct']:>4}/{s['total']:<3} {tp(1):>7} {tp(2):>7} {tp(3):>7} {s['hallucs']:>8} {s['errors']:>7} {s['parse_fails']:>6}")
+
+    print("=" * 100)
+
+
 def print_summary(results: list["EvalResult"], model: str) -> None:
     """Print a summary table to stdout."""
     total = len(results)

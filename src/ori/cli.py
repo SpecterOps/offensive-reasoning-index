@@ -100,6 +100,45 @@ def eval(manifest: str, model: str, output: str, concurrency: int, bhce_url: str
     ))
 
 
+@main.command()
+@click.option("--manifest", "-m", required=True, type=click.Path(exists=True), help="Path to manifest.json")
+@click.option("--model", "models", multiple=True, required=True, help="Model to evaluate (repeat for multiple)")
+@click.option("--output-dir", "-o", required=True, type=click.Path(), help="Directory for per-model CSV files")
+@click.option("--concurrency", default=1, show_default=True, help="Concurrent calls per model (keep low for local models)")
+@click.option("--bhce-url", default=None, help="BH CE base URL (overrides BLOODHOUND_DOMAIN env var)")
+def baseline(
+    manifest: str,
+    models: tuple[str, ...],
+    output_dir: str,
+    concurrency: int,
+    bhce_url: str | None,
+) -> None:
+    """Evaluate multiple models against the same manifest and print a comparison table."""
+    import asyncio
+    from .eval.runner import run_eval_cli_bare
+    from .eval.report import print_comparison
+
+    out = Path(output_dir)
+    out.mkdir(parents=True, exist_ok=True)
+
+    all_results = {}
+    for i, model in enumerate(models, 1):
+        slug = model.replace("/", "_").replace(":", "-")
+        csv_path = out / f"{slug}.csv"
+        click.echo(f"\n[{i}/{len(models)}] {model}")
+        results = asyncio.run(run_eval_cli_bare(
+            manifest_path=Path(manifest),
+            model=model,
+            output_path=csv_path,
+            concurrency=concurrency,
+            bhce_url=bhce_url,
+        ))
+        all_results[model] = results
+
+    print_comparison(all_results)
+    click.echo(f"\nResults written to {output_dir}/")
+
+
 def _build_manifest(graph: ADGraph, seed: int) -> dict:
     """Build the ground-truth manifest for the generated dataset."""
     users = graph.nodes_by_type("User")
