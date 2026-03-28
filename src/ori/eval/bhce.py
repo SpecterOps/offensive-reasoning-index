@@ -172,13 +172,24 @@ def _extract_nodes(data: dict) -> list[dict]:
 
 
 def _extract_node_names(nodes: list[dict]) -> set[str]:
-    """Extract name strings from node objects."""
+    """
+    Extract name strings from BH CE node objects.
+
+    BH CE returns nodes in two formats depending on version:
+      New (v1.9+): {"label": "NAME@DOMAIN", "kind": "User", "objectId": "...", ...}
+      Old:         {"properties": {"name": "NAME@DOMAIN", ...}, ...}
+    Check both.
+    """
     names: set[str] = set()
     for node in nodes:
-        # BH CE node format: {"label": "...", "kind": "...", "properties": {"name": ...}}
-        if isinstance(node, dict):
-            props = node.get("properties", node)
+        if not isinstance(node, dict):
+            continue
+        # New format: name is in "label"
+        name = node.get("label")
+        if not name:
+            # Old format: name is nested under "properties"
+            props = node.get("properties", {})
             name = props.get("name") or props.get("Name")
-            if name:
-                names.add(str(name))
+        if name:
+            names.add(str(name))
     return names
