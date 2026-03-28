@@ -35,7 +35,12 @@ async def run_eval(
 
     print(f"Fetching valid node names for hallucination detection...")
     valid_names = await bhce.get_all_node_names()
-    print(f"  {len(valid_names)} node names loaded")
+    if len(valid_names) == 0:
+        print(f"  WARNING: 0 node names loaded — BH CE graph appears empty.")
+        print(f"  Make sure you have uploaded and ingested the generated zip before running eval.")
+        print(f"  Continuing, but all tasks will likely fail with CYPHER_ERROR.")
+    else:
+        print(f"  {len(valid_names)} node names loaded")
 
     print(f"Pre-fetching reference Cypher results for {len(tasks)} tasks...")
     ref_results: dict[str, CypherResult] = {}

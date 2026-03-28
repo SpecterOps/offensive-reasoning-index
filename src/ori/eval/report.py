@@ -16,7 +16,7 @@ def write_csv(results: list["EvalResult"], output_path: Path) -> None:
         "task_id", "template_id", "tier", "category", "model",
         "score", "outcome", "hallucination",
         "tokens_input", "tokens_output", "elapsed_seconds",
-        "grade_mode", "question", "model_cypher",
+        "grade_mode", "question", "model_cypher", "error_detail",
     ]
     with output_path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -37,6 +37,7 @@ def write_csv(results: list["EvalResult"], output_path: Path) -> None:
                 "grade_mode": r.task.grade_mode,
                 "question": r.task.question,
                 "model_cypher": (r.model_response.cypher or "").replace("\n", " "),
+                "error_detail": r.grade.details if r.grade.outcome in ("CYPHER_ERROR", "MODEL_ERROR") else "",
             })
 
 
