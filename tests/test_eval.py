@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import pytest
 
-from ori.eval.adapter import extract_cypher
+import asyncio
+
+from ori.eval.adapter import call_model, extract_cypher
 from ori.eval.bhce import _extract_node_names, _extract_nodes
 from ori.eval.grader import GradeResult, _check_hallucination, grade
 from ori.eval.tasks import Task, generate_tasks
@@ -380,3 +382,63 @@ def test_global_privileged_sessions_returns_computers_not_paths():
     task = next(t for t in tasks if t.id == "global-privileged-sessions")
     assert "RETURN c" in task.reference_cypher
     assert "RETURN p" not in task.reference_cypher
+
+
+# ---------------------------------------------------------------------------
+# Mock providers
+# ---------------------------------------------------------------------------
+
+def _make_task_for_mock() -> Task:
+    return Task(
+        id="mock-test",
+        template_id="t1_admin_to",
+        tier=1,
+        category="path_finding",
+        question="Find the attack path",
+        reference_cypher="MATCH p=shortestPath((u:User {name: 'JDOE@TEST.LOCAL'})-[*1..]->(c:Computer)) RETURN p",
+        grade_mode="path_exists",
+        metadata={"domain": "TEST.LOCAL"},
+    )
+
+
+def test_mock_perfect_returns_reference_cypher():
+    task = _make_task_for_mock()
+    resp = asyncio.run(call_model(task, "mock/perfect"))
+    assert resp.cypher == task.reference_cypher
+    assert resp.error is None
+
+
+def test_mock_empty_returns_no_cypher():
+    task = _make_task_for_mock()
+    resp = asyncio.run(call_model(task, "mock/empty"))
+    assert resp.cypher is None
+    assert resp.error is None
+
+
+def test_mock_hallucinate_references_fake_node():
+    task = _make_task_for_mock()
+    resp = asyncio.run(call_model(task, "mock/hallucinate"))
+    assert resp.cypher is not None
+    assert "FAKE_SENTINEL_NODE@TEST.LOCAL" in resp.cypher
+    assert "FAKE_SENTINEL_NODE@TEST.LOCAL" in resp.raw_text
+
+
+def test_mock_wrong_returns_unrelated_cypher():
+    task = _make_task_for_mock()
+    resp = asyncio.run(call_model(task, "mock/wrong"))
+    assert resp.cypher is not None
+    assert "GPO" in resp.cypher  # returns GPO nodes, unrelated to path tasks
+
+
+def test_mock_syntax_error_returns_malformed_cypher():
+    task = _make_task_for_mock()
+    resp = asyncio.run(call_model(task, "mock/syntax_error"))
+    assert resp.cypher is not None
+    assert extract_cypher(resp.cypher) is not None  # extractable but invalid Cypher
+
+
+def test_mock_unknown_variant_returns_error():
+    task = _make_task_for_mock()
+    resp = asyncio.run(call_model(task, "mock/nonexistent"))
+    assert resp.error is not None
+    assert "nonexistent" in resp.error

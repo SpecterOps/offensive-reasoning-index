@@ -58,31 +58,77 @@ async def call_model(
     """Call the model and return a structured response.
 
     Special providers (no API key needed):
-      mock/perfect  — returns the task's reference Cypher verbatim (all tasks should score CORRECT)
-      mock/empty    — returns empty response (all tasks should score INCORRECT/PARSE_FAIL)
+      mock/perfect       — reference Cypher verbatim → all CORRECT
+      mock/empty         — no Cypher returned → all PARSE_FAIL
+      mock/hallucinate   — Cypher referencing invented node names → all HALLUCINATION
+      mock/wrong         — valid Cypher returning unrelated nodes → all INCORRECT
+      mock/syntax_error  — malformed Cypher → all CYPHER_ERROR
     """
-    # Mock providers — useful for smoke-testing the full pipeline without API keys
+    # Mock providers — smoke-test all outcome code paths without API keys
     if model.startswith("mock/"):
         variant = model.split("/", 1)[1]
+        domain = task.metadata.get("domain", "CORP.LOCAL")
+
         if variant == "perfect":
+            # Returns reference Cypher verbatim — should score CORRECT on every task
             cypher = task.reference_cypher
             return ModelResponse(
                 raw_text=cypher, cypher=cypher,
                 tokens_input=0, tokens_output=0,
                 elapsed_seconds=0.0, model=model,
             )
+
         elif variant == "empty":
+            # Returns no Cypher — should score PARSE_FAIL on every task
             return ModelResponse(
-                raw_text="", cypher=None,
+                raw_text="I cannot answer this question.",
+                cypher=None,
                 tokens_input=0, tokens_output=0,
                 elapsed_seconds=0.0, model=model,
             )
+
+        elif variant == "hallucinate":
+            # Returns Cypher with invented node name — should score HALLUCINATION on every task.
+            # FAKE_SENTINEL_NODE will not exist in any generated graph.
+            cypher = (
+                f"MATCH (u:User {{name: 'FAKE_SENTINEL_NODE@{domain}'}})"
+                f"-[:MemberOf]->(g:Group) RETURN u, g"
+            )
+            raw = f"The attacker FAKE_SENTINEL_NODE@{domain} is a member of Domain Admins."
+            return ModelResponse(
+                raw_text=raw, cypher=cypher,
+                tokens_input=0, tokens_output=0,
+                elapsed_seconds=0.0, model=model,
+            )
+
+        elif variant == "wrong":
+            # Returns valid Cypher that executes but returns wrong nodes — should score INCORRECT.
+            # Returns all GPO objects, which won't overlap with any planted path nodes.
+            cypher = "MATCH (g:GPO) RETURN g"
+            return ModelResponse(
+                raw_text=cypher, cypher=cypher,
+                tokens_input=0, tokens_output=0,
+                elapsed_seconds=0.0, model=model,
+            )
+
+        elif variant == "syntax_error":
+            # Returns malformed Cypher — should score CYPHER_ERROR on every task.
+            cypher = "MATCH (u:User WHERE RETURN u"
+            return ModelResponse(
+                raw_text=cypher, cypher=cypher,
+                tokens_input=0, tokens_output=0,
+                elapsed_seconds=0.0, model=model,
+            )
+
         else:
             return ModelResponse(
                 raw_text="", cypher=None,
                 tokens_input=0, tokens_output=0,
                 elapsed_seconds=0.0, model=model,
-                error=f"Unknown mock variant {variant!r}. Use mock/perfect or mock/empty.",
+                error=(
+                    f"Unknown mock variant {variant!r}. "
+                    "Use: mock/perfect, mock/empty, mock/hallucinate, mock/wrong, mock/syntax_error"
+                ),
             )
 
     domain = task.metadata.get("domain", "CORP.LOCAL")
