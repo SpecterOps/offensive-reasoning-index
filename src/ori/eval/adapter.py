@@ -37,7 +37,14 @@ class ModelResponse:
 
 
 def extract_cypher(text: str) -> str | None:
-    """Extract Cypher query from model response text."""
+    """Extract Cypher query from model response text.
+
+    Handles thinking models (Qwen3, DeepSeek-R1) that wrap reasoning in
+    <think>...</think> blocks before the actual answer.
+    """
+    # Strip thinking-model reasoning blocks before extraction
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE).strip()
+
     # 1. Fenced code block (```cypher or ```)
     m = re.search(r"```(?:cypher)?\s*\n(.*?)```", text, re.DOTALL | re.IGNORECASE)
     if m:

@@ -149,20 +149,25 @@ def baseline(
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
 
-    all_results = {}
-    for i, (model, model_concurrency) in enumerate(model_entries, 1):
-        effective_concurrency = concurrency if concurrency is not None else model_concurrency
-        slug = model.replace("/", "_").replace(":", "-")
-        csv_path = out / f"{slug}.csv"
-        click.echo(f"\n[{i}/{len(model_entries)}] {model}  (concurrency={effective_concurrency})")
-        results = asyncio.run(run_eval_cli_bare(
-            manifest_path=Path(manifest),
-            model=model,
-            output_path=csv_path,
-            concurrency=effective_concurrency,
-            bhce_url=bhce_url,
-        ))
-        all_results[model] = results
+    # Run all models in a single event loop to avoid httpx cleanup errors
+    # that occur when asyncio.run() is called multiple times (closes loop between runs)
+    async def _run_all() -> dict:
+        results = {}
+        for i, (model, model_concurrency) in enumerate(model_entries, 1):
+            effective_concurrency = concurrency if concurrency is not None else model_concurrency
+            slug = model.replace("/", "_").replace(":", "-")
+            csv_path = out / f"{slug}.csv"
+            click.echo(f"\n[{i}/{len(model_entries)}] {model}  (concurrency={effective_concurrency})")
+            results[model] = await run_eval_cli_bare(
+                manifest_path=Path(manifest),
+                model=model,
+                output_path=csv_path,
+                concurrency=effective_concurrency,
+                bhce_url=bhce_url,
+            )
+        return results
+
+    all_results = asyncio.run(_run_all())
 
     print_comparison(all_results)
     click.echo(f"\nPer-model CSVs written to {output_dir}/")
