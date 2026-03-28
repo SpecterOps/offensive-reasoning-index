@@ -1,0 +1,41 @@
+# ORI — Baseline Model Configuration
+#
+# Pass this file to: ori baseline --models-file models.yaml ...
+#
+# Model string format:
+#   ollama/MODEL              — local Ollama (uses OLLAMA_BASE_URL, default localhost:11434)
+#   anthropic/MODEL           — Anthropic API (requires ANTHROPIC_API_KEY)
+#   openai/MODEL              — OpenAI API (requires OPENAI_API_KEY)
+#   gemini/MODEL              — Google Gemini (requires GEMINI_API_KEY)
+#   openai-compat/MODEL@URL   — any OpenAI-compatible endpoint
+#   mock/perfect              — smoke test (no API key needed)
+
+defaults:
+  concurrency: 1   # keep at 1 for local Ollama; increase for cloud APIs
+
+models:
+  # ── Local Ollama (10.20.10.230) ────────────────────────────────────────────
+  - model: ollama/hermes3:latest
+
+  - model: ollama/llama3.2:latest
+
+  - model: ollama/qwen3:latest
+
+  - model: ollama/deepseek-r1:latest
+
+  - model: ollama/qwen3-coder:30b-a3b-q4_K_M
+
+  - model: ollama/command-r-plus:latest
+    concurrency: 1   # large model — keep sequential
+
+  - model: ollama/gpt-oss:20b
+
+  # ── Cloud APIs ─────────────────────────────────────────────────────────────
+  # - model: anthropic/claude-sonnet-4-5
+  #   concurrency: 3
+
+  # - model: openai/gpt-4o
+  #   concurrency: 3
+
+  # ── Smoke tests ────────────────────────────────────────────────────────────
+  # - model: mock/perfect

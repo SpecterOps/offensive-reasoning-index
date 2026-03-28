@@ -102,41 +102,70 @@ def eval(manifest: str, model: str, output: str, concurrency: int, bhce_url: str
 
 @main.command()
 @click.option("--manifest", "-m", required=True, type=click.Path(exists=True), help="Path to manifest.json")
-@click.option("--model", "models", multiple=True, required=True, help="Model to evaluate (repeat for multiple)")
+@click.option("--model", "models", multiple=True, help="Model to evaluate (repeat for multiple)")
+@click.option("--models-file", type=click.Path(exists=True), default=None, help="YAML file listing models to evaluate")
 @click.option("--output-dir", "-o", required=True, type=click.Path(), help="Directory for per-model CSV files")
-@click.option("--concurrency", default=1, show_default=True, help="Concurrent calls per model (keep low for local models)")
+@click.option("--concurrency", default=None, type=int, help="Override concurrency for all models")
 @click.option("--bhce-url", default=None, help="BH CE base URL (overrides BLOODHOUND_DOMAIN env var)")
 def baseline(
     manifest: str,
     models: tuple[str, ...],
+    models_file: str | None,
     output_dir: str,
-    concurrency: int,
+    concurrency: int | None,
     bhce_url: str | None,
 ) -> None:
-    """Evaluate multiple models against the same manifest and print a comparison table."""
+    """Evaluate multiple models against the same manifest and print a comparison table.
+
+    Models can be specified via --model (repeatable), --models-file models.yaml, or both.
+    """
     import asyncio
+    import yaml
     from .eval.runner import run_eval_cli_bare
     from .eval.report import print_comparison
+
+    # Build model list: [(model_string, concurrency), ...]
+    model_entries: list[tuple[str, int]] = []
+
+    if models_file:
+        with open(models_file) as f:
+            cfg = yaml.safe_load(f)
+        default_concurrency = cfg.get("defaults", {}).get("concurrency", 1)
+        for entry in cfg.get("models", []):
+            if isinstance(entry, str):
+                model_entries.append((entry, default_concurrency))
+            elif isinstance(entry, dict):
+                model_entries.append((
+                    entry["model"],
+                    entry.get("concurrency", default_concurrency),
+                ))
+
+    for m in models:
+        model_entries.append((m, 1))
+
+    if not model_entries:
+        raise click.UsageError("Provide at least one model via --model or --models-file.")
 
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
 
     all_results = {}
-    for i, model in enumerate(models, 1):
+    for i, (model, model_concurrency) in enumerate(model_entries, 1):
+        effective_concurrency = concurrency if concurrency is not None else model_concurrency
         slug = model.replace("/", "_").replace(":", "-")
         csv_path = out / f"{slug}.csv"
-        click.echo(f"\n[{i}/{len(models)}] {model}")
+        click.echo(f"\n[{i}/{len(model_entries)}] {model}  (concurrency={effective_concurrency})")
         results = asyncio.run(run_eval_cli_bare(
             manifest_path=Path(manifest),
             model=model,
             output_path=csv_path,
-            concurrency=concurrency,
+            concurrency=effective_concurrency,
             bhce_url=bhce_url,
         ))
         all_results[model] = results
 
     print_comparison(all_results)
-    click.echo(f"\nResults written to {output_dir}/")
+    click.echo(f"\nPer-model CSVs written to {output_dir}/")
 
 
 def _build_manifest(graph: ADGraph, seed: int) -> dict:
