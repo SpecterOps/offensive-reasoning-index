@@ -7,6 +7,7 @@ import datetime
 import hashlib
 import hmac
 import os
+import re
 from dataclasses import dataclass, field
 
 import httpx
@@ -82,10 +83,26 @@ class BHCEClient:
             base += f":{self.port}"
         return base + path
 
+    @staticmethod
+    def _normalize_cypher(query: str) -> str:
+        """
+        Normalize Cypher for BH CE's CySQL parser.
+
+        CySQL rejects whitespace (newlines or spaces) immediately after shortestPath(
+        and other function-call open-parens. Collapse all whitespace to single spaces
+        then remove spaces after opening parentheses so the pattern starts immediately.
+        """
+        # Collapse all newlines and runs of whitespace to a single space
+        q = " ".join(query.split())
+        # Remove spaces after opening parens — CySQL requires pattern to start right after (
+        q = re.sub(r"\(\s+", "(", q)
+        return q.strip()
+
     async def run_cypher(self, query: str) -> CypherResult:
         """Execute a Cypher query against BH CE and return normalized result."""
         import json
         path = "/api/v2/graphs/cypher"
+        query = self._normalize_cypher(query)
         body = json.dumps({"query": query, "includeproperties": True}).encode()
         headers = self._sign("POST", path, body)
 
@@ -114,11 +131,17 @@ class BHCEClient:
         return CypherResult(success=True, nodes=nodes, node_names=names, raw=data)
 
     async def get_all_node_names(self) -> set[str]:
-        """Fetch all node names from BH CE for hallucination detection."""
-        result = await self.run_cypher("MATCH (n) RETURN n LIMIT 500")
-        if not result.success:
-            return set()
-        return result.node_names
+        """
+        Fetch all node names from BH CE for hallucination detection.
+
+        CySQL doesn't support unlabeled MATCH (n) — query each type separately.
+        """
+        names: set[str] = set()
+        for label in ("User", "Computer", "Group", "Domain", "OU"):
+            result = await self.run_cypher(f"MATCH (n:{label}) RETURN n LIMIT 300")
+            if result.success:
+                names |= result.node_names
+        return names
 
     async def close(self) -> None:
         await self._client.aclose()
