@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import base64
+import datetime
 import hashlib
 import hmac
 import os
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 
 import httpx
 
@@ -45,16 +46,33 @@ class BHCEClient:
         self._client = httpx.AsyncClient(timeout=30.0)
 
     def _sign(self, method: str, path: str, body: bytes = b"") -> dict:
-        """Build HMAC-signed request headers."""
-        request_date = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
-        body_md5 = hashlib.md5(body).hexdigest()
-        # HMAC message: METHOD + path + date + body_md5
-        msg = "\n".join([method.upper(), path, request_date, body_md5]).encode()
-        sig = hmac.new(self.token_key.encode(), msg, hashlib.sha256).hexdigest()
+        """
+        Build HMAC-signed request headers using BH CE's chained HMAC-SHA256 scheme.
+
+        Chain 1: HMAC(token_key, method+path)
+        Chain 2: HMAC(chain1_digest, datetime_truncated_to_hour)
+        Chain 3: HMAC(chain2_digest, body)
+        Signature: base64(chain3_digest)
+        """
+        datetime_formatted = datetime.datetime.now().astimezone().isoformat("T")
+
+        # Chain 1: sign method + URI
+        d = hmac.new(self.token_key.encode(), None, hashlib.sha256)
+        d.update(f"{method}{path}".encode())
+
+        # Chain 2: sign datetime truncated to hour (e.g. "2026-03-28T00")
+        d = hmac.new(d.digest(), None, hashlib.sha256)
+        d.update(datetime_formatted[:13].encode())
+
+        # Chain 3: sign body
+        d = hmac.new(d.digest(), None, hashlib.sha256)
+        if body:
+            d.update(body)
+
         return {
             "Authorization": f"bhesignature {self.token_id}",
-            "RequestDate": request_date,
-            "Signature": sig,
+            "RequestDate": datetime_formatted,
+            "Signature": base64.b64encode(d.digest()),
             "Content-Type": "application/json",
         }
 
