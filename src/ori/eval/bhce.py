@@ -96,6 +96,8 @@ class BHCEClient:
         q = " ".join(query.split())
         # Remove spaces after opening parens — CySQL requires pattern to start right after (
         q = re.sub(r"\(\s+", "(", q)
+        # Remove spaces before closing parens — CySQL rejects ' )' at end of shortestPath(...)
+        q = re.sub(r"\s+\)", ")", q)
         return q.strip()
 
     async def run_cypher(self, query: str) -> CypherResult:
