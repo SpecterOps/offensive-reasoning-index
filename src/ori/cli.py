@@ -124,8 +124,8 @@ def baseline(
     from .eval.runner import run_eval_cli_bare
     from .eval.report import print_comparison
 
-    # Build model list: [(model_string, concurrency), ...]
-    model_entries: list[tuple[str, int]] = []
+    # Build model list: [(model_string, concurrency, ollama_options), ...]
+    model_entries: list[tuple[str, int, dict | None]] = []
 
     if models_file:
         with open(models_file) as f:
@@ -133,15 +133,20 @@ def baseline(
         default_concurrency = cfg.get("defaults", {}).get("concurrency", 1)
         for entry in cfg.get("models", []):
             if isinstance(entry, str):
-                model_entries.append((entry, default_concurrency))
+                model_entries.append((entry, default_concurrency, None))
             elif isinstance(entry, dict):
+                opts = entry.get("options") or {}
+                # Allow top-level num_ctx as shorthand for options.num_ctx
+                if "num_ctx" in entry:
+                    opts["num_ctx"] = entry["num_ctx"]
                 model_entries.append((
                     entry["model"],
                     entry.get("concurrency", default_concurrency),
+                    opts or None,
                 ))
 
     for m in models:
-        model_entries.append((m, 1))
+        model_entries.append((m, 1, None))
 
     if not model_entries:
         raise click.UsageError("Provide at least one model via --model or --models-file.")
@@ -153,17 +158,19 @@ def baseline(
     # that occur when asyncio.run() is called multiple times (closes loop between runs)
     async def _run_all() -> dict:
         results = {}
-        for i, (model, model_concurrency) in enumerate(model_entries, 1):
+        for i, (model, model_concurrency, model_options) in enumerate(model_entries, 1):
             effective_concurrency = concurrency if concurrency is not None else model_concurrency
             slug = model.replace("/", "_").replace(":", "-")
             csv_path = out / f"{slug}.csv"
-            click.echo(f"\n[{i}/{len(model_entries)}] {model}  (concurrency={effective_concurrency})")
+            opts_str = f", options={model_options}" if model_options else ""
+            click.echo(f"\n[{i}/{len(model_entries)}] {model}  (concurrency={effective_concurrency}{opts_str})")
             results[model] = await run_eval_cli_bare(
                 manifest_path=Path(manifest),
                 model=model,
                 output_path=csv_path,
                 concurrency=effective_concurrency,
                 bhce_url=bhce_url,
+                ollama_options=model_options,
             )
         return results
 

@@ -24,7 +24,17 @@ models:
 
   - model: ollama/deepseek-r1:latest      # 5.2 GB
 
-  # Too large for 10GB VRAM — comment back in if running CPU offload:
+  # ── Recommended new Qwen models ───────────────────────────────────────────
+  # Pull first: ollama pull qwen3.5:9b && ollama pull qwen3:14b && ollama pull qwen2.5-coder:14b
+  # - model: ollama/qwen3.5:9b            # 6.6 GB — best new model, Feb 2026, hybrid thinking
+
+  # - model: ollama/qwen3:14b             # 9.3 GB — highest quality that fits; num_ctx limits KV cache
+  #   num_ctx: 4096
+
+  # - model: ollama/qwen2.5-coder:14b     # 9.0 GB — code-specialized
+  #   num_ctx: 4096
+
+  # ── Too large for 10GB VRAM — comment back in if running CPU offload ──────
   # - model: ollama/qwen3-coder:30b-a3b-q4_K_M  # 18 GB
   # - model: ollama/gpt-oss:20b                  # 13 GB
   # - model: ollama/command-r-plus:latest        # 59 GB

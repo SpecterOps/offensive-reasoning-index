@@ -61,6 +61,7 @@ async def call_model(
     model: str,
     base_url: str | None = None,
     max_tokens: int = 1024,
+    ollama_options: dict | None = None,
 ) -> ModelResponse:
     """Call the model and return a structured response.
 
@@ -147,6 +148,7 @@ async def call_model(
         text, tokens_in, tokens_out = await _call_provider(
             model=model, messages=messages, system=system,
             max_tokens=max_tokens, base_url=base_url,
+            ollama_options=ollama_options,
         )
         elapsed = time.monotonic() - t0
         cypher = extract_cypher(text)
@@ -171,6 +173,7 @@ async def _call_provider(
     system: str,
     max_tokens: int,
     base_url: str | None,
+    ollama_options: dict | None = None,
 ) -> tuple[str, int, int]:
     """Dispatch to the correct provider SDK. Returns (text, input_tokens, output_tokens)."""
     provider, name = model.split("/", 1)
@@ -205,10 +208,16 @@ async def _call_provider(
         )
         # Inject system prompt as first message for OpenAI-compat providers
         full_messages = [{"role": "system", "content": system}] + messages
+        # ollama_options (e.g. {"num_ctx": 4096}) are passed via extra_body —
+        # Ollama's OpenAI-compatible API accepts them; standard OpenAI ignores them.
+        kwargs = {}
+        if ollama_options and provider == "ollama":
+            kwargs["extra_body"] = {"options": ollama_options}
         resp = await client.chat.completions.create(
             model=name,
             max_tokens=max_tokens,
             messages=full_messages,
+            **kwargs,
         )
         m = resp.choices[0].message
         usage = resp.usage

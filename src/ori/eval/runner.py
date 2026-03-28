@@ -30,6 +30,7 @@ async def run_eval(
     bhce: BHCEClient,
     concurrency: int = 3,
     base_url: str | None = None,
+    ollama_options: dict | None = None,
 ) -> list[EvalResult]:
     """Run evaluation for a list of tasks. Returns EvalResult per task."""
 
@@ -54,7 +55,7 @@ async def run_eval(
     async def run_one(task: Task, idx: int) -> EvalResult:
         async with sem:
             print(f"  [{idx}/{len(tasks)}] {task.id} ({task.tier=}, {task.grade_mode})")
-            model_resp = await call_model(task, model, base_url=base_url)
+            model_resp = await call_model(task, model, base_url=base_url, ollama_options=ollama_options)
 
             if model_resp.cypher:
                 model_result = await bhce.run_cypher(model_resp.cypher)
@@ -88,6 +89,7 @@ async def run_eval_cli_bare(
     output_path: Path,
     concurrency: int = 1,
     bhce_url: str | None = None,
+    ollama_options: dict | None = None,
 ) -> list[EvalResult]:
     """Like run_eval_cli but returns results for multi-model comparison."""
     manifest = json.loads(manifest_path.read_text())
@@ -104,7 +106,10 @@ async def run_eval_cli_bare(
             os.environ["BLOODHOUND_SCHEME"] = parsed.scheme
 
     async with BHCEClient(domain=domain) as bhce:
-        results = await run_eval(tasks=tasks, model=model, bhce=bhce, concurrency=concurrency)
+        results = await run_eval(
+            tasks=tasks, model=model, bhce=bhce,
+            concurrency=concurrency, ollama_options=ollama_options,
+        )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     write_csv(results, output_path)
