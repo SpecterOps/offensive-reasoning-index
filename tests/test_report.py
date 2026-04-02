@@ -3,7 +3,9 @@ from __future__ import annotations
 from ori.eval.adapter import ModelResponse
 from ori.eval.bhce import CypherResult
 from ori.eval.grader import GradeResult
-from ori.eval.report import print_comparison, print_summary
+import csv
+
+from ori.eval.report import print_comparison, print_summary, write_combined_csv, write_summary_csv
 from ori.eval.runner import EvalResult
 from ori.eval.tasks import Task
 
@@ -64,3 +66,37 @@ def test_print_comparison_includes_model_error_column(capsys) -> None:
     out = capsys.readouterr().out
     assert "ModelErr" in out
     assert "1" in out
+
+
+def test_write_combined_csv_writes_rows_for_all_models(tmp_path) -> None:
+    output = tmp_path / "baseline_combined.csv"
+    write_combined_csv(
+        {
+            "ollama/a:latest": [_result("CORRECT", score=1.0)],
+            "ollama/b:latest": [_result("MODEL_ERROR")],
+        },
+        output,
+    )
+    with output.open() as f:
+        rows = list(csv.DictReader(f))
+    assert len(rows) == 2
+    assert {row["model"] for row in rows} == {"ollama/test:latest"}
+    assert {row["outcome"] for row in rows} == {"CORRECT", "MODEL_ERROR"}
+
+
+def test_write_summary_csv_writes_one_row_per_model(tmp_path) -> None:
+    output = tmp_path / "baseline_summary.csv"
+    write_summary_csv(
+        {
+            "ollama/a:latest": [_result("CORRECT", score=1.0), _result("PARSE_FAIL")],
+            "ollama/b:latest": [_result("MODEL_ERROR")],
+        },
+        output,
+    )
+    with output.open() as f:
+        rows = list(csv.DictReader(f))
+    assert len(rows) == 2
+    by_model = {row["model"]: row for row in rows}
+    assert by_model["ollama/a:latest"]["correct"] == "1"
+    assert by_model["ollama/a:latest"]["parse_fails"] == "1"
+    assert by_model["ollama/b:latest"]["model_errors"] == "1"

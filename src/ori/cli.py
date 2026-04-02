@@ -159,7 +159,7 @@ def baseline(
     import asyncio
     import yaml
     from .eval.runner import run_eval_cli_bare
-    from .eval.report import print_comparison
+    from .eval.report import print_comparison, write_combined_csv, write_summary_csv
 
     # Build model list: [(model_string, concurrency, ollama_options), ...]
     model_entries: list[tuple[str, int, dict | None]] = []
@@ -213,8 +213,14 @@ def baseline(
 
     all_results = asyncio.run(_run_all())
 
+    combined_csv_path = out / "baseline_combined.csv"
+    summary_csv_path = out / "baseline_summary.csv"
+    write_combined_csv(all_results, combined_csv_path)
+    write_summary_csv(all_results, summary_csv_path)
     print_comparison(all_results)
     click.echo(f"\nPer-model CSVs written to {output_dir}/")
+    click.echo(f"Combined CSV written to {combined_csv_path}")
+    click.echo(f"Summary CSV written to {summary_csv_path}")
 
 
 def _build_manifest(graph: ADGraph, seed: int) -> dict:
