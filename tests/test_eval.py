@@ -143,6 +143,7 @@ def _make_model_response(cypher: str | None = "MATCH (u:User) RETURN u", error: 
     return ModelResponse(
         raw_text=cypher or "",
         cypher=cypher,
+        parse_stage="bare_match" if cypher else "none",
         tokens_input=10,
         tokens_output=5,
         elapsed_seconds=1.0,

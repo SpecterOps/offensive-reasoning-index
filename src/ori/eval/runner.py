@@ -11,6 +11,7 @@ from pathlib import Path
 from .adapter import ModelResponse, call_model
 from .bhce import BHCEClient, CypherResult
 from .grader import GradeResult, grade
+from .inspect_runtime import InspectEvalMetadata, run_eval_with_inspect
 from .report import write_csv, print_summary
 from .tasks import Task, generate_tasks
 
@@ -22,6 +23,7 @@ class EvalResult:
     grade: GradeResult
     ref_result: CypherResult
     model_result: CypherResult
+    inspect: InspectEvalMetadata | None = None
 
 
 async def run_eval(
@@ -106,9 +108,15 @@ async def run_eval_cli_bare(
             os.environ["BLOODHOUND_SCHEME"] = parsed.scheme
 
     async with BHCEClient(domain=domain) as bhce:
-        results = await run_eval(
-            tasks=tasks, model=model, bhce=bhce,
-            concurrency=concurrency, ollama_options=ollama_options,
+        results = await run_eval_with_inspect(
+            tasks=tasks,
+            model=model,
+            bhce=bhce,
+            output_path=output_path,
+            concurrency=concurrency,
+            base_url=None,
+            ollama_options=ollama_options,
+            bhce_domain=domain,
         )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -144,11 +152,14 @@ async def run_eval_cli(
             os.environ["BLOODHOUND_SCHEME"] = parsed.scheme
 
     async with BHCEClient(domain=domain) as bhce:
-        results = await run_eval(
+        results = await run_eval_with_inspect(
             tasks=tasks,
             model=model,
             bhce=bhce,
+            output_path=output_path,
             concurrency=concurrency,
+            base_url=None,
+            bhce_domain=domain,
         )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)

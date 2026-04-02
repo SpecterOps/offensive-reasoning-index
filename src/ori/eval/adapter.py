@@ -29,6 +29,7 @@ Rules:
 class ModelResponse:
     raw_text: str
     cypher: str | None       # None = parse failed
+    parse_stage: str
     tokens_input: int
     tokens_output: int
     elapsed_seconds: float
@@ -36,8 +37,8 @@ class ModelResponse:
     error: str | None = None
 
 
-def extract_cypher(text: str) -> str | None:
-    """Extract Cypher query from model response text.
+def extract_cypher_details(text: str) -> tuple[str | None, str]:
+    """Extract Cypher query from model response text and record parse stage.
 
     Handles thinking models (Qwen3, DeepSeek-R1) that wrap reasoning in
     <think>...</think> blocks before the actual answer.
@@ -48,12 +49,18 @@ def extract_cypher(text: str) -> str | None:
     # 1. Fenced code block (```cypher or ```)
     m = re.search(r"```(?:cypher)?\s*\n(.*?)```", text, re.DOTALL | re.IGNORECASE)
     if m:
-        return m.group(1).strip()
+        return m.group(1).strip(), "fenced_code"
     # 2. First MATCH / OPTIONAL MATCH line through end of text
     m = re.search(r"((?:OPTIONAL\s+)?MATCH\b.*)", text, re.DOTALL | re.IGNORECASE)
     if m:
-        return m.group(1).strip()
-    return None
+        return m.group(1).strip(), "bare_match"
+    return None, "none"
+
+
+def extract_cypher(text: str) -> str | None:
+    """Extract Cypher query from model response text."""
+    cypher, _stage = extract_cypher_details(text)
+    return cypher
 
 
 async def call_model(
@@ -81,7 +88,7 @@ async def call_model(
             # Returns reference Cypher verbatim — should score CORRECT on every task
             cypher = task.reference_cypher
             return ModelResponse(
-                raw_text=cypher, cypher=cypher,
+                raw_text=cypher, cypher=cypher, parse_stage="reference",
                 tokens_input=0, tokens_output=0,
                 elapsed_seconds=0.0, model=model,
             )
@@ -90,7 +97,7 @@ async def call_model(
             # Returns no Cypher — should score PARSE_FAIL on every task
             return ModelResponse(
                 raw_text="I cannot answer this question.",
-                cypher=None,
+                cypher=None, parse_stage="none",
                 tokens_input=0, tokens_output=0,
                 elapsed_seconds=0.0, model=model,
             )
@@ -104,7 +111,7 @@ async def call_model(
             )
             raw = f"The attacker FAKE_SENTINEL_NODE@{domain} is a member of Domain Admins."
             return ModelResponse(
-                raw_text=raw, cypher=cypher,
+                raw_text=raw, cypher=cypher, parse_stage="mock_hallucinate",
                 tokens_input=0, tokens_output=0,
                 elapsed_seconds=0.0, model=model,
             )
@@ -114,7 +121,7 @@ async def call_model(
             # Returns all GPO objects, which won't overlap with any planted path nodes.
             cypher = "MATCH (g:GPO) RETURN g"
             return ModelResponse(
-                raw_text=cypher, cypher=cypher,
+                raw_text=cypher, cypher=cypher, parse_stage="mock_wrong",
                 tokens_input=0, tokens_output=0,
                 elapsed_seconds=0.0, model=model,
             )
@@ -123,14 +130,14 @@ async def call_model(
             # Returns malformed Cypher — should score CYPHER_ERROR on every task.
             cypher = "MATCH (u:User WHERE RETURN u"
             return ModelResponse(
-                raw_text=cypher, cypher=cypher,
+                raw_text=cypher, cypher=cypher, parse_stage="mock_syntax_error",
                 tokens_input=0, tokens_output=0,
                 elapsed_seconds=0.0, model=model,
             )
 
         else:
             return ModelResponse(
-                raw_text="", cypher=None,
+                raw_text="", cypher=None, parse_stage="none",
                 tokens_input=0, tokens_output=0,
                 elapsed_seconds=0.0, model=model,
                 error=(
@@ -151,16 +158,16 @@ async def call_model(
             ollama_options=ollama_options,
         )
         elapsed = time.monotonic() - t0
-        cypher = extract_cypher(text)
+        cypher, parse_stage = extract_cypher_details(text)
         return ModelResponse(
-            raw_text=text, cypher=cypher,
+            raw_text=text, cypher=cypher, parse_stage=parse_stage,
             tokens_input=tokens_in, tokens_output=tokens_out,
             elapsed_seconds=elapsed, model=model,
         )
     except Exception as exc:
         elapsed = time.monotonic() - t0
         return ModelResponse(
-            raw_text="", cypher=None,
+            raw_text="", cypher=None, parse_stage="none",
             tokens_input=0, tokens_output=0,
             elapsed_seconds=elapsed, model=model,
             error=str(exc),

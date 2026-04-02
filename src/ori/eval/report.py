@@ -17,11 +17,14 @@ def write_csv(results: list["EvalResult"], output_path: Path) -> None:
         "score", "outcome", "hallucination",
         "tokens_input", "tokens_output", "elapsed_seconds",
         "grade_mode", "question", "model_cypher", "error_detail",
+        "parse_stage", "inspect_log", "inspect_sample_id", "inspect_sample_uuid",
+        "inspect_model_calls", "inspect_error_retries",
     ]
     with output_path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         for r in results:
+            inspect_meta = r.inspect
             writer.writerow({
                 "task_id": r.task.id,
                 "template_id": r.task.template_id,
@@ -38,6 +41,12 @@ def write_csv(results: list["EvalResult"], output_path: Path) -> None:
                 "question": r.task.question,
                 "model_cypher": (r.model_response.cypher or "").replace("\n", " "),
                 "error_detail": r.grade.details if r.grade.outcome in ("CYPHER_ERROR", "MODEL_ERROR") else "",
+                "parse_stage": r.model_response.parse_stage,
+                "inspect_log": inspect_meta.log_location if inspect_meta else "",
+                "inspect_sample_id": inspect_meta.sample_id if inspect_meta else "",
+                "inspect_sample_uuid": inspect_meta.sample_uuid if inspect_meta else "",
+                "inspect_model_calls": inspect_meta.model_calls if inspect_meta else 0,
+                "inspect_error_retries": inspect_meta.error_retries if inspect_meta else 0,
             })
 
 
