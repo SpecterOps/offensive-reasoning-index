@@ -102,6 +102,43 @@ def eval(manifest: str, model: str, output: str, concurrency: int, bhce_url: str
 
 @main.command()
 @click.option("--manifest", "-m", required=True, type=click.Path(exists=True), help="Path to manifest.json")
+@click.option("--bhce-url", default=None, help="BH CE base URL (overrides BLOODHOUND_DOMAIN env var)")
+def verify_ingest(manifest: str, bhce_url: str | None) -> None:
+    """Verify that uploaded BloodHound data matches the generated manifest."""
+    import asyncio
+
+    from .eval.ops import print_verify_ingest, verify_ingest
+
+    result = asyncio.run(verify_ingest(Path(manifest), bhce_url=bhce_url))
+    print_verify_ingest(result)
+    if not result.ok:
+        raise SystemExit(1)
+
+
+@main.command()
+@click.option("--manifest", "-m", required=True, type=click.Path(exists=True), help="Path to manifest.json")
+@click.option("--output-dir", "-o", required=True, type=click.Path(), help="Directory for smoke-test CSVs")
+@click.option("--bhce-url", default=None, help="BH CE base URL (overrides BLOODHOUND_DOMAIN env var)")
+def smoke_eval(manifest: str, output_dir: str, bhce_url: str | None) -> None:
+    """Run mock-model smoke tests for grading, parsing, and Cypher execution paths."""
+    import asyncio
+
+    from .eval.ops import print_smoke_eval, run_smoke_eval
+
+    result = asyncio.run(
+        run_smoke_eval(
+            manifest_path=Path(manifest),
+            output_dir=Path(output_dir),
+            bhce_url=bhce_url,
+        )
+    )
+    print_smoke_eval(result)
+    if not result.ok:
+        raise SystemExit(1)
+
+
+@main.command()
+@click.option("--manifest", "-m", required=True, type=click.Path(exists=True), help="Path to manifest.json")
 @click.option("--model", "models", multiple=True, help="Model to evaluate (repeat for multiple)")
 @click.option("--models-file", type=click.Path(exists=True), default=None, help="YAML file listing models to evaluate")
 @click.option("--output-dir", "-o", required=True, type=click.Path(), help="Directory for per-model CSV files")
