@@ -93,6 +93,16 @@ def test_run_eval_with_inspect_mock_hallucinate(tmp_path: Path, monkeypatch) -> 
     assert result.model_response.parse_stage == "mock_hallucinate"
 
 
+def test_run_eval_with_inspect_prints_per_task_outcome(tmp_path: Path, monkeypatch, capsys) -> None:
+    import asyncio
+
+    results = asyncio.run(_run("mock/perfect", tmp_path, monkeypatch))
+    assert len(results) == 1
+    out = capsys.readouterr().out
+    assert "[1/1] t1_admin_to-01" in out
+    assert "→ CORRECT (score=1.0)" in out
+
+
 def test_resolve_model_base_url_adds_v1_for_ollama(monkeypatch) -> None:
     monkeypatch.setenv("OLLAMA_BASE_URL", "http://localhost:11434")
     assert _resolve_model_base_url("ollama/qwen3:latest", None) == "http://localhost:11434/v1"

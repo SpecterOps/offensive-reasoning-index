@@ -297,6 +297,10 @@ def ori_direct_cypher_scorer():
             ref_result=ref_result,
             valid_node_names=valid_names,
         )
+        sample_index = metadata.get("sample_index", "?")
+        sample_total = metadata.get("sample_total", "?")
+        print(f"  [{sample_index}/{sample_total}] {task.id} ({task.tier=}, {task.grade_mode})")
+        print(f"           → {result.outcome} (score={result.score})")
         return Score(
             value=result.score,
             answer=model_response.cypher,
@@ -319,6 +323,8 @@ def _sample_for_task(
     model_base_url: str | None,
     ollama_options: dict[str, Any] | None,
     bhce_domain: str | None,
+    sample_index: int,
+    sample_total: int,
 ) -> Sample:
     return Sample(
         id=task.id,
@@ -332,6 +338,8 @@ def _sample_for_task(
             "model_base_url": model_base_url,
             "ollama_options": ollama_options,
             "bhce_domain": bhce_domain,
+            "sample_index": sample_index,
+            "sample_total": sample_total,
         },
     )
 
@@ -411,8 +419,10 @@ async def run_eval_with_inspect(
             model_base_url=resolved_base_url,
             ollama_options=ollama_options,
             bhce_domain=bhce_domain,
+            sample_index=i + 1,
+            sample_total=len(tasks),
         )
-        for task in tasks
+        for i, task in enumerate(tasks)
     ]
     inspect_task = InspectTask(
         dataset=samples,
