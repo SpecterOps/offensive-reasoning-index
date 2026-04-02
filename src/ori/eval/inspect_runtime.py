@@ -184,7 +184,10 @@ def _score_metadata_to_grade_result(score: Score) -> GradeResult:
 def _resolve_model_base_url(model: str, base_url: str | None) -> str | None:
     provider, _name = model.split("/", 1)
     if provider == "ollama":
-        return os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+        resolved = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
+        if not resolved.endswith("/v1"):
+            resolved = f"{resolved}/v1"
+        return resolved
     if provider == "openai-compat":
         return base_url
     return base_url

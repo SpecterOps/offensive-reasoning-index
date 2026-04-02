@@ -58,20 +58,24 @@ def print_comparison(all_results: dict[str, list["EvalResult"]]) -> None:
         hallucs = sum(1 for r in results if r.grade.hallucination)
         errors = sum(1 for r in results if r.grade.outcome == "CYPHER_ERROR")
         parse_fails = sum(1 for r in results if r.grade.outcome == "PARSE_FAIL")
+        model_errors = sum(1 for r in results if r.grade.outcome == "MODEL_ERROR")
         tiers = {}
         for tier in (1, 2, 3):
             t = [r for r in results if r.task.tier == tier]
             tiers[tier] = (sum(1 for r in t if r.grade.score == 1.0), len(t)) if t else (0, 0)
         return {"total": total, "correct": correct, "hallucs": hallucs,
-                "errors": errors, "parse_fails": parse_fails, "tiers": tiers}
+                "errors": errors, "parse_fails": parse_fails, "model_errors": model_errors, "tiers": tiers}
 
     col_w = 36
-    print("\n" + "=" * 100)
+    print("\n" + "=" * 110)
     print("BASELINE COMPARISON")
-    print("=" * 100)
-    header = f"{'Model':<{col_w}} {'Overall':>8} {'Tier1':>7} {'Tier2':>7} {'Tier3':>7} {'Hallucs':>8} {'Errors':>7} {'Fails':>6}"
+    print("=" * 110)
+    header = (
+        f"{'Model':<{col_w}} {'Overall':>8} {'Tier1':>7} {'Tier2':>7} {'Tier3':>7} "
+        f"{'Hallucs':>8} {'Errors':>7} {'Fails':>6} {'ModelErr':>9}"
+    )
     print(header)
-    print("-" * 100)
+    print("-" * 110)
 
     for model, results in all_results.items():
         s = _stats(results)
@@ -82,9 +86,13 @@ def print_comparison(all_results: dict[str, list["EvalResult"]]) -> None:
             return f"{100*c//t}%" if t else "n/a"
 
         short_model = model.split("/", 1)[-1][:col_w]
-        print(f"{short_model:<{col_w}} {s['correct']:>4}/{s['total']:<3} {tp(1):>7} {tp(2):>7} {tp(3):>7} {s['hallucs']:>8} {s['errors']:>7} {s['parse_fails']:>6}")
+        print(
+            f"{short_model:<{col_w}} {s['correct']:>4}/{s['total']:<3} "
+            f"{tp(1):>7} {tp(2):>7} {tp(3):>7} "
+            f"{s['hallucs']:>8} {s['errors']:>7} {s['parse_fails']:>6} {s['model_errors']:>9}"
+        )
 
-    print("=" * 100)
+    print("=" * 110)
 
 
 def print_summary(results: list["EvalResult"], model: str) -> None:
@@ -94,6 +102,7 @@ def print_summary(results: list["EvalResult"], model: str) -> None:
     hallucinations = sum(1 for r in results if r.grade.hallucination)
     parse_fails = sum(1 for r in results if r.grade.outcome == "PARSE_FAIL")
     cypher_errors = sum(1 for r in results if r.grade.outcome == "CYPHER_ERROR")
+    model_errors = sum(1 for r in results if r.grade.outcome == "MODEL_ERROR")
 
     def tier_score(tier: int) -> str:
         t = [r for r in results if r.task.tier == tier]
@@ -107,5 +116,8 @@ def print_summary(results: list["EvalResult"], model: str) -> None:
     print(f"Model:  {model}")
     print(f"Tasks:  {total}  |  Score: {correct}/{total} ({pct})")
     print(f"Tier 1: {tier_score(1)}  |  Tier 2: {tier_score(2)}  |  Tier 3: {tier_score(3)}")
-    print(f"Hallucinations: {hallucinations}  |  Parse failures: {parse_fails}  |  Cypher errors: {cypher_errors}")
+    print(
+        f"Hallucinations: {hallucinations}  |  Parse failures: {parse_fails}  |  "
+        f"Cypher errors: {cypher_errors}  |  Model errors: {model_errors}"
+    )
     print("=" * 60)
