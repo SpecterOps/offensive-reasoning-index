@@ -37,6 +37,15 @@ class FakeBHCEClient:
             )
         return CypherResult(success=False, error=f"unexpected query: {query}")
 
+    async def run_cypher_resilient(
+        self,
+        query: str,
+        *,
+        recovery_timeout_seconds: float = 90.0,
+        recovery_poll_interval: float = 5.0,
+    ) -> CypherResult:
+        return await self.run_cypher(query)
+
     async def get_all_node_names(self) -> set[str]:
         return {"JDOE@TEST.LOCAL", "DC01.TEST.LOCAL"}
 

@@ -268,7 +268,7 @@ def ori_direct_cypher_solver() -> Generate:
         if model_response.cypher:
             domain = metadata.get("bhce_domain")
             async with BHCEClient(domain=domain) as bhce:
-                model_result = await bhce.run_cypher(model_response.cypher)
+                model_result = await bhce.run_cypher_resilient(model_response.cypher)
         else:
             model_result = CypherResult(success=False, error="No Cypher extracted")
 
@@ -405,7 +405,7 @@ async def run_eval_with_inspect(
     print(f"Pre-fetching reference Cypher results for {len(tasks)} tasks...")
     ref_results: dict[str, CypherResult] = {}
     for task in tasks:
-        ref_results[task.id] = await bhce.run_cypher(task.reference_cypher)
+        ref_results[task.id] = await bhce.run_cypher_resilient(task.reference_cypher)
     print("  Done")
 
     resolved_base_url = _resolve_model_base_url(model, base_url)

@@ -26,6 +26,10 @@ class EvalResult:
     inspect: InspectEvalMetadata | None = None
 
 
+def _has_infra_errors(results: list[EvalResult]) -> bool:
+    return any(result.grade.outcome == "INFRA_ERROR" for result in results)
+
+
 async def run_eval(
     tasks: list[Task],
     model: str,
@@ -48,7 +52,7 @@ async def run_eval(
     print(f"Pre-fetching reference Cypher results for {len(tasks)} tasks...")
     ref_results: dict[str, CypherResult] = {}
     for task in tasks:
-        ref_results[task.id] = await bhce.run_cypher(task.reference_cypher)
+        ref_results[task.id] = await bhce.run_cypher_resilient(task.reference_cypher)
     print(f"  Done")
 
     sem = asyncio.Semaphore(concurrency)
@@ -60,7 +64,7 @@ async def run_eval(
             model_resp = await call_model(task, model, base_url=base_url, ollama_options=ollama_options)
 
             if model_resp.cypher:
-                model_result = await bhce.run_cypher(model_resp.cypher)
+                model_result = await bhce.run_cypher_resilient(model_resp.cypher)
             else:
                 model_result = CypherResult(success=False, error="No Cypher extracted")
 
@@ -92,6 +96,7 @@ async def run_eval_cli_bare(
     concurrency: int = 1,
     bhce_url: str | None = None,
     ollama_options: dict | None = None,
+    max_model_reruns_on_infra: int = 1,
 ) -> list[EvalResult]:
     """Like run_eval_cli but returns results for multi-model comparison."""
     manifest = json.loads(manifest_path.read_text())
@@ -107,16 +112,31 @@ async def run_eval_cli_bare(
         if parsed.scheme:
             os.environ["BLOODHOUND_SCHEME"] = parsed.scheme
 
-    async with BHCEClient(domain=domain) as bhce:
-        results = await run_eval_with_inspect(
-            tasks=tasks,
-            model=model,
-            bhce=bhce,
-            output_path=output_path,
-            concurrency=concurrency,
-            base_url=None,
-            ollama_options=ollama_options,
-            bhce_domain=domain,
+    attempt = 0
+    while True:
+        async with BHCEClient(domain=domain) as bhce:
+            health = await bhce.wait_until_healthy()
+            if not health.ok:
+                raise RuntimeError(
+                    f"BloodHound CE health check failed before eval: {health.detail} "
+                    f"(classification={health.classification})"
+                )
+            results = await run_eval_with_inspect(
+                tasks=tasks,
+                model=model,
+                bhce=bhce,
+                output_path=output_path,
+                concurrency=concurrency,
+                base_url=None,
+                ollama_options=ollama_options,
+                bhce_domain=domain,
+            )
+        if not _has_infra_errors(results) or attempt >= max_model_reruns_on_infra:
+            break
+        attempt += 1
+        print(
+            f"\nDetected INFRA_ERROR during {model} run. "
+            f"Re-running full model benchmark ({attempt}/{max_model_reruns_on_infra}) after recovery wait..."
         )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -131,6 +151,7 @@ async def run_eval_cli(
     output_path: Path,
     concurrency: int = 3,
     bhce_url: str | None = None,
+    max_model_reruns_on_infra: int = 1,
 ) -> None:
     """Entry point called from the CLI."""
     manifest = json.loads(manifest_path.read_text())
@@ -151,15 +172,30 @@ async def run_eval_cli(
         if parsed.scheme:
             os.environ["BLOODHOUND_SCHEME"] = parsed.scheme
 
-    async with BHCEClient(domain=domain) as bhce:
-        results = await run_eval_with_inspect(
-            tasks=tasks,
-            model=model,
-            bhce=bhce,
-            output_path=output_path,
-            concurrency=concurrency,
-            base_url=None,
-            bhce_domain=domain,
+    attempt = 0
+    while True:
+        async with BHCEClient(domain=domain) as bhce:
+            health = await bhce.wait_until_healthy()
+            if not health.ok:
+                raise RuntimeError(
+                    f"BloodHound CE health check failed before eval: {health.detail} "
+                    f"(classification={health.classification})"
+                )
+            results = await run_eval_with_inspect(
+                tasks=tasks,
+                model=model,
+                bhce=bhce,
+                output_path=output_path,
+                concurrency=concurrency,
+                base_url=None,
+                bhce_domain=domain,
+            )
+        if not _has_infra_errors(results) or attempt >= max_model_reruns_on_infra:
+            break
+        attempt += 1
+        print(
+            f"\nDetected INFRA_ERROR during {model} run. "
+            f"Re-running full eval ({attempt}/{max_model_reruns_on_infra}) after recovery wait..."
         )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)

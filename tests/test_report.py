@@ -57,6 +57,12 @@ def test_print_summary_includes_model_errors(capsys) -> None:
     assert "Model errors: 1" in out
 
 
+def test_print_summary_includes_infra_errors(capsys) -> None:
+    print_summary([_result("INFRA_ERROR"), _result("CORRECT", score=1.0)], "ollama/test:latest")
+    out = capsys.readouterr().out
+    assert "Infra errors: 1" in out
+
+
 def test_print_comparison_includes_model_error_column(capsys) -> None:
     print_comparison(
         {
@@ -68,12 +74,22 @@ def test_print_comparison_includes_model_error_column(capsys) -> None:
     assert "1" in out
 
 
+def test_print_comparison_includes_infra_error_column(capsys) -> None:
+    print_comparison(
+        {
+            "ollama/test:latest": [_result("INFRA_ERROR"), _result("PARSE_FAIL")],
+        }
+    )
+    out = capsys.readouterr().out
+    assert "InfraErr" in out
+
+
 def test_write_combined_csv_writes_rows_for_all_models(tmp_path) -> None:
     output = tmp_path / "baseline_combined.csv"
     write_combined_csv(
         {
             "ollama/a:latest": [_result("CORRECT", score=1.0)],
-            "ollama/b:latest": [_result("MODEL_ERROR")],
+            "ollama/b:latest": [_result("INFRA_ERROR")],
         },
         output,
     )
@@ -81,7 +97,7 @@ def test_write_combined_csv_writes_rows_for_all_models(tmp_path) -> None:
         rows = list(csv.DictReader(f))
     assert len(rows) == 2
     assert {row["model"] for row in rows} == {"ollama/test:latest"}
-    assert {row["outcome"] for row in rows} == {"CORRECT", "MODEL_ERROR"}
+    assert {row["outcome"] for row in rows} == {"CORRECT", "INFRA_ERROR"}
 
 
 def test_write_summary_csv_writes_one_row_per_model(tmp_path) -> None:
@@ -89,7 +105,7 @@ def test_write_summary_csv_writes_one_row_per_model(tmp_path) -> None:
     write_summary_csv(
         {
             "ollama/a:latest": [_result("CORRECT", score=1.0), _result("PARSE_FAIL")],
-            "ollama/b:latest": [_result("MODEL_ERROR")],
+            "ollama/b:latest": [_result("INFRA_ERROR")],
         },
         output,
     )
@@ -99,4 +115,4 @@ def test_write_summary_csv_writes_one_row_per_model(tmp_path) -> None:
     by_model = {row["model"]: row for row in rows}
     assert by_model["ollama/a:latest"]["correct"] == "1"
     assert by_model["ollama/a:latest"]["parse_fails"] == "1"
-    assert by_model["ollama/b:latest"]["model_errors"] == "1"
+    assert by_model["ollama/b:latest"]["infra_errors"] == "1"

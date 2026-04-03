@@ -5,13 +5,15 @@ from pathlib import Path
 from click.testing import CliRunner
 
 from ori.cli import main
-from ori.eval.bhce import CypherResult
+from ori.eval.bhce import BHHealthResult, CypherResult
 from ori.eval.ops import (
     SMOKE_EXPECTATIONS,
     SmokeCheck,
     _edge_query,
     print_smoke_eval,
+    print_verify_bh_health,
     print_verify_ingest,
+    verify_bh_health,
     verify_ingest,
 )
 from ori.eval.runner import EvalResult
@@ -41,6 +43,28 @@ class FakeBHCEClient:
         if "RETURN p" in query:
             return CypherResult(success=True, nodes=[{}, {}], node_names=set(), raw={})
         return CypherResult(success=False, error=query)
+
+    async def run_cypher_resilient(
+        self,
+        query: str,
+        *,
+        recovery_timeout_seconds: float = 90.0,
+        recovery_poll_interval: float = 5.0,
+    ) -> CypherResult:
+        return await self.run_cypher(query)
+
+    async def wait_until_healthy(
+        self,
+        timeout_seconds: float = 60.0,
+        poll_interval: float = 5.0,
+        query: str = "MATCH (n:Domain) RETURN n LIMIT 1",
+    ) -> BHHealthResult:
+        return BHHealthResult(
+            ok=True,
+            detail="query succeeded",
+            query=query,
+            classification="ok",
+        )
 
 
 def _manifest(tmp_path: Path) -> Path:
@@ -91,16 +115,28 @@ def test_verify_ingest_happy_path(tmp_path: Path, monkeypatch) -> None:
 
 
 def test_cli_verify_ingest(tmp_path: Path, monkeypatch) -> None:
-    import asyncio
-
-    async def fake_verify(manifest_path: Path, bhce_url: str | None = None):
-        return asyncio.run(verify_ingest(manifest_path, bhce_url))
-
     monkeypatch.setattr("ori.eval.ops.BHCEClient", lambda domain=None: FakeBHCEClient())
     runner = CliRunner()
     result = runner.invoke(main, ["verify-ingest", "-m", str(_manifest(tmp_path))])
     assert result.exit_code == 0
     assert "INGEST CHECK: PASS" in result.output
+
+
+def test_verify_bh_health_happy_path(monkeypatch) -> None:
+    import asyncio
+
+    monkeypatch.setattr("ori.eval.ops.BHCEClient", lambda domain=None: FakeBHCEClient())
+    result = asyncio.run(verify_bh_health())
+    assert result.ok is True
+    assert result.classification == "ok"
+
+
+def test_cli_verify_bh_health(monkeypatch) -> None:
+    monkeypatch.setattr("ori.eval.ops.BHCEClient", lambda domain=None: FakeBHCEClient())
+    runner = CliRunner()
+    result = runner.invoke(main, ["verify-bh-health", "--timeout", "0.1", "--poll-interval", "0.01"])
+    assert result.exit_code == 0
+    assert "BH HEALTH: PASS" in result.output
 
 
 def test_smoke_check_passes_only_single_expected_outcome() -> None:
@@ -178,6 +214,7 @@ def test_print_helpers(capsys) -> None:
         CountCheck,
         PathCheck,
         SmokeEvalResult,
+        VerifyBHHealthResult,
         VerifyIngestResult,
     )
 
@@ -188,6 +225,16 @@ def test_print_helpers(capsys) -> None:
     print_verify_ingest(verify)
     out = capsys.readouterr().out
     assert "INGEST CHECK: PASS" in out
+
+    health = VerifyBHHealthResult(
+        ok=True,
+        detail="query succeeded",
+        classification="ok",
+        query="MATCH (n:Domain) RETURN n LIMIT 1",
+    )
+    print_verify_bh_health(health)
+    out = capsys.readouterr().out
+    assert "BH HEALTH: PASS" in out
 
     smoke = SmokeEvalResult(
         checks=[SmokeCheck("mock/perfect", "CORRECT", {"CORRECT": 1})],

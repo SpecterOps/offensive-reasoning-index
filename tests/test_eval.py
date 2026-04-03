@@ -178,6 +178,26 @@ def test_grade_cypher_error():
     assert result.outcome == "CYPHER_ERROR"
 
 
+def test_grade_infra_error_for_model_query_failure():
+    task = _make_task()
+    resp = _make_model_response()
+    model_result = _make_cypher_result([], success=False)
+    model_result.error = "HTTP 502: Bad Gateway"
+    result = grade(task, resp, model_result, _make_cypher_result(["A@CORP.LOCAL"]), set())
+    assert result.score == 0.0
+    assert result.outcome == "INFRA_ERROR"
+
+
+def test_grade_infra_error_for_reference_query_failure():
+    task = _make_task()
+    resp = _make_model_response()
+    ref_result = _make_cypher_result([], success=False)
+    ref_result.error = "Request failed: timed out"
+    result = grade(task, resp, _make_cypher_result(["A@CORP.LOCAL"]), ref_result, set())
+    assert result.score == 0.0
+    assert result.outcome == "INFRA_ERROR"
+
+
 def test_grade_path_exists_correct():
     task = _make_task("path_exists")
     resp = _make_model_response()

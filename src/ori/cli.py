@@ -101,6 +101,28 @@ def eval(manifest: str, model: str, output: str, concurrency: int, bhce_url: str
 
 
 @main.command()
+@click.option("--bhce-url", default=None, help="BH CE base URL (overrides BLOODHOUND_DOMAIN env var)")
+@click.option("--timeout", default=60.0, show_default=True, type=float, help="Seconds to wait for BHCE to become healthy")
+@click.option("--poll-interval", default=5.0, show_default=True, type=float, help="Seconds between health probes")
+def verify_bh_health(bhce_url: str | None, timeout: float, poll_interval: float) -> None:
+    """Verify that BloodHound CE is healthy before starting a run."""
+    import asyncio
+
+    from .eval.ops import print_verify_bh_health, verify_bh_health
+
+    result = asyncio.run(
+        verify_bh_health(
+            bhce_url=bhce_url,
+            timeout_seconds=timeout,
+            poll_interval=poll_interval,
+        )
+    )
+    print_verify_bh_health(result)
+    if not result.ok:
+        raise SystemExit(1)
+
+
+@main.command()
 @click.option("--manifest", "-m", required=True, type=click.Path(exists=True), help="Path to manifest.json")
 @click.option("--bhce-url", default=None, help="BH CE base URL (overrides BLOODHOUND_DOMAIN env var)")
 def verify_ingest(manifest: str, bhce_url: str | None) -> None:

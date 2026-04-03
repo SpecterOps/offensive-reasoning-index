@@ -6,6 +6,7 @@ import re
 from dataclasses import dataclass
 
 from .adapter import ModelResponse
+from .bhce import BHCEClient
 from .bhce import CypherResult
 from .tasks import Task
 
@@ -13,7 +14,7 @@ from .tasks import Task
 @dataclass
 class GradeResult:
     score: float        # 0.0 or 1.0
-    outcome: str        # CORRECT | INCORRECT | PARSE_FAIL | CYPHER_ERROR | HALLUCINATION | MODEL_ERROR
+    outcome: str        # CORRECT | INCORRECT | PARSE_FAIL | CYPHER_ERROR | HALLUCINATION | MODEL_ERROR | INFRA_ERROR
     hallucination: bool
     details: str
 
@@ -43,8 +44,24 @@ def grade(
             details="Could not extract Cypher query from model response",
         )
 
+    # Infrastructure/runtime failure reaching BHCE
+    if not ref_result.success and BHCEClient.classify_error(ref_result.error) == "infra":
+        return GradeResult(
+            score=0.0,
+            outcome="INFRA_ERROR",
+            hallucination=False,
+            details=f"Reference Cypher could not be graded due to BHCE availability: {ref_result.error}",
+        )
+
     # Cypher execution error
     if not model_result.success:
+        if BHCEClient.classify_error(model_result.error) == "infra":
+            return GradeResult(
+                score=0.0,
+                outcome="INFRA_ERROR",
+                hallucination=False,
+                details=f"BloodHound CE unavailable during model query execution: {model_result.error}",
+            )
         return GradeResult(
             score=0.0, outcome="CYPHER_ERROR",
             hallucination=False,

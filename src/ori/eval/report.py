@@ -37,7 +37,9 @@ def _row_for_result(r: "EvalResult") -> dict[str, object]:
         "grade_mode": r.task.grade_mode,
         "question": r.task.question,
         "model_cypher": (r.model_response.cypher or "").replace("\n", " "),
-        "error_detail": r.grade.details if r.grade.outcome in ("CYPHER_ERROR", "MODEL_ERROR") else "",
+        "error_detail": (
+            r.grade.details if r.grade.outcome in ("CYPHER_ERROR", "MODEL_ERROR", "INFRA_ERROR") else ""
+        ),
         "parse_stage": r.model_response.parse_stage,
         "inspect_log": inspect_meta.log_location if inspect_meta else "",
         "inspect_sample_id": inspect_meta.sample_id if inspect_meta else "",
@@ -73,6 +75,7 @@ def _stats(results: list["EvalResult"]) -> dict:
     errors = sum(1 for r in results if r.grade.outcome == "CYPHER_ERROR")
     parse_fails = sum(1 for r in results if r.grade.outcome == "PARSE_FAIL")
     model_errors = sum(1 for r in results if r.grade.outcome == "MODEL_ERROR")
+    infra_errors = sum(1 for r in results if r.grade.outcome == "INFRA_ERROR")
     tiers = {}
     for tier in (1, 2, 3):
         t = [r for r in results if r.task.tier == tier]
@@ -84,6 +87,7 @@ def _stats(results: list["EvalResult"]) -> dict:
         "errors": errors,
         "parse_fails": parse_fails,
         "model_errors": model_errors,
+        "infra_errors": infra_errors,
         "tiers": tiers,
     }
 
@@ -95,7 +99,7 @@ def write_summary_csv(all_results: dict[str, list["EvalResult"]], output_path: P
         "tier1_correct", "tier1_total", "tier1_pct",
         "tier2_correct", "tier2_total", "tier2_pct",
         "tier3_correct", "tier3_total", "tier3_pct",
-        "hallucinations", "cypher_errors", "parse_fails", "model_errors",
+        "hallucinations", "cypher_errors", "parse_fails", "model_errors", "infra_errors",
     ]
     with output_path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -129,21 +133,22 @@ def write_summary_csv(all_results: dict[str, list["EvalResult"]], output_path: P
                 "cypher_errors": s["errors"],
                 "parse_fails": s["parse_fails"],
                 "model_errors": s["model_errors"],
+                "infra_errors": s["infra_errors"],
             })
 
 
 def print_comparison(all_results: dict[str, list["EvalResult"]]) -> None:
     """Print a multi-model comparison table."""
     col_w = 36
-    print("\n" + "=" * 110)
+    print("\n" + "=" * 121)
     print("BASELINE COMPARISON")
-    print("=" * 110)
+    print("=" * 121)
     header = (
         f"{'Model':<{col_w}} {'Overall':>8} {'Tier1':>7} {'Tier2':>7} {'Tier3':>7} "
-        f"{'Hallucs':>8} {'Errors':>7} {'Fails':>6} {'ModelErr':>9}"
+        f"{'Hallucs':>8} {'Errors':>7} {'Fails':>6} {'ModelErr':>9} {'InfraErr':>9}"
     )
     print(header)
-    print("-" * 110)
+    print("-" * 121)
 
     for model, results in all_results.items():
         s = _stats(results)
@@ -157,10 +162,11 @@ def print_comparison(all_results: dict[str, list["EvalResult"]]) -> None:
         print(
             f"{short_model:<{col_w}} {s['correct']:>4}/{s['total']:<3} "
             f"{tp(1):>7} {tp(2):>7} {tp(3):>7} "
-            f"{s['hallucs']:>8} {s['errors']:>7} {s['parse_fails']:>6} {s['model_errors']:>9}"
+            f"{s['hallucs']:>8} {s['errors']:>7} {s['parse_fails']:>6} "
+            f"{s['model_errors']:>9} {s['infra_errors']:>9}"
         )
 
-    print("=" * 110)
+    print("=" * 121)
 
 
 def print_summary(results: list["EvalResult"], model: str) -> None:
@@ -171,6 +177,7 @@ def print_summary(results: list["EvalResult"], model: str) -> None:
     parse_fails = sum(1 for r in results if r.grade.outcome == "PARSE_FAIL")
     cypher_errors = sum(1 for r in results if r.grade.outcome == "CYPHER_ERROR")
     model_errors = sum(1 for r in results if r.grade.outcome == "MODEL_ERROR")
+    infra_errors = sum(1 for r in results if r.grade.outcome == "INFRA_ERROR")
 
     def tier_score(tier: int) -> str:
         t = [r for r in results if r.task.tier == tier]
@@ -186,6 +193,6 @@ def print_summary(results: list["EvalResult"], model: str) -> None:
     print(f"Tier 1: {tier_score(1)}  |  Tier 2: {tier_score(2)}  |  Tier 3: {tier_score(3)}")
     print(
         f"Hallucinations: {hallucinations}  |  Parse failures: {parse_fails}  |  "
-        f"Cypher errors: {cypher_errors}  |  Model errors: {model_errors}"
+        f"Cypher errors: {cypher_errors}  |  Model errors: {model_errors}  |  Infra errors: {infra_errors}"
     )
     print("=" * 60)

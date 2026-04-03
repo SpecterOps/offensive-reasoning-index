@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlparse
 
-from .bhce import BHCEClient
+from .bhce import BHCEClient, BHHealthResult
 from .report import print_comparison
 from .runner import EvalResult, run_eval_cli_bare
 
@@ -59,6 +59,14 @@ class VerifyIngestResult:
         )
 
 
+@dataclass
+class VerifyBHHealthResult:
+    ok: bool
+    detail: str
+    classification: str
+    query: str
+
+
 def apply_bhce_url_override(bhce_url: str | None) -> str | None:
     """Apply CLI BHCE URL overrides to env and return parsed hostname."""
     domain = None
@@ -104,18 +112,18 @@ async def verify_ingest(manifest_path: Path, bhce_url: str | None = None) -> Ver
     async with BHCEClient(domain=domain) as bhce:
         count_checks: list[CountCheck] = []
         for key, query in _count_queries().items():
-            result = await bhce.run_cypher(query)
+            result = await bhce.run_cypher_resilient(query)
             actual = len(result.nodes) if result.success else -1
             expected = stats.get(key)
             count_checks.append(CountCheck(label=key, actual=actual, expected=expected))
 
         path_checks: list[PathCheck] = []
         for planted in manifest.get("planted_paths", []):
-            verification = await bhce.run_cypher(planted["verification_cypher"])
+            verification = await bhce.run_cypher_resilient(planted["verification_cypher"])
             found = verification.success and len(verification.nodes) > 0
             edge_checks: list[EdgeCheck] = []
             for edge in planted.get("path_edges", []):
-                edge_result = await bhce.run_cypher(
+                edge_result = await bhce.run_cypher_resilient(
                     _edge_query(edge["source"], edge["edge"], edge["target"])
                 )
                 edge_checks.append(
@@ -139,6 +147,34 @@ async def verify_ingest(manifest_path: Path, bhce_url: str | None = None) -> Ver
             )
 
     return VerifyIngestResult(count_checks=count_checks, path_checks=path_checks)
+
+
+async def verify_bh_health(
+    bhce_url: str | None = None,
+    timeout_seconds: float = 60.0,
+    poll_interval: float = 5.0,
+) -> VerifyBHHealthResult:
+    """Wait for BloodHound CE to become healthy using a safe graph query."""
+    domain = apply_bhce_url_override(bhce_url)
+    async with BHCEClient(domain=domain) as bhce:
+        result = await bhce.wait_until_healthy(
+            timeout_seconds=timeout_seconds,
+            poll_interval=poll_interval,
+        )
+    return VerifyBHHealthResult(
+        ok=result.ok,
+        detail=result.detail,
+        classification=result.classification,
+        query=result.query,
+    )
+
+
+def print_verify_bh_health(result: VerifyBHHealthResult) -> None:
+    print("== BloodHound health check ==")
+    print(f"query: {result.query}")
+    print(f"classification: {result.classification}")
+    print(f"detail: {result.detail}")
+    print(f"BH HEALTH: {'PASS' if result.ok else 'FAIL'}")
 
 
 def print_verify_ingest(result: VerifyIngestResult) -> None:
