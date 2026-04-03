@@ -7,12 +7,15 @@ from click.testing import CliRunner
 from ori.cli import main
 from ori.eval.bhce import BHHealthResult, CypherResult
 from ori.eval.ops import (
+    PreflightResult,
     SMOKE_EXPECTATIONS,
     SmokeCheck,
     _edge_query,
     print_smoke_eval,
+    print_preflight,
     print_verify_bh_health,
     print_verify_ingest,
+    run_preflight,
     verify_bh_health,
     verify_ingest,
 )
@@ -209,6 +212,50 @@ def test_cli_smoke_eval(tmp_path: Path, monkeypatch) -> None:
     assert "SMOKE TEST: PASS" in result.output
 
 
+def test_cli_preflight(tmp_path: Path, monkeypatch) -> None:
+    import asyncio
+    from ori.eval.ops import (
+        CountCheck,
+        PathCheck,
+        SmokeEvalResult,
+        VerifyBHHealthResult,
+        VerifyIngestResult,
+    )
+
+    async def fake_preflight(
+        manifest_path: Path,
+        output_dir: Path,
+        bhce_url: str | None = None,
+        timeout_seconds: float = 60.0,
+        poll_interval: float = 5.0,
+    ):
+        return PreflightResult(
+            health=VerifyBHHealthResult(
+                ok=True,
+                detail="query succeeded",
+                classification="ok",
+                query="MATCH (n:Domain) RETURN n LIMIT 1",
+            ),
+            ingest=VerifyIngestResult(
+                count_checks=[CountCheck("users", 2, 2)],
+                path_checks=[PathCheck("t1_admin_to", True, "J", "D", [])],
+            ),
+            smoke=SmokeEvalResult(
+                checks=[SmokeCheck("mock/perfect", "CORRECT", {"CORRECT": 1})],
+                results_by_model={"mock/perfect": []},
+            ),
+        )
+
+    monkeypatch.setattr("ori.eval.ops.run_preflight", fake_preflight)
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        ["preflight", "-m", str(_manifest(tmp_path)), "-o", str(tmp_path / "smoke"), "--timeout", "0.1", "--poll-interval", "0.01"],
+    )
+    assert result.exit_code == 0
+    assert "PREFLIGHT: PASS" in result.output
+
+
 def test_print_helpers(capsys) -> None:
     from ori.eval.ops import (
         CountCheck,
@@ -243,3 +290,17 @@ def test_print_helpers(capsys) -> None:
     print_smoke_eval(smoke)
     out = capsys.readouterr().out
     assert "SMOKE TEST: PASS" in out
+
+    preflight = PreflightResult(
+        health=VerifyBHHealthResult(
+            ok=True,
+            detail="query succeeded",
+            classification="ok",
+            query="MATCH (n:Domain) RETURN n LIMIT 1",
+        ),
+        ingest=verify,
+        smoke=smoke,
+    )
+    print_preflight(preflight)
+    out = capsys.readouterr().out
+    assert "PREFLIGHT: PASS" in out

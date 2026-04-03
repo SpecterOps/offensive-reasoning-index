@@ -233,6 +233,17 @@ class SmokeEvalResult:
         return all(check.ok for check in self.checks)
 
 
+@dataclass
+class PreflightResult:
+    health: VerifyBHHealthResult
+    ingest: VerifyIngestResult
+    smoke: SmokeEvalResult
+
+    @property
+    def ok(self) -> bool:
+        return self.health.ok and self.ingest.ok and self.smoke.ok
+
+
 async def run_smoke_eval(
     manifest_path: Path,
     output_dir: Path,
@@ -262,6 +273,28 @@ async def run_smoke_eval(
     return SmokeEvalResult(checks=checks, results_by_model=results_by_model)
 
 
+async def run_preflight(
+    manifest_path: Path,
+    output_dir: Path,
+    bhce_url: str | None = None,
+    timeout_seconds: float = 60.0,
+    poll_interval: float = 5.0,
+) -> PreflightResult:
+    """Run BH health, ingest verification, and smoke eval in one sequence."""
+    health = await verify_bh_health(
+        bhce_url=bhce_url,
+        timeout_seconds=timeout_seconds,
+        poll_interval=poll_interval,
+    )
+    ingest = await verify_ingest(manifest_path=manifest_path, bhce_url=bhce_url)
+    smoke = await run_smoke_eval(
+        manifest_path=manifest_path,
+        output_dir=output_dir,
+        bhce_url=bhce_url,
+    )
+    return PreflightResult(health=health, ingest=ingest, smoke=smoke)
+
+
 def print_smoke_eval(result: SmokeEvalResult) -> None:
     print("== Smoke test outcome checks ==")
     for check in result.checks:
@@ -272,3 +305,12 @@ def print_smoke_eval(result: SmokeEvalResult) -> None:
     print()
     print_comparison(result.results_by_model)
     print(f"\nSMOKE TEST: {'PASS' if result.ok else 'FAIL'}")
+
+
+def print_preflight(result: PreflightResult) -> None:
+    print_verify_bh_health(result.health)
+    print()
+    print_verify_ingest(result.ingest)
+    print()
+    print_smoke_eval(result.smoke)
+    print(f"\nPREFLIGHT: {'PASS' if result.ok else 'FAIL'}")
