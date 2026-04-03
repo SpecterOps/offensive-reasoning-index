@@ -6,6 +6,7 @@ import base64
 import datetime
 import hashlib
 import hmac
+import asyncio
 import os
 import re
 from dataclasses import dataclass, field
@@ -20,6 +21,15 @@ class CypherResult:
     node_names: set[str] = field(default_factory=set)
     error: str | None = None
     raw: dict = field(default_factory=dict)
+
+
+@dataclass
+class BHHealthResult:
+    ok: bool
+    detail: str
+    query: str
+    status_code: int | None = None
+    classification: str = "ok"
 
 
 class BHCEClient:
@@ -84,6 +94,56 @@ class BHCEClient:
         return base + path
 
     @staticmethod
+    def classify_error(error: str | None) -> str:
+        """Classify BHCE failures as infra, query, or unknown."""
+        if not error:
+            return "ok"
+        text = error.lower()
+
+        infra_markers = (
+            "502 bad gateway",
+            "503",
+            "504",
+            "gateway",
+            "connection refused",
+            "timed out",
+            "timeout",
+            "temporarily unavailable",
+            "request failed:",
+            "server disconnected",
+            "name or service not known",
+            "nodename nor servname provided",
+            "tls",
+            "certificate verify failed",
+            "internal error has occurred that is preventing the service from servicing this request",
+        )
+        if any(marker in text for marker in infra_markers):
+            return "infra"
+
+        query_markers = (
+            "cypher syntax error",
+            "neo.clienterror",
+            "syntaxerror",
+            "variable `p` not defined",
+            "no viable alternative",
+            "mismatched input",
+            "extraneous input",
+            "token recognition error",
+            "resource not found",
+            "http 400",
+            "http 404",
+        )
+        if any(marker in text for marker in query_markers):
+            return "query"
+
+        if "http 500" in text and ("neo4jerror" in text or "syntax" in text):
+            return "query"
+        if "http 500" in text:
+            return "unknown"
+
+        return "unknown"
+
+    @staticmethod
     def _normalize_cypher(query: str) -> str:
         """
         Normalize Cypher for BH CE's CySQL parser.
@@ -131,6 +191,69 @@ class BHCEClient:
         nodes = _extract_nodes(data)
         names = _extract_node_names(nodes)
         return CypherResult(success=True, nodes=nodes, node_names=names, raw=data)
+
+    async def wait_until_healthy(
+        self,
+        timeout_seconds: float = 90.0,
+        poll_interval: float = 5.0,
+        query: str = "MATCH (n:Domain) RETURN n LIMIT 1",
+    ) -> BHHealthResult:
+        """Poll BHCE until a simple query succeeds or timeout is reached."""
+        deadline = asyncio.get_event_loop().time() + timeout_seconds
+        last = BHHealthResult(ok=False, detail="not started", query=query, classification="unknown")
+        while True:
+            health = await self.check_health(query=query)
+            if health.ok:
+                return health
+            last = health
+            if asyncio.get_event_loop().time() >= deadline:
+                return last
+            await asyncio.sleep(poll_interval)
+
+    async def run_cypher_resilient(
+        self,
+        query: str,
+        *,
+        recovery_timeout_seconds: float = 90.0,
+        recovery_poll_interval: float = 5.0,
+    ) -> CypherResult:
+        """Run Cypher and retry once after waiting if the failure looks infra-related."""
+        result = await self.run_cypher(query)
+        if result.success:
+            return result
+        classification = self.classify_error(result.error)
+        if classification != "infra":
+            return result
+
+        health = await self.wait_until_healthy(
+            timeout_seconds=recovery_timeout_seconds,
+            poll_interval=recovery_poll_interval,
+        )
+        if not health.ok:
+            return CypherResult(
+                success=False,
+                error=(
+                    f"BHCE unavailable after recovery wait: {result.error} "
+                    f"(last health check: {health.detail})"
+                ),
+            )
+        return await self.run_cypher(query)
+
+    async def check_health(
+        self,
+        query: str = "MATCH (n:Domain) RETURN n LIMIT 1",
+    ) -> BHHealthResult:
+        """Check whether BHCE is reachable and can execute a safe query."""
+        result = await self.run_cypher(query)
+        if result.success:
+            return BHHealthResult(ok=True, detail="query succeeded", query=query, classification="ok")
+        classification = self.classify_error(result.error)
+        return BHHealthResult(
+            ok=False,
+            detail=result.error or "unknown error",
+            query=query,
+            classification=classification,
+        )
 
     async def get_all_node_names(self) -> set[str]:
         """

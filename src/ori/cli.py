@@ -101,6 +101,97 @@ def eval(manifest: str, model: str, output: str, concurrency: int, bhce_url: str
 
 
 @main.command()
+@click.option("--bhce-url", default=None, help="BH CE base URL (overrides BLOODHOUND_DOMAIN env var)")
+@click.option("--timeout", default=60.0, show_default=True, type=float, help="Seconds to wait for BHCE to become healthy")
+@click.option("--poll-interval", default=5.0, show_default=True, type=float, help="Seconds between health probes")
+def verify_bh_health(bhce_url: str | None, timeout: float, poll_interval: float) -> None:
+    """Verify that BloodHound CE is healthy before starting a run."""
+    import asyncio
+
+    from .eval.ops import print_verify_bh_health, verify_bh_health
+
+    result = asyncio.run(
+        verify_bh_health(
+            bhce_url=bhce_url,
+            timeout_seconds=timeout,
+            poll_interval=poll_interval,
+        )
+    )
+    print_verify_bh_health(result)
+    if not result.ok:
+        raise SystemExit(1)
+
+
+@main.command()
+@click.option("--manifest", "-m", required=True, type=click.Path(exists=True), help="Path to manifest.json")
+@click.option("--bhce-url", default=None, help="BH CE base URL (overrides BLOODHOUND_DOMAIN env var)")
+def verify_ingest(manifest: str, bhce_url: str | None) -> None:
+    """Verify that uploaded BloodHound data matches the generated manifest."""
+    import asyncio
+
+    from .eval.ops import print_verify_ingest, verify_ingest
+
+    result = asyncio.run(verify_ingest(Path(manifest), bhce_url=bhce_url))
+    print_verify_ingest(result)
+    if not result.ok:
+        raise SystemExit(1)
+
+
+@main.command()
+@click.option("--manifest", "-m", required=True, type=click.Path(exists=True), help="Path to manifest.json")
+@click.option("--output-dir", "-o", required=True, type=click.Path(), help="Directory for smoke-test CSVs")
+@click.option("--bhce-url", default=None, help="BH CE base URL (overrides BLOODHOUND_DOMAIN env var)")
+def smoke_eval(manifest: str, output_dir: str, bhce_url: str | None) -> None:
+    """Run mock-model smoke tests for grading, parsing, and Cypher execution paths."""
+    import asyncio
+
+    from .eval.ops import print_smoke_eval, run_smoke_eval
+
+    result = asyncio.run(
+        run_smoke_eval(
+            manifest_path=Path(manifest),
+            output_dir=Path(output_dir),
+            bhce_url=bhce_url,
+        )
+    )
+    print_smoke_eval(result)
+    if not result.ok:
+        raise SystemExit(1)
+
+
+@main.command()
+@click.option("--manifest", "-m", required=True, type=click.Path(exists=True), help="Path to manifest.json")
+@click.option("--output-dir", "-o", required=True, type=click.Path(), help="Directory for smoke-test CSVs")
+@click.option("--bhce-url", default=None, help="BH CE base URL (overrides BLOODHOUND_DOMAIN env var)")
+@click.option("--timeout", default=60.0, show_default=True, type=float, help="Seconds to wait for BHCE to become healthy")
+@click.option("--poll-interval", default=5.0, show_default=True, type=float, help="Seconds between health probes")
+def preflight(
+    manifest: str,
+    output_dir: str,
+    bhce_url: str | None,
+    timeout: float,
+    poll_interval: float,
+) -> None:
+    """Run BloodHound health, ingest verification, and smoke eval in one command."""
+    import asyncio
+
+    from .eval.ops import print_preflight, run_preflight
+
+    result = asyncio.run(
+        run_preflight(
+            manifest_path=Path(manifest),
+            output_dir=Path(output_dir),
+            bhce_url=bhce_url,
+            timeout_seconds=timeout,
+            poll_interval=poll_interval,
+        )
+    )
+    print_preflight(result)
+    if not result.ok:
+        raise SystemExit(1)
+
+
+@main.command()
 @click.option("--manifest", "-m", required=True, type=click.Path(exists=True), help="Path to manifest.json")
 @click.option("--model", "models", multiple=True, help="Model to evaluate (repeat for multiple)")
 @click.option("--models-file", type=click.Path(exists=True), default=None, help="YAML file listing models to evaluate")
@@ -122,7 +213,7 @@ def baseline(
     import asyncio
     import yaml
     from .eval.runner import run_eval_cli_bare
-    from .eval.report import print_comparison
+    from .eval.report import print_comparison, write_combined_csv, write_summary_csv
 
     # Build model list: [(model_string, concurrency, ollama_options), ...]
     model_entries: list[tuple[str, int, dict | None]] = []
@@ -176,8 +267,14 @@ def baseline(
 
     all_results = asyncio.run(_run_all())
 
+    combined_csv_path = out / "baseline_combined.csv"
+    summary_csv_path = out / "baseline_summary.csv"
+    write_combined_csv(all_results, combined_csv_path)
+    write_summary_csv(all_results, summary_csv_path)
     print_comparison(all_results)
     click.echo(f"\nPer-model CSVs written to {output_dir}/")
+    click.echo(f"Combined CSV written to {combined_csv_path}")
+    click.echo(f"Summary CSV written to {summary_csv_path}")
 
 
 def _build_manifest(graph: ADGraph, seed: int) -> dict:

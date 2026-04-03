@@ -143,6 +143,7 @@ def _make_model_response(cypher: str | None = "MATCH (u:User) RETURN u", error: 
     return ModelResponse(
         raw_text=cypher or "",
         cypher=cypher,
+        parse_stage="bare_match" if cypher else "none",
         tokens_input=10,
         tokens_output=5,
         elapsed_seconds=1.0,
@@ -175,6 +176,26 @@ def test_grade_cypher_error():
     result = grade(task, resp, model_result, _make_cypher_result(["A@CORP.LOCAL"]), set())
     assert result.score == 0.0
     assert result.outcome == "CYPHER_ERROR"
+
+
+def test_grade_infra_error_for_model_query_failure():
+    task = _make_task()
+    resp = _make_model_response()
+    model_result = _make_cypher_result([], success=False)
+    model_result.error = "HTTP 502: Bad Gateway"
+    result = grade(task, resp, model_result, _make_cypher_result(["A@CORP.LOCAL"]), set())
+    assert result.score == 0.0
+    assert result.outcome == "INFRA_ERROR"
+
+
+def test_grade_infra_error_for_reference_query_failure():
+    task = _make_task()
+    resp = _make_model_response()
+    ref_result = _make_cypher_result([], success=False)
+    ref_result.error = "Request failed: timed out"
+    result = grade(task, resp, _make_cypher_result(["A@CORP.LOCAL"]), ref_result, set())
+    assert result.score == 0.0
+    assert result.outcome == "INFRA_ERROR"
 
 
 def test_grade_path_exists_correct():
