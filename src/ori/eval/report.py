@@ -21,6 +21,8 @@ CSV_FIELDNAMES = [
     "tool_calls_total", "failed_tool_calls", "unique_tools_used",
     "cypher_query_calls", "non_cypher_tool_calls", "agent_turns",
     "attempted_policy_violations", "trajectory_log",
+    "server_prompt_used", "server_prompt_name", "resource_mode",
+    "resource_reads_total", "unique_resources_used", "resource_characters_total",
 ]
 
 
@@ -67,6 +69,12 @@ def _row_for_result(r: "EvalResult") -> dict[str, object]:
             mcp_meta.attempted_policy_violations if mcp_meta else 0
         ),
         "trajectory_log": mcp_meta.trajectory_log if mcp_meta else "",
+        "server_prompt_used": mcp_meta.server_prompt_used if mcp_meta else False,
+        "server_prompt_name": mcp_meta.server_prompt_name if mcp_meta else "",
+        "resource_mode": mcp_meta.resource_mode if mcp_meta else "",
+        "resource_reads_total": mcp_meta.resource_reads_total if mcp_meta else 0,
+        "unique_resources_used": ",".join(mcp_meta.unique_resources_used) if mcp_meta else "",
+        "resource_characters_total": mcp_meta.resource_characters_total if mcp_meta else 0,
     }
 
 
@@ -102,6 +110,9 @@ def _stats(results: list["EvalResult"]) -> dict:
     non_cypher_tool_calls = sum(r.mcp.non_cypher_tool_calls for r in results if r.mcp)
     failed_tool_calls = sum(r.mcp.failed_tool_calls for r in results if r.mcp)
     policy_violations = sum(r.mcp.attempted_policy_violations for r in results if r.mcp)
+    resource_reads_total = sum(r.mcp.resource_reads_total for r in results if r.mcp)
+    resource_characters_total = sum(r.mcp.resource_characters_total for r in results if r.mcp)
+    prompt_used = any(r.mcp.server_prompt_used for r in results if r.mcp)
     mcp_samples = sum(1 for r in results if r.mcp)
     tiers = {}
     for tier in (1, 2, 3):
@@ -120,6 +131,9 @@ def _stats(results: list["EvalResult"]) -> dict:
         "non_cypher_tool_calls": non_cypher_tool_calls,
         "failed_tool_calls": failed_tool_calls,
         "policy_violations": policy_violations,
+        "resource_reads_total": resource_reads_total,
+        "resource_characters_total": resource_characters_total,
+        "prompt_used": prompt_used,
         "mcp_samples": mcp_samples,
         "tiers": tiers,
     }
@@ -135,6 +149,7 @@ def write_summary_csv(all_results: dict[str, list["EvalResult"]], output_path: P
         "hallucinations", "cypher_errors", "parse_fails", "model_errors", "infra_errors",
         "avg_tool_calls", "cypher_query_calls", "non_cypher_tool_calls",
         "failed_tool_calls", "policy_violations",
+        "avg_resource_reads", "resource_characters_total", "server_prompt_used",
     ]
     with output_path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -174,6 +189,9 @@ def write_summary_csv(all_results: dict[str, list["EvalResult"]], output_path: P
                 "non_cypher_tool_calls": s["non_cypher_tool_calls"],
                 "failed_tool_calls": s["failed_tool_calls"],
                 "policy_violations": s["policy_violations"],
+                "avg_resource_reads": round((s["resource_reads_total"] / s["mcp_samples"]), 2) if s["mcp_samples"] else 0.0,
+                "resource_characters_total": s["resource_characters_total"],
+                "server_prompt_used": s["prompt_used"],
             })
 
 
@@ -211,6 +229,12 @@ def print_comparison(all_results: dict[str, list["EvalResult"]]) -> None:
                 f"{'':<{col_w}} {'tools(avg)':>8} {avg_tools:>7.2f} "
                 f"{'cypher':>7} {s['cypher_query_calls']:>7} {'noncy':>7} {s['non_cypher_tool_calls']:>7} "
                 f"{'toolfail':>9} {s['failed_tool_calls']:>9} {'policy':>9} {s['policy_violations']:>9}"
+            )
+            avg_resources = s["resource_reads_total"] / s["mcp_samples"] if s["mcp_samples"] else 0.0
+            print(
+                f"{'':<{col_w}} {'resources':>8} {avg_resources:>7.2f} "
+                f"{'chars':>7} {s['resource_characters_total']:>7} "
+                f"{'prompt':>7} {str(s['prompt_used']):>7}"
             )
 
     print("=" * 121)
@@ -250,5 +274,9 @@ def print_summary(results: list["EvalResult"], model: str) -> None:
             f"Non-cypher tool calls: {mcp['non_cypher_tool_calls']}  |  "
             f"Failed tool calls: {mcp['failed_tool_calls']}  |  "
             f"Policy violations: {mcp['policy_violations']}"
+        )
+        print(
+            f"Prompt used: {mcp['prompt_used']}  |  Resource reads: {mcp['resource_reads_total']}  |  "
+            f"Resource chars: {mcp['resource_characters_total']}"
         )
     print("=" * 60)

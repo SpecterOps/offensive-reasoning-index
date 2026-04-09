@@ -12,7 +12,7 @@ from .adapter import ModelResponse, call_model
 from .bhce import BHCEClient, CypherResult
 from .grader import GradeResult, grade
 from .inspect_runtime import InspectEvalMetadata, run_eval_with_inspect
-from .mcp_runtime import MCPRunMetadata, run_mcp_eval_with_inspect
+from .mcp_runtime import MCPRunMetadata, RESOURCE_MODE_OFF, run_mcp_eval_with_inspect
 from .report import write_csv, print_summary
 from .tasks import Task, generate_mcp_tasks, generate_tasks
 
@@ -218,6 +218,7 @@ async def run_eval_mcp_cli_bare(
     max_model_reruns_on_infra: int = 1,
     mcp_dir: Path | None = None,
     max_steps: int = 12,
+    resource_mode: str = RESOURCE_MODE_OFF,
 ) -> list[EvalResult]:
     """Run MCP-mode evaluation and return results for multi-model comparison."""
     manifest = json.loads(manifest_path.read_text())
@@ -252,6 +253,7 @@ async def run_eval_mcp_cli_bare(
                 bhce_domain=domain,
                 mcp_dir=mcp_dir,
                 max_steps=max_steps,
+                resource_mode=resource_mode,
             )
         if not _has_infra_errors(results) or attempt >= max_model_reruns_on_infra:
             break
@@ -277,6 +279,7 @@ async def run_eval_mcp_cli(
     mcp_dir: Path | None = None,
     max_steps: int = 12,
     ollama_options: dict | None = None,
+    resource_mode: str = RESOURCE_MODE_OFF,
 ) -> None:
     """Entry point called from the CLI for MCP-mode evaluation."""
     manifest = json.loads(manifest_path.read_text())
@@ -314,6 +317,7 @@ async def run_eval_mcp_cli(
                 bhce_domain=domain,
                 mcp_dir=mcp_dir,
                 max_steps=max_steps,
+                resource_mode=resource_mode,
             )
         if not _has_infra_errors(results) or attempt >= max_model_reruns_on_infra:
             break

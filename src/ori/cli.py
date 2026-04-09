@@ -138,6 +138,13 @@ def eval(
 @click.option("--mcp-dir", default="../bloodhound-mcp", type=click.Path(exists=True), show_default=True, help="Path to local bloodhound-mcp repo")
 @click.option("--max-steps", default=12, show_default=True, help="Max agent/tool steps")
 @click.option(
+    "--resource-mode",
+    type=click.Choice(["off", "on-demand"]),
+    default="off",
+    show_default=True,
+    help="Whether MCP reference resources are available to the model.",
+)
+@click.option(
     "--ollama-option",
     "ollama_options_raw",
     multiple=True,
@@ -151,6 +158,7 @@ def eval_mcp(
     bhce_url: str | None,
     mcp_dir: str,
     max_steps: int,
+    resource_mode: str,
     ollama_options_raw: tuple[str, ...],
 ) -> None:
     """Run MCP-mode evaluation using BloodHound MCP tools."""
@@ -165,6 +173,7 @@ def eval_mcp(
         bhce_url=bhce_url,
         mcp_dir=Path(mcp_dir),
         max_steps=max_steps,
+        resource_mode=resource_mode,
         ollama_options=_parse_ollama_options(ollama_options_raw),
     ))
 
@@ -234,7 +243,21 @@ def smoke_eval(manifest: str, output_dir: str, bhce_url: str | None) -> None:
 @click.option("--bhce-url", default=None, help="BH CE base URL (overrides BLOODHOUND_DOMAIN env var)")
 @click.option("--mcp-dir", default="../bloodhound-mcp", type=click.Path(), show_default=True, help="Path to local bloodhound-mcp repo")
 @click.option("--max-steps", default=12, show_default=True, help="Max agent/tool steps")
-def smoke_mcp(manifest: str, output_dir: str, bhce_url: str | None, mcp_dir: str, max_steps: int) -> None:
+@click.option(
+    "--resource-mode",
+    type=click.Choice(["off", "on-demand"]),
+    default="off",
+    show_default=True,
+    help="Whether MCP reference resources are available to the model.",
+)
+def smoke_mcp(
+    manifest: str,
+    output_dir: str,
+    bhce_url: str | None,
+    mcp_dir: str,
+    max_steps: int,
+    resource_mode: str,
+) -> None:
     """Run mock-model MCP smoke tests for structured answers and reporting."""
     import asyncio
 
@@ -247,6 +270,7 @@ def smoke_mcp(manifest: str, output_dir: str, bhce_url: str | None, mcp_dir: str
             bhce_url=bhce_url,
             mcp_dir=Path(mcp_dir),
             max_steps=max_steps,
+            resource_mode=resource_mode,
         )
     )
     print_smoke_eval(result)
@@ -381,6 +405,13 @@ def baseline(
 @click.option("--bhce-url", default=None, help="BH CE base URL (overrides BLOODHOUND_DOMAIN env var)")
 @click.option("--mcp-dir", default="../bloodhound-mcp", type=click.Path(exists=True), show_default=True, help="Path to local bloodhound-mcp repo")
 @click.option("--max-steps", default=12, show_default=True, help="Max agent/tool steps")
+@click.option(
+    "--resource-mode",
+    type=click.Choice(["off", "on-demand"]),
+    default="off",
+    show_default=True,
+    help="Whether MCP reference resources are available to the model.",
+)
 def baseline_mcp(
     manifest: str,
     models: tuple[str, ...],
@@ -390,6 +421,7 @@ def baseline_mcp(
     bhce_url: str | None,
     mcp_dir: str,
     max_steps: int,
+    resource_mode: str,
 ) -> None:
     """Evaluate multiple models in MCP mode and print a comparison table."""
     import asyncio
@@ -441,6 +473,7 @@ def baseline_mcp(
                 ollama_options=model_options,
                 mcp_dir=Path(mcp_dir),
                 max_steps=max_steps,
+                resource_mode=resource_mode,
             )
         return results
 

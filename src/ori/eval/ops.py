@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 
 from .bhce import BHCEClient, BHHealthResult
 from .report import print_comparison
+from .mcp_runtime import RESOURCE_MODE_OFF
 from .runner import EvalResult, run_eval_cli_bare, run_eval_mcp_cli_bare
 
 
@@ -307,6 +308,7 @@ async def run_smoke_mcp_eval(
     bhce_url: str | None = None,
     mcp_dir: Path | None = None,
     max_steps: int = 12,
+    resource_mode: str = RESOURCE_MODE_OFF,
 ) -> SmokeEvalResult:
     """Run mock-model MCP smoke tests for structured answers and reporting."""
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -324,6 +326,7 @@ async def run_smoke_mcp_eval(
             ollama_options=None,
             mcp_dir=mcp_dir,
             max_steps=max_steps,
+            resource_mode=resource_mode,
         )
         results_by_model[model] = results
         counts: dict[str, int] = {}

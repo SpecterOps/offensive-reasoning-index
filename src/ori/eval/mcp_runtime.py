@@ -10,6 +10,7 @@ from functools import wraps
 from pathlib import Path
 from typing import Any
 
+from mcp.types import EmbeddedResource, PromptMessage, ResourceLink, TextContent
 from inspect_ai import Task as InspectTask
 from inspect_ai import eval_async as inspect_eval_async
 from inspect_ai._util.registry import registry_info
@@ -47,6 +48,19 @@ from .inspect_runtime import (
 )
 from .tasks import Task
 
+RESOURCE_MODE_OFF = "off"
+RESOURCE_MODE_ON_DEMAND = "on-demand"
+BLOODHOUND_PROMPT_NAME = "bloodhound_assistant"
+RESOURCE_LIST_TOOL_NAME = "list_bloodhound_resources"
+RESOURCE_READ_TOOL_NAME = "read_bloodhound_resource"
+
+
+@dataclass
+class MCPServerBundle:
+    tools: list[Any]
+    server_prompt_text: str = ""
+    server_prompt_name: str = ""
+
 
 @dataclass
 class MCPRunMetadata:
@@ -61,6 +75,12 @@ class MCPRunMetadata:
     attempted_policy_violations: int = 0
     trajectory_log: str = ""
     infra_tool_errors: int = 0
+    server_prompt_used: bool = False
+    server_prompt_name: str = ""
+    resource_mode: str = RESOURCE_MODE_OFF
+    resource_reads_total: int = 0
+    unique_resources_used: list[str] = field(default_factory=list)
+    resource_characters_total: int = 0
 
     @property
     def final_answer_normalized_json(self) -> str:
@@ -115,6 +135,7 @@ def _mcp_subprocess_env() -> dict[str, str]:
     # Avoid noisy uv warnings when the parent ORI process is already inside a
     # different virtualenv than the MCP project being launched via `uv run`.
     env.pop("VIRTUAL_ENV", None)
+    env.setdefault("UV_CACHE_DIR", str(Path.cwd() / ".uv-cache"))
     return env
 
 
@@ -150,12 +171,125 @@ def _wrap_read_only_tool(tool_obj: Any) -> Any:
     return wrapped_tool()
 
 
-async def _load_bloodhound_mcp_tools(mcp_dir: Path) -> list[Any]:
-    server = mcp_server_stdio(
+def _create_bloodhound_mcp_server(mcp_dir: Path) -> Any:
+    return mcp_server_stdio(
         command="uv",
         args=["--directory", str(mcp_dir), "run", "main.py"],
         cwd=str(mcp_dir),
         env=_mcp_subprocess_env(),
+    )
+
+
+def _prompt_content_to_text(content: Any) -> str:
+    if isinstance(content, TextContent):
+        return content.text
+    if isinstance(content, ResourceLink):
+        title = content.title or content.name
+        description = f" — {content.description}" if content.description else ""
+        return f"Resource link: {title} ({content.uri}){description}"
+    if isinstance(content, EmbeddedResource):
+        resource = content.resource
+        text = getattr(resource, "text", None)
+        if text is not None:
+            return text
+        blob = getattr(resource, "blob", None)
+        if blob is not None:
+            return f"[binary resource: {resource.uri}]"
+    return str(content)
+
+
+def _prompt_messages_to_text(messages: list[PromptMessage]) -> str:
+    rendered: list[str] = []
+    for message in messages:
+        content = _prompt_content_to_text(message.content).strip()
+        if content:
+            rendered.append(f"[{message.role.upper()}]\n{content}")
+    return "\n\n".join(rendered).strip()
+
+
+async def _load_bloodhound_mcp_prompt(server: Any, prompt_name: str) -> str:
+    session_handle = server._task_session()
+    async with session_handle._client_session() as session:
+        prompt = await session.get_prompt(prompt_name)
+    return _prompt_messages_to_text(prompt.messages)
+
+
+def _format_resource_list(resources: list[Any]) -> str:
+    lines = ["Available BloodHound MCP resources:"]
+    for resource in resources:
+        title = f" ({resource.title})" if getattr(resource, "title", None) else ""
+        description = f" — {resource.description}" if getattr(resource, "description", None) else ""
+        lines.append(f"- {resource.uri}{title}{description}")
+    return "\n".join(lines)
+
+
+def _format_resource_contents(contents: list[Any]) -> str:
+    chunks: list[str] = []
+    for item in contents:
+        if hasattr(item, "text"):
+            chunks.append(f"URI: {item.uri}\n{item.text}")
+        elif hasattr(item, "blob"):
+            chunks.append(f"URI: {item.uri}\n[binary resource content omitted]")
+        else:
+            chunks.append(str(item))
+    return "\n\n".join(chunks).strip()
+
+
+def _resource_tools(server: Any) -> list[Any]:
+    @tool(name=RESOURCE_LIST_TOOL_NAME)
+    def list_bloodhound_resources() -> Any:
+        """List available BloodHound MCP reference resources."""
+
+        async def execute() -> str:
+            session_handle = server._task_session()
+            async with session_handle._client_session() as session:
+                result = await session.list_resources()
+            return _format_resource_list(result.resources)
+
+        return execute
+
+    @tool(name=RESOURCE_READ_TOOL_NAME)
+    def read_bloodhound_resource(uri: str) -> Any:
+        """Read a BloodHound MCP reference resource by URI."""
+
+        async def execute(uri: str) -> str:
+            print(f"           → resource read: {uri}")
+            session_handle = server._task_session()
+            async with session_handle._client_session() as session:
+                result = await session.read_resource(uri)
+            return _format_resource_contents(result.contents)
+
+        return execute
+
+    return [list_bloodhound_resources(), read_bloodhound_resource()]
+
+
+async def _load_bloodhound_mcp_bundle(
+    mcp_dir: Path,
+    *,
+    include_resources: bool,
+    include_prompt: bool,
+) -> MCPServerBundle:
+    server = _create_bloodhound_mcp_server(mcp_dir)
+    raw_tools = await mcp_tools(server).tools()
+    wrapped: list[Any] = []
+    for raw_tool in raw_tools:
+        name = _canonical_tool_name(raw_tool)
+        if name in _READ_ONLY_MCP_INFO_TYPES:
+            wrapped.append(_wrap_read_only_tool(raw_tool))
+    if include_resources:
+        wrapped.extend(_resource_tools(server))
+
+    prompt_text = ""
+    prompt_name = ""
+    if include_prompt:
+        prompt_text = await _load_bloodhound_mcp_prompt(server, BLOODHOUND_PROMPT_NAME)
+        prompt_name = BLOODHOUND_PROMPT_NAME if prompt_text else ""
+
+    return MCPServerBundle(
+        tools=wrapped,
+        server_prompt_text=prompt_text,
+        server_prompt_name=prompt_name,
     )
     raw_tools = await mcp_tools(server).tools()
     wrapped: list[Any] = []
@@ -201,6 +335,26 @@ Rules:
 - If you cannot find a path, set path_found to false and return an empty node_names list
 - Keep the final JSON compact and valid
 """
+
+
+def _mcp_conversation_messages(task: Task, server_prompt_text: str = "") -> list[Any]:
+    messages: list[Any] = []
+    if server_prompt_text.strip():
+        messages.append(
+            ChatMessageSystem(
+                content=(
+                    f"BloodHound MCP prompt ({BLOODHOUND_PROMPT_NAME}):\n"
+                    f"{server_prompt_text.strip()}"
+                )
+            )
+        )
+    messages.extend(
+        [
+            ChatMessageSystem(content=_mcp_system_prompt(task)),
+            ChatMessageUser(content=task.question),
+        ]
+    )
+    return messages
 
 
 def _parse_json_object(text: str) -> dict[str, Any] | None:
@@ -289,6 +443,10 @@ def _trajectory_from_messages(messages: list[Any], final_answer_raw: str = "") -
     agent_turns = 0
     attempted_policy_violations = 0
     infra_tool_errors = 0
+    resource_reads_total = 0
+    unique_resources: set[str] = set()
+    resource_characters_total = 0
+    tool_calls_by_id: dict[str, tuple[str, dict[str, Any]]] = {}
 
     for message in messages:
         if isinstance(message, ChatMessageAssistant):
@@ -296,13 +454,19 @@ def _trajectory_from_messages(messages: list[Any], final_answer_raw: str = "") -
             for call in message.tool_calls or []:
                 tool_calls_total += 1
                 unique_tools.add(call.function)
+                if call.id:
+                    tool_calls_by_id[call.id] = (call.function, call.arguments)
                 if call.function == "cypher_query":
                     cypher_query_calls += 1
                 else:
                     non_cypher_tool_calls += 1
         elif isinstance(message, ChatMessageTool):
+            tool_name = message.function or ""
+            tool_args: dict[str, Any] = {}
+            if message.tool_call_id and message.tool_call_id in tool_calls_by_id:
+                tool_name, tool_args = tool_calls_by_id[message.tool_call_id]
             classification = _tool_result_classification(
-                message.function or "",
+                tool_name,
                 message.text,
                 message.error.message if message.error else None,
             )
@@ -312,6 +476,12 @@ def _trajectory_from_messages(messages: list[Any], final_answer_raw: str = "") -
                 attempted_policy_violations += 1
             if classification == "infra":
                 infra_tool_errors += 1
+            if tool_name == RESOURCE_READ_TOOL_NAME:
+                resource_reads_total += 1
+                uri = str(tool_args.get("uri", "")).strip()
+                if uri:
+                    unique_resources.add(uri)
+                resource_characters_total += len(message.text or "")
 
     return MCPRunMetadata(
         final_answer_raw=final_answer_raw,
@@ -323,6 +493,9 @@ def _trajectory_from_messages(messages: list[Any], final_answer_raw: str = "") -
         agent_turns=agent_turns,
         attempted_policy_violations=attempted_policy_violations,
         infra_tool_errors=infra_tool_errors,
+        resource_reads_total=resource_reads_total,
+        unique_resources_used=sorted(unique_resources),
+        resource_characters_total=resource_characters_total,
     )
 
 
@@ -345,6 +518,12 @@ def _mcp_metadata_from_dict(data: dict[str, Any]) -> MCPRunMetadata:
         attempted_policy_violations=int(data.get("attempted_policy_violations", 0)),
         trajectory_log=data.get("trajectory_log", ""),
         infra_tool_errors=int(data.get("infra_tool_errors", 0)),
+        server_prompt_used=bool(data.get("server_prompt_used", False)),
+        server_prompt_name=data.get("server_prompt_name", ""),
+        resource_mode=data.get("resource_mode", RESOURCE_MODE_OFF),
+        resource_reads_total=int(data.get("resource_reads_total", 0)),
+        unique_resources_used=list(data.get("unique_resources_used", [])),
+        resource_characters_total=int(data.get("resource_characters_total", 0)),
     )
 
 
@@ -377,17 +556,21 @@ def _mock_mcp_answer(task: Task, ref_result: CypherResult, model_name: str) -> t
 
 
 @solver
-def ori_mcp_solver(tools: list[Any], max_steps: int = 12) -> Generate:
+def ori_mcp_solver(
+    tools: list[Any],
+    *,
+    max_steps: int = 12,
+    server_prompt_text: str = "",
+    server_prompt_name: str = "",
+    resource_mode: str = RESOURCE_MODE_OFF,
+) -> Generate:
     async def solve(state: TaskState, generate: Generate) -> TaskState:
         metadata = state.metadata
         task = _task_from_dict(metadata["ori_task"])
         ref_result = _cypher_result_from_dict(metadata["ref_result"])
         model_name = metadata.get("requested_model", str(state.model))
 
-        state.messages = [
-            ChatMessageSystem(content=_mcp_system_prompt(task)),
-            ChatMessageUser(content=task.question),
-        ]
+        state.messages = _mcp_conversation_messages(task, server_prompt_text=server_prompt_text)
         state.message_limit = max(8, max_steps * 4)
         state = await use_tools(tools, tool_choice="auto")(state, generate)
 
@@ -436,6 +619,9 @@ def ori_mcp_solver(tools: list[Any], max_steps: int = 12) -> Generate:
         normalized = _normalize_final_answer(parsed, task)
         trajectory = _trajectory_from_messages(state.messages, final_answer_raw=model_response.raw_text)
         trajectory.final_answer_normalized = normalized
+        trajectory.server_prompt_used = bool(server_prompt_text.strip())
+        trajectory.server_prompt_name = server_prompt_name if server_prompt_text.strip() else ""
+        trajectory.resource_mode = resource_mode
         state.store.set("ori_model_response", _model_response_to_dict(model_response))
         state.store.set("ori_mcp_trajectory", _mcp_metadata_to_dict(trajectory))
         state.store.set("ori_model_calls", 1)
@@ -467,7 +653,8 @@ def ori_mcp_scorer():
         print(f"  [{sample_index}/{sample_total}] {task.id} ({task.tier=}, {task.grade_mode})")
         print(
             f"           → {result.outcome} (score={result.score}, tools={mcp_meta.tool_calls_total}, "
-            f"cypher={mcp_meta.cypher_query_calls}, noncypher={mcp_meta.non_cypher_tool_calls})"
+            f"cypher={mcp_meta.cypher_query_calls}, noncypher={mcp_meta.non_cypher_tool_calls}, "
+            f"resources={mcp_meta.resource_reads_total})"
         )
         return Score(
             value=result.score,
@@ -552,7 +739,11 @@ async def run_mcp_eval_with_inspect(
     bhce_domain: str | None = None,
     mcp_dir: Path | None = None,
     max_steps: int = 12,
+    resource_mode: str = RESOURCE_MODE_OFF,
 ):
+    if resource_mode not in {RESOURCE_MODE_OFF, RESOURCE_MODE_ON_DEMAND}:
+        raise ValueError(f"Unsupported resource mode: {resource_mode!r}")
+
     print("Fetching valid node names for hallucination detection...")
     valid_names = await bhce.get_all_node_names()
     if len(valid_names) == 0:
@@ -583,15 +774,37 @@ async def run_mcp_eval_with_inspect(
         for i, task in enumerate(tasks)
     ]
 
+    server_prompt_text = ""
+    server_prompt_name = ""
     if model.startswith("mock/mcp_"):
         tools: list[Any] = []
     else:
         resolved_mcp_dir = (mcp_dir or (Path.cwd().parent / "bloodhound-mcp")).resolve()
-        tools = await _load_bloodhound_mcp_tools(resolved_mcp_dir)
+        bundle = await _load_bloodhound_mcp_bundle(
+            resolved_mcp_dir,
+            include_resources=resource_mode == RESOURCE_MODE_ON_DEMAND,
+            include_prompt=True,
+        )
+        tools = bundle.tools
+        server_prompt_text = bundle.server_prompt_text
+        server_prompt_name = bundle.server_prompt_name
+        if server_prompt_name:
+            print(
+                f"Loaded BloodHound MCP prompt: {server_prompt_name} "
+                f"({len(server_prompt_text)} chars)"
+            )
+        if resource_mode == RESOURCE_MODE_ON_DEMAND:
+            print("Resource mode: on-demand")
 
     inspect_task = InspectTask(
         dataset=samples,
-        solver=ori_mcp_solver(tools=tools, max_steps=max_steps),
+        solver=ori_mcp_solver(
+            tools=tools,
+            max_steps=max_steps,
+            server_prompt_text=server_prompt_text,
+            server_prompt_name=server_prompt_name,
+            resource_mode=resource_mode,
+        ),
         scorer=ori_mcp_scorer(),
         name=f"{_task_name_for_model(model)}_mcp",
     )

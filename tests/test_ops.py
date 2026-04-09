@@ -299,12 +299,41 @@ def test_cli_eval_mcp_parses_ollama_options(tmp_path: Path, monkeypatch) -> None
             "--model", "ollama/gemma4:e4b",
             "-o", str(tmp_path / "out.csv"),
             "--mcp-dir", str(mcp_dir),
+            "--resource-mode", "on-demand",
             "--ollama-option", "num_ctx=16384",
             "--ollama-option", "temperature=0.2",
         ],
     )
     assert result.exit_code == 0
     assert captured["ollama_options"] == {"num_ctx": 16384, "temperature": 0.2}
+    assert captured["resource_mode"] == "on-demand"
+
+
+def test_cli_baseline_mcp_parses_resource_mode(tmp_path: Path, monkeypatch) -> None:
+    manifest = _manifest(tmp_path)
+    mcp_dir = tmp_path / "bloodhound-mcp"
+    mcp_dir.mkdir()
+    captured: list[dict] = []
+
+    async def fake_run_eval_mcp_cli_bare(**kwargs):
+        captured.append(kwargs)
+        return []
+
+    monkeypatch.setattr("ori.eval.runner.run_eval_mcp_cli_bare", fake_run_eval_mcp_cli_bare)
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        [
+            "baseline-mcp",
+            "-m", str(manifest),
+            "--model", "mock/mcp_perfect",
+            "-o", str(tmp_path / "out"),
+            "--mcp-dir", str(mcp_dir),
+            "--resource-mode", "on-demand",
+        ],
+    )
+    assert result.exit_code == 0
+    assert captured[0]["resource_mode"] == "on-demand"
 
 
 def test_print_helpers(capsys) -> None:
