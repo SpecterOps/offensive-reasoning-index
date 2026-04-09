@@ -256,6 +256,57 @@ def test_cli_preflight(tmp_path: Path, monkeypatch) -> None:
     assert "PREFLIGHT: PASS" in result.output
 
 
+def test_cli_eval_parses_ollama_options(tmp_path: Path, monkeypatch) -> None:
+    manifest = _manifest(tmp_path)
+    captured: dict = {}
+
+    async def fake_run_eval_cli(**kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr("ori.eval.runner.run_eval_cli", fake_run_eval_cli)
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        [
+            "eval",
+            "-m", str(manifest),
+            "--model", "ollama/gemma4:e4b",
+            "-o", str(tmp_path / "out.csv"),
+            "--ollama-option", "num_ctx=16384",
+            "--ollama-option", "temperature=0.2",
+        ],
+    )
+    assert result.exit_code == 0
+    assert captured["ollama_options"] == {"num_ctx": 16384, "temperature": 0.2}
+
+
+def test_cli_eval_mcp_parses_ollama_options(tmp_path: Path, monkeypatch) -> None:
+    manifest = _manifest(tmp_path)
+    mcp_dir = tmp_path / "bloodhound-mcp"
+    mcp_dir.mkdir()
+    captured: dict = {}
+
+    async def fake_run_eval_mcp_cli(**kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr("ori.eval.runner.run_eval_mcp_cli", fake_run_eval_mcp_cli)
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        [
+            "eval-mcp",
+            "-m", str(manifest),
+            "--model", "ollama/gemma4:e4b",
+            "-o", str(tmp_path / "out.csv"),
+            "--mcp-dir", str(mcp_dir),
+            "--ollama-option", "num_ctx=16384",
+            "--ollama-option", "temperature=0.2",
+        ],
+    )
+    assert result.exit_code == 0
+    assert captured["ollama_options"] == {"num_ctx": 16384, "temperature": 0.2}
+
+
 def test_print_helpers(capsys) -> None:
     from ori.eval.ops import (
         CountCheck,

@@ -12,8 +12,9 @@ from .adapter import ModelResponse, call_model
 from .bhce import BHCEClient, CypherResult
 from .grader import GradeResult, grade
 from .inspect_runtime import InspectEvalMetadata, run_eval_with_inspect
+from .mcp_runtime import MCPRunMetadata, run_mcp_eval_with_inspect
 from .report import write_csv, print_summary
-from .tasks import Task, generate_tasks
+from .tasks import Task, generate_mcp_tasks, generate_tasks
 
 
 @dataclass
@@ -24,6 +25,7 @@ class EvalResult:
     ref_result: CypherResult
     model_result: CypherResult
     inspect: InspectEvalMetadata | None = None
+    mcp: MCPRunMetadata | None = None
 
 
 def _has_infra_errors(results: list[EvalResult]) -> bool:
@@ -152,6 +154,7 @@ async def run_eval_cli(
     concurrency: int = 3,
     bhce_url: str | None = None,
     max_model_reruns_on_infra: int = 1,
+    ollama_options: dict | None = None,
 ) -> None:
     """Entry point called from the CLI."""
     manifest = json.loads(manifest_path.read_text())
@@ -188,6 +191,7 @@ async def run_eval_cli(
                 output_path=output_path,
                 concurrency=concurrency,
                 base_url=None,
+                ollama_options=ollama_options,
                 bhce_domain=domain,
             )
         if not _has_infra_errors(results) or attempt >= max_model_reruns_on_infra:
@@ -195,6 +199,127 @@ async def run_eval_cli(
         attempt += 1
         print(
             f"\nDetected INFRA_ERROR during {model} run. "
+            f"Re-running full eval ({attempt}/{max_model_reruns_on_infra}) after recovery wait..."
+        )
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    write_csv(results, output_path)
+    print_summary(results, model)
+    print(f"\nResults written to {output_path}")
+
+
+async def run_eval_mcp_cli_bare(
+    manifest_path: Path,
+    model: str,
+    output_path: Path,
+    concurrency: int = 1,
+    bhce_url: str | None = None,
+    ollama_options: dict | None = None,
+    max_model_reruns_on_infra: int = 1,
+    mcp_dir: Path | None = None,
+    max_steps: int = 12,
+) -> list[EvalResult]:
+    """Run MCP-mode evaluation and return results for multi-model comparison."""
+    manifest = json.loads(manifest_path.read_text())
+    tasks = generate_mcp_tasks(manifest)
+
+    domain = None
+    if bhce_url:
+        from urllib.parse import urlparse
+        parsed = urlparse(bhce_url)
+        domain = parsed.hostname
+        if parsed.port:
+            os.environ["BLOODHOUND_PORT"] = str(parsed.port)
+        if parsed.scheme:
+            os.environ["BLOODHOUND_SCHEME"] = parsed.scheme
+
+    attempt = 0
+    while True:
+        async with BHCEClient(domain=domain) as bhce:
+            health = await bhce.wait_until_healthy()
+            if not health.ok:
+                raise RuntimeError(
+                    f"BloodHound CE health check failed before MCP eval: {health.detail} "
+                    f"(classification={health.classification})"
+                )
+            results = await run_mcp_eval_with_inspect(
+                tasks=tasks,
+                model=model,
+                bhce=bhce,
+                output_path=output_path,
+                concurrency=concurrency,
+                ollama_options=ollama_options,
+                bhce_domain=domain,
+                mcp_dir=mcp_dir,
+                max_steps=max_steps,
+            )
+        if not _has_infra_errors(results) or attempt >= max_model_reruns_on_infra:
+            break
+        attempt += 1
+        print(
+            f"\nDetected INFRA_ERROR during {model} MCP run. "
+            f"Re-running full model benchmark ({attempt}/{max_model_reruns_on_infra}) after recovery wait..."
+        )
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    write_csv(results, output_path)
+    print_summary(results, model)
+    return results
+
+
+async def run_eval_mcp_cli(
+    manifest_path: Path,
+    model: str,
+    output_path: Path,
+    concurrency: int = 1,
+    bhce_url: str | None = None,
+    max_model_reruns_on_infra: int = 1,
+    mcp_dir: Path | None = None,
+    max_steps: int = 12,
+    ollama_options: dict | None = None,
+) -> None:
+    """Entry point called from the CLI for MCP-mode evaluation."""
+    manifest = json.loads(manifest_path.read_text())
+    tasks = generate_mcp_tasks(manifest)
+    print(f"Generated {len(tasks)} MCP tasks from {manifest_path.name}")
+    print(f"Model: {model}")
+    print("Running MCP evaluation...\n")
+
+    domain = None
+    if bhce_url:
+        from urllib.parse import urlparse
+        parsed = urlparse(bhce_url)
+        domain = parsed.hostname
+        if parsed.port:
+            os.environ["BLOODHOUND_PORT"] = str(parsed.port)
+        if parsed.scheme:
+            os.environ["BLOODHOUND_SCHEME"] = parsed.scheme
+
+    attempt = 0
+    while True:
+        async with BHCEClient(domain=domain) as bhce:
+            health = await bhce.wait_until_healthy()
+            if not health.ok:
+                raise RuntimeError(
+                    f"BloodHound CE health check failed before MCP eval: {health.detail} "
+                    f"(classification={health.classification})"
+                )
+            results = await run_mcp_eval_with_inspect(
+                tasks=tasks,
+                model=model,
+                bhce=bhce,
+                output_path=output_path,
+                concurrency=concurrency,
+                ollama_options=ollama_options,
+                bhce_domain=domain,
+                mcp_dir=mcp_dir,
+                max_steps=max_steps,
+            )
+        if not _has_infra_errors(results) or attempt >= max_model_reruns_on_infra:
+            break
+        attempt += 1
+        print(
+            f"\nDetected INFRA_ERROR during {model} MCP eval. "
             f"Re-running full eval ({attempt}/{max_model_reruns_on_infra}) after recovery wait..."
         )
 

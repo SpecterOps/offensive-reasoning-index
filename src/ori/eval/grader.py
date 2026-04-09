@@ -146,6 +146,118 @@ def grade(
         )
 
 
+def grade_mcp(
+    task: Task,
+    model_response: ModelResponse,
+    final_answer: dict | None,
+    ref_result: CypherResult,
+    valid_node_names: set[str],
+    infra_tool_errors: int = 0,
+) -> GradeResult:
+    """Grade a structured MCP final answer against the reference result."""
+    if model_response.error:
+        return GradeResult(
+            score=0.0,
+            outcome="MODEL_ERROR",
+            hallucination=False,
+            details=f"Model call failed: {model_response.error}",
+        )
+
+    if not ref_result.success and BHCEClient.classify_error(ref_result.error) == "infra":
+        return GradeResult(
+            score=0.0,
+            outcome="INFRA_ERROR",
+            hallucination=False,
+            details=f"Reference Cypher could not be graded due to BHCE availability: {ref_result.error}",
+        )
+
+    if final_answer is None:
+        if infra_tool_errors > 0:
+            return GradeResult(
+                score=0.0,
+                outcome="INFRA_ERROR",
+                hallucination=False,
+                details="Structured final answer missing after MCP/BloodHound infrastructure errors",
+            )
+        return GradeResult(
+            score=0.0,
+            outcome="PARSE_FAIL",
+            hallucination=False,
+            details="Could not extract structured final answer from model response",
+        )
+
+    hallucination = _check_hallucination(model_response.raw_text, valid_node_names, task)
+    if hallucination:
+        return GradeResult(
+            score=0.0,
+            outcome="HALLUCINATION",
+            hallucination=True,
+            details="Response references node names not present in the graph",
+        )
+
+    mode = task.grade_mode
+    if mode == "path_exists":
+        found = bool(final_answer.get("path_found"))
+        answer_names = {str(name) for name in final_answer.get("node_names", [])}
+        if not ref_result.node_names:
+            correct = False
+            details = "path_exists: reference result is empty — verify BH CE ingest"
+        elif not found:
+            correct = False
+            details = "path_exists: model reported no path found"
+        else:
+            correct = ref_result.node_names.issubset(answer_names)
+            details = (
+                f"path_exists (mcp): answer={len(answer_names)} nodes, "
+                f"ref={len(ref_result.node_names)} nodes, "
+                f"overlap={len(ref_result.node_names & answer_names)}"
+            )
+        return GradeResult(
+            score=1.0 if correct else 0.0,
+            outcome="CORRECT" if correct else "INCORRECT",
+            hallucination=False,
+            details=details,
+        )
+
+    if mode == "node_set":
+        answer_names = {str(name) for name in final_answer.get("node_names", [])}
+        if not ref_result.node_names:
+            correct = len(answer_names) == 0
+        else:
+            correct = ref_result.node_names.issubset(answer_names)
+        return GradeResult(
+            score=1.0 if correct else 0.0,
+            outcome="CORRECT" if correct else "INCORRECT",
+            hallucination=False,
+            details=(
+                f"node_set (mcp): ref has {len(ref_result.node_names)} names, "
+                f"answer has {len(answer_names)} names, "
+                f"overlap: {len(ref_result.node_names & answer_names)}"
+            ),
+        )
+
+    if mode == "row_count":
+        ref_count = len(ref_result.nodes)
+        answer_count = int(final_answer.get("count", 0))
+        if ref_count == 0:
+            correct = answer_count == 0
+        else:
+            correct = abs(answer_count - ref_count) / ref_count <= 0.20
+        return GradeResult(
+            score=1.0 if correct else 0.0,
+            outcome="CORRECT" if correct else "INCORRECT",
+            hallucination=False,
+            details=f"row_count (mcp): ref={ref_count}, answer={answer_count}",
+        )
+
+    return GradeResult(
+        score=0.0,
+        outcome="INCORRECT",
+        hallucination=False,
+        details=f"Unknown grade_mode: {mode!r}",
+    )
+
+
 def _check_hallucination(
     text: str,
     valid_node_names: set[str],
@@ -162,12 +274,13 @@ def _check_hallucination(
     if not domain:
         return False
 
-    # Find all NAME@DOMAIN patterns in the text
+    # Find all NAME@DOMAIN patterns in the text, including BloodHound group
+    # names that commonly contain spaces (e.g. "DOMAIN ADMINS@CORP.LOCAL").
     pattern = re.compile(
-        r"\b([A-Z0-9_\-\.]+@" + re.escape(domain.upper()) + r")\b",
+        r"\b([A-Z0-9_\-\. ]+@" + re.escape(domain.upper()) + r")\b",
         re.IGNORECASE,
     )
-    mentioned = {m.group(1).upper() for m in pattern.finditer(text)}
+    mentioned = {m.group(1).strip().upper() for m in pattern.finditer(text)}
 
     # Check if any mentioned name is not in the valid set
     valid_upper = {n.upper() for n in valid_node_names}

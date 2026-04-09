@@ -10,7 +10,7 @@ from urllib.parse import urlparse
 
 from .bhce import BHCEClient, BHHealthResult
 from .report import print_comparison
-from .runner import EvalResult, run_eval_cli_bare
+from .runner import EvalResult, run_eval_cli_bare, run_eval_mcp_cli_bare
 
 
 @dataclass
@@ -211,6 +211,12 @@ SMOKE_EXPECTATIONS: dict[str, str] = {
     "mock/empty": "PARSE_FAIL",
 }
 
+SMOKE_MCP_EXPECTATIONS: dict[str, str] = {
+    "mock/mcp_perfect": "CORRECT",
+    "mock/mcp_wrong": "INCORRECT",
+    "mock/mcp_empty": "PARSE_FAIL",
+}
+
 
 @dataclass
 class SmokeCheck:
@@ -293,6 +299,39 @@ async def run_preflight(
         bhce_url=bhce_url,
     )
     return PreflightResult(health=health, ingest=ingest, smoke=smoke)
+
+
+async def run_smoke_mcp_eval(
+    manifest_path: Path,
+    output_dir: Path,
+    bhce_url: str | None = None,
+    mcp_dir: Path | None = None,
+    max_steps: int = 12,
+) -> SmokeEvalResult:
+    """Run mock-model MCP smoke tests for structured answers and reporting."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    results_by_model: dict[str, list[EvalResult]] = {}
+    checks: list[SmokeCheck] = []
+
+    for model, expected in SMOKE_MCP_EXPECTATIONS.items():
+        csv_path = output_dir / f"{model.replace('/', '_').replace(':', '-')}.csv"
+        results = await run_eval_mcp_cli_bare(
+            manifest_path=manifest_path,
+            model=model,
+            output_path=csv_path,
+            concurrency=1,
+            bhce_url=bhce_url,
+            ollama_options=None,
+            mcp_dir=mcp_dir,
+            max_steps=max_steps,
+        )
+        results_by_model[model] = results
+        counts: dict[str, int] = {}
+        for item in results:
+            counts[item.grade.outcome] = counts.get(item.grade.outcome, 0) + 1
+        checks.append(SmokeCheck(model=model, expected=expected, actual_counts=counts))
+
+    return SmokeEvalResult(checks=checks, results_by_model=results_by_model)
 
 
 def print_smoke_eval(result: SmokeEvalResult) -> None:
