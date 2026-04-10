@@ -139,6 +139,7 @@ def _model_response_to_dict(response: ModelResponse) -> dict[str, Any]:
         "tokens_output": response.tokens_output,
         "elapsed_seconds": response.elapsed_seconds,
         "model": response.model,
+        "thinking": response.thinking,
         "error": response.error,
     }
 
@@ -152,6 +153,7 @@ def _model_response_from_dict(data: dict[str, Any]) -> ModelResponse:
         tokens_output=int(data.get("tokens_output", 0)),
         elapsed_seconds=float(data.get("elapsed_seconds", 0.0)),
         model=data.get("model", ""),
+        thinking=data.get("thinking", ""),
         error=data.get("error"),
     )
 
@@ -184,7 +186,7 @@ def _score_metadata_to_grade_result(score: Score) -> GradeResult:
 def _resolve_model_base_url(model: str, base_url: str | None) -> str | None:
     provider, _name = model.split("/", 1)
     if provider == "ollama":
-        resolved = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
+        resolved = (base_url or os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")).rstrip("/")
         if not resolved.endswith("/v1"):
             resolved = f"{resolved}/v1"
         return resolved
@@ -202,6 +204,15 @@ def _inspect_supported_model(model: str) -> bool:
     return False
 
 
+def _use_adapter_path(model: str) -> bool:
+    if model.startswith("mock/"):
+        return True
+    provider, _name = model.split("/", 1)
+    if provider == "ollama":
+        return True
+    return not _inspect_supported_model(model)
+
+
 @solver
 def ori_direct_cypher_solver() -> Generate:
     async def solve(state: TaskState, generate: Generate) -> TaskState:
@@ -212,7 +223,7 @@ def ori_direct_cypher_solver() -> Generate:
         ollama_options = metadata.get("ollama_options")
         model_response: ModelResponse
 
-        if model_name.startswith("mock/") or not _inspect_supported_model(model_name):
+        if _use_adapter_path(model_name):
             model_response = await call_model(
                 task=task,
                 model=model_name,
@@ -246,6 +257,7 @@ def ori_direct_cypher_solver() -> Generate:
                     tokens_output=usage.output_tokens if usage else 0,
                     elapsed_seconds=output.time or 0.0,
                     model=output.model or model_name,
+                    thinking="",
                     error=output.error,
                 )
             except Exception as exc:
@@ -257,6 +269,7 @@ def ori_direct_cypher_solver() -> Generate:
                     tokens_output=0,
                     elapsed_seconds=0.0,
                     model=model_name,
+                    thinking="",
                     error=str(exc),
                 )
                 state.output = ModelOutput.from_content(
@@ -409,7 +422,7 @@ async def run_eval_with_inspect(
     print("  Done")
 
     resolved_base_url = _resolve_model_base_url(model, base_url)
-    inspect_model = model if _inspect_supported_model(model) else "none/none"
+    inspect_model = model if not _use_adapter_path(model) else "none/none"
     samples = [
         _sample_for_task(
             task=task,
@@ -444,7 +457,7 @@ async def run_eval_with_inspect(
         max_subprocesses=1,
         log_level="warning",
         log_level_transcript="warning",
-        extra_body={"options": ollama_options} if ollama_options and model.startswith("ollama/") else None,
+        extra_body={"options": ollama_options} if ollama_options and inspect_model.startswith("ollama/") else None,
     )
     if not eval_logs:
         raise RuntimeError("Inspect eval returned no logs")

@@ -4,16 +4,17 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from .adapter import ModelResponse, call_model
-from .bhce import BHCEClient, CypherResult
+from .bhce import BHCEClient, CypherResult, parse_bhce_url
 from .grader import GradeResult, grade
 from .inspect_runtime import InspectEvalMetadata, run_eval_with_inspect
+from .mcp_runtime import MCPRunMetadata, run_mcp_eval_with_inspect
 from .report import write_csv, print_summary
-from .tasks import Task, generate_tasks
+from .tasks import Task, generate_mcp_tasks, generate_tasks
 
 
 @dataclass
@@ -24,6 +25,10 @@ class EvalResult:
     ref_result: CypherResult
     model_result: CypherResult
     inspect: InspectEvalMetadata | None = None
+    mcp: MCPRunMetadata | None = None
+    run_name: str | None = None
+    requested_model: str | None = None
+    run_config: dict[str, Any] | None = None
 
 
 def _has_infra_errors(results: list[EvalResult]) -> bool:
@@ -37,6 +42,8 @@ async def run_eval(
     concurrency: int = 3,
     base_url: str | None = None,
     ollama_options: dict | None = None,
+    run_name: str | None = None,
+    run_config: dict[str, Any] | None = None,
 ) -> list[EvalResult]:
     """Run evaluation for a list of tasks. Returns EvalResult per task."""
 
@@ -82,6 +89,9 @@ async def run_eval(
                 grade=g,
                 ref_result=ref_results[task.id],
                 model_result=model_result,
+                run_name=run_name or model,
+                requested_model=model,
+                run_config=run_config,
             )
 
     coros = [run_one(task, i + 1) for i, task in enumerate(tasks)]
@@ -97,25 +107,26 @@ async def run_eval_cli_bare(
     bhce_url: str | None = None,
     ollama_options: dict | None = None,
     max_model_reruns_on_infra: int = 1,
+    model_base_url: str | None = None,
+    health_timeout_seconds: float = 60.0,
+    health_poll_interval: float = 5.0,
+    run_name: str | None = None,
+    run_config: dict[str, Any] | None = None,
 ) -> list[EvalResult]:
     """Like run_eval_cli but returns results for multi-model comparison."""
     manifest = json.loads(manifest_path.read_text())
     tasks = generate_tasks(manifest)
 
-    domain, scheme, port = None, None, None
-    if bhce_url:
-        from urllib.parse import urlparse
-        parsed = urlparse(bhce_url)
-        domain = parsed.hostname
-        if parsed.port:
-            os.environ["BLOODHOUND_PORT"] = str(parsed.port)
-        if parsed.scheme:
-            os.environ["BLOODHOUND_SCHEME"] = parsed.scheme
+    bhce_kwargs = parse_bhce_url(bhce_url)
+    domain = bhce_kwargs.get("domain")
 
     attempt = 0
     while True:
-        async with BHCEClient(domain=domain) as bhce:
-            health = await bhce.wait_until_healthy()
+        async with BHCEClient(**bhce_kwargs) as bhce:
+            health = await bhce.wait_until_healthy(
+                timeout_seconds=health_timeout_seconds,
+                poll_interval=health_poll_interval,
+            )
             if not health.ok:
                 raise RuntimeError(
                     f"BloodHound CE health check failed before eval: {health.detail} "
@@ -127,10 +138,14 @@ async def run_eval_cli_bare(
                 bhce=bhce,
                 output_path=output_path,
                 concurrency=concurrency,
-                base_url=None,
+                base_url=model_base_url,
                 ollama_options=ollama_options,
                 bhce_domain=domain,
             )
+            for result in results:
+                result.run_name = run_name or model
+                result.requested_model = model
+                result.run_config = run_config
         if not _has_infra_errors(results) or attempt >= max_model_reruns_on_infra:
             break
         attempt += 1
@@ -141,7 +156,7 @@ async def run_eval_cli_bare(
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     write_csv(results, output_path)
-    print_summary(results, model)
+    print_summary(results, run_name or model)
     return results
 
 
@@ -152,30 +167,31 @@ async def run_eval_cli(
     concurrency: int = 3,
     bhce_url: str | None = None,
     max_model_reruns_on_infra: int = 1,
+    ollama_options: dict | None = None,
+    model_base_url: str | None = None,
+    health_timeout_seconds: float = 60.0,
+    health_poll_interval: float = 5.0,
+    run_name: str | None = None,
+    run_config: dict[str, Any] | None = None,
 ) -> None:
     """Entry point called from the CLI."""
     manifest = json.loads(manifest_path.read_text())
     tasks = generate_tasks(manifest)
     print(f"Generated {len(tasks)} tasks from {manifest_path.name}")
-    print(f"Model: {model}")
+    print(f"Model: {run_name or model}")
     print(f"Running evaluation...\n")
 
     # Parse bhce_url if provided
-    domain = None
-    if bhce_url:
-        # e.g. https://bloodhound.example.com or http://localhost:8080
-        from urllib.parse import urlparse
-        parsed = urlparse(bhce_url)
-        domain = parsed.hostname
-        if parsed.port:
-            os.environ["BLOODHOUND_PORT"] = str(parsed.port)
-        if parsed.scheme:
-            os.environ["BLOODHOUND_SCHEME"] = parsed.scheme
+    bhce_kwargs = parse_bhce_url(bhce_url)
+    domain = bhce_kwargs.get("domain")
 
     attempt = 0
     while True:
-        async with BHCEClient(domain=domain) as bhce:
-            health = await bhce.wait_until_healthy()
+        async with BHCEClient(**bhce_kwargs) as bhce:
+            health = await bhce.wait_until_healthy(
+                timeout_seconds=health_timeout_seconds,
+                poll_interval=health_poll_interval,
+            )
             if not health.ok:
                 raise RuntimeError(
                     f"BloodHound CE health check failed before eval: {health.detail} "
@@ -187,9 +203,14 @@ async def run_eval_cli(
                 bhce=bhce,
                 output_path=output_path,
                 concurrency=concurrency,
-                base_url=None,
+                base_url=model_base_url,
+                ollama_options=ollama_options,
                 bhce_domain=domain,
             )
+            for result in results:
+                result.run_name = run_name or model
+                result.requested_model = model
+                result.run_config = run_config
         if not _has_infra_errors(results) or attempt >= max_model_reruns_on_infra:
             break
         attempt += 1
@@ -200,5 +221,138 @@ async def run_eval_cli(
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     write_csv(results, output_path)
-    print_summary(results, model)
+    print_summary(results, run_name or model)
+    print(f"\nResults written to {output_path}")
+
+
+async def run_eval_mcp_cli_bare(
+    manifest_path: Path,
+    model: str,
+    output_path: Path,
+    concurrency: int = 1,
+    bhce_url: str | None = None,
+    ollama_options: dict | None = None,
+    max_model_reruns_on_infra: int = 1,
+    mcp_dir: Path | None = None,
+    max_steps: int = 12,
+    model_base_url: str | None = None,
+    health_timeout_seconds: float = 60.0,
+    health_poll_interval: float = 5.0,
+    run_name: str | None = None,
+    run_config: dict[str, Any] | None = None,
+) -> list[EvalResult]:
+    """Run MCP-mode evaluation and return results for multi-model comparison."""
+    manifest = json.loads(manifest_path.read_text())
+    tasks = generate_mcp_tasks(manifest)
+
+    bhce_kwargs = parse_bhce_url(bhce_url)
+    domain = bhce_kwargs.get("domain")
+
+    attempt = 0
+    while True:
+        async with BHCEClient(**bhce_kwargs) as bhce:
+            health = await bhce.wait_until_healthy(
+                timeout_seconds=health_timeout_seconds,
+                poll_interval=health_poll_interval,
+            )
+            if not health.ok:
+                raise RuntimeError(
+                    f"BloodHound CE health check failed before MCP eval: {health.detail} "
+                    f"(classification={health.classification})"
+                )
+            results = await run_mcp_eval_with_inspect(
+                tasks=tasks,
+                model=model,
+                bhce=bhce,
+                output_path=output_path,
+                concurrency=concurrency,
+                base_url=model_base_url,
+                ollama_options=ollama_options,
+                bhce_domain=domain,
+                mcp_dir=mcp_dir,
+                max_steps=max_steps,
+            )
+            for result in results:
+                result.run_name = run_name or model
+                result.requested_model = model
+                result.run_config = run_config
+        if not _has_infra_errors(results) or attempt >= max_model_reruns_on_infra:
+            break
+        attempt += 1
+        print(
+            f"\nDetected INFRA_ERROR during {model} MCP run. "
+            f"Re-running full model benchmark ({attempt}/{max_model_reruns_on_infra}) after recovery wait..."
+        )
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    write_csv(results, output_path)
+    print_summary(results, run_name or model)
+    return results
+
+
+async def run_eval_mcp_cli(
+    manifest_path: Path,
+    model: str,
+    output_path: Path,
+    concurrency: int = 1,
+    bhce_url: str | None = None,
+    max_model_reruns_on_infra: int = 1,
+    mcp_dir: Path | None = None,
+    max_steps: int = 12,
+    ollama_options: dict | None = None,
+    model_base_url: str | None = None,
+    health_timeout_seconds: float = 60.0,
+    health_poll_interval: float = 5.0,
+    run_name: str | None = None,
+    run_config: dict[str, Any] | None = None,
+) -> None:
+    """Entry point called from the CLI for MCP-mode evaluation."""
+    manifest = json.loads(manifest_path.read_text())
+    tasks = generate_mcp_tasks(manifest)
+    print(f"Generated {len(tasks)} MCP tasks from {manifest_path.name}")
+    print(f"Model: {run_name or model}")
+    print("Running MCP evaluation...\n")
+
+    bhce_kwargs = parse_bhce_url(bhce_url)
+    domain = bhce_kwargs.get("domain")
+
+    attempt = 0
+    while True:
+        async with BHCEClient(**bhce_kwargs) as bhce:
+            health = await bhce.wait_until_healthy(
+                timeout_seconds=health_timeout_seconds,
+                poll_interval=health_poll_interval,
+            )
+            if not health.ok:
+                raise RuntimeError(
+                    f"BloodHound CE health check failed before MCP eval: {health.detail} "
+                    f"(classification={health.classification})"
+                )
+            results = await run_mcp_eval_with_inspect(
+                tasks=tasks,
+                model=model,
+                bhce=bhce,
+                output_path=output_path,
+                concurrency=concurrency,
+                base_url=model_base_url,
+                ollama_options=ollama_options,
+                bhce_domain=domain,
+                mcp_dir=mcp_dir,
+                max_steps=max_steps,
+            )
+            for result in results:
+                result.run_name = run_name or model
+                result.requested_model = model
+                result.run_config = run_config
+        if not _has_infra_errors(results) or attempt >= max_model_reruns_on_infra:
+            break
+        attempt += 1
+        print(
+            f"\nDetected INFRA_ERROR during {model} MCP eval. "
+            f"Re-running full eval ({attempt}/{max_model_reruns_on_infra}) after recovery wait..."
+        )
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    write_csv(results, output_path)
+    print_summary(results, run_name or model)
     print(f"\nResults written to {output_path}")

@@ -1,0 +1,52 @@
+version: 1
+
+defaults:
+  bhce_url: null
+  concurrency: 1
+  model_base_url: null
+  max_model_reruns_on_infra: 1
+  health:
+    timeout_seconds: 60
+    poll_interval: 5
+  mcp:
+    mcp_dir: ../bloodhound-mcp
+    max_steps: 12
+
+profiles:
+  phase3a_direct_m4:
+    kind: baseline
+    manifest: datasets/phase3b_manifest.json
+    output_dir: results/phase3a-m4-direct-cypher
+    models:
+      - name: gemma4-26b-32k
+        model: ollama/gemma4:26b
+        options:
+          num_ctx: 32768
+
+      - name: qwen3-14b-64k
+        model: ollama/qwen3:14b
+        options:
+          num_ctx: 65536
+
+  phase3b_mcp_m4:
+    kind: baseline-mcp
+    manifest: datasets/phase3b_manifest.json
+    output_dir: results/phase3b-m4-mcp
+    mcp:
+      max_steps: 20
+    models:
+      - name: gemma4-26b-32k
+        model: ollama/gemma4:26b
+        options:
+          num_ctx: 32768
+
+      - name: qwen3-14b-64k
+        model: ollama/qwen3:14b
+        options:
+          num_ctx: 65536
+        max_steps: 24
+
+  preflight_local:
+    kind: preflight
+    manifest: datasets/phase3b_manifest.json
+    output_dir: results/preflight-from-config

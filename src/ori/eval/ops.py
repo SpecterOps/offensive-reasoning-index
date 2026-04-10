@@ -3,14 +3,12 @@
 from __future__ import annotations
 
 import json
-import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from urllib.parse import urlparse
 
-from .bhce import BHCEClient, BHHealthResult
+from .bhce import BHCEClient, BHHealthResult, parse_bhce_url
 from .report import print_comparison
-from .runner import EvalResult, run_eval_cli_bare
+from .runner import EvalResult, run_eval_cli_bare, run_eval_mcp_cli_bare
 
 
 @dataclass
@@ -67,19 +65,6 @@ class VerifyBHHealthResult:
     query: str
 
 
-def apply_bhce_url_override(bhce_url: str | None) -> str | None:
-    """Apply CLI BHCE URL overrides to env and return parsed hostname."""
-    domain = None
-    if bhce_url:
-        parsed = urlparse(bhce_url)
-        domain = parsed.hostname
-        if parsed.port:
-            os.environ["BLOODHOUND_PORT"] = str(parsed.port)
-        if parsed.scheme:
-            os.environ["BLOODHOUND_SCHEME"] = parsed.scheme
-    return domain
-
-
 def _load_manifest(manifest_path: Path) -> dict:
     return json.loads(manifest_path.read_text())
 
@@ -107,9 +92,9 @@ async def verify_ingest(manifest_path: Path, bhce_url: str | None = None) -> Ver
     """Verify that manifest counts and planted paths all exist in BloodHound CE."""
     manifest = _load_manifest(manifest_path)
     stats = manifest.get("stats", {})
-    domain = apply_bhce_url_override(bhce_url)
+    bhce_kwargs = parse_bhce_url(bhce_url)
 
-    async with BHCEClient(domain=domain) as bhce:
+    async with BHCEClient(**bhce_kwargs) as bhce:
         count_checks: list[CountCheck] = []
         for key, query in _count_queries().items():
             result = await bhce.run_cypher_resilient(query)
@@ -155,8 +140,8 @@ async def verify_bh_health(
     poll_interval: float = 5.0,
 ) -> VerifyBHHealthResult:
     """Wait for BloodHound CE to become healthy using a safe graph query."""
-    domain = apply_bhce_url_override(bhce_url)
-    async with BHCEClient(domain=domain) as bhce:
+    bhce_kwargs = parse_bhce_url(bhce_url)
+    async with BHCEClient(**bhce_kwargs) as bhce:
         result = await bhce.wait_until_healthy(
             timeout_seconds=timeout_seconds,
             poll_interval=poll_interval,
@@ -209,6 +194,12 @@ SMOKE_EXPECTATIONS: dict[str, str] = {
     "mock/wrong": "INCORRECT",
     "mock/syntax_error": "CYPHER_ERROR",
     "mock/empty": "PARSE_FAIL",
+}
+
+SMOKE_MCP_EXPECTATIONS: dict[str, str] = {
+    "mock/mcp_perfect": "CORRECT",
+    "mock/mcp_wrong": "INCORRECT",
+    "mock/mcp_empty": "PARSE_FAIL",
 }
 
 
@@ -293,6 +284,39 @@ async def run_preflight(
         bhce_url=bhce_url,
     )
     return PreflightResult(health=health, ingest=ingest, smoke=smoke)
+
+
+async def run_smoke_mcp_eval(
+    manifest_path: Path,
+    output_dir: Path,
+    bhce_url: str | None = None,
+    mcp_dir: Path | None = None,
+    max_steps: int = 12,
+) -> SmokeEvalResult:
+    """Run mock-model MCP smoke tests for structured answers and reporting."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    results_by_model: dict[str, list[EvalResult]] = {}
+    checks: list[SmokeCheck] = []
+
+    for model, expected in SMOKE_MCP_EXPECTATIONS.items():
+        csv_path = output_dir / f"{model.replace('/', '_').replace(':', '-')}.csv"
+        results = await run_eval_mcp_cli_bare(
+            manifest_path=manifest_path,
+            model=model,
+            output_path=csv_path,
+            concurrency=1,
+            bhce_url=bhce_url,
+            ollama_options=None,
+            mcp_dir=mcp_dir,
+            max_steps=max_steps,
+        )
+        results_by_model[model] = results
+        counts: dict[str, int] = {}
+        for item in results:
+            counts[item.grade.outcome] = counts.get(item.grade.outcome, 0) + 1
+        checks.append(SmokeCheck(model=model, expected=expected, actual_counts=counts))
+
+    return SmokeEvalResult(checks=checks, results_by_model=results_by_model)
 
 
 def print_smoke_eval(result: SmokeEvalResult) -> None:

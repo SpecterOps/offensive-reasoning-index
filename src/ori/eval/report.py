@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import json
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -11,18 +12,43 @@ if TYPE_CHECKING:
 
 
 CSV_FIELDNAMES = [
+    "run_name", "requested_model", "resolved_model", "config_identity_json", "options_json",
     "task_id", "template_id", "tier", "category", "model",
     "score", "outcome", "hallucination",
     "tokens_input", "tokens_output", "elapsed_seconds",
-    "grade_mode", "question", "model_cypher", "error_detail",
+    "grade_mode", "question", "model_cypher", "model_thinking", "error_detail",
     "parse_stage", "inspect_log", "inspect_sample_id", "inspect_sample_uuid",
     "inspect_model_calls", "inspect_error_retries",
+    "eval_mode", "task_track", "final_answer_raw", "final_answer_normalized",
+    "tool_calls_total", "failed_tool_calls", "unique_tools_used",
+    "cypher_query_calls", "non_cypher_tool_calls", "agent_turns",
+    "attempted_policy_violations", "trajectory_log",
 ]
+
+
+def _run_name_for_result(r: "EvalResult") -> str:
+    return r.run_name or r.requested_model or r.model_response.model
+
+
+def _requested_model_for_result(r: "EvalResult") -> str:
+    return r.requested_model or r.model_response.model
 
 
 def _row_for_result(r: "EvalResult") -> dict[str, object]:
     inspect_meta = r.inspect
+    mcp_meta = r.mcp
+    run_name = _run_name_for_result(r)
+    requested_model = _requested_model_for_result(r)
+    config_identity_json = json.dumps(r.run_config, sort_keys=True) if r.run_config else ""
+    options_json = ""
+    if r.run_config and isinstance(r.run_config.get("options"), dict):
+        options_json = json.dumps(r.run_config["options"], sort_keys=True)
     return {
+        "run_name": run_name,
+        "requested_model": requested_model,
+        "resolved_model": r.model_response.model,
+        "config_identity_json": config_identity_json,
+        "options_json": options_json,
         "task_id": r.task.id,
         "template_id": r.task.template_id,
         "tier": r.task.tier,
@@ -37,6 +63,7 @@ def _row_for_result(r: "EvalResult") -> dict[str, object]:
         "grade_mode": r.task.grade_mode,
         "question": r.task.question,
         "model_cypher": (r.model_response.cypher or "").replace("\n", " "),
+        "model_thinking": (r.model_response.thinking or "").replace("\n", " "),
         "error_detail": (
             r.grade.details if r.grade.outcome in ("CYPHER_ERROR", "MODEL_ERROR", "INFRA_ERROR") else ""
         ),
@@ -46,6 +73,22 @@ def _row_for_result(r: "EvalResult") -> dict[str, object]:
         "inspect_sample_uuid": inspect_meta.sample_uuid if inspect_meta else "",
         "inspect_model_calls": inspect_meta.model_calls if inspect_meta else 0,
         "inspect_error_retries": inspect_meta.error_retries if inspect_meta else 0,
+        "eval_mode": "mcp" if mcp_meta else "direct_cypher",
+        "task_track": r.task.metadata.get("mcp_track", ""),
+        "final_answer_raw": (mcp_meta.final_answer_raw if mcp_meta else "").replace("\n", " "),
+        "final_answer_normalized": (
+            mcp_meta.final_answer_normalized_json if mcp_meta else ""
+        ).replace("\n", " "),
+        "tool_calls_total": mcp_meta.tool_calls_total if mcp_meta else 0,
+        "failed_tool_calls": mcp_meta.failed_tool_calls if mcp_meta else 0,
+        "unique_tools_used": ",".join(mcp_meta.unique_tools_used) if mcp_meta else "",
+        "cypher_query_calls": mcp_meta.cypher_query_calls if mcp_meta else 0,
+        "non_cypher_tool_calls": mcp_meta.non_cypher_tool_calls if mcp_meta else 0,
+        "agent_turns": mcp_meta.agent_turns if mcp_meta else 0,
+        "attempted_policy_violations": (
+            mcp_meta.attempted_policy_violations if mcp_meta else 0
+        ),
+        "trajectory_log": mcp_meta.trajectory_log if mcp_meta else "",
     }
 
 
@@ -76,6 +119,12 @@ def _stats(results: list["EvalResult"]) -> dict:
     parse_fails = sum(1 for r in results if r.grade.outcome == "PARSE_FAIL")
     model_errors = sum(1 for r in results if r.grade.outcome == "MODEL_ERROR")
     infra_errors = sum(1 for r in results if r.grade.outcome == "INFRA_ERROR")
+    tool_calls_total = sum(r.mcp.tool_calls_total for r in results if r.mcp)
+    cypher_query_calls = sum(r.mcp.cypher_query_calls for r in results if r.mcp)
+    non_cypher_tool_calls = sum(r.mcp.non_cypher_tool_calls for r in results if r.mcp)
+    failed_tool_calls = sum(r.mcp.failed_tool_calls for r in results if r.mcp)
+    policy_violations = sum(r.mcp.attempted_policy_violations for r in results if r.mcp)
+    mcp_samples = sum(1 for r in results if r.mcp)
     tiers = {}
     for tier in (1, 2, 3):
         t = [r for r in results if r.task.tier == tier]
@@ -88,6 +137,12 @@ def _stats(results: list["EvalResult"]) -> dict:
         "parse_fails": parse_fails,
         "model_errors": model_errors,
         "infra_errors": infra_errors,
+        "tool_calls_total": tool_calls_total,
+        "cypher_query_calls": cypher_query_calls,
+        "non_cypher_tool_calls": non_cypher_tool_calls,
+        "failed_tool_calls": failed_tool_calls,
+        "policy_violations": policy_violations,
+        "mcp_samples": mcp_samples,
         "tiers": tiers,
     }
 
@@ -95,17 +150,28 @@ def _stats(results: list["EvalResult"]) -> dict:
 def write_summary_csv(all_results: dict[str, list["EvalResult"]], output_path: Path) -> None:
     """Write one summary row per model."""
     fieldnames = [
+        "run_name", "requested_model", "resolved_model", "config_identity_json", "options_json",
         "model", "total_tasks", "correct", "score_pct",
         "tier1_correct", "tier1_total", "tier1_pct",
         "tier2_correct", "tier2_total", "tier2_pct",
         "tier3_correct", "tier3_total", "tier3_pct",
         "hallucinations", "cypher_errors", "parse_fails", "model_errors", "infra_errors",
+        "avg_tool_calls", "cypher_query_calls", "non_cypher_tool_calls",
+        "failed_tool_calls", "policy_violations",
     ]
     with output_path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         for model, results in all_results.items():
             s = _stats(results)
+            first = results[0] if results else None
+            requested_model = _requested_model_for_result(first) if first else model
+            resolved_model = first.model_response.model if first else requested_model
+            run_name = _run_name_for_result(first) if first else model
+            config_identity_json = json.dumps(first.run_config, sort_keys=True) if first and first.run_config else ""
+            options_json = ""
+            if first and first.run_config and isinstance(first.run_config.get("options"), dict):
+                options_json = json.dumps(first.run_config["options"], sort_keys=True)
 
             def tier_fields(tier: int) -> tuple[int, int, int]:
                 c, t = s["tiers"][tier]
@@ -116,6 +182,11 @@ def write_summary_csv(all_results: dict[str, list["EvalResult"]], output_path: P
             t2c, t2t, t2p = tier_fields(2)
             t3c, t3t, t3p = tier_fields(3)
             writer.writerow({
+                "run_name": run_name,
+                "requested_model": requested_model,
+                "resolved_model": resolved_model,
+                "config_identity_json": config_identity_json,
+                "options_json": options_json,
                 "model": model,
                 "total_tasks": s["total"],
                 "correct": s["correct"],
@@ -134,6 +205,11 @@ def write_summary_csv(all_results: dict[str, list["EvalResult"]], output_path: P
                 "parse_fails": s["parse_fails"],
                 "model_errors": s["model_errors"],
                 "infra_errors": s["infra_errors"],
+                "avg_tool_calls": round((s["tool_calls_total"] / s["mcp_samples"]), 2) if s["mcp_samples"] else 0.0,
+                "cypher_query_calls": s["cypher_query_calls"],
+                "non_cypher_tool_calls": s["non_cypher_tool_calls"],
+                "failed_tool_calls": s["failed_tool_calls"],
+                "policy_violations": s["policy_violations"],
             })
 
 
@@ -165,6 +241,13 @@ def print_comparison(all_results: dict[str, list["EvalResult"]]) -> None:
             f"{s['hallucs']:>8} {s['errors']:>7} {s['parse_fails']:>6} "
             f"{s['model_errors']:>9} {s['infra_errors']:>9}"
         )
+        if s["mcp_samples"]:
+            avg_tools = s["tool_calls_total"] / s["mcp_samples"]
+            print(
+                f"{'':<{col_w}} {'tools(avg)':>8} {avg_tools:>7.2f} "
+                f"{'cypher':>7} {s['cypher_query_calls']:>7} {'noncy':>7} {s['non_cypher_tool_calls']:>7} "
+                f"{'toolfail':>9} {s['failed_tool_calls']:>9} {'policy':>9} {s['policy_violations']:>9}"
+            )
 
     print("=" * 121)
 
@@ -195,4 +278,13 @@ def print_summary(results: list["EvalResult"], model: str) -> None:
         f"Hallucinations: {hallucinations}  |  Parse failures: {parse_fails}  |  "
         f"Cypher errors: {cypher_errors}  |  Model errors: {model_errors}  |  Infra errors: {infra_errors}"
     )
+    if any(r.mcp for r in results):
+        mcp = _stats(results)
+        avg_tools = mcp["tool_calls_total"] / mcp["mcp_samples"] if mcp["mcp_samples"] else 0.0
+        print(
+            f"Avg tool calls: {avg_tools:.2f}  |  Cypher tool calls: {mcp['cypher_query_calls']}  |  "
+            f"Non-cypher tool calls: {mcp['non_cypher_tool_calls']}  |  "
+            f"Failed tool calls: {mcp['failed_tool_calls']}  |  "
+            f"Policy violations: {mcp['policy_violations']}"
+        )
     print("=" * 60)
