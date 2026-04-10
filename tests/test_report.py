@@ -100,6 +100,7 @@ def test_write_combined_csv_writes_rows_for_all_models(tmp_path) -> None:
     assert {row["requested_model"] for row in rows} == {"ollama/test:latest"}
     assert {row["resolved_model"] for row in rows} == {"ollama/test:latest"}
     assert {row["model"] for row in rows} == {"ollama/test:latest"}
+    assert {row["model_thinking"] for row in rows} == {""}
     assert {row["outcome"] for row in rows} == {"CORRECT", "INFRA_ERROR"}
 
 
@@ -136,3 +137,14 @@ def test_write_summary_csv_includes_run_metadata(tmp_path) -> None:
     assert row["requested_model"] == "ollama/gemma4:26b"
     assert row["resolved_model"] == "ollama/test:latest"
     assert row["options_json"] == '{"num_ctx": 32768}'
+
+
+def test_write_combined_csv_preserves_model_thinking(tmp_path) -> None:
+    output = tmp_path / "baseline_combined.csv"
+    result = _result("CORRECT", score=1.0)
+    result.model_response.thinking = "first think then answer"
+    write_combined_csv({"ollama/a:latest": [result]}, output)
+    with output.open() as f:
+        rows = list(csv.DictReader(f))
+    assert len(rows) == 1
+    assert rows[0]["model_thinking"] == "first think then answer"

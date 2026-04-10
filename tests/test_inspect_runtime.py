@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from ori.eval.bhce import CypherResult
+from ori.eval.adapter import ModelResponse
 from ori.eval.inspect_runtime import _resolve_model_base_url, run_eval_with_inspect
 from ori.eval.tasks import Task
 
@@ -110,6 +111,46 @@ def test_run_eval_with_inspect_prints_per_task_outcome(tmp_path: Path, monkeypat
     out = capsys.readouterr().out
     assert "[1/1] t1_admin_to-01" in out
     assert "→ CORRECT (score=1.0)" in out
+
+
+def test_run_eval_with_inspect_ollama_uses_adapter_path_and_preserves_thinking(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import asyncio
+
+    monkeypatch.setattr("ori.eval.inspect_runtime.BHCEClient", FakeBHCEClient)
+
+    async def fake_call_model(*args, **kwargs):
+        return ModelResponse(
+            raw_text="MATCH p=shortestPath((u:User {name: 'JDOE@TEST.LOCAL'})-[*1..]->(c:Computer {name: 'DC01.TEST.LOCAL'})) RETURN p",
+            cypher="MATCH p=shortestPath((u:User {name: 'JDOE@TEST.LOCAL'})-[*1..]->(c:Computer {name: 'DC01.TEST.LOCAL'})) RETURN p",
+            parse_stage="bare_match",
+            tokens_input=12,
+            tokens_output=8,
+            elapsed_seconds=1.5,
+            model="ori-qwen35-9b-32k",
+            thinking="Reasoning about BloodHound schema first",
+        )
+
+    monkeypatch.setattr("ori.eval.inspect_runtime.call_model", fake_call_model)
+    bhce = FakeBHCEClient()
+    results = asyncio.run(
+        run_eval_with_inspect(
+            tasks=[_task()],
+            model="ollama/ori-qwen35-9b-32k",
+            bhce=bhce,
+            output_path=tmp_path / "results.csv",
+            concurrency=1,
+            bhce_domain="bloodhound.test.local",
+        )
+    )
+
+    assert len(results) == 1
+    result = results[0]
+    assert result.grade.outcome == "CORRECT"
+    assert result.model_response.model == "ori-qwen35-9b-32k"
+    assert result.model_response.thinking == "Reasoning about BloodHound schema first"
+    assert result.model_response.cypher is not None
 
 
 def test_resolve_model_base_url_adds_v1_for_ollama(monkeypatch) -> None:

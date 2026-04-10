@@ -16,7 +16,7 @@ CSV_FIELDNAMES = [
     "task_id", "template_id", "tier", "category", "model",
     "score", "outcome", "hallucination",
     "tokens_input", "tokens_output", "elapsed_seconds",
-    "grade_mode", "question", "model_cypher", "error_detail",
+    "grade_mode", "question", "model_cypher", "model_thinking", "error_detail",
     "parse_stage", "inspect_log", "inspect_sample_id", "inspect_sample_uuid",
     "inspect_model_calls", "inspect_error_retries",
     "eval_mode", "task_track", "final_answer_raw", "final_answer_normalized",
@@ -63,6 +63,7 @@ def _row_for_result(r: "EvalResult") -> dict[str, object]:
         "grade_mode": r.task.grade_mode,
         "question": r.task.question,
         "model_cypher": (r.model_response.cypher or "").replace("\n", " "),
+        "model_thinking": (r.model_response.thinking or "").replace("\n", " "),
         "error_detail": (
             r.grade.details if r.grade.outcome in ("CYPHER_ERROR", "MODEL_ERROR", "INFRA_ERROR") else ""
         ),

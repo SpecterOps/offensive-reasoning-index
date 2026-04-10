@@ -44,6 +44,11 @@ def test_extract_cypher_returns_none_when_no_cypher():
     assert extract_cypher("") is None
 
 
+def test_extract_cypher_strips_think_block():
+    text = "<think>I should reason first</think>\nMATCH (u:User {hasspn: true}) RETURN u"
+    assert extract_cypher(text) == "MATCH (u:User {hasspn: true}) RETURN u"
+
+
 def test_extract_cypher_multiline_fenced():
     text = (
         "```cypher\n"

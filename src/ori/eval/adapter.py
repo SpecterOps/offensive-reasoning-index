@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import time
 from dataclasses import dataclass
+import json
 
 from .tasks import Task
 
@@ -34,6 +35,7 @@ class ModelResponse:
     tokens_output: int
     elapsed_seconds: float
     model: str
+    thinking: str = ""
     error: str | None = None
 
 
@@ -152,7 +154,7 @@ async def call_model(
 
     t0 = time.monotonic()
     try:
-        text, tokens_in, tokens_out = await _call_provider(
+        text, tokens_in, tokens_out, thinking = await _call_provider(
             model=model, messages=messages, system=system,
             max_tokens=max_tokens, base_url=base_url,
             ollama_options=ollama_options,
@@ -162,7 +164,7 @@ async def call_model(
         return ModelResponse(
             raw_text=text, cypher=cypher, parse_stage=parse_stage,
             tokens_input=tokens_in, tokens_output=tokens_out,
-            elapsed_seconds=elapsed, model=model,
+            elapsed_seconds=elapsed, model=model, thinking=thinking,
         )
     except Exception as exc:
         elapsed = time.monotonic() - t0
@@ -181,8 +183,11 @@ async def _call_provider(
     max_tokens: int,
     base_url: str | None,
     ollama_options: dict | None = None,
-) -> tuple[str, int, int]:
-    """Dispatch to the correct provider SDK. Returns (text, input_tokens, output_tokens)."""
+) -> tuple[str, int, int, str]:
+    """Dispatch to the correct provider SDK.
+
+    Returns (final_text, input_tokens, output_tokens, thinking_text).
+    """
     provider, name = model.split("/", 1)
 
     if provider == "anthropic":
@@ -194,20 +199,60 @@ async def _call_provider(
             system=system,
             messages=messages,
         )
-        return resp.content[0].text, resp.usage.input_tokens, resp.usage.output_tokens
+        return resp.content[0].text, resp.usage.input_tokens, resp.usage.output_tokens, ""
 
-    elif provider in ("openai", "ollama", "openai-compat", "gemini"):
+    elif provider == "ollama":
+        import os
+        import httpx
+
+        resolved_base = (base_url or os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")).rstrip("/")
+        if resolved_base.endswith("/v1"):
+            resolved_base = resolved_base[:-3].rstrip("/")
+        url = f"{resolved_base}/api/chat"
+
+        full_messages = [{"role": "system", "content": system}] + messages
+        options = dict(ollama_options or {})
+        payload: dict[str, object] = {
+            "model": name,
+            "messages": full_messages,
+            "stream": True,
+        }
+        if options:
+            payload["options"] = options
+
+        content_parts: list[str] = []
+        thinking_parts: list[str] = []
+        prompt_eval_count = 0
+        eval_count = 0
+
+        timeout = httpx.Timeout(connect=10.0, read=180.0, write=30.0, pool=30.0)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            async with client.stream("POST", url, json=payload) as resp:
+                resp.raise_for_status()
+                async for line in resp.aiter_lines():
+                    if not line.strip():
+                        continue
+                    data = json.loads(line)
+                    message = data.get("message") or {}
+                    thinking = message.get("thinking")
+                    if isinstance(thinking, str) and thinking:
+                        thinking_parts.append(thinking)
+                    content = message.get("content")
+                    if isinstance(content, str) and content:
+                        content_parts.append(content)
+                    if data.get("done"):
+                        prompt_eval_count = int(data.get("prompt_eval_count") or prompt_eval_count or 0)
+                        eval_count = int(data.get("eval_count") or eval_count or 0)
+
+        return "".join(content_parts), prompt_eval_count, eval_count, "".join(thinking_parts)
+
+    elif provider in ("openai", "openai-compat", "gemini"):
         import os
         import openai
-        if provider == "ollama":
-            resolved_base = (base_url or os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")).rstrip("/")
-            if not resolved_base.endswith("/v1"):
-                resolved_base = f"{resolved_base}/v1"
-        else:
-            resolved_base = {
-                "gemini": "https://generativelanguage.googleapis.com/v1beta/openai/",
-            }.get(provider, base_url)
-        api_key = "ollama" if provider == "ollama" else None
+        resolved_base = {
+            "gemini": "https://generativelanguage.googleapis.com/v1beta/openai/",
+        }.get(provider, base_url)
+        api_key = None
 
         # handle "modelname@http://custom-url" for openai-compat
         if "@" in name and provider == "openai-compat":
@@ -219,20 +264,14 @@ async def _call_provider(
         )
         # Inject system prompt as first message for OpenAI-compat providers
         full_messages = [{"role": "system", "content": system}] + messages
-        # ollama_options (e.g. {"num_ctx": 4096}) are passed via extra_body —
-        # Ollama's OpenAI-compatible API accepts them; standard OpenAI ignores them.
-        kwargs = {}
-        if ollama_options and provider == "ollama":
-            kwargs["extra_body"] = {"options": ollama_options}
         resp = await client.chat.completions.create(
             model=name,
             max_tokens=max_tokens,
             messages=full_messages,
-            **kwargs,
         )
         m = resp.choices[0].message
         usage = resp.usage
-        return m.content, usage.prompt_tokens, usage.completion_tokens
+        return m.content, usage.prompt_tokens, usage.completion_tokens, ""
 
     else:
         raise ValueError(

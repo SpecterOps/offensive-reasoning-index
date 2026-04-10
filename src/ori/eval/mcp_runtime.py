@@ -5,11 +5,13 @@ from __future__ import annotations
 import inspect
 import json
 import os
+import time
 from dataclasses import asdict, dataclass, field
 from functools import wraps
 from pathlib import Path
 from typing import Any
 
+import httpx
 from inspect_ai import Task as InspectTask
 from inspect_ai import eval_async as inspect_eval_async
 from inspect_ai._util.registry import registry_info
@@ -24,7 +26,8 @@ from inspect_ai.model import (
 )
 from inspect_ai.scorer import Score, accuracy, scorer, stderr
 from inspect_ai.solver import Generate, TaskState, solver, use_tools
-from inspect_ai.tool import ToolError, mcp_server_stdio, mcp_tools, tool
+from inspect_ai.tool import ToolCall, ToolCallError, ToolError, mcp_server_stdio, mcp_tools, tool
+from inspect_ai.tool._tool_info import parse_tool_info
 
 from .adapter import ModelResponse
 from .bhce import BHCEClient, CypherResult
@@ -348,6 +351,229 @@ def _mcp_metadata_from_dict(data: dict[str, Any]) -> MCPRunMetadata:
     )
 
 
+def _is_ollama_model(model_name: str) -> bool:
+    return model_name.startswith("ollama/")
+
+
+def _native_ollama_chat_url(base_url: str | None) -> str:
+    resolved = (base_url or os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")).rstrip("/")
+    if resolved.endswith("/v1"):
+        resolved = resolved[:-3].rstrip("/")
+    return f"{resolved}/api/chat"
+
+
+def _tool_result_to_text(result: Any) -> str:
+    if isinstance(result, str):
+        return result
+    try:
+        return json.dumps(result)
+    except Exception:
+        return str(result)
+
+
+def _ollama_tool_spec(tool_obj: Any) -> tuple[dict[str, Any], Any]:
+    canonical_name = _canonical_tool_name(tool_obj)
+    executor = tool_obj()
+    info = parse_tool_info(executor)
+    return (
+        {
+            "type": "function",
+            "function": {
+                "name": canonical_name,
+                "description": info.description or "",
+                "parameters": info.parameters.model_dump(),
+            },
+        },
+        executor,
+    )
+
+
+async def _ollama_chat_turn(
+    *,
+    url: str,
+    model_name: str,
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]],
+    ollama_options: dict[str, Any] | None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "model": model_name.split("/", 1)[1],
+        "messages": messages,
+        "tools": tools,
+        "stream": True,
+    }
+    if ollama_options:
+        payload["options"] = dict(ollama_options)
+
+    thinking_parts: list[str] = []
+    content_parts: list[str] = []
+    tool_calls: list[dict[str, Any]] = []
+    prompt_eval_count = 0
+    eval_count = 0
+    final_model = model_name
+
+    timeout = httpx.Timeout(connect=10.0, read=300.0, write=30.0, pool=30.0)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        async with client.stream("POST", url, json=payload) as resp:
+            resp.raise_for_status()
+            async for line in resp.aiter_lines():
+                if not line.strip():
+                    continue
+                data = json.loads(line)
+                final_model = data.get("model") or final_model
+                message = data.get("message") or {}
+                thinking = message.get("thinking")
+                if isinstance(thinking, str) and thinking:
+                    thinking_parts.append(thinking)
+                content = message.get("content")
+                if isinstance(content, str) and content:
+                    content_parts.append(content)
+                chunk_tool_calls = message.get("tool_calls") or []
+                if chunk_tool_calls:
+                    tool_calls.extend(chunk_tool_calls)
+                if data.get("done"):
+                    prompt_eval_count = int(data.get("prompt_eval_count") or prompt_eval_count or 0)
+                    eval_count = int(data.get("eval_count") or eval_count or 0)
+
+    return {
+        "model": final_model,
+        "thinking": "".join(thinking_parts),
+        "content": "".join(content_parts),
+        "tool_calls": tool_calls,
+        "prompt_eval_count": prompt_eval_count,
+        "eval_count": eval_count,
+    }
+
+
+async def _run_ollama_mcp_loop(
+    *,
+    task: Task,
+    model_name: str,
+    base_url: str | None,
+    ollama_options: dict[str, Any] | None,
+    tools: list[Any],
+    max_steps: int,
+) -> tuple[ModelResponse, MCPRunMetadata, list[Any]]:
+    url = _native_ollama_chat_url(base_url)
+    messages_payload: list[dict[str, Any]] = [
+        {"role": "system", "content": _mcp_system_prompt(task)},
+        {"role": "user", "content": task.question},
+    ]
+    inspect_messages: list[Any] = [
+        ChatMessageSystem(content=_mcp_system_prompt(task)),
+        ChatMessageUser(content=task.question),
+    ]
+    tool_specs: list[dict[str, Any]] = []
+    tool_runners: dict[str, Any] = {}
+    for tool_obj in tools:
+        spec, executor = _ollama_tool_spec(tool_obj)
+        tool_specs.append(spec)
+        tool_runners[spec["function"]["name"]] = executor
+
+    total_prompt_tokens = 0
+    total_completion_tokens = 0
+    thinking_parts: list[str] = []
+    final_content = ""
+    resolved_model = model_name
+    t0 = time.monotonic()
+
+    for step in range(max_steps):
+        turn = await _ollama_chat_turn(
+            url=url,
+            model_name=model_name,
+            messages=messages_payload,
+            tools=tool_specs,
+            ollama_options=ollama_options,
+        )
+        total_prompt_tokens += int(turn["prompt_eval_count"])
+        total_completion_tokens += int(turn["eval_count"])
+        resolved_model = str(turn["model"] or resolved_model)
+        thinking = str(turn["thinking"] or "")
+        content = str(turn["content"] or "")
+        raw_tool_calls = list(turn["tool_calls"] or [])
+        if thinking:
+            thinking_parts.append(thinking)
+
+        inspect_tool_calls: list[ToolCall] = []
+        payload_assistant: dict[str, Any] = {"role": "assistant", "content": content}
+        if thinking:
+            payload_assistant["thinking"] = thinking
+        if raw_tool_calls:
+            for idx, call in enumerate(raw_tool_calls):
+                function = dict(call.get("function") or {})
+                name = str(function.get("name") or "")
+                arguments = function.get("arguments") or {}
+                if not isinstance(arguments, dict):
+                    arguments = {}
+                call_id = str(call.get("id") or f"ollama-call-{step + 1}-{idx + 1}")
+                inspect_tool_calls.append(
+                    ToolCall(id=call_id, function=name, arguments=arguments)
+                )
+            payload_assistant["tool_calls"] = raw_tool_calls
+
+        messages_payload.append(payload_assistant)
+        inspect_messages.append(
+            ChatMessageAssistant(
+                content=content,
+                tool_calls=inspect_tool_calls or None,
+                model=resolved_model,
+            )
+        )
+
+        if not raw_tool_calls:
+            final_content = content
+            break
+
+        for idx, tool_call in enumerate(inspect_tool_calls):
+            tool_name = tool_call.function
+            tool_runner = tool_runners.get(tool_name)
+            result_text = ""
+            tool_error: ToolCallError | None = None
+            try:
+                if tool_runner is None:
+                    raise RuntimeError(f"Unknown tool: {tool_name}")
+                result = tool_runner(**tool_call.arguments)
+                if inspect.isawaitable(result):
+                    result = await result
+                result_text = _tool_result_to_text(result)
+            except Exception as exc:
+                result_text = json.dumps({"success": False, "error": str(exc), "error_type": "tool_error"})
+                tool_error = ToolCallError(type="unknown", message=str(exc))
+
+            messages_payload.append(
+                {
+                    "role": "tool",
+                    "tool_name": tool_name,
+                    "content": result_text,
+                }
+            )
+            inspect_messages.append(
+                ChatMessageTool(
+                    content=result_text,
+                    tool_call_id=tool_call.id,
+                    function=tool_name,
+                    error=tool_error,
+                )
+            )
+    else:
+        final_content = ""
+
+    elapsed = time.monotonic() - t0
+    model_response = ModelResponse(
+        raw_text=final_content,
+        cypher=None,
+        parse_stage="mcp_final_answer" if final_content else "none",
+        tokens_input=total_prompt_tokens,
+        tokens_output=total_completion_tokens,
+        elapsed_seconds=elapsed,
+        model=resolved_model,
+        thinking="".join(thinking_parts),
+        error=None if final_content else "MCP loop exhausted without final answer",
+    )
+    trajectory = _trajectory_from_messages(inspect_messages, final_answer_raw=final_content)
+    return model_response, trajectory, inspect_messages
+
+
 def _mock_mcp_answer(task: Task, ref_result: CypherResult, model_name: str) -> tuple[str, dict[str, Any] | None]:
     if model_name == "mock/mcp_empty":
         return "", None
@@ -401,9 +627,25 @@ def ori_mcp_solver(tools: list[Any], max_steps: int = 12) -> Generate:
                 tokens_output=0,
                 elapsed_seconds=0.0,
                 model=model_name,
+                thinking="",
                 error=None,
             )
             state.output = ModelOutput.from_content(model=model_name, content=completion)
+        elif _is_ollama_model(model_name):
+            model_response, trajectory, ollama_messages = await _run_ollama_mcp_loop(
+                task=task,
+                model_name=model_name,
+                base_url=metadata.get("model_base_url"),
+                ollama_options=metadata.get("ollama_options"),
+                tools=tools,
+                max_steps=max_steps,
+            )
+            state.messages = ollama_messages
+            state.output = ModelOutput.from_content(
+                model=model_response.model,
+                content=model_response.raw_text,
+                error=model_response.error,
+            )
         else:
             try:
                 state = await generate(state, tool_calls="loop")
@@ -417,6 +659,7 @@ def ori_mcp_solver(tools: list[Any], max_steps: int = 12) -> Generate:
                     tokens_output=usage.output_tokens if usage else 0,
                     elapsed_seconds=output.time or 0.0,
                     model=output.model or model_name,
+                    thinking="",
                     error=output.error,
                 )
             except Exception as exc:
@@ -428,13 +671,15 @@ def ori_mcp_solver(tools: list[Any], max_steps: int = 12) -> Generate:
                     tokens_output=0,
                     elapsed_seconds=0.0,
                     model=model_name,
+                    thinking="",
                     error=str(exc),
                 )
                 state.output = ModelOutput.from_content(model=model_name, content="", error=str(exc))
 
         parsed = _parse_json_object(model_response.raw_text)
         normalized = _normalize_final_answer(parsed, task)
-        trajectory = _trajectory_from_messages(state.messages, final_answer_raw=model_response.raw_text)
+        if not model_name.startswith("mock/mcp_") and not _is_ollama_model(model_name):
+            trajectory = _trajectory_from_messages(state.messages, final_answer_raw=model_response.raw_text)
         trajectory.final_answer_normalized = normalized
         state.store.set("ori_model_response", _model_response_to_dict(model_response))
         state.store.set("ori_mcp_trajectory", _mcp_metadata_to_dict(trajectory))
@@ -567,7 +812,7 @@ async def run_mcp_eval_with_inspect(
     print("  Done")
 
     resolved_base_url = _resolve_model_base_url(model, base_url)
-    inspect_model = model if _inspect_supported_model(model) else "none/none"
+    inspect_model = model if (_inspect_supported_model(model) and not _is_ollama_model(model)) else "none/none"
     samples = [
         _sample_for_task(
             task=task,
@@ -609,7 +854,7 @@ async def run_mcp_eval_with_inspect(
         max_subprocesses=1,
         log_level="warning",
         log_level_transcript="warning",
-        extra_body={"options": ollama_options} if ollama_options and model.startswith("ollama/") else None,
+        extra_body={"options": ollama_options} if ollama_options and inspect_model.startswith("ollama/") else None,
     )
     if not eval_logs:
         raise RuntimeError("Inspect MCP eval returned no logs")

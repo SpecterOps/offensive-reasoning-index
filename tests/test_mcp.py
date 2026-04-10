@@ -10,7 +10,15 @@ from ori.cli import main
 from ori.eval.adapter import ModelResponse
 from ori.eval.bhce import CypherResult
 from ori.eval.grader import GradeResult, grade_mcp
-from ori.eval.mcp_runtime import MCPRunMetadata, _mcp_subprocess_env, _normalize_final_answer, _parse_json_object
+from inspect_ai.tool import tool
+
+from ori.eval.mcp_runtime import (
+    MCPRunMetadata,
+    _mcp_subprocess_env,
+    _normalize_final_answer,
+    _parse_json_object,
+    _run_ollama_mcp_loop,
+)
 from ori.eval.report import write_combined_csv, write_summary_csv
 from ori.eval.runner import EvalResult
 from ori.eval.tasks import Task, generate_mcp_tasks
@@ -96,6 +104,73 @@ def test_parse_and_normalize_final_answer_handles_fenced_json() -> None:
     parsed = _parse_json_object(raw)
     normalized = _normalize_final_answer(parsed, _task())
     assert normalized == {"answer_type": "node_set", "node_names": ["A", "B"]}
+
+
+def test_run_ollama_mcp_loop_preserves_thinking_and_final_answer(monkeypatch) -> None:
+    import asyncio
+
+    calls = {"count": 0}
+
+    async def fake_turn(**kwargs):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return {
+                "model": "ori-qwen35-9b-32k",
+                "thinking": "need group info first",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "function": {
+                            "name": "group_info",
+                            "arguments": {"group_name": "DOMAIN ADMINS@TEST.LOCAL", "info_type": "members"},
+                        },
+                    }
+                ],
+                "prompt_eval_count": 100,
+                "eval_count": 20,
+            }
+        return {
+            "model": "ori-qwen35-9b-32k",
+            "thinking": "now answer",
+            "content": '{"answer_type":"node_set","node_names":["WS-01.TEST.LOCAL"]}',
+            "tool_calls": [],
+            "prompt_eval_count": 120,
+            "eval_count": 15,
+        }
+
+    monkeypatch.setattr("ori.eval.mcp_runtime._ollama_chat_turn", fake_turn)
+
+    @tool(name="group_info")
+    def group_info():
+        async def execute(group_name: str, info_type: str) -> str:
+            return '{"success": true, "nodes": ["WS-01.TEST.LOCAL"]}'
+
+        return execute
+
+    response, trajectory, messages = asyncio.run(
+        _run_ollama_mcp_loop(
+            task=_task(),
+            model_name="ollama/ori-qwen35-9b-32k",
+            base_url="http://127.0.0.1:11434/v1",
+            ollama_options=None,
+            tools=[group_info],
+            max_steps=4,
+        )
+    )
+
+    assert response.error is None
+    assert response.parse_stage == "mcp_final_answer"
+    assert response.raw_text == '{"answer_type":"node_set","node_names":["WS-01.TEST.LOCAL"]}'
+    assert "need group info first" in response.thinking
+    assert "now answer" in response.thinking
+    assert response.tokens_input == 220
+    assert response.tokens_output == 35
+    assert trajectory.tool_calls_total == 1
+    assert trajectory.non_cypher_tool_calls == 1
+    assert trajectory.cypher_query_calls == 0
+    assert trajectory.final_answer_raw == response.raw_text
+    assert len(messages) >= 4
 
 
 def test_hallucination_check_allows_group_names_with_spaces() -> None:
