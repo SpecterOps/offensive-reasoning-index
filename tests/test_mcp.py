@@ -4,28 +4,24 @@ import csv
 import json
 from pathlib import Path
 
-from mcp.types import EmbeddedResource, PromptMessage, TextContent, TextResourceContents
 from click.testing import CliRunner
 
 from ori.cli import main
 from ori.eval.adapter import ModelResponse
 from ori.eval.bhce import CypherResult
 from ori.eval.grader import GradeResult, grade_mcp
+from inspect_ai.tool import tool
+
 from ori.eval.mcp_runtime import (
-    BLOODHOUND_PROMPT_NAME,
     MCPRunMetadata,
-    RESOURCE_MODE_ON_DEMAND,
-    _mcp_conversation_messages,
     _mcp_subprocess_env,
     _normalize_final_answer,
     _parse_json_object,
-    _prompt_messages_to_text,
-    _trajectory_from_messages,
+    _run_ollama_mcp_loop,
 )
 from ori.eval.report import write_combined_csv, write_summary_csv
 from ori.eval.runner import EvalResult
 from ori.eval.tasks import Task, generate_mcp_tasks
-from inspect_ai.model import ChatMessageAssistant, ChatMessageTool
 
 
 def _manifest() -> dict:
@@ -110,59 +106,71 @@ def test_parse_and_normalize_final_answer_handles_fenced_json() -> None:
     assert normalized == {"answer_type": "node_set", "node_names": ["A", "B"]}
 
 
-def test_prompt_messages_to_text_handles_text_and_embedded_resource() -> None:
-    prompt_text = _prompt_messages_to_text(
-        [
-            PromptMessage(role="user", content=TextContent(type="text", text="Use resources first")),
-            PromptMessage(
-                role="assistant",
-                content=EmbeddedResource(
-                    type="resource",
-                    resource=TextResourceContents(
-                        uri="bloodhound://cypher/reference",
-                        text="MATCH (n) RETURN n",
-                    ),
-                ),
-            ),
-        ]
+def test_run_ollama_mcp_loop_preserves_thinking_and_final_answer(monkeypatch) -> None:
+    import asyncio
+
+    calls = {"count": 0}
+
+    async def fake_turn(**kwargs):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return {
+                "model": "ori-qwen35-9b-32k",
+                "thinking": "need group info first",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "function": {
+                            "name": "group_info",
+                            "arguments": {"group_name": "DOMAIN ADMINS@TEST.LOCAL", "info_type": "members"},
+                        },
+                    }
+                ],
+                "prompt_eval_count": 100,
+                "eval_count": 20,
+            }
+        return {
+            "model": "ori-qwen35-9b-32k",
+            "thinking": "now answer",
+            "content": '{"answer_type":"node_set","node_names":["WS-01.TEST.LOCAL"]}',
+            "tool_calls": [],
+            "prompt_eval_count": 120,
+            "eval_count": 15,
+        }
+
+    monkeypatch.setattr("ori.eval.mcp_runtime._ollama_chat_turn", fake_turn)
+
+    @tool(name="group_info")
+    def group_info():
+        async def execute(group_name: str, info_type: str) -> str:
+            return '{"success": true, "nodes": ["WS-01.TEST.LOCAL"]}'
+
+        return execute
+
+    response, trajectory, messages = asyncio.run(
+        _run_ollama_mcp_loop(
+            task=_task(),
+            model_name="ollama/ori-qwen35-9b-32k",
+            base_url="http://127.0.0.1:11434/v1",
+            ollama_options=None,
+            tools=[group_info],
+            max_steps=4,
+        )
     )
-    assert "[USER]" in prompt_text
-    assert "Use resources first" in prompt_text
-    assert "MATCH (n) RETURN n" in prompt_text
 
-
-def test_mcp_conversation_messages_prepends_server_prompt() -> None:
-    messages = _mcp_conversation_messages(_task(), server_prompt_text="Load bloodhound resources.")
-    assert messages[0].role == "system"
-    assert BLOODHOUND_PROMPT_NAME in messages[0].text
-    assert "Load bloodhound resources." in messages[0].text
-    assert messages[1].role == "system"
-    assert messages[2].role == "user"
-
-
-def test_trajectory_tracks_resource_reads_from_tool_calls() -> None:
-    messages = [
-        ChatMessageAssistant(
-            content="",
-            tool_calls=[
-                {
-                    "id": "tool-1",
-                    "function": "read_bloodhound_resource",
-                    "arguments": {"uri": "bloodhound://cypher/reference"},
-                }
-            ],
-        ),
-        ChatMessageTool(
-            content="URI: bloodhound://cypher/reference\nMATCH (n) RETURN n",
-            function="read_bloodhound_resource",
-            tool_call_id="tool-1",
-        ),
-    ]
-    meta = _trajectory_from_messages(messages, final_answer_raw="{}")
-    assert meta.tool_calls_total == 1
-    assert meta.resource_reads_total == 1
-    assert meta.unique_resources_used == ["bloodhound://cypher/reference"]
-    assert meta.resource_characters_total > 0
+    assert response.error is None
+    assert response.parse_stage == "mcp_final_answer"
+    assert response.raw_text == '{"answer_type":"node_set","node_names":["WS-01.TEST.LOCAL"]}'
+    assert "need group info first" in response.thinking
+    assert "now answer" in response.thinking
+    assert response.tokens_input == 220
+    assert response.tokens_output == 35
+    assert trajectory.tool_calls_total == 1
+    assert trajectory.non_cypher_tool_calls == 1
+    assert trajectory.cypher_query_calls == 0
+    assert trajectory.final_answer_raw == response.raw_text
+    assert len(messages) >= 4
 
 
 def test_hallucination_check_allows_group_names_with_spaces() -> None:
@@ -284,12 +292,6 @@ def test_report_includes_mcp_fields(tmp_path: Path) -> None:
             agent_turns=2,
             attempted_policy_violations=0,
             trajectory_log="trace.eval",
-            server_prompt_used=True,
-            server_prompt_name=BLOODHOUND_PROMPT_NAME,
-            resource_mode=RESOURCE_MODE_ON_DEMAND,
-            resource_reads_total=1,
-            unique_resources_used=["bloodhound://cypher/reference"],
-            resource_characters_total=54,
         ),
     )
     combined = tmp_path / "combined.csv"
@@ -301,17 +303,10 @@ def test_report_includes_mcp_fields(tmp_path: Path) -> None:
     assert row["eval_mode"] == "mcp"
     assert row["tool_calls_total"] == "3"
     assert row["cypher_query_calls"] == "1"
-    assert row["server_prompt_used"] == "True"
-    assert row["server_prompt_name"] == BLOODHOUND_PROMPT_NAME
-    assert row["resource_mode"] == RESOURCE_MODE_ON_DEMAND
-    assert row["resource_reads_total"] == "1"
-    assert row["unique_resources_used"] == "bloodhound://cypher/reference"
     with summary.open() as f:
         summary_row = next(csv.DictReader(f))
     assert summary_row["avg_tool_calls"] == "3.0"
     assert summary_row["non_cypher_tool_calls"] == "2"
-    assert summary_row["avg_resource_reads"] == "1.0"
-    assert summary_row["server_prompt_used"] == "True"
 
 
 def test_cli_smoke_mcp(tmp_path: Path, monkeypatch) -> None:
@@ -341,15 +336,7 @@ def test_cli_smoke_mcp(tmp_path: Path, monkeypatch) -> None:
     runner = CliRunner()
     result = runner.invoke(
         main,
-        [
-            "smoke-mcp",
-            "-m",
-            str(manifest_path),
-            "-o",
-            str(tmp_path / "smoke"),
-            "--resource-mode",
-            "on-demand",
-        ],
+        ["smoke-mcp", "-m", str(manifest_path), "-o", str(tmp_path / "smoke")],
     )
     assert result.exit_code == 0
     assert "SMOKE TEST: PASS" in result.output

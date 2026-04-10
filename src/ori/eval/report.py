@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import json
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -11,25 +12,44 @@ if TYPE_CHECKING:
 
 
 CSV_FIELDNAMES = [
+    "run_name", "requested_model", "resolved_model", "config_identity_json", "options_json",
     "task_id", "template_id", "tier", "category", "model",
     "score", "outcome", "hallucination",
     "tokens_input", "tokens_output", "elapsed_seconds",
-    "grade_mode", "question", "model_cypher", "error_detail",
+    "grade_mode", "question", "model_cypher", "model_thinking", "error_detail",
     "parse_stage", "inspect_log", "inspect_sample_id", "inspect_sample_uuid",
     "inspect_model_calls", "inspect_error_retries",
     "eval_mode", "task_track", "final_answer_raw", "final_answer_normalized",
     "tool_calls_total", "failed_tool_calls", "unique_tools_used",
     "cypher_query_calls", "non_cypher_tool_calls", "agent_turns",
     "attempted_policy_violations", "trajectory_log",
-    "server_prompt_used", "server_prompt_name", "resource_mode",
-    "resource_reads_total", "unique_resources_used", "resource_characters_total",
 ]
+
+
+def _run_name_for_result(r: "EvalResult") -> str:
+    return getattr(r, "run_name", None) or getattr(r, "requested_model", None) or r.model_response.model
+
+
+def _requested_model_for_result(r: "EvalResult") -> str:
+    return getattr(r, "requested_model", None) or r.model_response.model
 
 
 def _row_for_result(r: "EvalResult") -> dict[str, object]:
     inspect_meta = r.inspect
     mcp_meta = r.mcp
+    run_name = _run_name_for_result(r)
+    requested_model = _requested_model_for_result(r)
+    run_config = getattr(r, "run_config", None)
+    config_identity_json = json.dumps(run_config, sort_keys=True) if run_config else ""
+    options_json = ""
+    if run_config and isinstance(run_config.get("options"), dict):
+        options_json = json.dumps(run_config["options"], sort_keys=True)
     return {
+        "run_name": run_name,
+        "requested_model": requested_model,
+        "resolved_model": r.model_response.model,
+        "config_identity_json": config_identity_json,
+        "options_json": options_json,
         "task_id": r.task.id,
         "template_id": r.task.template_id,
         "tier": r.task.tier,
@@ -44,6 +64,7 @@ def _row_for_result(r: "EvalResult") -> dict[str, object]:
         "grade_mode": r.task.grade_mode,
         "question": r.task.question,
         "model_cypher": (r.model_response.cypher or "").replace("\n", " "),
+        "model_thinking": (r.model_response.thinking or "").replace("\n", " "),
         "error_detail": (
             r.grade.details if r.grade.outcome in ("CYPHER_ERROR", "MODEL_ERROR", "INFRA_ERROR") else ""
         ),
@@ -69,12 +90,6 @@ def _row_for_result(r: "EvalResult") -> dict[str, object]:
             mcp_meta.attempted_policy_violations if mcp_meta else 0
         ),
         "trajectory_log": mcp_meta.trajectory_log if mcp_meta else "",
-        "server_prompt_used": mcp_meta.server_prompt_used if mcp_meta else False,
-        "server_prompt_name": mcp_meta.server_prompt_name if mcp_meta else "",
-        "resource_mode": mcp_meta.resource_mode if mcp_meta else "",
-        "resource_reads_total": mcp_meta.resource_reads_total if mcp_meta else 0,
-        "unique_resources_used": ",".join(mcp_meta.unique_resources_used) if mcp_meta else "",
-        "resource_characters_total": mcp_meta.resource_characters_total if mcp_meta else 0,
     }
 
 
@@ -110,9 +125,6 @@ def _stats(results: list["EvalResult"]) -> dict:
     non_cypher_tool_calls = sum(r.mcp.non_cypher_tool_calls for r in results if r.mcp)
     failed_tool_calls = sum(r.mcp.failed_tool_calls for r in results if r.mcp)
     policy_violations = sum(r.mcp.attempted_policy_violations for r in results if r.mcp)
-    resource_reads_total = sum(r.mcp.resource_reads_total for r in results if r.mcp)
-    resource_characters_total = sum(r.mcp.resource_characters_total for r in results if r.mcp)
-    prompt_used = any(r.mcp.server_prompt_used for r in results if r.mcp)
     mcp_samples = sum(1 for r in results if r.mcp)
     tiers = {}
     for tier in (1, 2, 3):
@@ -131,9 +143,6 @@ def _stats(results: list["EvalResult"]) -> dict:
         "non_cypher_tool_calls": non_cypher_tool_calls,
         "failed_tool_calls": failed_tool_calls,
         "policy_violations": policy_violations,
-        "resource_reads_total": resource_reads_total,
-        "resource_characters_total": resource_characters_total,
-        "prompt_used": prompt_used,
         "mcp_samples": mcp_samples,
         "tiers": tiers,
     }
@@ -142,6 +151,7 @@ def _stats(results: list["EvalResult"]) -> dict:
 def write_summary_csv(all_results: dict[str, list["EvalResult"]], output_path: Path) -> None:
     """Write one summary row per model."""
     fieldnames = [
+        "run_name", "requested_model", "resolved_model", "config_identity_json", "options_json",
         "model", "total_tasks", "correct", "score_pct",
         "tier1_correct", "tier1_total", "tier1_pct",
         "tier2_correct", "tier2_total", "tier2_pct",
@@ -149,13 +159,21 @@ def write_summary_csv(all_results: dict[str, list["EvalResult"]], output_path: P
         "hallucinations", "cypher_errors", "parse_fails", "model_errors", "infra_errors",
         "avg_tool_calls", "cypher_query_calls", "non_cypher_tool_calls",
         "failed_tool_calls", "policy_violations",
-        "avg_resource_reads", "resource_characters_total", "server_prompt_used",
     ]
     with output_path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         for model, results in all_results.items():
             s = _stats(results)
+            first = results[0] if results else None
+            requested_model = _requested_model_for_result(first) if first else model
+            resolved_model = first.model_response.model if first else requested_model
+            run_name = _run_name_for_result(first) if first else model
+            first_run_config = getattr(first, "run_config", None) if first else None
+            config_identity_json = json.dumps(first_run_config, sort_keys=True) if first_run_config else ""
+            options_json = ""
+            if first_run_config and isinstance(first_run_config.get("options"), dict):
+                options_json = json.dumps(first_run_config["options"], sort_keys=True)
 
             def tier_fields(tier: int) -> tuple[int, int, int]:
                 c, t = s["tiers"][tier]
@@ -166,6 +184,11 @@ def write_summary_csv(all_results: dict[str, list["EvalResult"]], output_path: P
             t2c, t2t, t2p = tier_fields(2)
             t3c, t3t, t3p = tier_fields(3)
             writer.writerow({
+                "run_name": run_name,
+                "requested_model": requested_model,
+                "resolved_model": resolved_model,
+                "config_identity_json": config_identity_json,
+                "options_json": options_json,
                 "model": model,
                 "total_tasks": s["total"],
                 "correct": s["correct"],
@@ -189,9 +212,6 @@ def write_summary_csv(all_results: dict[str, list["EvalResult"]], output_path: P
                 "non_cypher_tool_calls": s["non_cypher_tool_calls"],
                 "failed_tool_calls": s["failed_tool_calls"],
                 "policy_violations": s["policy_violations"],
-                "avg_resource_reads": round((s["resource_reads_total"] / s["mcp_samples"]), 2) if s["mcp_samples"] else 0.0,
-                "resource_characters_total": s["resource_characters_total"],
-                "server_prompt_used": s["prompt_used"],
             })
 
 
@@ -229,12 +249,6 @@ def print_comparison(all_results: dict[str, list["EvalResult"]]) -> None:
                 f"{'':<{col_w}} {'tools(avg)':>8} {avg_tools:>7.2f} "
                 f"{'cypher':>7} {s['cypher_query_calls']:>7} {'noncy':>7} {s['non_cypher_tool_calls']:>7} "
                 f"{'toolfail':>9} {s['failed_tool_calls']:>9} {'policy':>9} {s['policy_violations']:>9}"
-            )
-            avg_resources = s["resource_reads_total"] / s["mcp_samples"] if s["mcp_samples"] else 0.0
-            print(
-                f"{'':<{col_w}} {'resources':>8} {avg_resources:>7.2f} "
-                f"{'chars':>7} {s['resource_characters_total']:>7} "
-                f"{'prompt':>7} {str(s['prompt_used']):>7}"
             )
 
     print("=" * 121)
@@ -274,9 +288,5 @@ def print_summary(results: list["EvalResult"], model: str) -> None:
             f"Non-cypher tool calls: {mcp['non_cypher_tool_calls']}  |  "
             f"Failed tool calls: {mcp['failed_tool_calls']}  |  "
             f"Policy violations: {mcp['policy_violations']}"
-        )
-        print(
-            f"Prompt used: {mcp['prompt_used']}  |  Resource reads: {mcp['resource_reads_total']}  |  "
-            f"Resource chars: {mcp['resource_characters_total']}"
         )
     print("=" * 60)
