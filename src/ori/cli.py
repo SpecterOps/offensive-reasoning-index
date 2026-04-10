@@ -267,6 +267,7 @@ async def _run_baseline_mcp_with_specs(
     max_steps_override: int | None = None,
     model_base_url_override: str | None = None,
     max_model_reruns_on_infra: int = 1,
+    resource_mode: str = "off",
 ) -> dict[str, list]:
     from .eval.runner import run_eval_mcp_cli_bare
 
@@ -301,6 +302,7 @@ async def _run_baseline_mcp_with_specs(
             max_model_reruns_on_infra=max_model_reruns_on_infra,
             mcp_dir=mcp_dir,
             max_steps=effective_max_steps,
+            resource_mode=resource_mode,
             run_name=run_spec.run_name,
             run_config=_effective_run_config(
                 run_spec,
@@ -423,6 +425,13 @@ def eval(
 @click.option("--mcp-dir", default="../bloodhound-mcp", type=click.Path(exists=True), show_default=True, help="Path to local bloodhound-mcp repo")
 @click.option("--max-steps", default=12, show_default=True, help="Max agent/tool steps")
 @click.option(
+    "--resource-mode",
+    type=click.Choice(["off", "on-demand"]),
+    default="off",
+    show_default=True,
+    help="Whether MCP reference resources are available to the model.",
+)
+@click.option(
     "--ollama-option",
     "ollama_options_raw",
     multiple=True,
@@ -436,6 +445,7 @@ def eval_mcp(
     bhce_url: str | None,
     mcp_dir: str,
     max_steps: int,
+    resource_mode: str,
     ollama_options_raw: tuple[str, ...],
 ) -> None:
     """Run MCP-mode evaluation using BloodHound MCP tools."""
@@ -454,6 +464,7 @@ def eval_mcp(
         ollama_options=run_spec.ollama_options,
         run_name=run_spec.run_name,
         run_config=run_spec.config_identity,
+        resource_mode=resource_mode,
     ))
 
 
@@ -522,7 +533,21 @@ def smoke_eval(manifest: str, output_dir: str, bhce_url: str | None) -> None:
 @click.option("--bhce-url", default=None, help="BH CE base URL (overrides BLOODHOUND_DOMAIN env var)")
 @click.option("--mcp-dir", default="../bloodhound-mcp", type=click.Path(), show_default=True, help="Path to local bloodhound-mcp repo")
 @click.option("--max-steps", default=12, show_default=True, help="Max agent/tool steps")
-def smoke_mcp(manifest: str, output_dir: str, bhce_url: str | None, mcp_dir: str, max_steps: int) -> None:
+@click.option(
+    "--resource-mode",
+    type=click.Choice(["off", "on-demand"]),
+    default="off",
+    show_default=True,
+    help="Whether MCP reference resources are available to the model.",
+)
+def smoke_mcp(
+    manifest: str,
+    output_dir: str,
+    bhce_url: str | None,
+    mcp_dir: str,
+    max_steps: int,
+    resource_mode: str,
+) -> None:
     """Run mock-model MCP smoke tests for structured answers and reporting."""
     import asyncio
 
@@ -535,6 +560,7 @@ def smoke_mcp(manifest: str, output_dir: str, bhce_url: str | None, mcp_dir: str
             bhce_url=bhce_url,
             mcp_dir=Path(mcp_dir),
             max_steps=max_steps,
+            resource_mode=resource_mode,
         )
     )
     print_smoke_eval(result)
@@ -900,16 +926,7 @@ def baseline(
     click.echo(f"Summary CSV written to {summary_csv_path}")
 
 
-@main.command(name="baseline-mcp")
-@click.option("--manifest", "-m", required=True, type=click.Path(exists=True), help="Path to manifest.json")
-@click.option("--model", "models", multiple=True, help="Model to evaluate (repeat for multiple)")
-@click.option("--models-file", type=click.Path(exists=True), default=None, help="YAML file listing models to evaluate")
-@click.option("--output-dir", "-o", required=True, type=click.Path(), help="Directory for per-model CSV files")
-@click.option("--concurrency", default=None, type=int, help="Override concurrency for all models")
-@click.option("--bhce-url", default=None, help="BH CE base URL (overrides BLOODHOUND_DOMAIN env var)")
-@click.option("--mcp-dir", default="../bloodhound-mcp", type=click.Path(exists=True), show_default=True, help="Path to local bloodhound-mcp repo")
-@click.option("--max-steps", default=12, show_default=True, help="Max agent/tool steps")
-def baseline_mcp(
+def _run_baseline_mcp(
     manifest: str,
     models: tuple[str, ...],
     models_file: str | None,
@@ -918,8 +935,8 @@ def baseline_mcp(
     bhce_url: str | None,
     mcp_dir: str,
     max_steps: int,
+    resource_mode: str,
 ) -> None:
-    """Evaluate multiple models in MCP mode and print a comparison table."""
     import asyncio
     from .eval.report import print_comparison, write_combined_csv, write_summary_csv
 
@@ -934,6 +951,7 @@ def baseline_mcp(
             bhce_url=bhce_url,
             mcp_dir=Path(mcp_dir),
             max_steps=max_steps,
+            resource_mode=resource_mode,
         )
     )
 
@@ -945,6 +963,80 @@ def baseline_mcp(
     click.echo(f"\nPer-model CSVs written to {output_dir}/")
     click.echo(f"Combined CSV written to {combined_csv_path}")
     click.echo(f"Summary CSV written to {summary_csv_path}")
+
+
+@main.command(name="baseline-mcp")
+@click.option("--manifest", "-m", required=True, type=click.Path(exists=True), help="Path to manifest.json")
+@click.option("--model", "models", multiple=True, help="Model to evaluate (repeat for multiple)")
+@click.option("--models-file", type=click.Path(exists=True), default=None, help="YAML file listing models to evaluate")
+@click.option("--output-dir", "-o", required=True, type=click.Path(), help="Directory for per-model CSV files")
+@click.option("--concurrency", default=None, type=int, help="Override concurrency for all models")
+@click.option("--bhce-url", default=None, help="BH CE base URL (overrides BLOODHOUND_DOMAIN env var)")
+@click.option("--mcp-dir", default="../bloodhound-mcp", type=click.Path(exists=True), show_default=True, help="Path to local bloodhound-mcp repo")
+@click.option("--max-steps", default=12, show_default=True, help="Max agent/tool steps")
+@click.option(
+    "--resource-mode",
+    type=click.Choice(["off", "on-demand"]),
+    default="off",
+    show_default=True,
+    help="Whether MCP reference resources are available to the model.",
+)
+def baseline_mcp(
+    manifest: str,
+    models: tuple[str, ...],
+    models_file: str | None,
+    output_dir: str,
+    concurrency: int | None,
+    bhce_url: str | None,
+    mcp_dir: str,
+    max_steps: int,
+    resource_mode: str,
+) -> None:
+    """Evaluate multiple models in MCP mode and print a comparison table."""
+    _run_baseline_mcp(
+        manifest=manifest,
+        models=models,
+        models_file=models_file,
+        output_dir=output_dir,
+        concurrency=concurrency,
+        bhce_url=bhce_url,
+        mcp_dir=mcp_dir,
+        max_steps=max_steps,
+        resource_mode=resource_mode,
+    )
+
+
+@main.command(name="baseline-mcp-resources")
+@click.option("--manifest", "-m", required=True, type=click.Path(exists=True), help="Path to manifest.json")
+@click.option("--model", "models", multiple=True, help="Model to evaluate (repeat for multiple)")
+@click.option("--models-file", type=click.Path(exists=True), default=None, help="YAML file listing models to evaluate")
+@click.option("--output-dir", "-o", required=True, type=click.Path(), help="Directory for per-model CSV files")
+@click.option("--concurrency", default=None, type=int, help="Override concurrency for all models")
+@click.option("--bhce-url", default=None, help="BH CE base URL (overrides BLOODHOUND_DOMAIN env var)")
+@click.option("--mcp-dir", default="../bloodhound-mcp", type=click.Path(exists=True), show_default=True, help="Path to local bloodhound-mcp repo")
+@click.option("--max-steps", default=12, show_default=True, help="Max agent/tool steps")
+def baseline_mcp_resources(
+    manifest: str,
+    models: tuple[str, ...],
+    models_file: str | None,
+    output_dir: str,
+    concurrency: int | None,
+    bhce_url: str | None,
+    mcp_dir: str,
+    max_steps: int,
+) -> None:
+    """Run the Phase 3C resources-enabled multi-model MCP baseline sweep."""
+    _run_baseline_mcp(
+        manifest=manifest,
+        models=models,
+        models_file=models_file,
+        output_dir=output_dir,
+        concurrency=concurrency,
+        bhce_url=bhce_url,
+        mcp_dir=mcp_dir,
+        max_steps=max_steps,
+        resource_mode="on-demand",
+    )
 
 
 def _build_manifest(graph: ADGraph, seed: int) -> dict:

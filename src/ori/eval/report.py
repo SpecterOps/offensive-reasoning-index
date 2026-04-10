@@ -27,11 +27,11 @@ CSV_FIELDNAMES = [
 
 
 def _run_name_for_result(r: "EvalResult") -> str:
-    return r.run_name or r.requested_model or r.model_response.model
+    return getattr(r, "run_name", None) or getattr(r, "requested_model", None) or r.model_response.model
 
 
 def _requested_model_for_result(r: "EvalResult") -> str:
-    return r.requested_model or r.model_response.model
+    return getattr(r, "requested_model", None) or r.model_response.model
 
 
 def _row_for_result(r: "EvalResult") -> dict[str, object]:
@@ -39,10 +39,11 @@ def _row_for_result(r: "EvalResult") -> dict[str, object]:
     mcp_meta = r.mcp
     run_name = _run_name_for_result(r)
     requested_model = _requested_model_for_result(r)
-    config_identity_json = json.dumps(r.run_config, sort_keys=True) if r.run_config else ""
+    run_config = getattr(r, "run_config", None)
+    config_identity_json = json.dumps(run_config, sort_keys=True) if run_config else ""
     options_json = ""
-    if r.run_config and isinstance(r.run_config.get("options"), dict):
-        options_json = json.dumps(r.run_config["options"], sort_keys=True)
+    if run_config and isinstance(run_config.get("options"), dict):
+        options_json = json.dumps(run_config["options"], sort_keys=True)
     return {
         "run_name": run_name,
         "requested_model": requested_model,
@@ -168,10 +169,11 @@ def write_summary_csv(all_results: dict[str, list["EvalResult"]], output_path: P
             requested_model = _requested_model_for_result(first) if first else model
             resolved_model = first.model_response.model if first else requested_model
             run_name = _run_name_for_result(first) if first else model
-            config_identity_json = json.dumps(first.run_config, sort_keys=True) if first and first.run_config else ""
+            first_run_config = getattr(first, "run_config", None) if first else None
+            config_identity_json = json.dumps(first_run_config, sort_keys=True) if first_run_config else ""
             options_json = ""
-            if first and first.run_config and isinstance(first.run_config.get("options"), dict):
-                options_json = json.dumps(first.run_config["options"], sort_keys=True)
+            if first_run_config and isinstance(first_run_config.get("options"), dict):
+                options_json = json.dumps(first_run_config["options"], sort_keys=True)
 
             def tier_fields(tier: int) -> tuple[int, int, int]:
                 c, t = s["tiers"][tier]

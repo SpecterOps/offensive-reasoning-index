@@ -12,7 +12,7 @@ from .adapter import ModelResponse, call_model
 from .bhce import BHCEClient, CypherResult, parse_bhce_url
 from .grader import GradeResult, grade
 from .inspect_runtime import InspectEvalMetadata, run_eval_with_inspect
-from .mcp_runtime import MCPRunMetadata, run_mcp_eval_with_inspect
+from .mcp_runtime import MCPRunMetadata, RESOURCE_MODE_OFF, run_mcp_eval_with_inspect
 from .report import write_csv, print_summary
 from .tasks import Task, generate_mcp_tasks, generate_tasks
 
@@ -240,6 +240,7 @@ async def run_eval_mcp_cli_bare(
     health_poll_interval: float = 5.0,
     run_name: str | None = None,
     run_config: dict[str, Any] | None = None,
+    resource_mode: str = RESOURCE_MODE_OFF,
 ) -> list[EvalResult]:
     """Run MCP-mode evaluation and return results for multi-model comparison."""
     manifest = json.loads(manifest_path.read_text())
@@ -271,6 +272,7 @@ async def run_eval_mcp_cli_bare(
                 bhce_domain=domain,
                 mcp_dir=mcp_dir,
                 max_steps=max_steps,
+                resource_mode=resource_mode,
             )
             for result in results:
                 result.run_name = run_name or model
@@ -305,6 +307,7 @@ async def run_eval_mcp_cli(
     health_poll_interval: float = 5.0,
     run_name: str | None = None,
     run_config: dict[str, Any] | None = None,
+    resource_mode: str = RESOURCE_MODE_OFF,
 ) -> None:
     """Entry point called from the CLI for MCP-mode evaluation."""
     manifest = json.loads(manifest_path.read_text())
@@ -339,6 +342,7 @@ async def run_eval_mcp_cli(
                 bhce_domain=domain,
                 mcp_dir=mcp_dir,
                 max_steps=max_steps,
+                resource_mode=resource_mode,
             )
             for result in results:
                 result.run_name = run_name or model

@@ -321,6 +321,7 @@ def test_cli_smoke_mcp(tmp_path: Path, monkeypatch) -> None:
         bhce_url: str | None = None,
         mcp_dir: Path | None = None,
         max_steps: int = 12,
+        resource_mode: str = "off",
     ) -> SmokeEvalResult:
         return SmokeEvalResult(
             checks=[
