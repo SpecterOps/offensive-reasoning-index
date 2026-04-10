@@ -10,6 +10,7 @@ import asyncio
 import os
 import re
 from dataclasses import dataclass, field
+from urllib.parse import urlparse
 
 import httpx
 
@@ -30,6 +31,21 @@ class BHHealthResult:
     query: str
     status_code: int | None = None
     classification: str = "ok"
+
+
+def parse_bhce_url(bhce_url: str | None) -> dict[str, str | int]:
+    """Resolve explicit non-secret BHCE connection settings from a URL."""
+    if not bhce_url:
+        return {}
+    parsed = urlparse(bhce_url)
+    kwargs: dict[str, str | int] = {}
+    if parsed.hostname:
+        kwargs["domain"] = parsed.hostname
+    if parsed.scheme:
+        kwargs["scheme"] = parsed.scheme
+    if parsed.port is not None:
+        kwargs["port"] = parsed.port
+    return kwargs
 
 
 class BHCEClient:

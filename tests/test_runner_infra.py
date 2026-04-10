@@ -24,6 +24,10 @@ def _task() -> Task:
 
 
 class FakeBHCEClient:
+    def __init__(self, **kwargs) -> None:
+        self.init_kwargs = kwargs
+        self.health_calls: list[tuple[float, float, str]] = []
+
     async def __aenter__(self) -> "FakeBHCEClient":
         return self
 
@@ -36,6 +40,7 @@ class FakeBHCEClient:
         poll_interval: float = 5.0,
         query: str = "MATCH (n:Domain) RETURN n LIMIT 1",
     ) -> BHHealthResult:
+        self.health_calls.append((timeout_seconds, poll_interval, query))
         return BHHealthResult(ok=True, detail="query succeeded", query=query, classification="ok")
 
 
@@ -74,7 +79,7 @@ def test_run_eval_cli_bare_reruns_once_on_infra(tmp_path: Path, monkeypatch) -> 
     manifest_path.write_text(json.dumps({"domain": "TEST.LOCAL"}))
 
     monkeypatch.setattr("ori.eval.runner.generate_tasks", lambda manifest: [_task()])
-    monkeypatch.setattr("ori.eval.runner.BHCEClient", lambda domain=None: FakeBHCEClient())
+    monkeypatch.setattr("ori.eval.runner.BHCEClient", lambda **kwargs: FakeBHCEClient(**kwargs))
 
     calls = {"count": 0}
 
@@ -98,3 +103,74 @@ def test_run_eval_cli_bare_reruns_once_on_infra(tmp_path: Path, monkeypatch) -> 
     assert calls["count"] == 2
     assert len(results) == 1
     assert results[0].grade.outcome == "CORRECT"
+
+
+def test_run_eval_cli_bare_threads_health_and_base_url(tmp_path: Path, monkeypatch) -> None:
+    import asyncio
+
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps({"domain": "TEST.LOCAL"}))
+
+    fake_bh = FakeBHCEClient()
+    monkeypatch.setattr("ori.eval.runner.generate_tasks", lambda manifest: [_task()])
+    monkeypatch.setattr("ori.eval.runner.BHCEClient", lambda **kwargs: fake_bh)
+
+    captured: dict = {}
+
+    async def fake_run_eval_with_inspect(**kwargs):
+        captured.update(kwargs)
+        return [_result("CORRECT")]
+
+    monkeypatch.setattr("ori.eval.runner.run_eval_with_inspect", fake_run_eval_with_inspect)
+
+    asyncio.run(
+        run_eval_cli_bare(
+            manifest_path=manifest_path,
+            model="ollama/test:latest",
+            output_path=tmp_path / "results.csv",
+            model_base_url="http://127.0.0.1:11434/v1",
+            health_timeout_seconds=12.0,
+            health_poll_interval=0.25,
+        )
+    )
+
+    assert fake_bh.health_calls == [(12.0, 0.25, "MATCH (n:Domain) RETURN n LIMIT 1")]
+    assert captured["base_url"] == "http://127.0.0.1:11434/v1"
+
+
+def test_run_eval_cli_bare_threads_explicit_bhce_url_kwargs(tmp_path: Path, monkeypatch) -> None:
+    import asyncio
+
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps({"domain": "TEST.LOCAL"}))
+
+    monkeypatch.setattr("ori.eval.runner.generate_tasks", lambda manifest: [_task()])
+    created: dict = {}
+
+    def make_bh(**kwargs):
+        client = FakeBHCEClient(**kwargs)
+        created["client"] = client
+        return client
+
+    monkeypatch.setattr("ori.eval.runner.BHCEClient", make_bh)
+
+    async def fake_run_eval_with_inspect(**kwargs):
+        return [_result("CORRECT")]
+
+    monkeypatch.setattr("ori.eval.runner.run_eval_with_inspect", fake_run_eval_with_inspect)
+
+    results = asyncio.run(
+        run_eval_cli_bare(
+            manifest_path=manifest_path,
+            model="ollama/test:latest",
+            output_path=tmp_path / "results.csv",
+            bhce_url="http://bh.example.local:8080",
+        )
+    )
+
+    assert len(results) == 1
+    assert created["client"].init_kwargs == {
+        "domain": "bh.example.local",
+        "scheme": "http",
+        "port": 8080,
+    }

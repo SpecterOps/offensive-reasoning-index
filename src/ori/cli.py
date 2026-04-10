@@ -2,17 +2,35 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import re
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import click
 import yaml
 
+from .run_config import RunConfigOverrides, list_run_profiles, load_run_profile
 from .generator.attack_paths import plant_all_paths
 from .generator.graph import ADGraph
 from .generator.org import build_org
 from .generator.security import apply_baseline_security
 from .generator.serializer import serialize_to_dir, serialize_to_zip
+
+
+@dataclass(frozen=True)
+class RunSpec:
+    run_name: str
+    requested_model: str
+    concurrency: int
+    ollama_options: dict | None
+    model_base_url: str | None
+    max_steps: int | None
+    config_identity: dict[str, Any]
+    config_identity_json: str
+    file_slug: str
 
 
 def _parse_ollama_options(options: tuple[str, ...]) -> dict:
@@ -28,6 +46,270 @@ def _parse_ollama_options(options: tuple[str, ...]) -> dict:
             raise click.BadParameter("Ollama option key cannot be empty.")
         parsed[key] = yaml.safe_load(raw_value)
     return parsed
+
+
+def _normalize_identity_config(entry: dict[str, Any]) -> dict[str, Any]:
+    identity = {k: v for k, v in entry.items() if k != "name"}
+    options = dict(identity.get("options") or {})
+    if "num_ctx" in identity:
+        options["num_ctx"] = identity.pop("num_ctx")
+    if options:
+        identity["options"] = options
+    else:
+        identity.pop("options", None)
+    return identity
+
+
+def _identity_parts(value: Any, prefix: str = "") -> list[str]:
+    if isinstance(value, dict):
+        parts: list[str] = []
+        for key in sorted(value):
+            next_prefix = f"{prefix}.{key}" if prefix else key
+            parts.extend(_identity_parts(value[key], next_prefix))
+        return parts
+    return [f"{prefix}={json.dumps(value, sort_keys=True)}"]
+
+
+def _fallback_run_name(model: str, config_identity: dict[str, Any]) -> str:
+    extras = {
+        key: value
+        for key, value in config_identity.items()
+        if key != "model"
+    }
+    if not extras:
+        return model
+    return f"{model} [{', '.join(_identity_parts(extras))}]"
+
+
+def _slugify_run_name(text: str) -> str:
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", text).strip("._-")
+    return slug or "run"
+
+
+def _run_spec_from_entry(
+    entry: str | dict[str, Any],
+    *,
+    default_concurrency: int,
+) -> RunSpec:
+    if isinstance(entry, str):
+        explicit_name = None
+        model = entry
+        concurrency = default_concurrency
+        identity: dict[str, Any] = {"model": entry}
+    elif isinstance(entry, dict):
+        if "model" not in entry:
+            raise click.UsageError("Model config objects must include a model field.")
+        explicit_name = entry.get("name")
+        model = entry["model"]
+        concurrency = entry.get("concurrency", default_concurrency)
+        identity = _normalize_identity_config(entry)
+    else:
+        raise click.UsageError("Model config entries must be strings or objects.")
+
+    config_identity_json = json.dumps(identity, sort_keys=True, separators=(",", ":"))
+    run_name = explicit_name or _fallback_run_name(model, identity)
+    return RunSpec(
+        run_name=run_name,
+        requested_model=model,
+        concurrency=concurrency,
+        ollama_options=identity.get("options") or None,
+        model_base_url=identity.get("model_base_url"),
+        max_steps=identity.get("max_steps"),
+        config_identity=identity,
+        config_identity_json=config_identity_json,
+        file_slug=_slugify_run_name(run_name),
+    )
+
+
+def _dedupe_run_specs(run_specs: list[RunSpec]) -> list[RunSpec]:
+    run_names_seen: set[str] = set()
+    slug_counts: dict[str, int] = {}
+    deduped: list[RunSpec] = []
+
+    for run_spec in run_specs:
+        if run_spec.run_name in run_names_seen:
+            raise click.UsageError(
+                f"Duplicate model run identity {run_spec.run_name!r}. "
+                "Add unique `name` values in the models file."
+            )
+        run_names_seen.add(run_spec.run_name)
+
+        base_slug = _slugify_run_name(run_spec.run_name)
+        file_slug = base_slug
+        if base_slug in slug_counts:
+            short_hash = hashlib.sha1(run_spec.config_identity_json.encode("utf-8")).hexdigest()[:8]
+            file_slug = f"{base_slug}-{short_hash}"
+        slug_counts[base_slug] = slug_counts.get(base_slug, 0) + 1
+
+        deduped.append(
+            RunSpec(
+                run_name=run_spec.run_name,
+                requested_model=run_spec.requested_model,
+                concurrency=run_spec.concurrency,
+                ollama_options=run_spec.ollama_options,
+                model_base_url=run_spec.model_base_url,
+                max_steps=run_spec.max_steps,
+                config_identity=run_spec.config_identity,
+                config_identity_json=run_spec.config_identity_json,
+                file_slug=file_slug,
+            )
+        )
+
+    return deduped
+
+
+def _build_run_specs(models: tuple[str, ...], models_file: str | None) -> list[RunSpec]:
+    run_specs: list[RunSpec] = []
+
+    if models_file:
+        with open(models_file) as f:
+            cfg = yaml.safe_load(f)
+        default_concurrency = cfg.get("defaults", {}).get("concurrency", 1)
+        for entry in cfg.get("models", []):
+            run_specs.append(_run_spec_from_entry(entry, default_concurrency=default_concurrency))
+
+    for model in models:
+        run_specs.append(_run_spec_from_entry(model, default_concurrency=1))
+
+    if not run_specs:
+        raise click.UsageError("Provide at least one model via --model or --models-file.")
+
+    return _dedupe_run_specs(run_specs)
+
+
+def _build_inline_run_spec(model: str, ollama_options: dict | None = None) -> RunSpec:
+    identity: dict[str, Any] = {"model": model}
+    if ollama_options:
+        identity["options"] = dict(ollama_options)
+    config_identity_json = json.dumps(identity, sort_keys=True, separators=(",", ":"))
+    run_name = _fallback_run_name(model, identity)
+    return RunSpec(
+        run_name=run_name,
+        requested_model=model,
+        concurrency=1,
+        ollama_options=ollama_options,
+        model_base_url=None,
+        max_steps=None,
+        config_identity=identity,
+        config_identity_json=config_identity_json,
+        file_slug=_slugify_run_name(run_name),
+    )
+
+
+def _effective_run_config(
+    run_spec: RunSpec,
+    *,
+    model_base_url: str | None = None,
+    max_steps: int | None = None,
+) -> dict[str, Any]:
+    config = dict(run_spec.config_identity)
+    if model_base_url is not None and "model_base_url" not in config:
+        config["model_base_url"] = model_base_url
+    if max_steps is not None and "max_steps" not in config:
+        config["max_steps"] = max_steps
+    return config
+
+
+async def _run_baseline_with_specs(
+    *,
+    manifest_path: Path,
+    run_specs: list[RunSpec],
+    output_dir: Path,
+    concurrency_override: int | None,
+    bhce_url: str | None,
+    default_model_base_url: str | None = None,
+    model_base_url_override: str | None = None,
+    max_model_reruns_on_infra: int = 1,
+) -> dict[str, list]:
+    from .eval.runner import run_eval_cli_bare
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    results = {}
+    for i, run_spec in enumerate(run_specs, 1):
+        effective_concurrency = concurrency_override if concurrency_override is not None else run_spec.concurrency
+        effective_model_base_url = (
+            model_base_url_override
+            if model_base_url_override is not None
+            else run_spec.model_base_url or default_model_base_url
+        )
+        csv_path = output_dir / f"{run_spec.file_slug}.csv"
+        opts_str = f", options={run_spec.ollama_options}" if run_spec.ollama_options else ""
+        base_url_str = f", base_url={effective_model_base_url}" if effective_model_base_url else ""
+        click.echo(
+            f"\n[{i}/{len(run_specs)}] {run_spec.run_name} -> {run_spec.requested_model}  "
+            f"(concurrency={effective_concurrency}{opts_str}{base_url_str})"
+        )
+        results[run_spec.run_name] = await run_eval_cli_bare(
+            manifest_path=manifest_path,
+            model=run_spec.requested_model,
+            output_path=csv_path,
+            concurrency=effective_concurrency,
+            bhce_url=bhce_url,
+            ollama_options=run_spec.ollama_options,
+            max_model_reruns_on_infra=max_model_reruns_on_infra,
+            run_name=run_spec.run_name,
+            run_config=_effective_run_config(run_spec, model_base_url=effective_model_base_url),
+            model_base_url=effective_model_base_url,
+        )
+    return results
+
+
+async def _run_baseline_mcp_with_specs(
+    *,
+    manifest_path: Path,
+    run_specs: list[RunSpec],
+    output_dir: Path,
+    concurrency_override: int | None,
+    bhce_url: str | None,
+    mcp_dir: Path,
+    max_steps: int,
+    default_model_base_url: str | None = None,
+    max_steps_override: int | None = None,
+    model_base_url_override: str | None = None,
+    max_model_reruns_on_infra: int = 1,
+) -> dict[str, list]:
+    from .eval.runner import run_eval_mcp_cli_bare
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    results = {}
+    for i, run_spec in enumerate(run_specs, 1):
+        effective_concurrency = concurrency_override if concurrency_override is not None else run_spec.concurrency
+        effective_max_steps = (
+            max_steps_override
+            if max_steps_override is not None
+            else run_spec.max_steps if run_spec.max_steps is not None else max_steps
+        )
+        effective_model_base_url = (
+            model_base_url_override
+            if model_base_url_override is not None
+            else run_spec.model_base_url or default_model_base_url
+        )
+        csv_path = output_dir / f"{run_spec.file_slug}.csv"
+        opts_str = f", options={run_spec.ollama_options}" if run_spec.ollama_options else ""
+        base_url_str = f", base_url={effective_model_base_url}" if effective_model_base_url else ""
+        click.echo(
+            f"\n[{i}/{len(run_specs)}] {run_spec.run_name} -> {run_spec.requested_model}  "
+            f"(concurrency={effective_concurrency}{opts_str}{base_url_str}, max_steps={effective_max_steps})"
+        )
+        results[run_spec.run_name] = await run_eval_mcp_cli_bare(
+            manifest_path=manifest_path,
+            model=run_spec.requested_model,
+            output_path=csv_path,
+            concurrency=effective_concurrency,
+            bhce_url=bhce_url,
+            ollama_options=run_spec.ollama_options,
+            max_model_reruns_on_infra=max_model_reruns_on_infra,
+            mcp_dir=mcp_dir,
+            max_steps=effective_max_steps,
+            run_name=run_spec.run_name,
+            run_config=_effective_run_config(
+                run_spec,
+                model_base_url=effective_model_base_url,
+                max_steps=effective_max_steps,
+            ),
+            model_base_url=effective_model_base_url,
+        )
+    return results
 
 
 @click.group()
@@ -119,13 +401,16 @@ def eval(
     """Run evaluation: generate tasks from manifest, run model, grade results."""
     import asyncio
     from .eval.runner import run_eval_cli
+    run_spec = _build_inline_run_spec(model=model, ollama_options=_parse_ollama_options(ollama_options_raw))
     asyncio.run(run_eval_cli(
         manifest_path=Path(manifest),
         model=model,
         output_path=Path(output),
         concurrency=concurrency,
         bhce_url=bhce_url,
-        ollama_options=_parse_ollama_options(ollama_options_raw),
+        ollama_options=run_spec.ollama_options,
+        run_name=run_spec.run_name,
+        run_config=run_spec.config_identity,
     ))
 
 
@@ -156,6 +441,7 @@ def eval_mcp(
     """Run MCP-mode evaluation using BloodHound MCP tools."""
     import asyncio
     from .eval.runner import run_eval_mcp_cli
+    run_spec = _build_inline_run_spec(model=model, ollama_options=_parse_ollama_options(ollama_options_raw))
 
     asyncio.run(run_eval_mcp_cli(
         manifest_path=Path(manifest),
@@ -165,7 +451,9 @@ def eval_mcp(
         bhce_url=bhce_url,
         mcp_dir=Path(mcp_dir),
         max_steps=max_steps,
-        ollama_options=_parse_ollama_options(ollama_options_raw),
+        ollama_options=run_spec.ollama_options,
+        run_name=run_spec.run_name,
+        run_config=run_spec.config_identity,
     ))
 
 
@@ -254,6 +542,288 @@ def smoke_mcp(manifest: str, output_dir: str, bhce_url: str | None, mcp_dir: str
         raise SystemExit(1)
 
 
+@main.command(name="run")
+@click.option("--config", "config_path", required=True, type=click.Path(exists=True), help="Path to versioned ORI run config YAML")
+@click.option("--profile", default=None, help="Profile name inside the config file")
+@click.option("--run-all-profiles", is_flag=True, default=False, help="Run all enabled profiles in config order")
+@click.option("--keep-going", is_flag=True, default=False, help="With --run-all-profiles, continue after profile failures and report them at the end")
+@click.option("--manifest", type=click.Path(), default=None, help="Override manifest path")
+@click.option("--output", type=click.Path(), default=None, help="Override single-run output CSV path")
+@click.option("--output-dir", type=click.Path(), default=None, help="Override multi-run output directory")
+@click.option("--bhce-url", default=None, help="Override BH CE base URL")
+@click.option("--concurrency", type=int, default=None, help="Override run concurrency")
+@click.option("--mcp-dir", type=click.Path(), default=None, help="Override local bloodhound-mcp path")
+@click.option("--max-steps", type=int, default=None, help="Override MCP max tool/agent steps")
+@click.option("--model-base-url", default=None, help="Override model provider base URL")
+@click.option("--max-model-reruns-on-infra", type=int, default=None, help="Override full-run retries after INFRA_ERROR")
+@click.option("--health-timeout", type=float, default=None, help="Override BloodHound health timeout in seconds")
+@click.option("--health-poll-interval", type=float, default=None, help="Override BloodHound health poll interval in seconds")
+def run_from_config(
+    config_path: str,
+    profile: str | None,
+    run_all_profiles: bool,
+    keep_going: bool,
+    manifest: str | None,
+    output: str | None,
+    output_dir: str | None,
+    bhce_url: str | None,
+    concurrency: int | None,
+    mcp_dir: str | None,
+    max_steps: int | None,
+    model_base_url: str | None,
+    max_model_reruns_on_infra: int | None,
+    health_timeout: float | None,
+    health_poll_interval: float | None,
+) -> None:
+    """Run ORI from a single versioned config file."""
+    import asyncio
+
+    from .eval.ops import print_preflight, print_smoke_eval, run_preflight, run_smoke_eval, run_smoke_mcp_eval
+    from .eval.report import print_comparison, write_combined_csv, write_summary_csv
+    from .eval.runner import run_eval_cli, run_eval_mcp_cli
+
+    if profile is not None and run_all_profiles:
+        raise click.UsageError("--profile and --run-all-profiles are mutually exclusive.")
+    if keep_going and not run_all_profiles:
+        raise click.UsageError("--keep-going requires --run-all-profiles.")
+
+    overrides = RunConfigOverrides(
+        manifest=manifest,
+        output=output,
+        output_dir=output_dir,
+        bhce_url=bhce_url,
+        concurrency=concurrency,
+        mcp_dir=mcp_dir,
+        max_steps=max_steps,
+        model_base_url=model_base_url,
+        max_model_reruns_on_infra=max_model_reruns_on_infra,
+        health_timeout_seconds=health_timeout,
+        health_poll_interval=health_poll_interval,
+    )
+
+    def _run_one_profile(resolved) -> None:
+        click.echo(f"Using config profile: {resolved.profile_name} ({resolved.kind})")
+
+        if resolved.kind == "eval":
+            run_spec = _dedupe_run_specs([
+                _run_spec_from_entry(
+                    resolved.model_entry,
+                    default_concurrency=resolved.concurrency or 1,
+                )
+            ])[0]
+            effective_model_base_url = (
+                model_base_url
+                if model_base_url is not None
+                else run_spec.model_base_url or resolved.model_base_url
+            )
+            asyncio.run(
+                run_eval_cli(
+                    manifest_path=Path(resolved.manifest),
+                    model=run_spec.requested_model,
+                    output_path=Path(resolved.output),
+                    concurrency=concurrency if concurrency is not None else run_spec.concurrency,
+                    bhce_url=resolved.bhce_url,
+                    max_model_reruns_on_infra=resolved.max_model_reruns_on_infra,
+                    ollama_options=run_spec.ollama_options,
+                    run_name=run_spec.run_name,
+                    run_config=_effective_run_config(
+                        run_spec,
+                        model_base_url=effective_model_base_url,
+                    ),
+                    model_base_url=effective_model_base_url,
+                    health_timeout_seconds=resolved.health_timeout_seconds,
+                    health_poll_interval=resolved.health_poll_interval,
+                )
+            )
+            return
+
+        if resolved.kind == "eval_mcp":
+            run_spec = _dedupe_run_specs([
+                _run_spec_from_entry(
+                    resolved.model_entry,
+                    default_concurrency=resolved.concurrency or 1,
+                )
+            ])[0]
+            effective_model_base_url = (
+                model_base_url
+                if model_base_url is not None
+                else run_spec.model_base_url or resolved.model_base_url
+            )
+            effective_max_steps = (
+                max_steps
+                if max_steps is not None
+                else run_spec.max_steps if run_spec.max_steps is not None else resolved.max_steps
+            )
+            asyncio.run(
+                run_eval_mcp_cli(
+                    manifest_path=Path(resolved.manifest),
+                    model=run_spec.requested_model,
+                    output_path=Path(resolved.output),
+                    concurrency=concurrency if concurrency is not None else run_spec.concurrency,
+                    bhce_url=resolved.bhce_url,
+                    max_model_reruns_on_infra=resolved.max_model_reruns_on_infra,
+                    mcp_dir=Path(resolved.mcp_dir),
+                    max_steps=effective_max_steps,
+                    ollama_options=run_spec.ollama_options,
+                    run_name=run_spec.run_name,
+                    run_config=_effective_run_config(
+                        run_spec,
+                        model_base_url=effective_model_base_url,
+                        max_steps=effective_max_steps,
+                    ),
+                    model_base_url=effective_model_base_url,
+                    health_timeout_seconds=resolved.health_timeout_seconds,
+                    health_poll_interval=resolved.health_poll_interval,
+                )
+            )
+            return
+
+        if resolved.kind == "baseline":
+            run_specs = _dedupe_run_specs([
+                _run_spec_from_entry(entry, default_concurrency=resolved.concurrency or 1)
+                for entry in resolved.model_entries or []
+            ])
+            all_results = asyncio.run(
+                _run_baseline_with_specs(
+                    manifest_path=Path(resolved.manifest),
+                    run_specs=run_specs,
+                    output_dir=Path(resolved.output_dir),
+                    concurrency_override=concurrency,
+                    bhce_url=resolved.bhce_url,
+                    default_model_base_url=resolved.model_base_url,
+                    model_base_url_override=model_base_url,
+                    max_model_reruns_on_infra=resolved.max_model_reruns_on_infra,
+                )
+            )
+            combined_csv_path = Path(resolved.output_dir) / "baseline_combined.csv"
+            summary_csv_path = Path(resolved.output_dir) / "baseline_summary.csv"
+            write_combined_csv(all_results, combined_csv_path)
+            write_summary_csv(all_results, summary_csv_path)
+            print_comparison(all_results)
+            click.echo(f"\nPer-model CSVs written to {resolved.output_dir}/")
+            click.echo(f"Combined CSV written to {combined_csv_path}")
+            click.echo(f"Summary CSV written to {summary_csv_path}")
+            return
+
+        if resolved.kind == "baseline_mcp":
+            run_specs = _dedupe_run_specs([
+                _run_spec_from_entry(entry, default_concurrency=resolved.concurrency or 1)
+                for entry in resolved.model_entries or []
+            ])
+            all_results = asyncio.run(
+                _run_baseline_mcp_with_specs(
+                    manifest_path=Path(resolved.manifest),
+                    run_specs=run_specs,
+                    output_dir=Path(resolved.output_dir),
+                    concurrency_override=concurrency,
+                    bhce_url=resolved.bhce_url,
+                    mcp_dir=Path(resolved.mcp_dir),
+                    max_steps=resolved.max_steps,
+                    default_model_base_url=resolved.model_base_url,
+                    max_steps_override=max_steps,
+                    model_base_url_override=model_base_url,
+                    max_model_reruns_on_infra=resolved.max_model_reruns_on_infra,
+                )
+            )
+            combined_csv_path = Path(resolved.output_dir) / "baseline_combined.csv"
+            summary_csv_path = Path(resolved.output_dir) / "baseline_summary.csv"
+            write_combined_csv(all_results, combined_csv_path)
+            write_summary_csv(all_results, summary_csv_path)
+            print_comparison(all_results)
+            click.echo(f"\nPer-model CSVs written to {resolved.output_dir}/")
+            click.echo(f"Combined CSV written to {combined_csv_path}")
+            click.echo(f"Summary CSV written to {summary_csv_path}")
+            return
+
+        if resolved.kind == "smoke_eval":
+            result = asyncio.run(
+                run_smoke_eval(
+                    manifest_path=Path(resolved.manifest),
+                    output_dir=Path(resolved.output_dir),
+                    bhce_url=resolved.bhce_url,
+                )
+            )
+            print_smoke_eval(result)
+            if not result.ok:
+                raise SystemExit(1)
+            return
+
+        if resolved.kind == "smoke_mcp":
+            result = asyncio.run(
+                run_smoke_mcp_eval(
+                    manifest_path=Path(resolved.manifest),
+                    output_dir=Path(resolved.output_dir),
+                    bhce_url=resolved.bhce_url,
+                    mcp_dir=Path(resolved.mcp_dir),
+                    max_steps=resolved.max_steps,
+                )
+            )
+            print_smoke_eval(result)
+            if not result.ok:
+                raise SystemExit(1)
+            return
+
+        if resolved.kind == "preflight":
+            result = asyncio.run(
+                run_preflight(
+                    manifest_path=Path(resolved.manifest),
+                    output_dir=Path(resolved.output_dir),
+                    bhce_url=resolved.bhce_url,
+                    timeout_seconds=resolved.health_timeout_seconds,
+                    poll_interval=resolved.health_poll_interval,
+                )
+            )
+            print_preflight(result)
+            if not result.ok:
+                raise SystemExit(1)
+            return
+
+        raise click.UsageError(f"Unsupported profile kind: {resolved.kind}")
+
+    config_file = Path(config_path)
+    if run_all_profiles:
+        enabled_profiles = [info for info in list_run_profiles(config_file) if info.enabled]
+        if not enabled_profiles:
+            raise click.UsageError("Config contains no enabled profiles to run.")
+        total = len(enabled_profiles)
+        failures: list[tuple[str, str]] = []
+        for index, info in enumerate(enabled_profiles, 1):
+            click.echo(f"\n[{index}/{total}] {info.profile_name} ({info.kind})")
+            try:
+                resolved = load_run_profile(
+                    config_file,
+                    profile_name=info.profile_name,
+                    overrides=overrides,
+                )
+                _run_one_profile(resolved)
+            except SystemExit as exc:
+                code = exc.code if isinstance(exc.code, int) else 1
+                if code in (None, 0):
+                    continue
+                failures.append((info.profile_name, f"exit code {code}"))
+                click.echo(f"Profile failed: {info.profile_name} (exit code {code})", err=True)
+                if not keep_going:
+                    raise
+            except Exception as exc:
+                failures.append((info.profile_name, str(exc) or exc.__class__.__name__))
+                click.echo(f"Profile failed: {info.profile_name} ({exc})", err=True)
+                if not keep_going:
+                    raise
+        if failures:
+            click.echo("\nRun-all profile failures:", err=True)
+            for profile_name, detail in failures:
+                click.echo(f"- {profile_name}: {detail}", err=True)
+            raise SystemExit(1)
+        return
+
+    resolved = load_run_profile(
+        config_file,
+        profile_name=profile,
+        overrides=overrides,
+    )
+    _run_one_profile(resolved)
+
+
 @main.command()
 @click.option("--manifest", "-m", required=True, type=click.Path(exists=True), help="Path to manifest.json")
 @click.option("--output-dir", "-o", required=True, type=click.Path(), help="Directory for smoke-test CSVs")
@@ -306,61 +876,19 @@ def baseline(
     Models can be specified via --model (repeatable), --models-file models.yaml, or both.
     """
     import asyncio
-    import yaml
-    from .eval.runner import run_eval_cli_bare
     from .eval.report import print_comparison, write_combined_csv, write_summary_csv
 
-    # Build model list: [(model_string, concurrency, ollama_options), ...]
-    model_entries: list[tuple[str, int, dict | None]] = []
-
-    if models_file:
-        with open(models_file) as f:
-            cfg = yaml.safe_load(f)
-        default_concurrency = cfg.get("defaults", {}).get("concurrency", 1)
-        for entry in cfg.get("models", []):
-            if isinstance(entry, str):
-                model_entries.append((entry, default_concurrency, None))
-            elif isinstance(entry, dict):
-                opts = entry.get("options") or {}
-                # Allow top-level num_ctx as shorthand for options.num_ctx
-                if "num_ctx" in entry:
-                    opts["num_ctx"] = entry["num_ctx"]
-                model_entries.append((
-                    entry["model"],
-                    entry.get("concurrency", default_concurrency),
-                    opts or None,
-                ))
-
-    for m in models:
-        model_entries.append((m, 1, None))
-
-    if not model_entries:
-        raise click.UsageError("Provide at least one model via --model or --models-file.")
-
+    run_specs = _build_run_specs(models=models, models_file=models_file)
     out = Path(output_dir)
-    out.mkdir(parents=True, exist_ok=True)
-
-    # Run all models in a single event loop to avoid httpx cleanup errors
-    # that occur when asyncio.run() is called multiple times (closes loop between runs)
-    async def _run_all() -> dict:
-        results = {}
-        for i, (model, model_concurrency, model_options) in enumerate(model_entries, 1):
-            effective_concurrency = concurrency if concurrency is not None else model_concurrency
-            slug = model.replace("/", "_").replace(":", "-")
-            csv_path = out / f"{slug}.csv"
-            opts_str = f", options={model_options}" if model_options else ""
-            click.echo(f"\n[{i}/{len(model_entries)}] {model}  (concurrency={effective_concurrency}{opts_str})")
-            results[model] = await run_eval_cli_bare(
-                manifest_path=Path(manifest),
-                model=model,
-                output_path=csv_path,
-                concurrency=effective_concurrency,
-                bhce_url=bhce_url,
-                ollama_options=model_options,
-            )
-        return results
-
-    all_results = asyncio.run(_run_all())
+    all_results = asyncio.run(
+        _run_baseline_with_specs(
+            manifest_path=Path(manifest),
+            run_specs=run_specs,
+            output_dir=out,
+            concurrency_override=concurrency,
+            bhce_url=bhce_url,
+        )
+    )
 
     combined_csv_path = out / "baseline_combined.csv"
     summary_csv_path = out / "baseline_summary.csv"
@@ -393,58 +921,21 @@ def baseline_mcp(
 ) -> None:
     """Evaluate multiple models in MCP mode and print a comparison table."""
     import asyncio
-    from .eval.runner import run_eval_mcp_cli_bare
     from .eval.report import print_comparison, write_combined_csv, write_summary_csv
 
-    model_entries: list[tuple[str, int, dict | None]] = []
-
-    if models_file:
-        with open(models_file) as f:
-            cfg = yaml.safe_load(f)
-        default_concurrency = cfg.get("defaults", {}).get("concurrency", 1)
-        for entry in cfg.get("models", []):
-            if isinstance(entry, str):
-                model_entries.append((entry, default_concurrency, None))
-            elif isinstance(entry, dict):
-                opts = entry.get("options") or {}
-                if "num_ctx" in entry:
-                    opts["num_ctx"] = entry["num_ctx"]
-                model_entries.append((
-                    entry["model"],
-                    entry.get("concurrency", default_concurrency),
-                    opts or None,
-                ))
-
-    for m in models:
-        model_entries.append((m, 1, None))
-
-    if not model_entries:
-        raise click.UsageError("Provide at least one model via --model or --models-file.")
-
+    run_specs = _build_run_specs(models=models, models_file=models_file)
     out = Path(output_dir)
-    out.mkdir(parents=True, exist_ok=True)
-
-    async def _run_all() -> dict:
-        results = {}
-        for i, (model, model_concurrency, model_options) in enumerate(model_entries, 1):
-            effective_concurrency = concurrency if concurrency is not None else model_concurrency
-            slug = model.replace("/", "_").replace(":", "-")
-            csv_path = out / f"{slug}.csv"
-            opts_str = f", options={model_options}" if model_options else ""
-            click.echo(f"\n[{i}/{len(model_entries)}] {model}  (concurrency={effective_concurrency}{opts_str}, max_steps={max_steps})")
-            results[model] = await run_eval_mcp_cli_bare(
-                manifest_path=Path(manifest),
-                model=model,
-                output_path=csv_path,
-                concurrency=effective_concurrency,
-                bhce_url=bhce_url,
-                ollama_options=model_options,
-                mcp_dir=Path(mcp_dir),
-                max_steps=max_steps,
-            )
-        return results
-
-    all_results = asyncio.run(_run_all())
+    all_results = asyncio.run(
+        _run_baseline_mcp_with_specs(
+            manifest_path=Path(manifest),
+            run_specs=run_specs,
+            output_dir=out,
+            concurrency_override=concurrency,
+            bhce_url=bhce_url,
+            mcp_dir=Path(mcp_dir),
+            max_steps=max_steps,
+        )
+    )
 
     combined_csv_path = out / "baseline_combined.csv"
     summary_csv_path = out / "baseline_summary.csv"

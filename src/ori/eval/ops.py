@@ -3,12 +3,10 @@
 from __future__ import annotations
 
 import json
-import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from urllib.parse import urlparse
 
-from .bhce import BHCEClient, BHHealthResult
+from .bhce import BHCEClient, BHHealthResult, parse_bhce_url
 from .report import print_comparison
 from .runner import EvalResult, run_eval_cli_bare, run_eval_mcp_cli_bare
 
@@ -67,19 +65,6 @@ class VerifyBHHealthResult:
     query: str
 
 
-def apply_bhce_url_override(bhce_url: str | None) -> str | None:
-    """Apply CLI BHCE URL overrides to env and return parsed hostname."""
-    domain = None
-    if bhce_url:
-        parsed = urlparse(bhce_url)
-        domain = parsed.hostname
-        if parsed.port:
-            os.environ["BLOODHOUND_PORT"] = str(parsed.port)
-        if parsed.scheme:
-            os.environ["BLOODHOUND_SCHEME"] = parsed.scheme
-    return domain
-
-
 def _load_manifest(manifest_path: Path) -> dict:
     return json.loads(manifest_path.read_text())
 
@@ -107,9 +92,9 @@ async def verify_ingest(manifest_path: Path, bhce_url: str | None = None) -> Ver
     """Verify that manifest counts and planted paths all exist in BloodHound CE."""
     manifest = _load_manifest(manifest_path)
     stats = manifest.get("stats", {})
-    domain = apply_bhce_url_override(bhce_url)
+    bhce_kwargs = parse_bhce_url(bhce_url)
 
-    async with BHCEClient(domain=domain) as bhce:
+    async with BHCEClient(**bhce_kwargs) as bhce:
         count_checks: list[CountCheck] = []
         for key, query in _count_queries().items():
             result = await bhce.run_cypher_resilient(query)
@@ -155,8 +140,8 @@ async def verify_bh_health(
     poll_interval: float = 5.0,
 ) -> VerifyBHHealthResult:
     """Wait for BloodHound CE to become healthy using a safe graph query."""
-    domain = apply_bhce_url_override(bhce_url)
-    async with BHCEClient(domain=domain) as bhce:
+    bhce_kwargs = parse_bhce_url(bhce_url)
+    async with BHCEClient(**bhce_kwargs) as bhce:
         result = await bhce.wait_until_healthy(
             timeout_seconds=timeout_seconds,
             poll_interval=poll_interval,

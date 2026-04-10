@@ -96,6 +96,9 @@ def test_write_combined_csv_writes_rows_for_all_models(tmp_path) -> None:
     with output.open() as f:
         rows = list(csv.DictReader(f))
     assert len(rows) == 2
+    assert {row["run_name"] for row in rows} == {"ollama/test:latest"}
+    assert {row["requested_model"] for row in rows} == {"ollama/test:latest"}
+    assert {row["resolved_model"] for row in rows} == {"ollama/test:latest"}
     assert {row["model"] for row in rows} == {"ollama/test:latest"}
     assert {row["outcome"] for row in rows} == {"CORRECT", "INFRA_ERROR"}
 
@@ -116,3 +119,20 @@ def test_write_summary_csv_writes_one_row_per_model(tmp_path) -> None:
     assert by_model["ollama/a:latest"]["correct"] == "1"
     assert by_model["ollama/a:latest"]["parse_fails"] == "1"
     assert by_model["ollama/b:latest"]["infra_errors"] == "1"
+
+
+def test_write_summary_csv_includes_run_metadata(tmp_path) -> None:
+    output = tmp_path / "baseline_summary.csv"
+    result = _result("CORRECT", score=1.0)
+    result.run_name = "gemma4-26b-32k"
+    result.requested_model = "ollama/gemma4:26b"
+    result.run_config = {"model": "ollama/gemma4:26b", "options": {"num_ctx": 32768}}
+    write_summary_csv({"gemma4-26b-32k": [result]}, output)
+    with output.open() as f:
+        rows = list(csv.DictReader(f))
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["run_name"] == "gemma4-26b-32k"
+    assert row["requested_model"] == "ollama/gemma4:26b"
+    assert row["resolved_model"] == "ollama/test:latest"
+    assert row["options_json"] == '{"num_ctx": 32768}'

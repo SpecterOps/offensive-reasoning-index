@@ -117,6 +117,14 @@ def test_resolve_model_base_url_adds_v1_for_ollama(monkeypatch) -> None:
     assert _resolve_model_base_url("ollama/qwen3:latest", None) == "http://localhost:11434/v1"
 
 
+def test_resolve_model_base_url_prefers_explicit_base_url_for_ollama(monkeypatch) -> None:
+    monkeypatch.setenv("OLLAMA_BASE_URL", "http://env-host:11434")
+    assert (
+        _resolve_model_base_url("ollama/qwen3:latest", "http://yaml-host:11434")
+        == "http://yaml-host:11434/v1"
+    )
+
+
 def test_resolve_model_base_url_preserves_existing_v1_for_ollama(monkeypatch) -> None:
     monkeypatch.setenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
     assert _resolve_model_base_url("ollama/qwen3:latest", None) == "http://localhost:11434/v1"

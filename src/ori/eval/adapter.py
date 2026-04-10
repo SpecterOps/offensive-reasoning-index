@@ -199,10 +199,14 @@ async def _call_provider(
     elif provider in ("openai", "ollama", "openai-compat", "gemini"):
         import os
         import openai
-        resolved_base = {
-            "ollama": os.getenv("OLLAMA_BASE_URL", "http://localhost:11434") + "/v1",
-            "gemini": "https://generativelanguage.googleapis.com/v1beta/openai/",
-        }.get(provider, base_url)
+        if provider == "ollama":
+            resolved_base = (base_url or os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")).rstrip("/")
+            if not resolved_base.endswith("/v1"):
+                resolved_base = f"{resolved_base}/v1"
+        else:
+            resolved_base = {
+                "gemini": "https://generativelanguage.googleapis.com/v1beta/openai/",
+            }.get(provider, base_url)
         api_key = "ollama" if provider == "ollama" else None
 
         # handle "modelname@http://custom-url" for openai-compat

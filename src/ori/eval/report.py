@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import json
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -11,6 +12,7 @@ if TYPE_CHECKING:
 
 
 CSV_FIELDNAMES = [
+    "run_name", "requested_model", "resolved_model", "config_identity_json", "options_json",
     "task_id", "template_id", "tier", "category", "model",
     "score", "outcome", "hallucination",
     "tokens_input", "tokens_output", "elapsed_seconds",
@@ -24,10 +26,29 @@ CSV_FIELDNAMES = [
 ]
 
 
+def _run_name_for_result(r: "EvalResult") -> str:
+    return r.run_name or r.requested_model or r.model_response.model
+
+
+def _requested_model_for_result(r: "EvalResult") -> str:
+    return r.requested_model or r.model_response.model
+
+
 def _row_for_result(r: "EvalResult") -> dict[str, object]:
     inspect_meta = r.inspect
     mcp_meta = r.mcp
+    run_name = _run_name_for_result(r)
+    requested_model = _requested_model_for_result(r)
+    config_identity_json = json.dumps(r.run_config, sort_keys=True) if r.run_config else ""
+    options_json = ""
+    if r.run_config and isinstance(r.run_config.get("options"), dict):
+        options_json = json.dumps(r.run_config["options"], sort_keys=True)
     return {
+        "run_name": run_name,
+        "requested_model": requested_model,
+        "resolved_model": r.model_response.model,
+        "config_identity_json": config_identity_json,
+        "options_json": options_json,
         "task_id": r.task.id,
         "template_id": r.task.template_id,
         "tier": r.task.tier,
@@ -128,6 +149,7 @@ def _stats(results: list["EvalResult"]) -> dict:
 def write_summary_csv(all_results: dict[str, list["EvalResult"]], output_path: Path) -> None:
     """Write one summary row per model."""
     fieldnames = [
+        "run_name", "requested_model", "resolved_model", "config_identity_json", "options_json",
         "model", "total_tasks", "correct", "score_pct",
         "tier1_correct", "tier1_total", "tier1_pct",
         "tier2_correct", "tier2_total", "tier2_pct",
@@ -141,6 +163,14 @@ def write_summary_csv(all_results: dict[str, list["EvalResult"]], output_path: P
         writer.writeheader()
         for model, results in all_results.items():
             s = _stats(results)
+            first = results[0] if results else None
+            requested_model = _requested_model_for_result(first) if first else model
+            resolved_model = first.model_response.model if first else requested_model
+            run_name = _run_name_for_result(first) if first else model
+            config_identity_json = json.dumps(first.run_config, sort_keys=True) if first and first.run_config else ""
+            options_json = ""
+            if first and first.run_config and isinstance(first.run_config.get("options"), dict):
+                options_json = json.dumps(first.run_config["options"], sort_keys=True)
 
             def tier_fields(tier: int) -> tuple[int, int, int]:
                 c, t = s["tiers"][tier]
@@ -151,6 +181,11 @@ def write_summary_csv(all_results: dict[str, list["EvalResult"]], output_path: P
             t2c, t2t, t2p = tier_fields(2)
             t3c, t3t, t3p = tier_fields(3)
             writer.writerow({
+                "run_name": run_name,
+                "requested_model": requested_model,
+                "resolved_model": resolved_model,
+                "config_identity_json": config_identity_json,
+                "options_json": options_json,
                 "model": model,
                 "total_tasks": s["total"],
                 "correct": s["correct"],

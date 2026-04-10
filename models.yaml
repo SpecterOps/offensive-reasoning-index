@@ -56,9 +56,6 @@ models:
   #   num_ctx: 4096
 
   # ── Too large for 10GB VRAM — comment back in if running CPU offload ──────
-  # - model: ollama/qwen3.5:27b               # ~17 GB quantized; better fit for M4 / larger-memory reruns
-  #   options:
-  #     num_ctx: 32768
   # - model: ollama/qwen3-coder:30b-a3b-q4_K_M  # 18 GB
   # - model: ollama/gpt-oss:20b                  # 13 GB
   # - model: ollama/command-r-plus:latest        # 59 GB
