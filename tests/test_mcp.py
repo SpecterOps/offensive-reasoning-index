@@ -5,19 +5,24 @@ import json
 from pathlib import Path
 
 from click.testing import CliRunner
+from inspect_ai.model import ChatMessageAssistant, ChatMessageTool
+from inspect_ai.tool import ToolCall, tool
 
 from ori.cli import main
 from ori.eval.adapter import ModelResponse
-from ori.eval.bhce import CypherResult
+from ori.eval.bhce import BHHealthResult, CypherResult
 from ori.eval.grader import GradeResult, grade_mcp
-from inspect_ai.tool import tool
 
 from ori.eval.mcp_runtime import (
     MCPRunMetadata,
+    RESOURCE_READ_TOOL_NAME,
     _mcp_subprocess_env,
     _normalize_final_answer,
+    _ollama_chat_turn,
     _parse_json_object,
     _run_ollama_mcp_loop,
+    _trajectory_from_messages,
+    run_mcp_eval_with_inspect,
 )
 from ori.eval.report import write_combined_csv, write_summary_csv
 from ori.eval.runner import EvalResult
@@ -82,6 +87,32 @@ def _task() -> Task:
     )
 
 
+class _FakeBHCE:
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        return None
+
+    async def wait_until_healthy(
+        self,
+        timeout_seconds: float = 60.0,
+        poll_interval: float = 5.0,
+    ) -> BHHealthResult:
+        return BHHealthResult(ok=True, detail="ok", query="RETURN 1", classification="ok")
+
+    async def get_all_node_names(self) -> set[str]:
+        return {"DOMAIN ADMINS@TEST.LOCAL", "WS-01.TEST.LOCAL"}
+
+    async def run_cypher_resilient(self, query: str) -> CypherResult:
+        return CypherResult(
+            success=True,
+            nodes=[{"name": "WS-01.TEST.LOCAL"}],
+            node_names={"WS-01.TEST.LOCAL"},
+            raw={"query": query},
+        )
+
+
 def test_generate_mcp_tasks_includes_both_tracks() -> None:
     tasks = generate_mcp_tasks(_manifest())
     tracks = {task.metadata.get("mcp_track") for task in tasks}
@@ -104,6 +135,138 @@ def test_parse_and_normalize_final_answer_handles_fenced_json() -> None:
     parsed = _parse_json_object(raw)
     normalized = _normalize_final_answer(parsed, _task())
     assert normalized == {"answer_type": "node_set", "node_names": ["A", "B"]}
+
+
+def test_run_mcp_eval_with_inspect_mock_perfect_exercises_solver(tmp_path: Path) -> None:
+    import asyncio
+
+    results = asyncio.run(
+        run_mcp_eval_with_inspect(
+            [_task()],
+            "mock/mcp_perfect",
+            _FakeBHCE(),
+            tmp_path / "mock-perfect.csv",
+            log_dir=tmp_path / "logs",
+        )
+    )
+
+    assert len(results) == 1
+    result = results[0]
+    assert result.grade.outcome == "CORRECT"
+    assert result.grade.score == 1.0
+    assert result.model_response.model == "mock/mcp_perfect"
+    assert result.model_response.parse_stage == "mcp_final_answer"
+    assert result.mcp is not None
+    assert result.mcp.final_answer_normalized == {
+        "answer_type": "node_set",
+        "node_names": ["WS-01.TEST.LOCAL"],
+    }
+    assert result.mcp.final_answer_raw == result.model_response.raw_text
+    assert result.mcp.tool_calls_total == 0
+
+
+def test_run_smoke_mcp_eval_exercises_actual_runtime(tmp_path: Path, monkeypatch) -> None:
+    import asyncio
+
+    from ori.eval.ops import run_smoke_mcp_eval
+
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps(_manifest()))
+    monkeypatch.setattr("ori.eval.runner.BHCEClient", lambda **kwargs: _FakeBHCE())
+    monkeypatch.setattr("ori.eval.runner.generate_mcp_tasks", lambda manifest: [_task()])
+
+    result = asyncio.run(run_smoke_mcp_eval(manifest_path, tmp_path / "smoke"))
+
+    assert result.ok
+    assert {check.model: check.actual_counts for check in result.checks} == {
+        "mock/mcp_perfect": {"CORRECT": 1},
+        "mock/mcp_wrong": {"INCORRECT": 1},
+        "mock/mcp_empty": {"PARSE_FAIL": 1},
+    }
+    assert all(len(results) == 1 for results in result.results_by_model.values())
+
+
+def test_ollama_chat_turn_streams_payload_options_and_tool_calls(monkeypatch) -> None:
+    import asyncio
+
+    captured: dict[str, object] = {}
+    lines = [
+        json.dumps({"model": "ori-test", "message": {"thinking": "think ", "content": "part1"}}),
+        json.dumps(
+            {
+                "model": "ori-test",
+                "message": {
+                    "thinking": "again",
+                    "content": " part2",
+                    "tool_calls": [
+                        {
+                            "id": "call-1",
+                            "function": {
+                                "name": "group_info",
+                                "arguments": {"group_name": "DOMAIN ADMINS@TEST.LOCAL"},
+                            },
+                        }
+                    ],
+                },
+            }
+        ),
+        json.dumps({"done": True, "prompt_eval_count": 11, "eval_count": 7}),
+    ]
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        async def aiter_lines(self):
+            for line in lines:
+                yield line
+
+    class FakeStream:
+        async def __aenter__(self):
+            return FakeResponse()
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            captured["timeout"] = kwargs.get("timeout")
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def stream(self, method: str, url: str, json: dict):
+            captured["method"] = method
+            captured["url"] = url
+            captured["payload"] = json
+            return FakeStream()
+
+    monkeypatch.setattr("ori.eval.mcp_runtime.httpx.AsyncClient", FakeAsyncClient)
+
+    turn = asyncio.run(
+        _ollama_chat_turn(
+            url="http://127.0.0.1:11434/api/chat",
+            model_name="ollama/ori-test",
+            messages=[{"role": "user", "content": "q"}],
+            tools=[{"type": "function", "function": {"name": "group_info"}}],
+            ollama_options={"num_ctx": 32768, "temperature": 0},
+        )
+    )
+
+    assert captured["method"] == "POST"
+    assert captured["url"] == "http://127.0.0.1:11434/api/chat"
+    payload = captured["payload"]
+    assert payload["model"] == "ori-test"
+    assert payload["stream"] is True
+    assert payload["options"] == {"num_ctx": 32768, "temperature": 0}
+    assert turn["thinking"] == "think again"
+    assert turn["content"] == "part1 part2"
+    assert turn["tool_calls"][0]["function"]["name"] == "group_info"
+    assert turn["prompt_eval_count"] == 11
+    assert turn["eval_count"] == 7
 
 
 def test_run_ollama_mcp_loop_preserves_thinking_and_final_answer(monkeypatch) -> None:
@@ -266,6 +429,35 @@ def test_mock_wrong_smoke_style_answer_stays_incorrect_not_hallucination() -> No
     assert result.outcome == "INCORRECT"
 
 
+def test_trajectory_counts_resource_reads() -> None:
+    trajectory = _trajectory_from_messages(
+        [
+            ChatMessageAssistant(
+                content="",
+                tool_calls=[
+                    ToolCall(
+                        id="resource-call-1",
+                        function=RESOURCE_READ_TOOL_NAME,
+                        arguments={"uri": "bloodhound://domains/TEST.LOCAL"},
+                    )
+                ],
+            ),
+            ChatMessageTool(
+                content="resource body",
+                tool_call_id="resource-call-1",
+                function=RESOURCE_READ_TOOL_NAME,
+            ),
+        ],
+        final_answer_raw='{"answer_type":"node_set","node_names":[]}',
+    )
+
+    assert trajectory.tool_calls_total == 1
+    assert trajectory.non_cypher_tool_calls == 1
+    assert trajectory.resource_reads_total == 1
+    assert trajectory.unique_resources_used == ["bloodhound://domains/TEST.LOCAL"]
+    assert trajectory.resource_characters_total == len("resource body")
+
+
 def test_report_includes_mcp_fields(tmp_path: Path) -> None:
     result = EvalResult(
         task=_task(),
@@ -292,6 +484,12 @@ def test_report_includes_mcp_fields(tmp_path: Path) -> None:
             agent_turns=2,
             attempted_policy_violations=0,
             trajectory_log="trace.eval",
+            server_prompt_used=True,
+            server_prompt_name="bloodhound_assistant",
+            resource_mode="on-demand",
+            resource_reads_total=2,
+            unique_resources_used=["bloodhound://domains/TEST.LOCAL"],
+            resource_characters_total=1234,
         ),
     )
     combined = tmp_path / "combined.csv"
@@ -303,6 +501,12 @@ def test_report_includes_mcp_fields(tmp_path: Path) -> None:
     assert row["eval_mode"] == "mcp"
     assert row["tool_calls_total"] == "3"
     assert row["cypher_query_calls"] == "1"
+    assert row["server_prompt_used"] == "True"
+    assert row["server_prompt_name"] == "bloodhound_assistant"
+    assert row["resource_mode"] == "on-demand"
+    assert row["resource_reads_total"] == "2"
+    assert row["unique_resources_used"] == "bloodhound://domains/TEST.LOCAL"
+    assert row["resource_characters_total"] == "1234"
     with summary.open() as f:
         summary_row = next(csv.DictReader(f))
     assert summary_row["avg_tool_calls"] == "3.0"

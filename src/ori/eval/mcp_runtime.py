@@ -812,6 +812,10 @@ def ori_mcp_solver(
                 error=None,
             )
             state.output = ModelOutput.from_content(model=model_name, content=completion)
+            trajectory = _trajectory_from_messages(state.messages, final_answer_raw=completion)
+            trajectory.server_prompt_used = bool(server_prompt_text.strip())
+            trajectory.server_prompt_name = server_prompt_name if server_prompt_text.strip() else ""
+            trajectory.resource_mode = resource_mode
         elif _is_ollama_model(model_name):
             model_response, trajectory, ollama_messages = await _run_ollama_mcp_loop(
                 task=task,

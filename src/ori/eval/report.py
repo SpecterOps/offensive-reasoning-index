@@ -23,6 +23,8 @@ CSV_FIELDNAMES = [
     "tool_calls_total", "failed_tool_calls", "unique_tools_used",
     "cypher_query_calls", "non_cypher_tool_calls", "agent_turns",
     "attempted_policy_violations", "trajectory_log",
+    "server_prompt_used", "server_prompt_name", "resource_mode",
+    "resource_reads_total", "unique_resources_used", "resource_characters_total",
 ]
 
 
@@ -90,6 +92,12 @@ def _row_for_result(r: "EvalResult") -> dict[str, object]:
             mcp_meta.attempted_policy_violations if mcp_meta else 0
         ),
         "trajectory_log": mcp_meta.trajectory_log if mcp_meta else "",
+        "server_prompt_used": mcp_meta.server_prompt_used if mcp_meta else False,
+        "server_prompt_name": mcp_meta.server_prompt_name if mcp_meta else "",
+        "resource_mode": mcp_meta.resource_mode if mcp_meta else "",
+        "resource_reads_total": mcp_meta.resource_reads_total if mcp_meta else 0,
+        "unique_resources_used": ",".join(mcp_meta.unique_resources_used) if mcp_meta else "",
+        "resource_characters_total": mcp_meta.resource_characters_total if mcp_meta else 0,
     }
 
 
