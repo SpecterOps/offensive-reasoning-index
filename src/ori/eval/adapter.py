@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 
 from .tasks import Task
@@ -37,6 +37,7 @@ class ModelResponse:
     model: str
     thinking: str = ""
     error: str | None = None
+    provider_metrics: dict[str, object] = field(default_factory=dict)
 
 
 def extract_cypher_details(text: str) -> tuple[str | None, str]:
@@ -154,7 +155,7 @@ async def call_model(
 
     t0 = time.monotonic()
     try:
-        text, tokens_in, tokens_out, thinking = await _call_provider(
+        text, tokens_in, tokens_out, thinking, provider_metrics = await _call_provider(
             model=model, messages=messages, system=system,
             max_tokens=max_tokens, base_url=base_url,
             ollama_options=ollama_options,
@@ -165,6 +166,7 @@ async def call_model(
             raw_text=text, cypher=cypher, parse_stage=parse_stage,
             tokens_input=tokens_in, tokens_output=tokens_out,
             elapsed_seconds=elapsed, model=model, thinking=thinking,
+            provider_metrics=provider_metrics,
         )
     except Exception as exc:
         elapsed = time.monotonic() - t0
@@ -183,10 +185,10 @@ async def _call_provider(
     max_tokens: int,
     base_url: str | None,
     ollama_options: dict | None = None,
-) -> tuple[str, int, int, str]:
+) -> tuple[str, int, int, str, dict[str, object]]:
     """Dispatch to the correct provider SDK.
 
-    Returns (final_text, input_tokens, output_tokens, thinking_text).
+    Returns (final_text, input_tokens, output_tokens, thinking_text, provider_metrics).
     """
     provider, name = model.split("/", 1)
 
@@ -199,7 +201,7 @@ async def _call_provider(
             system=system,
             messages=messages,
         )
-        return resp.content[0].text, resp.usage.input_tokens, resp.usage.output_tokens, ""
+        return resp.content[0].text, resp.usage.input_tokens, resp.usage.output_tokens, "", {}
 
     elif provider == "ollama":
         import os
@@ -224,6 +226,7 @@ async def _call_provider(
         thinking_parts: list[str] = []
         prompt_eval_count = 0
         eval_count = 0
+        done_metrics: dict[str, object] = {}
 
         timeout = httpx.Timeout(connect=10.0, read=180.0, write=30.0, pool=30.0)
         async with httpx.AsyncClient(timeout=timeout) as client:
@@ -243,8 +246,23 @@ async def _call_provider(
                     if data.get("done"):
                         prompt_eval_count = int(data.get("prompt_eval_count") or prompt_eval_count or 0)
                         eval_count = int(data.get("eval_count") or eval_count or 0)
+                        done_metrics = {
+                            "provider": "ollama_native_chat",
+                            "prompt_eval_count": prompt_eval_count,
+                            "eval_count": eval_count,
+                            "total_duration_ns": int(data.get("total_duration") or 0),
+                            "load_duration_ns": int(data.get("load_duration") or 0),
+                            "prompt_eval_duration_ns": int(data.get("prompt_eval_duration") or 0),
+                            "eval_duration_ns": int(data.get("eval_duration") or 0),
+                        }
 
-        return "".join(content_parts), prompt_eval_count, eval_count, "".join(thinking_parts)
+        return (
+            "".join(content_parts),
+            prompt_eval_count,
+            eval_count,
+            "".join(thinking_parts),
+            done_metrics,
+        )
 
     elif provider in ("openai", "openai-compat", "gemini"):
         import os
@@ -271,7 +289,7 @@ async def _call_provider(
         )
         m = resp.choices[0].message
         usage = resp.usage
-        return m.content, usage.prompt_tokens, usage.completion_tokens, ""
+        return m.content, usage.prompt_tokens, usage.completion_tokens, "", {}
 
     else:
         raise ValueError(

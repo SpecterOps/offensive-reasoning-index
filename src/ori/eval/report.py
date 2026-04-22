@@ -15,7 +15,8 @@ CSV_FIELDNAMES = [
     "run_name", "requested_model", "resolved_model", "config_identity_json", "options_json",
     "task_id", "template_id", "tier", "category", "model",
     "score", "outcome", "hallucination",
-    "tokens_input", "tokens_output", "elapsed_seconds",
+    "tokens_input", "tokens_output", "elapsed_seconds", "task_wall_seconds",
+    "output_tokens_per_second", "tokens_per_second_source",
     "grade_mode", "question", "model_cypher", "model_thinking", "error_detail",
     "parse_stage", "inspect_log", "inspect_sample_id", "inspect_sample_uuid",
     "inspect_model_calls", "inspect_error_retries",
@@ -25,6 +26,9 @@ CSV_FIELDNAMES = [
     "attempted_policy_violations", "trajectory_log",
     "server_prompt_used", "server_prompt_name", "resource_mode",
     "resource_reads_total", "unique_resources_used", "resource_characters_total",
+    "ollama_version", "ollama_model_digest", "ollama_model_context_length",
+    "ollama_model_size_bytes", "ollama_model_size_vram_bytes",
+    "model_quantization_level", "telemetry_sample_ref",
 ]
 
 
@@ -42,6 +46,7 @@ def _row_for_result(r: "EvalResult") -> dict[str, object]:
     run_name = _run_name_for_result(r)
     requested_model = _requested_model_for_result(r)
     run_config = getattr(r, "run_config", None)
+    telemetry = getattr(r, "telemetry", None) or {}
     config_identity_json = json.dumps(run_config, sort_keys=True) if run_config else ""
     options_json = ""
     if run_config and isinstance(run_config.get("options"), dict):
@@ -63,6 +68,17 @@ def _row_for_result(r: "EvalResult") -> dict[str, object]:
         "tokens_input": r.model_response.tokens_input,
         "tokens_output": r.model_response.tokens_output,
         "elapsed_seconds": f"{r.model_response.elapsed_seconds:.2f}",
+        "task_wall_seconds": (
+            f"{telemetry.get('task_wall_seconds'):.2f}"
+            if isinstance(telemetry.get("task_wall_seconds"), int | float)
+            else ""
+        ),
+        "output_tokens_per_second": (
+            f"{telemetry.get('output_tokens_per_second'):.4f}"
+            if isinstance(telemetry.get("output_tokens_per_second"), int | float)
+            else ""
+        ),
+        "tokens_per_second_source": telemetry.get("tokens_per_second_source", ""),
         "grade_mode": r.task.grade_mode,
         "question": r.task.question,
         "model_cypher": (r.model_response.cypher or "").replace("\n", " "),
@@ -98,6 +114,13 @@ def _row_for_result(r: "EvalResult") -> dict[str, object]:
         "resource_reads_total": mcp_meta.resource_reads_total if mcp_meta else 0,
         "unique_resources_used": ",".join(mcp_meta.unique_resources_used) if mcp_meta else "",
         "resource_characters_total": mcp_meta.resource_characters_total if mcp_meta else 0,
+        "ollama_version": telemetry.get("ollama_version", ""),
+        "ollama_model_digest": telemetry.get("ollama_model_digest", ""),
+        "ollama_model_context_length": telemetry.get("ollama_model_context_length", ""),
+        "ollama_model_size_bytes": telemetry.get("ollama_model_size_bytes", ""),
+        "ollama_model_size_vram_bytes": telemetry.get("ollama_model_size_vram_bytes", ""),
+        "model_quantization_level": telemetry.get("model_quantization_level", ""),
+        "telemetry_sample_ref": telemetry.get("sample_ref", ""),
     }
 
 
@@ -133,6 +156,14 @@ def _stats(results: list["EvalResult"]) -> dict:
     non_cypher_tool_calls = sum(r.mcp.non_cypher_tool_calls for r in results if r.mcp)
     failed_tool_calls = sum(r.mcp.failed_tool_calls for r in results if r.mcp)
     policy_violations = sum(r.mcp.attempted_policy_violations for r in results if r.mcp)
+    resource_reads_total = sum(r.mcp.resource_reads_total for r in results if r.mcp)
+    resource_characters_total = sum(r.mcp.resource_characters_total for r in results if r.mcp)
+    prompt_used = any(r.mcp.server_prompt_used for r in results if r.mcp)
+    output_tps_values = [
+        r.telemetry.get("output_tokens_per_second")
+        for r in results
+        if r.telemetry and isinstance(r.telemetry.get("output_tokens_per_second"), int | float)
+    ]
     mcp_samples = sum(1 for r in results if r.mcp)
     tiers = {}
     for tier in (1, 2, 3):
@@ -151,6 +182,12 @@ def _stats(results: list["EvalResult"]) -> dict:
         "non_cypher_tool_calls": non_cypher_tool_calls,
         "failed_tool_calls": failed_tool_calls,
         "policy_violations": policy_violations,
+        "resource_reads_total": resource_reads_total,
+        "resource_characters_total": resource_characters_total,
+        "prompt_used": prompt_used,
+        "avg_output_tokens_per_second": (
+            sum(output_tps_values) / len(output_tps_values) if output_tps_values else None
+        ),
         "mcp_samples": mcp_samples,
         "tiers": tiers,
     }
@@ -167,6 +204,9 @@ def write_summary_csv(all_results: dict[str, list["EvalResult"]], output_path: P
         "hallucinations", "cypher_errors", "parse_fails", "model_errors", "infra_errors",
         "avg_tool_calls", "cypher_query_calls", "non_cypher_tool_calls",
         "failed_tool_calls", "policy_violations",
+        "avg_resource_reads", "resource_characters_total", "server_prompt_used",
+        "avg_output_tokens_per_second", "ollama_version", "ollama_model_digest",
+        "ollama_model_context_length", "model_quantization_level",
     ]
     with output_path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -182,6 +222,8 @@ def write_summary_csv(all_results: dict[str, list["EvalResult"]], output_path: P
             options_json = ""
             if first_run_config and isinstance(first_run_config.get("options"), dict):
                 options_json = json.dumps(first_run_config["options"], sort_keys=True)
+            first_telemetry = getattr(first, "telemetry", None) if first else None
+            first_telemetry = first_telemetry or {}
 
             def tier_fields(tier: int) -> tuple[int, int, int]:
                 c, t = s["tiers"][tier]
@@ -220,6 +262,18 @@ def write_summary_csv(all_results: dict[str, list["EvalResult"]], output_path: P
                 "non_cypher_tool_calls": s["non_cypher_tool_calls"],
                 "failed_tool_calls": s["failed_tool_calls"],
                 "policy_violations": s["policy_violations"],
+                "avg_resource_reads": round((s["resource_reads_total"] / s["mcp_samples"]), 2) if s["mcp_samples"] else 0.0,
+                "resource_characters_total": s["resource_characters_total"],
+                "server_prompt_used": s["prompt_used"],
+                "avg_output_tokens_per_second": (
+                    round(s["avg_output_tokens_per_second"], 4)
+                    if s["avg_output_tokens_per_second"] is not None
+                    else ""
+                ),
+                "ollama_version": first_telemetry.get("ollama_version", ""),
+                "ollama_model_digest": first_telemetry.get("ollama_model_digest", ""),
+                "ollama_model_context_length": first_telemetry.get("ollama_model_context_length", ""),
+                "model_quantization_level": first_telemetry.get("model_quantization_level", ""),
             })
 
 

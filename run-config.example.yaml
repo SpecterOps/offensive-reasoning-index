@@ -11,6 +11,11 @@ defaults:
   mcp:
     mcp_dir: ../bloodhound-mcp
     max_steps: 12
+    resource_mode: off
+  telemetry:
+    # Writes results/<run>/telemetry/{run_environment.json,models/,samples/,telemetry_summary.csv}
+    # Disable only for fast smoke/debug loops: `ori run ... --no-telemetry`.
+    enabled: true
 
 profiles:
   phase3a_direct_m4:
@@ -34,6 +39,26 @@ profiles:
     output_dir: results/phase3b-m4-mcp
     mcp:
       max_steps: 20
+      resource_mode: off
+    models:
+      - name: gemma4-26b-32k
+        model: ollama/gemma4:26b
+        options:
+          num_ctx: 32768
+
+      - name: qwen3-14b-64k
+        model: ollama/qwen3:14b
+        options:
+          num_ctx: 65536
+        max_steps: 24
+
+  phase3c_mcp_resources_m4:
+    kind: baseline-mcp
+    manifest: datasets/phase3b_manifest.json
+    output_dir: results/phase3c-m4-mcp-resources
+    mcp:
+      max_steps: 20
+      resource_mode: on-demand
     models:
       - name: gemma4-26b-32k
         model: ollama/gemma4:26b

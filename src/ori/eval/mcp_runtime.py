@@ -590,6 +590,7 @@ async def _ollama_chat_turn(
     prompt_eval_count = 0
     eval_count = 0
     final_model = model_name
+    done_metrics: dict[str, int] = {}
 
     timeout = httpx.Timeout(connect=10.0, read=300.0, write=30.0, pool=30.0)
     async with httpx.AsyncClient(timeout=timeout) as client:
@@ -613,6 +614,12 @@ async def _ollama_chat_turn(
                 if data.get("done"):
                     prompt_eval_count = int(data.get("prompt_eval_count") or prompt_eval_count or 0)
                     eval_count = int(data.get("eval_count") or eval_count or 0)
+                    done_metrics = {
+                        "total_duration_ns": int(data.get("total_duration") or 0),
+                        "load_duration_ns": int(data.get("load_duration") or 0),
+                        "prompt_eval_duration_ns": int(data.get("prompt_eval_duration") or 0),
+                        "eval_duration_ns": int(data.get("eval_duration") or 0),
+                    }
 
     return {
         "model": final_model,
@@ -621,6 +628,7 @@ async def _ollama_chat_turn(
         "tool_calls": tool_calls,
         "prompt_eval_count": prompt_eval_count,
         "eval_count": eval_count,
+        "metrics": done_metrics,
     }
 
 
@@ -652,6 +660,12 @@ async def _run_ollama_mcp_loop(
 
     total_prompt_tokens = 0
     total_completion_tokens = 0
+    total_metrics = {
+        "total_duration_ns": 0,
+        "load_duration_ns": 0,
+        "prompt_eval_duration_ns": 0,
+        "eval_duration_ns": 0,
+    }
     thinking_parts: list[str] = []
     final_content = ""
     resolved_model = model_name
@@ -667,6 +681,8 @@ async def _run_ollama_mcp_loop(
         )
         total_prompt_tokens += int(turn["prompt_eval_count"])
         total_completion_tokens += int(turn["eval_count"])
+        for key in total_metrics:
+            total_metrics[key] += int((turn.get("metrics") or {}).get(key) or 0)
         resolved_model = str(turn["model"] or resolved_model)
         thinking = str(turn["thinking"] or "")
         content = str(turn["content"] or "")
@@ -743,6 +759,12 @@ async def _run_ollama_mcp_loop(
         model=resolved_model,
         thinking="".join(thinking_parts),
         error=None if final_content else "MCP loop exhausted without final answer",
+        provider_metrics={
+            "provider": "ollama_native_chat_mcp_loop",
+            "prompt_eval_count": total_prompt_tokens,
+            "eval_count": total_completion_tokens,
+            **total_metrics,
+        },
     )
     trajectory = _trajectory_from_messages(inspect_messages, final_answer_raw=final_content)
     trajectory.server_prompt_used = bool(server_prompt_text.strip())
@@ -789,6 +811,7 @@ def ori_mcp_solver(
     resource_mode: str = RESOURCE_MODE_OFF,
 ) -> Generate:
     async def solve(state: TaskState, generate: Generate) -> TaskState:
+        task_t0 = time.monotonic()
         metadata = state.metadata
         task = _task_from_dict(metadata["ori_task"])
         ref_result = _cypher_result_from_dict(metadata["ref_result"])
@@ -848,6 +871,7 @@ def ori_mcp_solver(
                     model=output.model or model_name,
                     thinking="",
                     error=output.error,
+                    provider_metrics={},
                 )
             except Exception as exc:
                 model_response = ModelResponse(
@@ -860,6 +884,7 @@ def ori_mcp_solver(
                     model=model_name,
                     thinking="",
                     error=str(exc),
+                    provider_metrics={},
                 )
                 state.output = ModelOutput.from_content(model=model_name, content="", error=str(exc))
 
@@ -874,6 +899,7 @@ def ori_mcp_solver(
         state.store.set("ori_model_response", _model_response_to_dict(model_response))
         state.store.set("ori_mcp_trajectory", _mcp_metadata_to_dict(trajectory))
         state.store.set("ori_model_calls", 1)
+        state.store.set("ori_task_wall_seconds", time.monotonic() - task_t0)
         return state
 
     return solve
@@ -973,6 +999,7 @@ def _result_from_sample(sample: EvalSample, log: EvalLog):
         model_result=CypherResult(success=True, nodes=[], node_names=set(), raw={}),
         inspect=inspect_meta,
         mcp=mcp_meta,
+        task_wall_seconds=float(sample.store.get("ori_task_wall_seconds", model_response.elapsed_seconds)),
     )
 
 

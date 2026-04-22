@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -141,6 +142,7 @@ def _model_response_to_dict(response: ModelResponse) -> dict[str, Any]:
         "model": response.model,
         "thinking": response.thinking,
         "error": response.error,
+        "provider_metrics": dict(response.provider_metrics),
     }
 
 
@@ -155,6 +157,7 @@ def _model_response_from_dict(data: dict[str, Any]) -> ModelResponse:
         model=data.get("model", ""),
         thinking=data.get("thinking", ""),
         error=data.get("error"),
+        provider_metrics=dict(data.get("provider_metrics") or {}),
     )
 
 
@@ -216,6 +219,7 @@ def _use_adapter_path(model: str) -> bool:
 @solver
 def ori_direct_cypher_solver() -> Generate:
     async def solve(state: TaskState, generate: Generate) -> TaskState:
+        task_t0 = time.monotonic()
         metadata = state.metadata
         task = _task_from_dict(metadata["ori_task"])
         model_name = metadata.get("requested_model", str(state.model))
@@ -259,6 +263,7 @@ def ori_direct_cypher_solver() -> Generate:
                     model=output.model or model_name,
                     thinking="",
                     error=output.error,
+                    provider_metrics={},
                 )
             except Exception as exc:
                 model_response = ModelResponse(
@@ -271,6 +276,7 @@ def ori_direct_cypher_solver() -> Generate:
                     model=model_name,
                     thinking="",
                     error=str(exc),
+                    provider_metrics={},
                 )
                 state.output = ModelOutput.from_content(
                     model=model_name,
@@ -288,6 +294,7 @@ def ori_direct_cypher_solver() -> Generate:
         state.store.set("ori_model_response", _model_response_to_dict(model_response))
         state.store.set("ori_model_result", _cypher_result_to_dict(model_result))
         state.store.set("ori_model_calls", 1)
+        state.store.set("ori_task_wall_seconds", time.monotonic() - task_t0)
         return state
 
     return solve
@@ -390,6 +397,7 @@ def _result_from_sample(sample: EvalSample, log: EvalLog) -> EvalResult:
         ref_result=_cypher_result_from_dict(sample.metadata["ref_result"]),
         model_result=model_result,
         inspect=inspect_meta,
+        task_wall_seconds=float(sample.store.get("ori_task_wall_seconds", model_response.elapsed_seconds)),
     )
 
 

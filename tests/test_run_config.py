@@ -25,6 +25,9 @@ defaults:
   mcp:
     mcp_dir: bloodhound-mcp
     max_steps: 22
+    resource_mode: on-demand
+  telemetry:
+    enabled: false
 profiles:
   phase3b:
     kind: baseline-mcp
@@ -44,6 +47,8 @@ profiles:
     assert resolved.health_timeout_seconds == 11.0
     assert resolved.health_poll_interval == 1.5
     assert resolved.max_steps == 22
+    assert resolved.resource_mode == "on-demand"
+    assert resolved.telemetry_enabled is False
     assert resolved.manifest == str((tmp_path / "datasets/phase3b_manifest.json").resolve())
     assert resolved.output_dir == str((tmp_path / "results/out").resolve())
     assert resolved.mcp_dir == str(mcp_dir.resolve())
@@ -84,6 +89,8 @@ profiles:
     kind: smoke-mcp
     manifest: manifest.json
     output_dir: out
+    mcp:
+      resource_mode: off
 """
     )
 
@@ -93,14 +100,60 @@ profiles:
         overrides=RunConfigOverrides(
             concurrency=4,
             max_steps=30,
+            resource_mode="on-demand",
             health_timeout_seconds=10,
             health_poll_interval=0.5,
         ),
     )
     assert resolved.concurrency == 4
     assert resolved.max_steps == 30
+    assert resolved.resource_mode == "on-demand"
     assert resolved.health_timeout_seconds == 10.0
     assert resolved.health_poll_interval == 0.5
+
+
+def test_load_run_profile_defaults_resource_mode_to_off(tmp_path: Path) -> None:
+    config = tmp_path / "run.yaml"
+    config.write_text(
+        """
+version: 1
+profiles:
+  smoke:
+    kind: smoke-mcp
+    manifest: manifest.json
+    output_dir: out
+"""
+    )
+
+    resolved = load_run_profile(config, profile_name="smoke")
+    assert resolved.resource_mode == "off"
+    assert resolved.telemetry_enabled is True
+
+
+def test_load_run_profile_applies_telemetry_override(tmp_path: Path) -> None:
+    config = tmp_path / "run.yaml"
+    config.write_text(
+        """
+version: 1
+defaults:
+  telemetry:
+    enabled: true
+profiles:
+  phase:
+    kind: baseline
+    manifest: manifest.json
+    output_dir: out
+    models:
+      - model: ollama/gemma4:e4b
+"""
+    )
+
+    resolved = load_run_profile(
+        config,
+        profile_name="phase",
+        overrides=RunConfigOverrides(telemetry_enabled=False),
+    )
+    assert resolved.telemetry_enabled is False
 
 
 def test_list_run_profiles_preserves_order_and_enabled(tmp_path: Path) -> None:

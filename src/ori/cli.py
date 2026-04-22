@@ -201,12 +201,16 @@ def _effective_run_config(
     *,
     model_base_url: str | None = None,
     max_steps: int | None = None,
+    resource_mode: str | None = None,
+    telemetry_enabled: bool | None = None,
 ) -> dict[str, Any]:
     config = dict(run_spec.config_identity)
     if model_base_url is not None and "model_base_url" not in config:
         config["model_base_url"] = model_base_url
     if max_steps is not None and "max_steps" not in config:
         config["max_steps"] = max_steps
+    if resource_mode is not None and "resource_mode" not in config:
+        config["resource_mode"] = resource_mode
     return config
 
 
@@ -220,6 +224,9 @@ async def _run_baseline_with_specs(
     default_model_base_url: str | None = None,
     model_base_url_override: str | None = None,
     max_model_reruns_on_infra: int = 1,
+    health_timeout_seconds: float = 60.0,
+    health_poll_interval: float = 5.0,
+    telemetry_enabled: bool = True,
 ) -> dict[str, list]:
     from .eval.runner import run_eval_cli_bare
 
@@ -248,8 +255,15 @@ async def _run_baseline_with_specs(
             ollama_options=run_spec.ollama_options,
             max_model_reruns_on_infra=max_model_reruns_on_infra,
             run_name=run_spec.run_name,
-            run_config=_effective_run_config(run_spec, model_base_url=effective_model_base_url),
+            run_config=_effective_run_config(
+                run_spec,
+                model_base_url=effective_model_base_url,
+                telemetry_enabled=telemetry_enabled,
+            ),
             model_base_url=effective_model_base_url,
+            health_timeout_seconds=health_timeout_seconds,
+            health_poll_interval=health_poll_interval,
+            telemetry_enabled=telemetry_enabled,
         )
     return results
 
@@ -263,11 +277,14 @@ async def _run_baseline_mcp_with_specs(
     bhce_url: str | None,
     mcp_dir: Path,
     max_steps: int,
+    resource_mode: str,
     default_model_base_url: str | None = None,
     max_steps_override: int | None = None,
     model_base_url_override: str | None = None,
     max_model_reruns_on_infra: int = 1,
-    resource_mode: str = "off",
+    health_timeout_seconds: float = 60.0,
+    health_poll_interval: float = 5.0,
+    telemetry_enabled: bool = True,
 ) -> dict[str, list]:
     from .eval.runner import run_eval_mcp_cli_bare
 
@@ -308,8 +325,13 @@ async def _run_baseline_mcp_with_specs(
                 run_spec,
                 model_base_url=effective_model_base_url,
                 max_steps=effective_max_steps,
+                resource_mode=resource_mode,
+                telemetry_enabled=telemetry_enabled,
             ),
             model_base_url=effective_model_base_url,
+            health_timeout_seconds=health_timeout_seconds,
+            health_poll_interval=health_poll_interval,
+            telemetry_enabled=telemetry_enabled,
         )
     return results
 
@@ -392,6 +414,7 @@ def generate(
     multiple=True,
     help="Repeatable Ollama option in KEY=VALUE form, e.g. --ollama-option num_ctx=16384",
 )
+@click.option("--telemetry/--no-telemetry", "telemetry_enabled", default=True, show_default=True, help="Write portable run/model/system telemetry artifacts.")
 def eval(
     manifest: str,
     model: str,
@@ -399,6 +422,7 @@ def eval(
     concurrency: int,
     bhce_url: str | None,
     ollama_options_raw: tuple[str, ...],
+    telemetry_enabled: bool,
 ) -> None:
     """Run evaluation: generate tasks from manifest, run model, grade results."""
     import asyncio
@@ -412,7 +436,8 @@ def eval(
         bhce_url=bhce_url,
         ollama_options=run_spec.ollama_options,
         run_name=run_spec.run_name,
-        run_config=run_spec.config_identity,
+        run_config=_effective_run_config(run_spec, telemetry_enabled=telemetry_enabled),
+        telemetry_enabled=telemetry_enabled,
     ))
 
 
@@ -437,6 +462,7 @@ def eval(
     multiple=True,
     help="Repeatable Ollama option in KEY=VALUE form, e.g. --ollama-option num_ctx=16384",
 )
+@click.option("--telemetry/--no-telemetry", "telemetry_enabled", default=True, show_default=True, help="Write portable run/model/system telemetry artifacts.")
 def eval_mcp(
     manifest: str,
     model: str,
@@ -447,6 +473,7 @@ def eval_mcp(
     max_steps: int,
     resource_mode: str,
     ollama_options_raw: tuple[str, ...],
+    telemetry_enabled: bool,
 ) -> None:
     """Run MCP-mode evaluation using BloodHound MCP tools."""
     import asyncio
@@ -461,10 +488,11 @@ def eval_mcp(
         bhce_url=bhce_url,
         mcp_dir=Path(mcp_dir),
         max_steps=max_steps,
+        resource_mode=resource_mode,
         ollama_options=run_spec.ollama_options,
         run_name=run_spec.run_name,
         run_config=run_spec.config_identity,
-        resource_mode=resource_mode,
+        telemetry_enabled=telemetry_enabled,
     ))
 
 
@@ -580,10 +608,17 @@ def smoke_mcp(
 @click.option("--concurrency", type=int, default=None, help="Override run concurrency")
 @click.option("--mcp-dir", type=click.Path(), default=None, help="Override local bloodhound-mcp path")
 @click.option("--max-steps", type=int, default=None, help="Override MCP max tool/agent steps")
+@click.option(
+    "--resource-mode",
+    type=click.Choice(["off", "on-demand"]),
+    default=None,
+    help="Override MCP resource mode for config-driven runs.",
+)
 @click.option("--model-base-url", default=None, help="Override model provider base URL")
 @click.option("--max-model-reruns-on-infra", type=int, default=None, help="Override full-run retries after INFRA_ERROR")
 @click.option("--health-timeout", type=float, default=None, help="Override BloodHound health timeout in seconds")
 @click.option("--health-poll-interval", type=float, default=None, help="Override BloodHound health poll interval in seconds")
+@click.option("--telemetry/--no-telemetry", "telemetry_enabled", default=None, help="Override telemetry artifact collection for real eval/baseline profiles.")
 def run_from_config(
     config_path: str,
     profile: str | None,
@@ -596,10 +631,12 @@ def run_from_config(
     concurrency: int | None,
     mcp_dir: str | None,
     max_steps: int | None,
+    resource_mode: str | None,
     model_base_url: str | None,
     max_model_reruns_on_infra: int | None,
     health_timeout: float | None,
     health_poll_interval: float | None,
+    telemetry_enabled: bool | None,
 ) -> None:
     """Run ORI from a single versioned config file."""
     import asyncio
@@ -621,10 +658,12 @@ def run_from_config(
         concurrency=concurrency,
         mcp_dir=mcp_dir,
         max_steps=max_steps,
+        resource_mode=resource_mode,
         model_base_url=model_base_url,
         max_model_reruns_on_infra=max_model_reruns_on_infra,
         health_timeout_seconds=health_timeout,
         health_poll_interval=health_poll_interval,
+        telemetry_enabled=telemetry_enabled,
     )
 
     def _run_one_profile(resolved) -> None:
@@ -655,10 +694,12 @@ def run_from_config(
                     run_config=_effective_run_config(
                         run_spec,
                         model_base_url=effective_model_base_url,
+                        telemetry_enabled=resolved.telemetry_enabled,
                     ),
                     model_base_url=effective_model_base_url,
                     health_timeout_seconds=resolved.health_timeout_seconds,
                     health_poll_interval=resolved.health_poll_interval,
+                    telemetry_enabled=resolved.telemetry_enabled,
                 )
             )
             return
@@ -690,16 +731,20 @@ def run_from_config(
                     max_model_reruns_on_infra=resolved.max_model_reruns_on_infra,
                     mcp_dir=Path(resolved.mcp_dir),
                     max_steps=effective_max_steps,
+                    resource_mode=resolved.resource_mode,
                     ollama_options=run_spec.ollama_options,
                     run_name=run_spec.run_name,
                     run_config=_effective_run_config(
                         run_spec,
                         model_base_url=effective_model_base_url,
                         max_steps=effective_max_steps,
+                        resource_mode=resolved.resource_mode,
+                        telemetry_enabled=resolved.telemetry_enabled,
                     ),
                     model_base_url=effective_model_base_url,
                     health_timeout_seconds=resolved.health_timeout_seconds,
                     health_poll_interval=resolved.health_poll_interval,
+                    telemetry_enabled=resolved.telemetry_enabled,
                 )
             )
             return
@@ -719,6 +764,9 @@ def run_from_config(
                     default_model_base_url=resolved.model_base_url,
                     model_base_url_override=model_base_url,
                     max_model_reruns_on_infra=resolved.max_model_reruns_on_infra,
+                    health_timeout_seconds=resolved.health_timeout_seconds,
+                    health_poll_interval=resolved.health_poll_interval,
+                    telemetry_enabled=resolved.telemetry_enabled,
                 )
             )
             combined_csv_path = Path(resolved.output_dir) / "baseline_combined.csv"
@@ -745,10 +793,14 @@ def run_from_config(
                     bhce_url=resolved.bhce_url,
                     mcp_dir=Path(resolved.mcp_dir),
                     max_steps=resolved.max_steps,
+                    resource_mode=resolved.resource_mode,
                     default_model_base_url=resolved.model_base_url,
                     max_steps_override=max_steps,
                     model_base_url_override=model_base_url,
                     max_model_reruns_on_infra=resolved.max_model_reruns_on_infra,
+                    health_timeout_seconds=resolved.health_timeout_seconds,
+                    health_poll_interval=resolved.health_poll_interval,
+                    telemetry_enabled=resolved.telemetry_enabled,
                 )
             )
             combined_csv_path = Path(resolved.output_dir) / "baseline_combined.csv"
@@ -782,6 +834,7 @@ def run_from_config(
                     bhce_url=resolved.bhce_url,
                     mcp_dir=Path(resolved.mcp_dir),
                     max_steps=resolved.max_steps,
+                    resource_mode=resolved.resource_mode,
                 )
             )
             print_smoke_eval(result)
@@ -889,6 +942,7 @@ def preflight(
 @click.option("--output-dir", "-o", required=True, type=click.Path(), help="Directory for per-model CSV files")
 @click.option("--concurrency", default=None, type=int, help="Override concurrency for all models")
 @click.option("--bhce-url", default=None, help="BH CE base URL (overrides BLOODHOUND_DOMAIN env var)")
+@click.option("--telemetry/--no-telemetry", "telemetry_enabled", default=True, show_default=True, help="Write portable run/model/system telemetry artifacts.")
 def baseline(
     manifest: str,
     models: tuple[str, ...],
@@ -896,6 +950,7 @@ def baseline(
     output_dir: str,
     concurrency: int | None,
     bhce_url: str | None,
+    telemetry_enabled: bool,
 ) -> None:
     """Evaluate multiple models against the same manifest and print a comparison table.
 
@@ -913,6 +968,7 @@ def baseline(
             output_dir=out,
             concurrency_override=concurrency,
             bhce_url=bhce_url,
+            telemetry_enabled=telemetry_enabled,
         )
     )
 
@@ -936,6 +992,7 @@ def _run_baseline_mcp(
     mcp_dir: str,
     max_steps: int,
     resource_mode: str,
+    telemetry_enabled: bool = True,
 ) -> None:
     import asyncio
     from .eval.report import print_comparison, write_combined_csv, write_summary_csv
@@ -952,6 +1009,7 @@ def _run_baseline_mcp(
             mcp_dir=Path(mcp_dir),
             max_steps=max_steps,
             resource_mode=resource_mode,
+            telemetry_enabled=telemetry_enabled,
         )
     )
 
@@ -981,6 +1039,7 @@ def _run_baseline_mcp(
     show_default=True,
     help="Whether MCP reference resources are available to the model.",
 )
+@click.option("--telemetry/--no-telemetry", "telemetry_enabled", default=True, show_default=True, help="Write portable run/model/system telemetry artifacts.")
 def baseline_mcp(
     manifest: str,
     models: tuple[str, ...],
@@ -991,6 +1050,7 @@ def baseline_mcp(
     mcp_dir: str,
     max_steps: int,
     resource_mode: str,
+    telemetry_enabled: bool,
 ) -> None:
     """Evaluate multiple models in MCP mode and print a comparison table."""
     _run_baseline_mcp(
@@ -1003,6 +1063,7 @@ def baseline_mcp(
         mcp_dir=mcp_dir,
         max_steps=max_steps,
         resource_mode=resource_mode,
+        telemetry_enabled=telemetry_enabled,
     )
 
 
@@ -1015,6 +1076,7 @@ def baseline_mcp(
 @click.option("--bhce-url", default=None, help="BH CE base URL (overrides BLOODHOUND_DOMAIN env var)")
 @click.option("--mcp-dir", default="../bloodhound-mcp", type=click.Path(exists=True), show_default=True, help="Path to local bloodhound-mcp repo")
 @click.option("--max-steps", default=12, show_default=True, help="Max agent/tool steps")
+@click.option("--telemetry/--no-telemetry", "telemetry_enabled", default=True, show_default=True, help="Write portable run/model/system telemetry artifacts.")
 def baseline_mcp_resources(
     manifest: str,
     models: tuple[str, ...],
@@ -1024,6 +1086,7 @@ def baseline_mcp_resources(
     bhce_url: str | None,
     mcp_dir: str,
     max_steps: int,
+    telemetry_enabled: bool,
 ) -> None:
     """Run the Phase 3C resources-enabled multi-model MCP baseline sweep."""
     _run_baseline_mcp(
@@ -1036,6 +1099,7 @@ def baseline_mcp_resources(
         mcp_dir=mcp_dir,
         max_steps=max_steps,
         resource_mode="on-demand",
+        telemetry_enabled=telemetry_enabled,
     )
 
 

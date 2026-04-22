@@ -148,3 +148,28 @@ def test_write_combined_csv_preserves_model_thinking(tmp_path) -> None:
         rows = list(csv.DictReader(f))
     assert len(rows) == 1
     assert rows[0]["model_thinking"] == "first think then answer"
+
+
+def test_write_combined_csv_includes_telemetry_columns(tmp_path) -> None:
+    output = tmp_path / "baseline_combined.csv"
+    result = _result("CORRECT", score=1.0)
+    result.task_wall_seconds = 2.5
+    result.telemetry = {
+        "task_wall_seconds": 2.5,
+        "output_tokens_per_second": 12.34567,
+        "tokens_per_second_source": "model_elapsed_seconds",
+        "ollama_version": "0.12.6",
+        "ollama_model_digest": "sha256:test",
+        "ollama_model_context_length": 32768,
+        "model_quantization_level": "Q4_K_M",
+        "sample_ref": "telemetry/samples/test.jsonl:L1",
+    }
+    write_combined_csv({"ollama/a:latest": [result]}, output)
+    with output.open() as f:
+        rows = list(csv.DictReader(f))
+    assert rows[0]["task_wall_seconds"] == "2.50"
+    assert rows[0]["output_tokens_per_second"] == "12.3457"
+    assert rows[0]["tokens_per_second_source"] == "model_elapsed_seconds"
+    assert rows[0]["ollama_version"] == "0.12.6"
+    assert rows[0]["model_quantization_level"] == "Q4_K_M"
+    assert rows[0]["telemetry_sample_ref"] == "telemetry/samples/test.jsonl:L1"

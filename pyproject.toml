@@ -17,6 +17,7 @@ dependencies = [
     "python-dotenv>=1.0",
     "inspect-ai>=0.3.203",
     "mcp>=1.17.0",
+    "psutil>=5.9",
 ]
 
 [project.scripts]

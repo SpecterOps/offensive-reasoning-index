@@ -15,6 +15,7 @@ from .inspect_runtime import InspectEvalMetadata, run_eval_with_inspect
 from .mcp_runtime import MCPRunMetadata, RESOURCE_MODE_OFF, run_mcp_eval_with_inspect
 from .report import write_csv, print_summary
 from .tasks import Task, generate_mcp_tasks, generate_tasks
+from ..telemetry import record_eval_telemetry
 
 
 @dataclass
@@ -29,6 +30,8 @@ class EvalResult:
     run_name: str | None = None
     requested_model: str | None = None
     run_config: dict[str, Any] | None = None
+    task_wall_seconds: float | None = None
+    telemetry: dict[str, Any] | None = None
 
 
 def _has_infra_errors(results: list[EvalResult]) -> bool:
@@ -67,6 +70,7 @@ async def run_eval(
 
     async def run_one(task: Task, idx: int) -> EvalResult:
         async with sem:
+            task_t0 = asyncio.get_running_loop().time()
             print(f"  [{idx}/{len(tasks)}] {task.id} ({task.tier=}, {task.grade_mode})")
             model_resp = await call_model(task, model, base_url=base_url, ollama_options=ollama_options)
 
@@ -92,6 +96,7 @@ async def run_eval(
                 run_name=run_name or model,
                 requested_model=model,
                 run_config=run_config,
+                task_wall_seconds=asyncio.get_running_loop().time() - task_t0,
             )
 
     coros = [run_one(task, i + 1) for i, task in enumerate(tasks)]
@@ -112,6 +117,7 @@ async def run_eval_cli_bare(
     health_poll_interval: float = 5.0,
     run_name: str | None = None,
     run_config: dict[str, Any] | None = None,
+    telemetry_enabled: bool = True,
 ) -> list[EvalResult]:
     """Like run_eval_cli but returns results for multi-model comparison."""
     manifest = json.loads(manifest_path.read_text())
@@ -155,6 +161,16 @@ async def run_eval_cli_bare(
         )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    record_eval_telemetry(
+        results,
+        output_path=output_path,
+        model=model,
+        run_name=run_name or model,
+        requested_model=model,
+        run_config=run_config,
+        model_base_url=model_base_url,
+        enabled=telemetry_enabled,
+    )
     write_csv(results, output_path)
     print_summary(results, run_name or model)
     return results
@@ -173,6 +189,7 @@ async def run_eval_cli(
     health_poll_interval: float = 5.0,
     run_name: str | None = None,
     run_config: dict[str, Any] | None = None,
+    telemetry_enabled: bool = True,
 ) -> None:
     """Entry point called from the CLI."""
     manifest = json.loads(manifest_path.read_text())
@@ -220,6 +237,16 @@ async def run_eval_cli(
         )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    record_eval_telemetry(
+        results,
+        output_path=output_path,
+        model=model,
+        run_name=run_name or model,
+        requested_model=model,
+        run_config=run_config,
+        model_base_url=model_base_url,
+        enabled=telemetry_enabled,
+    )
     write_csv(results, output_path)
     print_summary(results, run_name or model)
     print(f"\nResults written to {output_path}")
@@ -235,12 +262,13 @@ async def run_eval_mcp_cli_bare(
     max_model_reruns_on_infra: int = 1,
     mcp_dir: Path | None = None,
     max_steps: int = 12,
+    resource_mode: str = RESOURCE_MODE_OFF,
     model_base_url: str | None = None,
     health_timeout_seconds: float = 60.0,
     health_poll_interval: float = 5.0,
     run_name: str | None = None,
     run_config: dict[str, Any] | None = None,
-    resource_mode: str = RESOURCE_MODE_OFF,
+    telemetry_enabled: bool = True,
 ) -> list[EvalResult]:
     """Run MCP-mode evaluation and return results for multi-model comparison."""
     manifest = json.loads(manifest_path.read_text())
@@ -287,6 +315,16 @@ async def run_eval_mcp_cli_bare(
         )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    record_eval_telemetry(
+        results,
+        output_path=output_path,
+        model=model,
+        run_name=run_name or model,
+        requested_model=model,
+        run_config=run_config,
+        model_base_url=model_base_url,
+        enabled=telemetry_enabled,
+    )
     write_csv(results, output_path)
     print_summary(results, run_name or model)
     return results
@@ -302,12 +340,13 @@ async def run_eval_mcp_cli(
     mcp_dir: Path | None = None,
     max_steps: int = 12,
     ollama_options: dict | None = None,
+    resource_mode: str = RESOURCE_MODE_OFF,
     model_base_url: str | None = None,
     health_timeout_seconds: float = 60.0,
     health_poll_interval: float = 5.0,
     run_name: str | None = None,
     run_config: dict[str, Any] | None = None,
-    resource_mode: str = RESOURCE_MODE_OFF,
+    telemetry_enabled: bool = True,
 ) -> None:
     """Entry point called from the CLI for MCP-mode evaluation."""
     manifest = json.loads(manifest_path.read_text())
@@ -357,6 +396,16 @@ async def run_eval_mcp_cli(
         )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    record_eval_telemetry(
+        results,
+        output_path=output_path,
+        model=model,
+        run_name=run_name or model,
+        requested_model=model,
+        run_config=run_config,
+        model_base_url=model_base_url,
+        enabled=telemetry_enabled,
+    )
     write_csv(results, output_path)
     print_summary(results, run_name or model)
     print(f"\nResults written to {output_path}")

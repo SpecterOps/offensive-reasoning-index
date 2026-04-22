@@ -22,6 +22,8 @@ class RunConfigOverrides:
     max_model_reruns_on_infra: int | None = None
     health_timeout_seconds: float | None = None
     health_poll_interval: float | None = None
+    resource_mode: str | None = None
+    telemetry_enabled: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -39,6 +41,8 @@ class ResolvedRunProfile:
     health_poll_interval: float
     mcp_dir: str | None
     max_steps: int | None
+    resource_mode: str
+    telemetry_enabled: bool
     model_entry: str | dict[str, Any] | None
     model_entries: list[str | dict[str, Any]] | None
 
@@ -143,6 +147,24 @@ def _merged_nested_value(
     return fallback
 
 
+def _normalize_resource_mode(raw_mode: Any) -> str:
+    if raw_mode is None:
+        return "off"
+    if not isinstance(raw_mode, str):
+        raise ValueError("MCP resource_mode must be a string when present.")
+    if raw_mode not in {"off", "on-demand"}:
+        raise ValueError("Unsupported resource_mode {!r}. Supported values: off, on-demand".format(raw_mode))
+    return raw_mode
+
+
+def _normalize_telemetry_enabled(raw_value: Any) -> bool:
+    if raw_value is None:
+        return True
+    if not isinstance(raw_value, bool):
+        raise ValueError("telemetry.enabled must be a boolean when present.")
+    return raw_value
+
+
 def load_run_profile(
     config_path: Path,
     *,
@@ -229,6 +251,26 @@ def load_run_profile(
         "max_steps",
         fallback=12,
     )
+    resource_mode = _normalize_resource_mode(
+        _merged_nested_value(
+            overrides.resource_mode,
+            profile,
+            defaults,
+            "mcp",
+            "resource_mode",
+            fallback="off",
+        )
+    )
+    telemetry_enabled = _normalize_telemetry_enabled(
+        _merged_nested_value(
+            overrides.telemetry_enabled,
+            profile,
+            defaults,
+            "telemetry",
+            "enabled",
+            fallback=True,
+        )
+    )
 
     model_entry = profile.get("model")
     model_entries = profile.get("models")
@@ -269,6 +311,8 @@ def load_run_profile(
         health_poll_interval=float(health_poll_interval),
         mcp_dir=mcp_dir,
         max_steps=int(max_steps) if max_steps is not None else None,
+        resource_mode=resource_mode,
+        telemetry_enabled=telemetry_enabled,
         model_entry=model_entry,
         model_entries=model_entries,
     )

@@ -1546,6 +1546,7 @@ dependencies = [
     { name = "inspect-ai" },
     { name = "mcp" },
     { name = "openai" },
+    { name = "psutil" },
     { name = "python-dotenv" },
     { name = "pyyaml" },
 ]
@@ -1566,6 +1567,7 @@ requires-dist = [
     { name = "inspect-ai", specifier = ">=0.3.203" },
     { name = "mcp", specifier = ">=1.17.0" },
     { name = "openai", specifier = ">=1.0" },
+    { name = "psutil", specifier = ">=5.9" },
     { name = "python-dotenv", specifier = ">=1.0" },
     { name = "pyyaml", specifier = ">=6.0" },
 ]
