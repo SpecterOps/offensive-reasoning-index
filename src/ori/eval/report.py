@@ -127,7 +127,8 @@ def _row_for_result(r: EvalResult) -> dict[str, object]:
         "model_thinking": (r.model_response.thinking or "").replace("\n", " "),
         "error_detail": (
             r.grade.details
-            if r.grade.outcome in ("CYPHER_ERROR", "MODEL_ERROR", "INFRA_ERROR")
+            if r.grade.outcome
+            in ("CYPHER_ERROR", "QUERY_TOO_EXPENSIVE", "MODEL_ERROR", "INFRA_ERROR")
             else ""
         ),
         "parse_stage": r.model_response.parse_stage,
@@ -189,7 +190,8 @@ def _stats(results: list[EvalResult]) -> dict:
     total = len(results)
     correct = sum(1 for r in results if r.grade.score == 1.0)
     hallucs = sum(1 for r in results if r.grade.hallucination)
-    errors = sum(1 for r in results if r.grade.outcome == "CYPHER_ERROR")
+    cypher_errors = sum(1 for r in results if r.grade.outcome == "CYPHER_ERROR")
+    query_too_expensive = sum(1 for r in results if r.grade.outcome == "QUERY_TOO_EXPENSIVE")
     parse_fails = sum(1 for r in results if r.grade.outcome == "PARSE_FAIL")
     model_errors = sum(1 for r in results if r.grade.outcome == "MODEL_ERROR")
     infra_errors = sum(1 for r in results if r.grade.outcome == "INFRA_ERROR")
@@ -215,7 +217,8 @@ def _stats(results: list[EvalResult]) -> dict:
         "total": total,
         "correct": correct,
         "hallucs": hallucs,
-        "errors": errors,
+        "cypher_errors": cypher_errors,
+        "query_too_expensive": query_too_expensive,
         "parse_fails": parse_fails,
         "model_errors": model_errors,
         "infra_errors": infra_errors,
@@ -258,6 +261,7 @@ def write_summary_csv(all_results: dict[str, list[EvalResult]], output_path: Pat
         "tier3_pct",
         "hallucinations",
         "cypher_errors",
+        "query_too_expensive",
         "parse_fails",
         "model_errors",
         "infra_errors",
@@ -323,7 +327,8 @@ def write_summary_csv(all_results: dict[str, list[EvalResult]], output_path: Pat
                     "tier3_total": t3t,
                     "tier3_pct": t3p,
                     "hallucinations": s["hallucs"],
-                    "cypher_errors": s["errors"],
+                    "cypher_errors": s["cypher_errors"],
+                    "query_too_expensive": s["query_too_expensive"],
                     "parse_fails": s["parse_fails"],
                     "model_errors": s["model_errors"],
                     "infra_errors": s["infra_errors"],
@@ -357,15 +362,15 @@ def write_summary_csv(all_results: dict[str, list[EvalResult]], output_path: Pat
 def print_comparison(all_results: dict[str, list[EvalResult]]) -> None:
     """Print a multi-model comparison table."""
     col_w = 36
-    print("\n" + "=" * 121)
+    print("\n" + "=" * 129)
     print("BASELINE COMPARISON")
-    print("=" * 121)
+    print("=" * 129)
     header = (
         f"{'Model':<{col_w}} {'Overall':>8} {'Tier1':>7} {'Tier2':>7} {'Tier3':>7} "
-        f"{'Hallucs':>8} {'Errors':>7} {'Fails':>6} {'ModelErr':>9} {'InfraErr':>9}"
+        f"{'Hallucs':>8} {'CyErr':>7} {'QExp':>6} {'Fails':>6} {'ModelErr':>9} {'InfraErr':>9}"
     )
     print(header)
-    print("-" * 121)
+    print("-" * 129)
 
     for model, results in all_results.items():
         s = _stats(results)
@@ -379,7 +384,8 @@ def print_comparison(all_results: dict[str, list[EvalResult]]) -> None:
         print(
             f"{short_model:<{col_w}} {s['correct']:>4}/{s['total']:<3} "
             f"{tp(1):>7} {tp(2):>7} {tp(3):>7} "
-            f"{s['hallucs']:>8} {s['errors']:>7} {s['parse_fails']:>6} "
+            f"{s['hallucs']:>8} {s['cypher_errors']:>7} {s['query_too_expensive']:>6} "
+            f"{s['parse_fails']:>6} "
             f"{s['model_errors']:>9} {s['infra_errors']:>9}"
         )
         if s["mcp_samples"]:
@@ -390,7 +396,7 @@ def print_comparison(all_results: dict[str, list[EvalResult]]) -> None:
                 f"{'toolfail':>9} {s['failed_tool_calls']:>9} {'policy':>9} {s['policy_violations']:>9}"  # noqa: E501
             )
 
-    print("=" * 121)
+    print("=" * 129)
 
 
 def print_summary(results: list[EvalResult], model: str) -> None:
@@ -400,6 +406,7 @@ def print_summary(results: list[EvalResult], model: str) -> None:
     hallucinations = sum(1 for r in results if r.grade.hallucination)
     parse_fails = sum(1 for r in results if r.grade.outcome == "PARSE_FAIL")
     cypher_errors = sum(1 for r in results if r.grade.outcome == "CYPHER_ERROR")
+    query_too_expensive = sum(1 for r in results if r.grade.outcome == "QUERY_TOO_EXPENSIVE")
     model_errors = sum(1 for r in results if r.grade.outcome == "MODEL_ERROR")
     infra_errors = sum(1 for r in results if r.grade.outcome == "INFRA_ERROR")
 
@@ -417,7 +424,8 @@ def print_summary(results: list[EvalResult], model: str) -> None:
     print(f"Tier 1: {tier_score(1)}  |  Tier 2: {tier_score(2)}  |  Tier 3: {tier_score(3)}")
     print(
         f"Hallucinations: {hallucinations}  |  Parse failures: {parse_fails}  |  "
-        f"Cypher errors: {cypher_errors}  |  Model errors: {model_errors}  |  Infra errors: {infra_errors}"  # noqa: E501
+        f"Cypher errors: {cypher_errors}  |  Query too expensive: {query_too_expensive}  |  "
+        f"Model errors: {model_errors}  |  Infra errors: {infra_errors}"
     )
     if any(r.mcp for r in results):
         mcp = _stats(results)

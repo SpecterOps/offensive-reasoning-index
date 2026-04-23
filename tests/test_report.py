@@ -63,6 +63,15 @@ def test_print_summary_includes_infra_errors(capsys) -> None:
     assert "Infra errors: 1" in out
 
 
+def test_print_summary_includes_query_too_expensive(capsys) -> None:
+    print_summary(
+        [_result("QUERY_TOO_EXPENSIVE"), _result("CORRECT", score=1.0)],
+        "ollama/test:latest",
+    )
+    out = capsys.readouterr().out
+    assert "Query too expensive: 1" in out
+
+
 def test_print_comparison_includes_model_error_column(capsys) -> None:
     print_comparison(
         {
@@ -82,6 +91,16 @@ def test_print_comparison_includes_infra_error_column(capsys) -> None:
     )
     out = capsys.readouterr().out
     assert "InfraErr" in out
+
+
+def test_print_comparison_includes_query_too_expensive_column(capsys) -> None:
+    print_comparison(
+        {
+            "ollama/test:latest": [_result("QUERY_TOO_EXPENSIVE"), _result("PARSE_FAIL")],
+        }
+    )
+    out = capsys.readouterr().out
+    assert "QExp" in out
 
 
 def test_write_combined_csv_writes_rows_for_all_models(tmp_path) -> None:
@@ -120,6 +139,20 @@ def test_write_summary_csv_writes_one_row_per_model(tmp_path) -> None:
     assert by_model["ollama/a:latest"]["correct"] == "1"
     assert by_model["ollama/a:latest"]["parse_fails"] == "1"
     assert by_model["ollama/b:latest"]["infra_errors"] == "1"
+
+
+def test_write_summary_csv_tracks_query_too_expensive(tmp_path) -> None:
+    output = tmp_path / "baseline_summary.csv"
+    write_summary_csv(
+        {
+            "ollama/a:latest": [_result("QUERY_TOO_EXPENSIVE")],
+        },
+        output,
+    )
+    with output.open() as f:
+        rows = list(csv.DictReader(f))
+    assert len(rows) == 1
+    assert rows[0]["query_too_expensive"] == "1"
 
 
 def test_write_summary_csv_includes_run_metadata(tmp_path) -> None:

@@ -34,8 +34,20 @@ class EvalResult:
     telemetry: dict[str, Any] | None = None
 
 
-def _has_infra_errors(results: list[EvalResult]) -> bool:
-    return any(result.grade.outcome == "INFRA_ERROR" for result in results)
+def _infra_task_ids(results: list[EvalResult]) -> set[str]:
+    return {result.task.id for result in results if result.grade.outcome == "INFRA_ERROR"}
+
+
+def _merge_results_by_task(
+    task_order: list[Task],
+    current_results: list[EvalResult],
+    new_results: list[EvalResult],
+) -> list[EvalResult]:
+    """Merge rerun results while preserving manifest task order."""
+    by_task_id = {result.task.id: result for result in current_results}
+    for result in new_results:
+        by_task_id[result.task.id] = result
+    return [by_task_id[task.id] for task in task_order if task.id in by_task_id]
 
 
 async def run_eval(
@@ -129,6 +141,8 @@ async def run_eval_cli_bare(
     domain = bhce_kwargs.get("domain")
 
     attempt = 0
+    pending_tasks = list(tasks)
+    results: list[EvalResult] = []
     while True:
         async with BHCEClient(**bhce_kwargs) as bhce:
             health = await bhce.wait_until_healthy(
@@ -140,8 +154,8 @@ async def run_eval_cli_bare(
                     f"BloodHound CE health check failed before eval: {health.detail} "
                     f"(classification={health.classification})"
                 )
-            results = await run_eval_with_inspect(
-                tasks=tasks,
+            batch_results = await run_eval_with_inspect(
+                tasks=pending_tasks,
                 model=model,
                 bhce=bhce,
                 output_path=output_path,
@@ -150,16 +164,20 @@ async def run_eval_cli_bare(
                 ollama_options=ollama_options,
                 bhce_domain=domain,
             )
-            for result in results:
+            for result in batch_results:
                 result.run_name = run_name or model
                 result.requested_model = model
                 result.run_config = run_config
-        if not _has_infra_errors(results) or attempt >= max_model_reruns_on_infra:
+            results = _merge_results_by_task(tasks, results, batch_results)
+        infra_task_ids = _infra_task_ids(batch_results)
+        if not infra_task_ids or attempt >= max_model_reruns_on_infra:
             break
         attempt += 1
+        pending_tasks = [task for task in tasks if task.id in infra_task_ids]
         print(
             f"\nDetected INFRA_ERROR during {model} run. "
-            f"Re-running full model benchmark ({attempt}/{max_model_reruns_on_infra}) after recovery wait..."  # noqa: E501
+            f"Re-running {len(pending_tasks)} infra-error task(s) "
+            f"({attempt}/{max_model_reruns_on_infra}) after recovery wait..."
         )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -205,6 +223,8 @@ async def run_eval_cli(
     domain = bhce_kwargs.get("domain")
 
     attempt = 0
+    pending_tasks = list(tasks)
+    results: list[EvalResult] = []
     while True:
         async with BHCEClient(**bhce_kwargs) as bhce:
             health = await bhce.wait_until_healthy(
@@ -216,8 +236,8 @@ async def run_eval_cli(
                     f"BloodHound CE health check failed before eval: {health.detail} "
                     f"(classification={health.classification})"
                 )
-            results = await run_eval_with_inspect(
-                tasks=tasks,
+            batch_results = await run_eval_with_inspect(
+                tasks=pending_tasks,
                 model=model,
                 bhce=bhce,
                 output_path=output_path,
@@ -226,16 +246,20 @@ async def run_eval_cli(
                 ollama_options=ollama_options,
                 bhce_domain=domain,
             )
-            for result in results:
+            for result in batch_results:
                 result.run_name = run_name or model
                 result.requested_model = model
                 result.run_config = run_config
-        if not _has_infra_errors(results) or attempt >= max_model_reruns_on_infra:
+            results = _merge_results_by_task(tasks, results, batch_results)
+        infra_task_ids = _infra_task_ids(batch_results)
+        if not infra_task_ids or attempt >= max_model_reruns_on_infra:
             break
         attempt += 1
+        pending_tasks = [task for task in tasks if task.id in infra_task_ids]
         print(
             f"\nDetected INFRA_ERROR during {model} run. "
-            f"Re-running full eval ({attempt}/{max_model_reruns_on_infra}) after recovery wait..."
+            f"Re-running {len(pending_tasks)} infra-error task(s) "
+            f"({attempt}/{max_model_reruns_on_infra}) after recovery wait..."
         )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -280,6 +304,8 @@ async def run_eval_mcp_cli_bare(
     domain = bhce_kwargs.get("domain")
 
     attempt = 0
+    pending_tasks = list(tasks)
+    results: list[EvalResult] = []
     while True:
         async with BHCEClient(**bhce_kwargs) as bhce:
             health = await bhce.wait_until_healthy(
@@ -291,8 +317,8 @@ async def run_eval_mcp_cli_bare(
                     f"BloodHound CE health check failed before MCP eval: {health.detail} "
                     f"(classification={health.classification})"
                 )
-            results = await run_mcp_eval_with_inspect(
-                tasks=tasks,
+            batch_results = await run_mcp_eval_with_inspect(
+                tasks=pending_tasks,
                 model=model,
                 bhce=bhce,
                 output_path=output_path,
@@ -304,16 +330,20 @@ async def run_eval_mcp_cli_bare(
                 max_steps=max_steps,
                 resource_mode=resource_mode,
             )
-            for result in results:
+            for result in batch_results:
                 result.run_name = run_name or model
                 result.requested_model = model
                 result.run_config = run_config
-        if not _has_infra_errors(results) or attempt >= max_model_reruns_on_infra:
+            results = _merge_results_by_task(tasks, results, batch_results)
+        infra_task_ids = _infra_task_ids(batch_results)
+        if not infra_task_ids or attempt >= max_model_reruns_on_infra:
             break
         attempt += 1
+        pending_tasks = [task for task in tasks if task.id in infra_task_ids]
         print(
             f"\nDetected INFRA_ERROR during {model} MCP run. "
-            f"Re-running full model benchmark ({attempt}/{max_model_reruns_on_infra}) after recovery wait..."  # noqa: E501
+            f"Re-running {len(pending_tasks)} infra-error task(s) "
+            f"({attempt}/{max_model_reruns_on_infra}) after recovery wait..."
         )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -361,6 +391,8 @@ async def run_eval_mcp_cli(
     domain = bhce_kwargs.get("domain")
 
     attempt = 0
+    pending_tasks = list(tasks)
+    results: list[EvalResult] = []
     while True:
         async with BHCEClient(**bhce_kwargs) as bhce:
             health = await bhce.wait_until_healthy(
@@ -372,8 +404,8 @@ async def run_eval_mcp_cli(
                     f"BloodHound CE health check failed before MCP eval: {health.detail} "
                     f"(classification={health.classification})"
                 )
-            results = await run_mcp_eval_with_inspect(
-                tasks=tasks,
+            batch_results = await run_mcp_eval_with_inspect(
+                tasks=pending_tasks,
                 model=model,
                 bhce=bhce,
                 output_path=output_path,
@@ -385,16 +417,20 @@ async def run_eval_mcp_cli(
                 max_steps=max_steps,
                 resource_mode=resource_mode,
             )
-            for result in results:
+            for result in batch_results:
                 result.run_name = run_name or model
                 result.requested_model = model
                 result.run_config = run_config
-        if not _has_infra_errors(results) or attempt >= max_model_reruns_on_infra:
+            results = _merge_results_by_task(tasks, results, batch_results)
+        infra_task_ids = _infra_task_ids(batch_results)
+        if not infra_task_ids or attempt >= max_model_reruns_on_infra:
             break
         attempt += 1
+        pending_tasks = [task for task in tasks if task.id in infra_task_ids]
         print(
             f"\nDetected INFRA_ERROR during {model} MCP eval. "
-            f"Re-running full eval ({attempt}/{max_model_reruns_on_infra}) after recovery wait..."
+            f"Re-running {len(pending_tasks)} infra-error task(s) "
+            f"({attempt}/{max_model_reruns_on_infra}) after recovery wait..."
         )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)

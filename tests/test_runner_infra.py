@@ -6,13 +6,13 @@ from pathlib import Path
 from ori.eval.adapter import ModelResponse
 from ori.eval.bhce import BHHealthResult, CypherResult
 from ori.eval.grader import GradeResult
-from ori.eval.runner import EvalResult, run_eval_cli_bare
+from ori.eval.runner import EvalResult, run_eval_cli_bare, run_eval_mcp_cli_bare
 from ori.eval.tasks import Task
 
 
-def _task() -> Task:
+def _task(task_id: str = "t1") -> Task:
     return Task(
-        id="t1",
+        id=task_id,
         template_id="global",
         tier=1,
         category="enumeration",
@@ -44,8 +44,8 @@ class FakeBHCEClient:
         return BHHealthResult(ok=True, detail="query succeeded", query=query, classification="ok")
 
 
-def _result(outcome: str) -> EvalResult:
-    task = _task()
+def _result(outcome: str, task_id: str = "t1") -> EvalResult:
+    task = _task(task_id)
     model_response = ModelResponse(
         raw_text="MATCH (n) RETURN n",
         cypher="MATCH (n) RETURN n",
@@ -78,16 +78,18 @@ def test_run_eval_cli_bare_reruns_once_on_infra(tmp_path: Path, monkeypatch) -> 
     manifest_path = tmp_path / "manifest.json"
     manifest_path.write_text(json.dumps({"domain": "TEST.LOCAL"}))
 
-    monkeypatch.setattr("ori.eval.runner.generate_tasks", lambda manifest: [_task()])
+    tasks = [_task("t1"), _task("t2")]
+    monkeypatch.setattr("ori.eval.runner.generate_tasks", lambda manifest: tasks)
     monkeypatch.setattr("ori.eval.runner.BHCEClient", lambda **kwargs: FakeBHCEClient(**kwargs))
 
-    calls = {"count": 0}
+    calls: list[list[str]] = []
 
     async def fake_run_eval_with_inspect(**kwargs):
-        calls["count"] += 1
-        if calls["count"] == 1:
-            return [_result("INFRA_ERROR")]
-        return [_result("CORRECT")]
+        task_ids = [task.id for task in kwargs["tasks"]]
+        calls.append(task_ids)
+        if len(calls) == 1:
+            return [_result("CORRECT", "t1"), _result("INFRA_ERROR", "t2")]
+        return [_result("CORRECT", "t2")]
 
     monkeypatch.setattr("ori.eval.runner.run_eval_with_inspect", fake_run_eval_with_inspect)
 
@@ -100,9 +102,48 @@ def test_run_eval_cli_bare_reruns_once_on_infra(tmp_path: Path, monkeypatch) -> 
         )
     )
 
-    assert calls["count"] == 2
-    assert len(results) == 1
-    assert results[0].grade.outcome == "CORRECT"
+    assert calls == [["t1", "t2"], ["t2"]]
+    assert len(results) == 2
+    assert [result.task.id for result in results] == ["t1", "t2"]
+    assert [result.grade.outcome for result in results] == ["CORRECT", "CORRECT"]
+
+
+def test_run_eval_mcp_cli_bare_reruns_only_infra_tasks(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import asyncio
+
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps({"domain": "TEST.LOCAL"}))
+
+    tasks = [_task("m1"), _task("m2")]
+    monkeypatch.setattr("ori.eval.runner.generate_mcp_tasks", lambda manifest: tasks)
+    monkeypatch.setattr("ori.eval.runner.BHCEClient", lambda **kwargs: FakeBHCEClient(**kwargs))
+
+    calls: list[list[str]] = []
+
+    async def fake_run_mcp_eval_with_inspect(**kwargs):
+        task_ids = [task.id for task in kwargs["tasks"]]
+        calls.append(task_ids)
+        if len(calls) == 1:
+            return [_result("INFRA_ERROR", "m1"), _result("CORRECT", "m2")]
+        return [_result("CORRECT", "m1")]
+
+    monkeypatch.setattr("ori.eval.runner.run_mcp_eval_with_inspect", fake_run_mcp_eval_with_inspect)
+
+    results = asyncio.run(
+        run_eval_mcp_cli_bare(
+            manifest_path=manifest_path,
+            model="ollama/test:latest",
+            output_path=tmp_path / "results.csv",
+            max_model_reruns_on_infra=1,
+        )
+    )
+
+    assert calls == [["m1", "m2"], ["m1"]]
+    assert len(results) == 2
+    assert [result.task.id for result in results] == ["m1", "m2"]
+    assert [result.grade.outcome for result in results] == ["CORRECT", "CORRECT"]
 
 
 def test_run_eval_cli_bare_threads_health_and_base_url(tmp_path: Path, monkeypatch) -> None:

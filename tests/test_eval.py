@@ -196,14 +196,14 @@ def test_grade_cypher_error():
     assert result.outcome == "CYPHER_ERROR"
 
 
-def test_grade_infra_error_for_model_query_failure():
+def test_grade_query_too_expensive_for_model_query_failure():
     task = _make_task()
     resp = _make_model_response()
     model_result = _make_cypher_result([], success=False)
     model_result.error = "HTTP 502: Bad Gateway"
     result = grade(task, resp, model_result, _make_cypher_result(["A@CORP.LOCAL"]), set())
     assert result.score == 0.0
-    assert result.outcome == "INFRA_ERROR"
+    assert result.outcome == "QUERY_TOO_EXPENSIVE"
 
 
 def test_grade_infra_error_for_reference_query_failure():

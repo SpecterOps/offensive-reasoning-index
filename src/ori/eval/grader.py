@@ -13,7 +13,7 @@ from .tasks import Task
 @dataclass
 class GradeResult:
     score: float  # 0.0 or 1.0
-    outcome: str  # CORRECT | INCORRECT | PARSE_FAIL | CYPHER_ERROR | HALLUCINATION | MODEL_ERROR | INFRA_ERROR  # noqa: E501
+    outcome: str  # CORRECT | INCORRECT | PARSE_FAIL | CYPHER_ERROR | QUERY_TOO_EXPENSIVE | HALLUCINATION | MODEL_ERROR | INFRA_ERROR  # noqa: E501
     hallucination: bool
     details: str
 
@@ -59,9 +59,12 @@ def grade(
         if BHCEClient.classify_error(model_result.error) == "infra":
             return GradeResult(
                 score=0.0,
-                outcome="INFRA_ERROR",
+                outcome="QUERY_TOO_EXPENSIVE",
                 hallucination=False,
-                details=f"BloodHound CE unavailable during model query execution: {model_result.error}",  # noqa: E501
+                details=(
+                    "Model-generated Cypher could not be executed by BloodHound CE "
+                    f"(likely overly expensive or otherwise non-viable): {model_result.error}"
+                ),
             )
         return GradeResult(
             score=0.0,
