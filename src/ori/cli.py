@@ -12,12 +12,12 @@ from typing import Any
 import click
 import yaml
 
-from .run_config import RunConfigOverrides, list_run_profiles, load_run_profile
 from .generator.attack_paths import plant_all_paths
 from .generator.graph import ADGraph
 from .generator.org import build_org
 from .generator.security import apply_baseline_security
 from .generator.serializer import serialize_to_dir, serialize_to_zip
+from .run_config import RunConfigOverrides, list_run_profiles, load_run_profile
 
 
 @dataclass(frozen=True)
@@ -37,9 +37,7 @@ def _parse_ollama_options(options: tuple[str, ...]) -> dict:
     parsed: dict = {}
     for option in options:
         if "=" not in option:
-            raise click.BadParameter(
-                f"Invalid --ollama-option {option!r}. Expected KEY=VALUE."
-            )
+            raise click.BadParameter(f"Invalid --ollama-option {option!r}. Expected KEY=VALUE.")
         key, raw_value = option.split("=", 1)
         key = key.strip()
         if not key:
@@ -71,11 +69,7 @@ def _identity_parts(value: Any, prefix: str = "") -> list[str]:
 
 
 def _fallback_run_name(model: str, config_identity: dict[str, Any]) -> str:
-    extras = {
-        key: value
-        for key, value in config_identity.items()
-        if key != "model"
-    }
+    extras = {key: value for key, value in config_identity.items() if key != "model"}
     if not extras:
         return model
     return f"{model} [{', '.join(_identity_parts(extras))}]"
@@ -233,7 +227,9 @@ async def _run_baseline_with_specs(
     output_dir.mkdir(parents=True, exist_ok=True)
     results = {}
     for i, run_spec in enumerate(run_specs, 1):
-        effective_concurrency = concurrency_override if concurrency_override is not None else run_spec.concurrency
+        effective_concurrency = (
+            concurrency_override if concurrency_override is not None else run_spec.concurrency
+        )
         effective_model_base_url = (
             model_base_url_override
             if model_base_url_override is not None
@@ -291,11 +287,15 @@ async def _run_baseline_mcp_with_specs(
     output_dir.mkdir(parents=True, exist_ok=True)
     results = {}
     for i, run_spec in enumerate(run_specs, 1):
-        effective_concurrency = concurrency_override if concurrency_override is not None else run_spec.concurrency
+        effective_concurrency = (
+            concurrency_override if concurrency_override is not None else run_spec.concurrency
+        )
         effective_max_steps = (
             max_steps_override
             if max_steps_override is not None
-            else run_spec.max_steps if run_spec.max_steps is not None else max_steps
+            else run_spec.max_steps
+            if run_spec.max_steps is not None
+            else max_steps
         )
         effective_model_base_url = (
             model_base_url_override
@@ -307,7 +307,7 @@ async def _run_baseline_mcp_with_specs(
         base_url_str = f", base_url={effective_model_base_url}" if effective_model_base_url else ""
         click.echo(
             f"\n[{i}/{len(run_specs)}] {run_spec.run_name} -> {run_spec.requested_model}  "
-            f"(concurrency={effective_concurrency}{opts_str}{base_url_str}, max_steps={effective_max_steps})"
+            f"(concurrency={effective_concurrency}{opts_str}{base_url_str}, max_steps={effective_max_steps})"  # noqa: E501
         )
         results[run_spec.run_name] = await run_eval_mcp_cli_bare(
             manifest_path=manifest_path,
@@ -342,6 +342,7 @@ def main() -> None:
     # Load .env from the current directory (or any parent) on every invocation.
     # override=False means shell env vars and CI/CD vars take precedence over the file.
     from dotenv import load_dotenv
+
     load_dotenv(override=False)
 
 
@@ -397,24 +398,40 @@ def generate(
     manifest_path.write_text(json.dumps(manifest, indent=2))
     click.echo(f"        Manifest: {manifest_path}")
 
-    click.echo(f"\nDone. {graph.node_count()} nodes, {graph.edge_count()} edges, {len(planted)} planted paths.")
+    click.echo(
+        f"\nDone. {graph.node_count()} nodes, {graph.edge_count()} edges, {len(planted)} planted paths."  # noqa: E501
+    )
     for path in planted:
         click.echo(f"  [{path.tier}] {path.template_id}: {path.description[:80]}...")
 
 
 @main.command()
-@click.option("--manifest", "-m", required=True, type=click.Path(exists=True), help="Path to manifest.json")
-@click.option("--model", required=True, help="Model string, e.g. anthropic/claude-sonnet-4-5 or ollama/llama3.1:8b")
+@click.option(
+    "--manifest", "-m", required=True, type=click.Path(exists=True), help="Path to manifest.json"
+)
+@click.option(
+    "--model",
+    required=True,
+    help="Model string, e.g. anthropic/claude-sonnet-4-5 or ollama/llama3.1:8b",
+)
 @click.option("--output", "-o", required=True, type=click.Path(), help="Output CSV path")
 @click.option("--concurrency", default=3, show_default=True, help="Max concurrent model calls")
-@click.option("--bhce-url", default=None, help="BH CE base URL (overrides BLOODHOUND_DOMAIN env var)")
+@click.option(
+    "--bhce-url", default=None, help="BH CE base URL (overrides BLOODHOUND_DOMAIN env var)"
+)
 @click.option(
     "--ollama-option",
     "ollama_options_raw",
     multiple=True,
     help="Repeatable Ollama option in KEY=VALUE form, e.g. --ollama-option num_ctx=16384",
 )
-@click.option("--telemetry/--no-telemetry", "telemetry_enabled", default=True, show_default=True, help="Write portable run/model/system telemetry artifacts.")
+@click.option(
+    "--telemetry/--no-telemetry",
+    "telemetry_enabled",
+    default=True,
+    show_default=True,
+    help="Write portable run/model/system telemetry artifacts.",
+)
 def eval(
     manifest: str,
     model: str,
@@ -426,28 +443,44 @@ def eval(
 ) -> None:
     """Run evaluation: generate tasks from manifest, run model, grade results."""
     import asyncio
+
     from .eval.runner import run_eval_cli
-    run_spec = _build_inline_run_spec(model=model, ollama_options=_parse_ollama_options(ollama_options_raw))
-    asyncio.run(run_eval_cli(
-        manifest_path=Path(manifest),
-        model=model,
-        output_path=Path(output),
-        concurrency=concurrency,
-        bhce_url=bhce_url,
-        ollama_options=run_spec.ollama_options,
-        run_name=run_spec.run_name,
-        run_config=_effective_run_config(run_spec, telemetry_enabled=telemetry_enabled),
-        telemetry_enabled=telemetry_enabled,
-    ))
+
+    run_spec = _build_inline_run_spec(
+        model=model, ollama_options=_parse_ollama_options(ollama_options_raw)
+    )
+    asyncio.run(
+        run_eval_cli(
+            manifest_path=Path(manifest),
+            model=model,
+            output_path=Path(output),
+            concurrency=concurrency,
+            bhce_url=bhce_url,
+            ollama_options=run_spec.ollama_options,
+            run_name=run_spec.run_name,
+            run_config=_effective_run_config(run_spec, telemetry_enabled=telemetry_enabled),
+            telemetry_enabled=telemetry_enabled,
+        )
+    )
 
 
 @main.command(name="eval-mcp")
-@click.option("--manifest", "-m", required=True, type=click.Path(exists=True), help="Path to manifest.json")
+@click.option(
+    "--manifest", "-m", required=True, type=click.Path(exists=True), help="Path to manifest.json"
+)
 @click.option("--model", required=True, help="Model string, e.g. ollama/qwen3:latest")
 @click.option("--output", "-o", required=True, type=click.Path(), help="Output CSV path")
 @click.option("--concurrency", default=1, show_default=True, help="Max concurrent model calls")
-@click.option("--bhce-url", default=None, help="BH CE base URL (overrides BLOODHOUND_DOMAIN env var)")
-@click.option("--mcp-dir", default="../bloodhound-mcp", type=click.Path(exists=True), show_default=True, help="Path to local bloodhound-mcp repo")
+@click.option(
+    "--bhce-url", default=None, help="BH CE base URL (overrides BLOODHOUND_DOMAIN env var)"
+)
+@click.option(
+    "--mcp-dir",
+    default="../bloodhound-mcp",
+    type=click.Path(exists=True),
+    show_default=True,
+    help="Path to local bloodhound-mcp repo",
+)
 @click.option("--max-steps", default=12, show_default=True, help="Max agent/tool steps")
 @click.option(
     "--resource-mode",
@@ -462,7 +495,13 @@ def eval(
     multiple=True,
     help="Repeatable Ollama option in KEY=VALUE form, e.g. --ollama-option num_ctx=16384",
 )
-@click.option("--telemetry/--no-telemetry", "telemetry_enabled", default=True, show_default=True, help="Write portable run/model/system telemetry artifacts.")
+@click.option(
+    "--telemetry/--no-telemetry",
+    "telemetry_enabled",
+    default=True,
+    show_default=True,
+    help="Write portable run/model/system telemetry artifacts.",
+)
 def eval_mcp(
     manifest: str,
     model: str,
@@ -477,29 +516,49 @@ def eval_mcp(
 ) -> None:
     """Run MCP-mode evaluation using BloodHound MCP tools."""
     import asyncio
-    from .eval.runner import run_eval_mcp_cli
-    run_spec = _build_inline_run_spec(model=model, ollama_options=_parse_ollama_options(ollama_options_raw))
 
-    asyncio.run(run_eval_mcp_cli(
-        manifest_path=Path(manifest),
-        model=model,
-        output_path=Path(output),
-        concurrency=concurrency,
-        bhce_url=bhce_url,
-        mcp_dir=Path(mcp_dir),
-        max_steps=max_steps,
-        resource_mode=resource_mode,
-        ollama_options=run_spec.ollama_options,
-        run_name=run_spec.run_name,
-        run_config=run_spec.config_identity,
-        telemetry_enabled=telemetry_enabled,
-    ))
+    from .eval.runner import run_eval_mcp_cli
+
+    run_spec = _build_inline_run_spec(
+        model=model, ollama_options=_parse_ollama_options(ollama_options_raw)
+    )
+
+    asyncio.run(
+        run_eval_mcp_cli(
+            manifest_path=Path(manifest),
+            model=model,
+            output_path=Path(output),
+            concurrency=concurrency,
+            bhce_url=bhce_url,
+            mcp_dir=Path(mcp_dir),
+            max_steps=max_steps,
+            resource_mode=resource_mode,
+            ollama_options=run_spec.ollama_options,
+            run_name=run_spec.run_name,
+            run_config=run_spec.config_identity,
+            telemetry_enabled=telemetry_enabled,
+        )
+    )
 
 
 @main.command()
-@click.option("--bhce-url", default=None, help="BH CE base URL (overrides BLOODHOUND_DOMAIN env var)")
-@click.option("--timeout", default=60.0, show_default=True, type=float, help="Seconds to wait for BHCE to become healthy")
-@click.option("--poll-interval", default=5.0, show_default=True, type=float, help="Seconds between health probes")
+@click.option(
+    "--bhce-url", default=None, help="BH CE base URL (overrides BLOODHOUND_DOMAIN env var)"
+)
+@click.option(
+    "--timeout",
+    default=60.0,
+    show_default=True,
+    type=float,
+    help="Seconds to wait for BHCE to become healthy",
+)
+@click.option(
+    "--poll-interval",
+    default=5.0,
+    show_default=True,
+    type=float,
+    help="Seconds between health probes",
+)
 def verify_bh_health(bhce_url: str | None, timeout: float, poll_interval: float) -> None:
     """Verify that BloodHound CE is healthy before starting a run."""
     import asyncio
@@ -519,8 +578,12 @@ def verify_bh_health(bhce_url: str | None, timeout: float, poll_interval: float)
 
 
 @main.command()
-@click.option("--manifest", "-m", required=True, type=click.Path(exists=True), help="Path to manifest.json")
-@click.option("--bhce-url", default=None, help="BH CE base URL (overrides BLOODHOUND_DOMAIN env var)")
+@click.option(
+    "--manifest", "-m", required=True, type=click.Path(exists=True), help="Path to manifest.json"
+)
+@click.option(
+    "--bhce-url", default=None, help="BH CE base URL (overrides BLOODHOUND_DOMAIN env var)"
+)
 def verify_ingest(manifest: str, bhce_url: str | None) -> None:
     """Verify that uploaded BloodHound data matches the generated manifest."""
     import asyncio
@@ -534,9 +597,15 @@ def verify_ingest(manifest: str, bhce_url: str | None) -> None:
 
 
 @main.command()
-@click.option("--manifest", "-m", required=True, type=click.Path(exists=True), help="Path to manifest.json")
-@click.option("--output-dir", "-o", required=True, type=click.Path(), help="Directory for smoke-test CSVs")
-@click.option("--bhce-url", default=None, help="BH CE base URL (overrides BLOODHOUND_DOMAIN env var)")
+@click.option(
+    "--manifest", "-m", required=True, type=click.Path(exists=True), help="Path to manifest.json"
+)
+@click.option(
+    "--output-dir", "-o", required=True, type=click.Path(), help="Directory for smoke-test CSVs"
+)
+@click.option(
+    "--bhce-url", default=None, help="BH CE base URL (overrides BLOODHOUND_DOMAIN env var)"
+)
 def smoke_eval(manifest: str, output_dir: str, bhce_url: str | None) -> None:
     """Run mock-model smoke tests for grading, parsing, and Cypher execution paths."""
     import asyncio
@@ -556,10 +625,22 @@ def smoke_eval(manifest: str, output_dir: str, bhce_url: str | None) -> None:
 
 
 @main.command(name="smoke-mcp")
-@click.option("--manifest", "-m", required=True, type=click.Path(exists=True), help="Path to manifest.json")
-@click.option("--output-dir", "-o", required=True, type=click.Path(), help="Directory for MCP smoke-test CSVs")
-@click.option("--bhce-url", default=None, help="BH CE base URL (overrides BLOODHOUND_DOMAIN env var)")
-@click.option("--mcp-dir", default="../bloodhound-mcp", type=click.Path(), show_default=True, help="Path to local bloodhound-mcp repo")
+@click.option(
+    "--manifest", "-m", required=True, type=click.Path(exists=True), help="Path to manifest.json"
+)
+@click.option(
+    "--output-dir", "-o", required=True, type=click.Path(), help="Directory for MCP smoke-test CSVs"
+)
+@click.option(
+    "--bhce-url", default=None, help="BH CE base URL (overrides BLOODHOUND_DOMAIN env var)"
+)
+@click.option(
+    "--mcp-dir",
+    default="../bloodhound-mcp",
+    type=click.Path(),
+    show_default=True,
+    help="Path to local bloodhound-mcp repo",
+)
 @click.option("--max-steps", default=12, show_default=True, help="Max agent/tool steps")
 @click.option(
     "--resource-mode",
@@ -597,16 +678,38 @@ def smoke_mcp(
 
 
 @main.command(name="run")
-@click.option("--config", "config_path", required=True, type=click.Path(exists=True), help="Path to versioned ORI run config YAML")
+@click.option(
+    "--config",
+    "config_path",
+    required=True,
+    type=click.Path(exists=True),
+    help="Path to versioned ORI run config YAML",
+)
 @click.option("--profile", default=None, help="Profile name inside the config file")
-@click.option("--run-all-profiles", is_flag=True, default=False, help="Run all enabled profiles in config order")
-@click.option("--keep-going", is_flag=True, default=False, help="With --run-all-profiles, continue after profile failures and report them at the end")
+@click.option(
+    "--run-all-profiles",
+    is_flag=True,
+    default=False,
+    help="Run all enabled profiles in config order",
+)
+@click.option(
+    "--keep-going",
+    is_flag=True,
+    default=False,
+    help="With --run-all-profiles, continue after profile failures and report them at the end",
+)
 @click.option("--manifest", type=click.Path(), default=None, help="Override manifest path")
-@click.option("--output", type=click.Path(), default=None, help="Override single-run output CSV path")
-@click.option("--output-dir", type=click.Path(), default=None, help="Override multi-run output directory")
+@click.option(
+    "--output", type=click.Path(), default=None, help="Override single-run output CSV path"
+)
+@click.option(
+    "--output-dir", type=click.Path(), default=None, help="Override multi-run output directory"
+)
 @click.option("--bhce-url", default=None, help="Override BH CE base URL")
 @click.option("--concurrency", type=int, default=None, help="Override run concurrency")
-@click.option("--mcp-dir", type=click.Path(), default=None, help="Override local bloodhound-mcp path")
+@click.option(
+    "--mcp-dir", type=click.Path(), default=None, help="Override local bloodhound-mcp path"
+)
 @click.option("--max-steps", type=int, default=None, help="Override MCP max tool/agent steps")
 @click.option(
     "--resource-mode",
@@ -615,10 +718,30 @@ def smoke_mcp(
     help="Override MCP resource mode for config-driven runs.",
 )
 @click.option("--model-base-url", default=None, help="Override model provider base URL")
-@click.option("--max-model-reruns-on-infra", type=int, default=None, help="Override full-run retries after INFRA_ERROR")
-@click.option("--health-timeout", type=float, default=None, help="Override BloodHound health timeout in seconds")
-@click.option("--health-poll-interval", type=float, default=None, help="Override BloodHound health poll interval in seconds")
-@click.option("--telemetry/--no-telemetry", "telemetry_enabled", default=None, help="Override telemetry artifact collection for real eval/baseline profiles.")
+@click.option(
+    "--max-model-reruns-on-infra",
+    type=int,
+    default=None,
+    help="Override full-run retries after INFRA_ERROR",
+)
+@click.option(
+    "--health-timeout",
+    type=float,
+    default=None,
+    help="Override BloodHound health timeout in seconds",
+)
+@click.option(
+    "--health-poll-interval",
+    type=float,
+    default=None,
+    help="Override BloodHound health poll interval in seconds",
+)
+@click.option(
+    "--telemetry/--no-telemetry",
+    "telemetry_enabled",
+    default=None,
+    help="Override telemetry artifact collection for real eval/baseline profiles.",
+)
 def run_from_config(
     config_path: str,
     profile: str | None,
@@ -641,7 +764,13 @@ def run_from_config(
     """Run ORI from a single versioned config file."""
     import asyncio
 
-    from .eval.ops import print_preflight, print_smoke_eval, run_preflight, run_smoke_eval, run_smoke_mcp_eval
+    from .eval.ops import (
+        print_preflight,
+        print_smoke_eval,
+        run_preflight,
+        run_smoke_eval,
+        run_smoke_mcp_eval,
+    )
     from .eval.report import print_comparison, write_combined_csv, write_summary_csv
     from .eval.runner import run_eval_cli, run_eval_mcp_cli
 
@@ -670,12 +799,14 @@ def run_from_config(
         click.echo(f"Using config profile: {resolved.profile_name} ({resolved.kind})")
 
         if resolved.kind == "eval":
-            run_spec = _dedupe_run_specs([
-                _run_spec_from_entry(
-                    resolved.model_entry,
-                    default_concurrency=resolved.concurrency or 1,
-                )
-            ])[0]
+            run_spec = _dedupe_run_specs(
+                [
+                    _run_spec_from_entry(
+                        resolved.model_entry,
+                        default_concurrency=resolved.concurrency or 1,
+                    )
+                ]
+            )[0]
             effective_model_base_url = (
                 model_base_url
                 if model_base_url is not None
@@ -705,12 +836,14 @@ def run_from_config(
             return
 
         if resolved.kind == "eval_mcp":
-            run_spec = _dedupe_run_specs([
-                _run_spec_from_entry(
-                    resolved.model_entry,
-                    default_concurrency=resolved.concurrency or 1,
-                )
-            ])[0]
+            run_spec = _dedupe_run_specs(
+                [
+                    _run_spec_from_entry(
+                        resolved.model_entry,
+                        default_concurrency=resolved.concurrency or 1,
+                    )
+                ]
+            )[0]
             effective_model_base_url = (
                 model_base_url
                 if model_base_url is not None
@@ -719,7 +852,9 @@ def run_from_config(
             effective_max_steps = (
                 max_steps
                 if max_steps is not None
-                else run_spec.max_steps if run_spec.max_steps is not None else resolved.max_steps
+                else run_spec.max_steps
+                if run_spec.max_steps is not None
+                else resolved.max_steps
             )
             asyncio.run(
                 run_eval_mcp_cli(
@@ -750,10 +885,12 @@ def run_from_config(
             return
 
         if resolved.kind == "baseline":
-            run_specs = _dedupe_run_specs([
-                _run_spec_from_entry(entry, default_concurrency=resolved.concurrency or 1)
-                for entry in resolved.model_entries or []
-            ])
+            run_specs = _dedupe_run_specs(
+                [
+                    _run_spec_from_entry(entry, default_concurrency=resolved.concurrency or 1)
+                    for entry in resolved.model_entries or []
+                ]
+            )
             all_results = asyncio.run(
                 _run_baseline_with_specs(
                     manifest_path=Path(resolved.manifest),
@@ -780,10 +917,12 @@ def run_from_config(
             return
 
         if resolved.kind == "baseline_mcp":
-            run_specs = _dedupe_run_specs([
-                _run_spec_from_entry(entry, default_concurrency=resolved.concurrency or 1)
-                for entry in resolved.model_entries or []
-            ])
+            run_specs = _dedupe_run_specs(
+                [
+                    _run_spec_from_entry(entry, default_concurrency=resolved.concurrency or 1)
+                    for entry in resolved.model_entries or []
+                ]
+            )
             all_results = asyncio.run(
                 _run_baseline_mcp_with_specs(
                     manifest_path=Path(resolved.manifest),
@@ -904,11 +1043,29 @@ def run_from_config(
 
 
 @main.command()
-@click.option("--manifest", "-m", required=True, type=click.Path(exists=True), help="Path to manifest.json")
-@click.option("--output-dir", "-o", required=True, type=click.Path(), help="Directory for smoke-test CSVs")
-@click.option("--bhce-url", default=None, help="BH CE base URL (overrides BLOODHOUND_DOMAIN env var)")
-@click.option("--timeout", default=60.0, show_default=True, type=float, help="Seconds to wait for BHCE to become healthy")
-@click.option("--poll-interval", default=5.0, show_default=True, type=float, help="Seconds between health probes")
+@click.option(
+    "--manifest", "-m", required=True, type=click.Path(exists=True), help="Path to manifest.json"
+)
+@click.option(
+    "--output-dir", "-o", required=True, type=click.Path(), help="Directory for smoke-test CSVs"
+)
+@click.option(
+    "--bhce-url", default=None, help="BH CE base URL (overrides BLOODHOUND_DOMAIN env var)"
+)
+@click.option(
+    "--timeout",
+    default=60.0,
+    show_default=True,
+    type=float,
+    help="Seconds to wait for BHCE to become healthy",
+)
+@click.option(
+    "--poll-interval",
+    default=5.0,
+    show_default=True,
+    type=float,
+    help="Seconds between health probes",
+)
 def preflight(
     manifest: str,
     output_dir: str,
@@ -936,13 +1093,30 @@ def preflight(
 
 
 @main.command()
-@click.option("--manifest", "-m", required=True, type=click.Path(exists=True), help="Path to manifest.json")
+@click.option(
+    "--manifest", "-m", required=True, type=click.Path(exists=True), help="Path to manifest.json"
+)
 @click.option("--model", "models", multiple=True, help="Model to evaluate (repeat for multiple)")
-@click.option("--models-file", type=click.Path(exists=True), default=None, help="YAML file listing models to evaluate")
-@click.option("--output-dir", "-o", required=True, type=click.Path(), help="Directory for per-model CSV files")
+@click.option(
+    "--models-file",
+    type=click.Path(exists=True),
+    default=None,
+    help="YAML file listing models to evaluate",
+)
+@click.option(
+    "--output-dir", "-o", required=True, type=click.Path(), help="Directory for per-model CSV files"
+)
 @click.option("--concurrency", default=None, type=int, help="Override concurrency for all models")
-@click.option("--bhce-url", default=None, help="BH CE base URL (overrides BLOODHOUND_DOMAIN env var)")
-@click.option("--telemetry/--no-telemetry", "telemetry_enabled", default=True, show_default=True, help="Write portable run/model/system telemetry artifacts.")
+@click.option(
+    "--bhce-url", default=None, help="BH CE base URL (overrides BLOODHOUND_DOMAIN env var)"
+)
+@click.option(
+    "--telemetry/--no-telemetry",
+    "telemetry_enabled",
+    default=True,
+    show_default=True,
+    help="Write portable run/model/system telemetry artifacts.",
+)
 def baseline(
     manifest: str,
     models: tuple[str, ...],
@@ -957,6 +1131,7 @@ def baseline(
     Models can be specified via --model (repeatable), --models-file models.yaml, or both.
     """
     import asyncio
+
     from .eval.report import print_comparison, write_combined_csv, write_summary_csv
 
     run_specs = _build_run_specs(models=models, models_file=models_file)
@@ -995,6 +1170,7 @@ def _run_baseline_mcp(
     telemetry_enabled: bool = True,
 ) -> None:
     import asyncio
+
     from .eval.report import print_comparison, write_combined_csv, write_summary_csv
 
     run_specs = _build_run_specs(models=models, models_file=models_file)
@@ -1024,13 +1200,30 @@ def _run_baseline_mcp(
 
 
 @main.command(name="baseline-mcp")
-@click.option("--manifest", "-m", required=True, type=click.Path(exists=True), help="Path to manifest.json")
+@click.option(
+    "--manifest", "-m", required=True, type=click.Path(exists=True), help="Path to manifest.json"
+)
 @click.option("--model", "models", multiple=True, help="Model to evaluate (repeat for multiple)")
-@click.option("--models-file", type=click.Path(exists=True), default=None, help="YAML file listing models to evaluate")
-@click.option("--output-dir", "-o", required=True, type=click.Path(), help="Directory for per-model CSV files")
+@click.option(
+    "--models-file",
+    type=click.Path(exists=True),
+    default=None,
+    help="YAML file listing models to evaluate",
+)
+@click.option(
+    "--output-dir", "-o", required=True, type=click.Path(), help="Directory for per-model CSV files"
+)
 @click.option("--concurrency", default=None, type=int, help="Override concurrency for all models")
-@click.option("--bhce-url", default=None, help="BH CE base URL (overrides BLOODHOUND_DOMAIN env var)")
-@click.option("--mcp-dir", default="../bloodhound-mcp", type=click.Path(exists=True), show_default=True, help="Path to local bloodhound-mcp repo")
+@click.option(
+    "--bhce-url", default=None, help="BH CE base URL (overrides BLOODHOUND_DOMAIN env var)"
+)
+@click.option(
+    "--mcp-dir",
+    default="../bloodhound-mcp",
+    type=click.Path(exists=True),
+    show_default=True,
+    help="Path to local bloodhound-mcp repo",
+)
 @click.option("--max-steps", default=12, show_default=True, help="Max agent/tool steps")
 @click.option(
     "--resource-mode",
@@ -1039,7 +1232,13 @@ def _run_baseline_mcp(
     show_default=True,
     help="Whether MCP reference resources are available to the model.",
 )
-@click.option("--telemetry/--no-telemetry", "telemetry_enabled", default=True, show_default=True, help="Write portable run/model/system telemetry artifacts.")
+@click.option(
+    "--telemetry/--no-telemetry",
+    "telemetry_enabled",
+    default=True,
+    show_default=True,
+    help="Write portable run/model/system telemetry artifacts.",
+)
 def baseline_mcp(
     manifest: str,
     models: tuple[str, ...],
@@ -1068,15 +1267,38 @@ def baseline_mcp(
 
 
 @main.command(name="baseline-mcp-resources")
-@click.option("--manifest", "-m", required=True, type=click.Path(exists=True), help="Path to manifest.json")
+@click.option(
+    "--manifest", "-m", required=True, type=click.Path(exists=True), help="Path to manifest.json"
+)
 @click.option("--model", "models", multiple=True, help="Model to evaluate (repeat for multiple)")
-@click.option("--models-file", type=click.Path(exists=True), default=None, help="YAML file listing models to evaluate")
-@click.option("--output-dir", "-o", required=True, type=click.Path(), help="Directory for per-model CSV files")
+@click.option(
+    "--models-file",
+    type=click.Path(exists=True),
+    default=None,
+    help="YAML file listing models to evaluate",
+)
+@click.option(
+    "--output-dir", "-o", required=True, type=click.Path(), help="Directory for per-model CSV files"
+)
 @click.option("--concurrency", default=None, type=int, help="Override concurrency for all models")
-@click.option("--bhce-url", default=None, help="BH CE base URL (overrides BLOODHOUND_DOMAIN env var)")
-@click.option("--mcp-dir", default="../bloodhound-mcp", type=click.Path(exists=True), show_default=True, help="Path to local bloodhound-mcp repo")
+@click.option(
+    "--bhce-url", default=None, help="BH CE base URL (overrides BLOODHOUND_DOMAIN env var)"
+)
+@click.option(
+    "--mcp-dir",
+    default="../bloodhound-mcp",
+    type=click.Path(exists=True),
+    show_default=True,
+    help="Path to local bloodhound-mcp repo",
+)
 @click.option("--max-steps", default=12, show_default=True, help="Max agent/tool steps")
-@click.option("--telemetry/--no-telemetry", "telemetry_enabled", default=True, show_default=True, help="Write portable run/model/system telemetry artifacts.")
+@click.option(
+    "--telemetry/--no-telemetry",
+    "telemetry_enabled",
+    default=True,
+    show_default=True,
+    help="Write portable run/model/system telemetry artifacts.",
+)
 def baseline_mcp_resources(
     manifest: str,
     models: tuple[str, ...],
@@ -1129,12 +1351,19 @@ def _build_manifest(graph: ADGraph, seed: int) -> dict:
                 "category": p.category,
                 "description": p.description,
                 "source_node": p.source_node,
-                "source_name": (graph.get_node(p.source_node).properties.get("name", "") if graph.get_node(p.source_node) else ""),
+                "source_name": (
+                    graph.get_node(p.source_node).properties.get("name", "")
+                    if graph.get_node(p.source_node)
+                    else ""
+                ),
                 "target_node": p.target_node,
-                "target_name": (graph.get_node(p.target_node).properties.get("name", "") if graph.get_node(p.target_node) else ""),
+                "target_name": (
+                    graph.get_node(p.target_node).properties.get("name", "")
+                    if graph.get_node(p.target_node)
+                    else ""
+                ),
                 "path_edges": [
-                    {"source": src, "edge": edge, "target": tgt}
-                    for src, edge, tgt in p.path_edges
+                    {"source": src, "edge": edge, "target": tgt} for src, edge, tgt in p.path_edges
                 ],
                 "verification_cypher": p.verification_cypher,
                 "mitre": p.mitre,

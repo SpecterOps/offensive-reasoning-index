@@ -6,9 +6,9 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .bhce import BHCEClient, BHHealthResult, parse_bhce_url
-from .report import print_comparison
+from .bhce import BHCEClient, parse_bhce_url
 from .mcp_runtime import RESOURCE_MODE_OFF
+from .report import print_comparison
 from .runner import EvalResult, run_eval_cli_bare, run_eval_mcp_cli_bare
 
 
@@ -166,9 +166,7 @@ def print_verify_bh_health(result: VerifyBHHealthResult) -> None:
 def print_verify_ingest(result: VerifyIngestResult) -> None:
     print("== Node counts ==")
     for check in result.count_checks:
-        expected = (
-            f" expected={check.expected}" if check.expected is not None else ""
-        )
+        expected = f" expected={check.expected}" if check.expected is not None else ""
         status = "OK" if check.ok else "MISMATCH"
         print(f"{check.label:10} actual={check.actual}{expected} {status}")
 
@@ -179,10 +177,7 @@ def print_verify_ingest(result: VerifyIngestResult) -> None:
         print(f"{desc:50} {status}")
         for edge in path.edge_checks:
             edge_status = "OK" if edge.found else "MISSING"
-            print(
-                f"  - {edge.edge_type:24} "
-                f"{edge.source[-6:]} -> {edge.target[-6:]} {edge_status}"
-            )
+            print(f"  - {edge.edge_type:24} {edge.source[-6:]} -> {edge.target[-6:]} {edge_status}")
 
     ok_paths = sum(1 for path in result.path_checks if path.ok)
     print(f"\nSummary: {ok_paths}/{len(result.path_checks)} planted paths verified")

@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-import json
 import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from inspect_ai import Task as InspectTask
 from inspect_ai import eval_async as inspect_eval_async
@@ -21,6 +20,9 @@ from .adapter import ModelResponse, call_model, extract_cypher_details
 from .bhce import BHCEClient, CypherResult
 from .grader import GradeResult, grade
 from .tasks import Task
+
+if TYPE_CHECKING:
+    from .runner import EvalResult
 
 
 @dataclass
@@ -235,7 +237,9 @@ def ori_direct_cypher_solver() -> Generate:
                 ollama_options=ollama_options,
             )
             state.messages = [
-                ChatMessageSystem(content=_system_prompt(task.metadata.get("domain", "CORP.LOCAL"))),
+                ChatMessageSystem(
+                    content=_system_prompt(task.metadata.get("domain", "CORP.LOCAL"))
+                ),
                 ChatMessageUser(content=task.question),
             ]
             state.output = ModelOutput.from_content(
@@ -245,7 +249,9 @@ def ori_direct_cypher_solver() -> Generate:
             )
         else:
             state.messages = [
-                ChatMessageSystem(content=_system_prompt(task.metadata.get("domain", "CORP.LOCAL"))),
+                ChatMessageSystem(
+                    content=_system_prompt(task.metadata.get("domain", "CORP.LOCAL"))
+                ),
                 ChatMessageUser(content=task.question),
             ]
             try:
@@ -397,7 +403,9 @@ def _result_from_sample(sample: EvalSample, log: EvalLog) -> EvalResult:
         ref_result=_cypher_result_from_dict(sample.metadata["ref_result"]),
         model_result=model_result,
         inspect=inspect_meta,
-        task_wall_seconds=float(sample.store.get("ori_task_wall_seconds", model_response.elapsed_seconds)),
+        task_wall_seconds=float(
+            sample.store.get("ori_task_wall_seconds", model_response.elapsed_seconds)
+        ),
     )
 
 
@@ -465,7 +473,9 @@ async def run_eval_with_inspect(
         max_subprocesses=1,
         log_level="warning",
         log_level_transcript="warning",
-        extra_body={"options": ollama_options} if ollama_options and inspect_model.startswith("ollama/") else None,
+        extra_body={"options": ollama_options}
+        if ollama_options and inspect_model.startswith("ollama/")
+        else None,
     )
     if not eval_logs:
         raise RuntimeError("Inspect eval returned no logs")

@@ -577,11 +577,7 @@ def record_eval_telemetry(
         )
         for result in results
     ]
-    tps_sources = {
-        r.telemetry.get("tokens_per_second_source")
-        for r in results
-        if r.telemetry
-    }
+    tps_sources = {r.telemetry.get("tokens_per_second_source") for r in results if r.telemetry}
     tps_source_summary = (
         "mixed"
         if len(tps_sources) > 1

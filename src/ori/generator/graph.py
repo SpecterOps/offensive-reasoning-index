@@ -6,38 +6,64 @@ import random
 from dataclasses import dataclass, field
 from typing import Literal
 
-
 NodeType = Literal[
-    "User", "Computer", "Group", "Domain", "OU", "Container", "GPO",
-    "RootCA", "EnterpriseCA", "AIACA", "NTAuthStore", "CertTemplate",
+    "User",
+    "Computer",
+    "Group",
+    "Domain",
+    "OU",
+    "Container",
+    "GPO",
+    "RootCA",
+    "EnterpriseCA",
+    "AIACA",
+    "NTAuthStore",
+    "CertTemplate",
 ]
 
 EdgeKind = Literal[
     # Group/membership
-    "MemberOf", "HasMember",
+    "MemberOf",
+    "HasMember",
     # Admin / lateral movement
-    "AdminTo", "CanRDP", "CanPSRemote", "ExecuteDCOM",
+    "AdminTo",
+    "CanRDP",
+    "CanPSRemote",
+    "ExecuteDCOM",
     # Sessions
     "HasSession",
     # ACL edges
-    "GenericAll", "GenericWrite", "WriteOwner", "WriteDACL",
-    "AllExtendedRights", "ForceChangePassword",
-    "AddMember", "AddSelf",
+    "GenericAll",
+    "GenericWrite",
+    "WriteOwner",
+    "WriteDACL",
+    "AllExtendedRights",
+    "ForceChangePassword",
+    "AddMember",
+    "AddSelf",
     "Owns",
-    "DCSync", "GetChanges", "GetChangesAll",
+    "DCSync",
+    "GetChanges",
+    "GetChangesAll",
     # Delegation
-    "AllowedToDelegate", "AllowedToAct",
+    "AllowedToDelegate",
+    "AllowedToAct",
     # Container / hierarchy
     "Contains",
     # Trust
     "TrustedBy",
     # ADCS
-    "Enroll", "AutoEnroll",
-    "PublishedTo", "IssuedSignedBy",
-    "EnterpriseCAFor", "RootCAFor",
-    "TrustedForNTAuth", "NTAuthStoreFor",
+    "Enroll",
+    "AutoEnroll",
+    "PublishedTo",
+    "IssuedSignedBy",
+    "EnterpriseCAFor",
+    "RootCAFor",
+    "TrustedForNTAuth",
+    "NTAuthStoreFor",
     # GPO
-    "GPLink", "GPOAffectedByContainer",
+    "GPLink",
+    "GPOAffectedByContainer",
     # SID History
     "HasSIDHistory",
 ]
@@ -59,9 +85,9 @@ class ACE:
 
 @dataclass
 class ADNode:
-    object_id: str          # SID or DN-based identifier
+    object_id: str  # SID or DN-based identifier
     node_type: NodeType
-    properties: dict        # SharpHound Properties dict
+    properties: dict  # SharpHound Properties dict
     aces: list[ACE] = field(default_factory=list)
     contained_by: TypedPrincipal | None = None
     # Type-specific extras (Members for Group, Trusts for Domain, etc.)
@@ -70,8 +96,8 @@ class ADNode:
 
 @dataclass
 class ADEdge:
-    source: str             # ObjectIdentifier
-    target: str             # ObjectIdentifier
+    source: str  # ObjectIdentifier
+    target: str  # ObjectIdentifier
     edge_kind: EdgeKind
     properties: dict = field(default_factory=dict)
 
@@ -79,12 +105,13 @@ class ADEdge:
 @dataclass
 class PlantedPath:
     """Documents a planted attack path for the ground truth manifest."""
+
     template_id: str
     tier: int
-    category: str           # path_finding, enumeration, analysis, etc.
+    category: str  # path_finding, enumeration, analysis, etc.
     description: str
-    source_node: str        # ObjectIdentifier
-    target_node: str        # ObjectIdentifier
+    source_node: str  # ObjectIdentifier
+    target_node: str  # ObjectIdentifier
     path_edges: list[tuple[str, str, str]]  # [(source, edge_kind, target), ...]
     verification_cypher: str
     mitre: list[str] = field(default_factory=list)
@@ -125,9 +152,11 @@ class SIDAllocator:
         return sid
 
     def alloc(self, name: str) -> str:
-        """Allocate a new SID for a named object. Raises if already allocated — use get_or_alloc() for idempotent access."""
+        """Allocate a new SID for a named object. Raises if already allocated — use get_or_alloc() for idempotent access."""  # noqa: E501
         if name in self._allocated:
-            raise ValueError(f"SID already allocated for {name!r} — use get_or_alloc() for idempotent access")
+            raise ValueError(
+                f"SID already allocated for {name!r} — use get_or_alloc() for idempotent access"
+            )
         if name in self.WELL_KNOWN:
             rid = self.WELL_KNOWN[name]
         else:
@@ -231,13 +260,15 @@ class ADGraph:
 
     def edges_from(self, source: str, edge_kind: EdgeKind | None = None) -> list[ADEdge]:
         return [
-            e for e in self._edges
+            e
+            for e in self._edges
             if e.source == source and (edge_kind is None or e.edge_kind == edge_kind)
         ]
 
     def edges_to(self, target: str, edge_kind: EdgeKind | None = None) -> list[ADEdge]:
         return [
-            e for e in self._edges
+            e
+            for e in self._edges
             if e.target == target and (edge_kind is None or e.edge_kind == edge_kind)
         ]
 

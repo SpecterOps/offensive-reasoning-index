@@ -28,7 +28,7 @@ class FakeBHCEClient:
         self.init_kwargs = kwargs
         self.health_calls: list[tuple[float, float, str]] = []
 
-    async def __aenter__(self) -> "FakeBHCEClient":
+    async def __aenter__(self) -> FakeBHCEClient:
         return self
 
     async def __aexit__(self, *args) -> None:

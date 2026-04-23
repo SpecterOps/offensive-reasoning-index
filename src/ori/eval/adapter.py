@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import re
 import time
 from dataclasses import dataclass, field
-import json
 
 from .tasks import Task
 
@@ -29,7 +29,7 @@ Rules:
 @dataclass
 class ModelResponse:
     raw_text: str
-    cypher: str | None       # None = parse failed
+    cypher: str | None  # None = parse failed
     parse_stage: str
     tokens_input: int
     tokens_output: int
@@ -91,18 +91,25 @@ async def call_model(
             # Returns reference Cypher verbatim — should score CORRECT on every task
             cypher = task.reference_cypher
             return ModelResponse(
-                raw_text=cypher, cypher=cypher, parse_stage="reference",
-                tokens_input=0, tokens_output=0,
-                elapsed_seconds=0.0, model=model,
+                raw_text=cypher,
+                cypher=cypher,
+                parse_stage="reference",
+                tokens_input=0,
+                tokens_output=0,
+                elapsed_seconds=0.0,
+                model=model,
             )
 
         elif variant == "empty":
             # Returns no Cypher — should score PARSE_FAIL on every task
             return ModelResponse(
                 raw_text="I cannot answer this question.",
-                cypher=None, parse_stage="none",
-                tokens_input=0, tokens_output=0,
-                elapsed_seconds=0.0, model=model,
+                cypher=None,
+                parse_stage="none",
+                tokens_input=0,
+                tokens_output=0,
+                elapsed_seconds=0.0,
+                model=model,
             )
 
         elif variant == "hallucinate":
@@ -114,9 +121,13 @@ async def call_model(
             )
             raw = f"The attacker FAKE_SENTINEL_NODE@{domain} is a member of Domain Admins."
             return ModelResponse(
-                raw_text=raw, cypher=cypher, parse_stage="mock_hallucinate",
-                tokens_input=0, tokens_output=0,
-                elapsed_seconds=0.0, model=model,
+                raw_text=raw,
+                cypher=cypher,
+                parse_stage="mock_hallucinate",
+                tokens_input=0,
+                tokens_output=0,
+                elapsed_seconds=0.0,
+                model=model,
             )
 
         elif variant == "wrong":
@@ -124,25 +135,37 @@ async def call_model(
             # Returns all GPO objects, which won't overlap with any planted path nodes.
             cypher = "MATCH (g:GPO) RETURN g"
             return ModelResponse(
-                raw_text=cypher, cypher=cypher, parse_stage="mock_wrong",
-                tokens_input=0, tokens_output=0,
-                elapsed_seconds=0.0, model=model,
+                raw_text=cypher,
+                cypher=cypher,
+                parse_stage="mock_wrong",
+                tokens_input=0,
+                tokens_output=0,
+                elapsed_seconds=0.0,
+                model=model,
             )
 
         elif variant == "syntax_error":
             # Returns malformed Cypher — should score CYPHER_ERROR on every task.
             cypher = "MATCH (u:User WHERE RETURN u"
             return ModelResponse(
-                raw_text=cypher, cypher=cypher, parse_stage="mock_syntax_error",
-                tokens_input=0, tokens_output=0,
-                elapsed_seconds=0.0, model=model,
+                raw_text=cypher,
+                cypher=cypher,
+                parse_stage="mock_syntax_error",
+                tokens_input=0,
+                tokens_output=0,
+                elapsed_seconds=0.0,
+                model=model,
             )
 
         else:
             return ModelResponse(
-                raw_text="", cypher=None, parse_stage="none",
-                tokens_input=0, tokens_output=0,
-                elapsed_seconds=0.0, model=model,
+                raw_text="",
+                cypher=None,
+                parse_stage="none",
+                tokens_input=0,
+                tokens_output=0,
+                elapsed_seconds=0.0,
+                model=model,
                 error=(
                     f"Unknown mock variant {variant!r}. "
                     "Use: mock/perfect, mock/empty, mock/hallucinate, mock/wrong, mock/syntax_error"
@@ -156,24 +179,36 @@ async def call_model(
     t0 = time.monotonic()
     try:
         text, tokens_in, tokens_out, thinking, provider_metrics = await _call_provider(
-            model=model, messages=messages, system=system,
-            max_tokens=max_tokens, base_url=base_url,
+            model=model,
+            messages=messages,
+            system=system,
+            max_tokens=max_tokens,
+            base_url=base_url,
             ollama_options=ollama_options,
         )
         elapsed = time.monotonic() - t0
         cypher, parse_stage = extract_cypher_details(text)
         return ModelResponse(
-            raw_text=text, cypher=cypher, parse_stage=parse_stage,
-            tokens_input=tokens_in, tokens_output=tokens_out,
-            elapsed_seconds=elapsed, model=model, thinking=thinking,
+            raw_text=text,
+            cypher=cypher,
+            parse_stage=parse_stage,
+            tokens_input=tokens_in,
+            tokens_output=tokens_out,
+            elapsed_seconds=elapsed,
+            model=model,
+            thinking=thinking,
             provider_metrics=provider_metrics,
         )
     except Exception as exc:
         elapsed = time.monotonic() - t0
         return ModelResponse(
-            raw_text="", cypher=None, parse_stage="none",
-            tokens_input=0, tokens_output=0,
-            elapsed_seconds=elapsed, model=model,
+            raw_text="",
+            cypher=None,
+            parse_stage="none",
+            tokens_input=0,
+            tokens_output=0,
+            elapsed_seconds=elapsed,
+            model=model,
             error=str(exc),
         )
 
@@ -194,6 +229,7 @@ async def _call_provider(
 
     if provider == "anthropic":
         import anthropic
+
         client = anthropic.AsyncAnthropic()
         resp = await client.messages.create(
             model=name,
@@ -205,9 +241,12 @@ async def _call_provider(
 
     elif provider == "ollama":
         import os
+
         import httpx
 
-        resolved_base = (base_url or os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")).rstrip("/")
+        resolved_base = (base_url or os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")).rstrip(
+            "/"
+        )
         if resolved_base.endswith("/v1"):
             resolved_base = resolved_base[:-3].rstrip("/")
         url = f"{resolved_base}/api/chat"
@@ -244,7 +283,9 @@ async def _call_provider(
                     if isinstance(content, str) and content:
                         content_parts.append(content)
                     if data.get("done"):
-                        prompt_eval_count = int(data.get("prompt_eval_count") or prompt_eval_count or 0)
+                        prompt_eval_count = int(
+                            data.get("prompt_eval_count") or prompt_eval_count or 0
+                        )
                         eval_count = int(data.get("eval_count") or eval_count or 0)
                         done_metrics = {
                             "provider": "ollama_native_chat",
@@ -266,7 +307,9 @@ async def _call_provider(
 
     elif provider in ("openai", "openai-compat", "gemini"):
         import os
+
         import openai
+
         resolved_base = {
             "gemini": "https://generativelanguage.googleapis.com/v1beta/openai/",
         }.get(provider, base_url)

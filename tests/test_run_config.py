@@ -181,6 +181,10 @@ profiles:
     )
 
     profiles = list_run_profiles(config)
-    assert [profile.profile_name for profile in profiles] == ["prep", "disabled_phase", "final_phase"]
+    assert [profile.profile_name for profile in profiles] == [
+        "prep",
+        "disabled_phase",
+        "final_phase",
+    ]
     assert [profile.kind for profile in profiles] == ["preflight", "baseline", "smoke_eval"]
     assert [profile.enabled for profile in profiles] == [True, False, True]

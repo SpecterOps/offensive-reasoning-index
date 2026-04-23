@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import time
 
-from ..graph import ACE, ADGraph, ADNode, PlantedPath, TypedPrincipal
+from ..graph import ACE, ADGraph, ADNode, PlantedPath
 
 
 def plant_unconstrained_delegation(graph: ADGraph) -> PlantedPath:
@@ -60,16 +60,18 @@ def plant_unconstrained_delegation(graph: ADGraph) -> PlantedPath:
 
     # Plant the privileged session
     graph.add_edge(target_ws.object_id, "HasSession", da_user.object_id)
-    target_ws.extra["Sessions"]["Results"].append({
-        "UserSID": da_user.object_id,
-        "ComputerSID": target_ws.object_id,
-    })
+    target_ws.extra["Sessions"]["Results"].append(
+        {
+            "UserSID": da_user.object_id,
+            "ComputerSID": target_ws.object_id,
+        }
+    )
 
     cypher = (
-        f"MATCH p=(c:Computer {{unconstraineddelegation: true}}) "
-        f"-[:HasSession]->(u:User) "
-        f"WHERE NOT c.isdc = true "
-        f"RETURN p"
+        "MATCH p=(c:Computer {unconstraineddelegation: true}) "
+        "-[:HasSession]->(u:User) "
+        "WHERE NOT c.isdc = true "
+        "RETURN p"
     )
 
     planted = PlantedPath(
@@ -132,7 +134,7 @@ def plant_constrained_delegation(graph: ADGraph) -> PlantedPath:
             "enabled": True,
             "hasspn": True,
             "unconstraineddelegation": False,
-            "trustedtoauth": True,   # Protocol transition — key property
+            "trustedtoauth": True,  # Protocol transition — key property
             "passwordnotreqd": False,
             "dontreqpreauth": False,
             "pwdlastset": now - graph.rng.randint(0, 180 * 86400),
@@ -163,10 +165,14 @@ def plant_constrained_delegation(graph: ADGraph) -> PlantedPath:
 
     # DA has GenericAll on this account
     if da_sid:
-        svc_node.aces.append(ACE(
-            principal_sid=da_sid, principal_type="Group",
-            right_name="GenericAll", is_inherited=True,
-        ))
+        svc_node.aces.append(
+            ACE(
+                principal_sid=da_sid,
+                principal_type="Group",
+                right_name="GenericAll",
+                is_inherited=True,
+            )
+        )
 
     cypher = (
         f"MATCH p=(u:User {{name: 'SVC_MSSQL@{graph.domain}'}}) "

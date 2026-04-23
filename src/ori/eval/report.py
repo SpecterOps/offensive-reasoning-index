@@ -12,35 +12,77 @@ if TYPE_CHECKING:
 
 
 CSV_FIELDNAMES = [
-    "run_name", "requested_model", "resolved_model", "config_identity_json", "options_json",
-    "task_id", "template_id", "tier", "category", "model",
-    "score", "outcome", "hallucination",
-    "tokens_input", "tokens_output", "elapsed_seconds", "task_wall_seconds",
-    "output_tokens_per_second", "tokens_per_second_source",
-    "grade_mode", "question", "model_cypher", "model_thinking", "error_detail",
-    "parse_stage", "inspect_log", "inspect_sample_id", "inspect_sample_uuid",
-    "inspect_model_calls", "inspect_error_retries",
-    "eval_mode", "task_track", "final_answer_raw", "final_answer_normalized",
-    "tool_calls_total", "failed_tool_calls", "unique_tools_used",
-    "cypher_query_calls", "non_cypher_tool_calls", "agent_turns",
-    "attempted_policy_violations", "trajectory_log",
-    "server_prompt_used", "server_prompt_name", "resource_mode",
-    "resource_reads_total", "unique_resources_used", "resource_characters_total",
-    "ollama_version", "ollama_model_digest", "ollama_model_context_length",
-    "ollama_model_size_bytes", "ollama_model_size_vram_bytes",
-    "model_quantization_level", "telemetry_sample_ref",
+    "run_name",
+    "requested_model",
+    "resolved_model",
+    "config_identity_json",
+    "options_json",
+    "task_id",
+    "template_id",
+    "tier",
+    "category",
+    "model",
+    "score",
+    "outcome",
+    "hallucination",
+    "tokens_input",
+    "tokens_output",
+    "elapsed_seconds",
+    "task_wall_seconds",
+    "output_tokens_per_second",
+    "tokens_per_second_source",
+    "grade_mode",
+    "question",
+    "model_cypher",
+    "model_thinking",
+    "error_detail",
+    "parse_stage",
+    "inspect_log",
+    "inspect_sample_id",
+    "inspect_sample_uuid",
+    "inspect_model_calls",
+    "inspect_error_retries",
+    "eval_mode",
+    "task_track",
+    "final_answer_raw",
+    "final_answer_normalized",
+    "tool_calls_total",
+    "failed_tool_calls",
+    "unique_tools_used",
+    "cypher_query_calls",
+    "non_cypher_tool_calls",
+    "agent_turns",
+    "attempted_policy_violations",
+    "trajectory_log",
+    "server_prompt_used",
+    "server_prompt_name",
+    "resource_mode",
+    "resource_reads_total",
+    "unique_resources_used",
+    "resource_characters_total",
+    "ollama_version",
+    "ollama_model_digest",
+    "ollama_model_context_length",
+    "ollama_model_size_bytes",
+    "ollama_model_size_vram_bytes",
+    "model_quantization_level",
+    "telemetry_sample_ref",
 ]
 
 
-def _run_name_for_result(r: "EvalResult") -> str:
-    return getattr(r, "run_name", None) or getattr(r, "requested_model", None) or r.model_response.model
+def _run_name_for_result(r: EvalResult) -> str:
+    return (
+        getattr(r, "run_name", None)
+        or getattr(r, "requested_model", None)
+        or r.model_response.model
+    )
 
 
-def _requested_model_for_result(r: "EvalResult") -> str:
+def _requested_model_for_result(r: EvalResult) -> str:
     return getattr(r, "requested_model", None) or r.model_response.model
 
 
-def _row_for_result(r: "EvalResult") -> dict[str, object]:
+def _row_for_result(r: EvalResult) -> dict[str, object]:
     inspect_meta = r.inspect
     mcp_meta = r.mcp
     run_name = _run_name_for_result(r)
@@ -84,7 +126,9 @@ def _row_for_result(r: "EvalResult") -> dict[str, object]:
         "model_cypher": (r.model_response.cypher or "").replace("\n", " "),
         "model_thinking": (r.model_response.thinking or "").replace("\n", " "),
         "error_detail": (
-            r.grade.details if r.grade.outcome in ("CYPHER_ERROR", "MODEL_ERROR", "INFRA_ERROR") else ""
+            r.grade.details
+            if r.grade.outcome in ("CYPHER_ERROR", "MODEL_ERROR", "INFRA_ERROR")
+            else ""
         ),
         "parse_stage": r.model_response.parse_stage,
         "inspect_log": inspect_meta.log_location if inspect_meta else "",
@@ -104,9 +148,7 @@ def _row_for_result(r: "EvalResult") -> dict[str, object]:
         "cypher_query_calls": mcp_meta.cypher_query_calls if mcp_meta else 0,
         "non_cypher_tool_calls": mcp_meta.non_cypher_tool_calls if mcp_meta else 0,
         "agent_turns": mcp_meta.agent_turns if mcp_meta else 0,
-        "attempted_policy_violations": (
-            mcp_meta.attempted_policy_violations if mcp_meta else 0
-        ),
+        "attempted_policy_violations": (mcp_meta.attempted_policy_violations if mcp_meta else 0),
         "trajectory_log": mcp_meta.trajectory_log if mcp_meta else "",
         "server_prompt_used": mcp_meta.server_prompt_used if mcp_meta else False,
         "server_prompt_name": mcp_meta.server_prompt_name if mcp_meta else "",
@@ -124,7 +166,7 @@ def _row_for_result(r: "EvalResult") -> dict[str, object]:
     }
 
 
-def write_csv(results: list["EvalResult"], output_path: Path) -> None:
+def write_csv(results: list[EvalResult], output_path: Path) -> None:
     """Write evaluation results to CSV."""
     with output_path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=CSV_FIELDNAMES)
@@ -133,7 +175,7 @@ def write_csv(results: list["EvalResult"], output_path: Path) -> None:
             writer.writerow(_row_for_result(r))
 
 
-def write_combined_csv(all_results: dict[str, list["EvalResult"]], output_path: Path) -> None:
+def write_combined_csv(all_results: dict[str, list[EvalResult]], output_path: Path) -> None:
     """Write all baseline task rows into a single CSV."""
     with output_path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=CSV_FIELDNAMES)
@@ -143,7 +185,7 @@ def write_combined_csv(all_results: dict[str, list["EvalResult"]], output_path: 
                 writer.writerow(_row_for_result(result))
 
 
-def _stats(results: list["EvalResult"]) -> dict:
+def _stats(results: list[EvalResult]) -> dict:
     total = len(results)
     correct = sum(1 for r in results if r.grade.score == 1.0)
     hallucs = sum(1 for r in results if r.grade.hallucination)
@@ -193,20 +235,45 @@ def _stats(results: list["EvalResult"]) -> dict:
     }
 
 
-def write_summary_csv(all_results: dict[str, list["EvalResult"]], output_path: Path) -> None:
+def write_summary_csv(all_results: dict[str, list[EvalResult]], output_path: Path) -> None:
     """Write one summary row per model."""
     fieldnames = [
-        "run_name", "requested_model", "resolved_model", "config_identity_json", "options_json",
-        "model", "total_tasks", "correct", "score_pct",
-        "tier1_correct", "tier1_total", "tier1_pct",
-        "tier2_correct", "tier2_total", "tier2_pct",
-        "tier3_correct", "tier3_total", "tier3_pct",
-        "hallucinations", "cypher_errors", "parse_fails", "model_errors", "infra_errors",
-        "avg_tool_calls", "cypher_query_calls", "non_cypher_tool_calls",
-        "failed_tool_calls", "policy_violations",
-        "avg_resource_reads", "resource_characters_total", "server_prompt_used",
-        "avg_output_tokens_per_second", "ollama_version", "ollama_model_digest",
-        "ollama_model_context_length", "model_quantization_level",
+        "run_name",
+        "requested_model",
+        "resolved_model",
+        "config_identity_json",
+        "options_json",
+        "model",
+        "total_tasks",
+        "correct",
+        "score_pct",
+        "tier1_correct",
+        "tier1_total",
+        "tier1_pct",
+        "tier2_correct",
+        "tier2_total",
+        "tier2_pct",
+        "tier3_correct",
+        "tier3_total",
+        "tier3_pct",
+        "hallucinations",
+        "cypher_errors",
+        "parse_fails",
+        "model_errors",
+        "infra_errors",
+        "avg_tool_calls",
+        "cypher_query_calls",
+        "non_cypher_tool_calls",
+        "failed_tool_calls",
+        "policy_violations",
+        "avg_resource_reads",
+        "resource_characters_total",
+        "server_prompt_used",
+        "avg_output_tokens_per_second",
+        "ollama_version",
+        "ollama_model_digest",
+        "ollama_model_context_length",
+        "model_quantization_level",
     ]
     with output_path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -218,7 +285,9 @@ def write_summary_csv(all_results: dict[str, list["EvalResult"]], output_path: P
             resolved_model = first.model_response.model if first else requested_model
             run_name = _run_name_for_result(first) if first else model
             first_run_config = getattr(first, "run_config", None) if first else None
-            config_identity_json = json.dumps(first_run_config, sort_keys=True) if first_run_config else ""
+            config_identity_json = (
+                json.dumps(first_run_config, sort_keys=True) if first_run_config else ""
+            )
             options_json = ""
             if first_run_config and isinstance(first_run_config.get("options"), dict):
                 options_json = json.dumps(first_run_config["options"], sort_keys=True)
@@ -233,51 +302,59 @@ def write_summary_csv(all_results: dict[str, list["EvalResult"]], output_path: P
             t1c, t1t, t1p = tier_fields(1)
             t2c, t2t, t2p = tier_fields(2)
             t3c, t3t, t3p = tier_fields(3)
-            writer.writerow({
-                "run_name": run_name,
-                "requested_model": requested_model,
-                "resolved_model": resolved_model,
-                "config_identity_json": config_identity_json,
-                "options_json": options_json,
-                "model": model,
-                "total_tasks": s["total"],
-                "correct": s["correct"],
-                "score_pct": (100 * s["correct"] // s["total"]) if s["total"] else 0,
-                "tier1_correct": t1c,
-                "tier1_total": t1t,
-                "tier1_pct": t1p,
-                "tier2_correct": t2c,
-                "tier2_total": t2t,
-                "tier2_pct": t2p,
-                "tier3_correct": t3c,
-                "tier3_total": t3t,
-                "tier3_pct": t3p,
-                "hallucinations": s["hallucs"],
-                "cypher_errors": s["errors"],
-                "parse_fails": s["parse_fails"],
-                "model_errors": s["model_errors"],
-                "infra_errors": s["infra_errors"],
-                "avg_tool_calls": round((s["tool_calls_total"] / s["mcp_samples"]), 2) if s["mcp_samples"] else 0.0,
-                "cypher_query_calls": s["cypher_query_calls"],
-                "non_cypher_tool_calls": s["non_cypher_tool_calls"],
-                "failed_tool_calls": s["failed_tool_calls"],
-                "policy_violations": s["policy_violations"],
-                "avg_resource_reads": round((s["resource_reads_total"] / s["mcp_samples"]), 2) if s["mcp_samples"] else 0.0,
-                "resource_characters_total": s["resource_characters_total"],
-                "server_prompt_used": s["prompt_used"],
-                "avg_output_tokens_per_second": (
-                    round(s["avg_output_tokens_per_second"], 4)
-                    if s["avg_output_tokens_per_second"] is not None
-                    else ""
-                ),
-                "ollama_version": first_telemetry.get("ollama_version", ""),
-                "ollama_model_digest": first_telemetry.get("ollama_model_digest", ""),
-                "ollama_model_context_length": first_telemetry.get("ollama_model_context_length", ""),
-                "model_quantization_level": first_telemetry.get("model_quantization_level", ""),
-            })
+            writer.writerow(
+                {
+                    "run_name": run_name,
+                    "requested_model": requested_model,
+                    "resolved_model": resolved_model,
+                    "config_identity_json": config_identity_json,
+                    "options_json": options_json,
+                    "model": model,
+                    "total_tasks": s["total"],
+                    "correct": s["correct"],
+                    "score_pct": (100 * s["correct"] // s["total"]) if s["total"] else 0,
+                    "tier1_correct": t1c,
+                    "tier1_total": t1t,
+                    "tier1_pct": t1p,
+                    "tier2_correct": t2c,
+                    "tier2_total": t2t,
+                    "tier2_pct": t2p,
+                    "tier3_correct": t3c,
+                    "tier3_total": t3t,
+                    "tier3_pct": t3p,
+                    "hallucinations": s["hallucs"],
+                    "cypher_errors": s["errors"],
+                    "parse_fails": s["parse_fails"],
+                    "model_errors": s["model_errors"],
+                    "infra_errors": s["infra_errors"],
+                    "avg_tool_calls": round((s["tool_calls_total"] / s["mcp_samples"]), 2)
+                    if s["mcp_samples"]
+                    else 0.0,
+                    "cypher_query_calls": s["cypher_query_calls"],
+                    "non_cypher_tool_calls": s["non_cypher_tool_calls"],
+                    "failed_tool_calls": s["failed_tool_calls"],
+                    "policy_violations": s["policy_violations"],
+                    "avg_resource_reads": round((s["resource_reads_total"] / s["mcp_samples"]), 2)
+                    if s["mcp_samples"]
+                    else 0.0,
+                    "resource_characters_total": s["resource_characters_total"],
+                    "server_prompt_used": s["prompt_used"],
+                    "avg_output_tokens_per_second": (
+                        round(s["avg_output_tokens_per_second"], 4)
+                        if s["avg_output_tokens_per_second"] is not None
+                        else ""
+                    ),
+                    "ollama_version": first_telemetry.get("ollama_version", ""),
+                    "ollama_model_digest": first_telemetry.get("ollama_model_digest", ""),
+                    "ollama_model_context_length": first_telemetry.get(
+                        "ollama_model_context_length", ""
+                    ),
+                    "model_quantization_level": first_telemetry.get("model_quantization_level", ""),
+                }
+            )
 
 
-def print_comparison(all_results: dict[str, list["EvalResult"]]) -> None:
+def print_comparison(all_results: dict[str, list[EvalResult]]) -> None:
     """Print a multi-model comparison table."""
     col_w = 36
     print("\n" + "=" * 121)
@@ -292,11 +369,11 @@ def print_comparison(all_results: dict[str, list["EvalResult"]]) -> None:
 
     for model, results in all_results.items():
         s = _stats(results)
-        pct = f"{100 * s['correct'] // s['total']}%" if s['total'] else "0%"
+        f"{100 * s['correct'] // s['total']}%" if s["total"] else "0%"
 
         def tp(tier):
-            c, t = s['tiers'][tier]
-            return f"{100*c//t}%" if t else "n/a"
+            c, t = s["tiers"][tier]
+            return f"{100 * c // t}%" if t else "n/a"
 
         short_model = model.split("/", 1)[-1][:col_w]
         print(
@@ -309,14 +386,14 @@ def print_comparison(all_results: dict[str, list["EvalResult"]]) -> None:
             avg_tools = s["tool_calls_total"] / s["mcp_samples"]
             print(
                 f"{'':<{col_w}} {'tools(avg)':>8} {avg_tools:>7.2f} "
-                f"{'cypher':>7} {s['cypher_query_calls']:>7} {'noncy':>7} {s['non_cypher_tool_calls']:>7} "
-                f"{'toolfail':>9} {s['failed_tool_calls']:>9} {'policy':>9} {s['policy_violations']:>9}"
+                f"{'cypher':>7} {s['cypher_query_calls']:>7} {'noncy':>7} {s['non_cypher_tool_calls']:>7} "  # noqa: E501
+                f"{'toolfail':>9} {s['failed_tool_calls']:>9} {'policy':>9} {s['policy_violations']:>9}"  # noqa: E501
             )
 
     print("=" * 121)
 
 
-def print_summary(results: list["EvalResult"], model: str) -> None:
+def print_summary(results: list[EvalResult], model: str) -> None:
     """Print a summary table to stdout."""
     total = len(results)
     correct = sum(1 for r in results if r.grade.score == 1.0)
@@ -331,7 +408,7 @@ def print_summary(results: list["EvalResult"], model: str) -> None:
         if not t:
             return "n/a"
         c = sum(1 for r in t if r.grade.score == 1.0)
-        return f"{c}/{len(t)} ({100*c//len(t)}%)"
+        return f"{c}/{len(t)} ({100 * c // len(t)}%)"
 
     pct = f"{100 * correct // total}%" if total else "0%"
     print("\n" + "=" * 60)
@@ -340,13 +417,13 @@ def print_summary(results: list["EvalResult"], model: str) -> None:
     print(f"Tier 1: {tier_score(1)}  |  Tier 2: {tier_score(2)}  |  Tier 3: {tier_score(3)}")
     print(
         f"Hallucinations: {hallucinations}  |  Parse failures: {parse_fails}  |  "
-        f"Cypher errors: {cypher_errors}  |  Model errors: {model_errors}  |  Infra errors: {infra_errors}"
+        f"Cypher errors: {cypher_errors}  |  Model errors: {model_errors}  |  Infra errors: {infra_errors}"  # noqa: E501
     )
     if any(r.mcp for r in results):
         mcp = _stats(results)
         avg_tools = mcp["tool_calls_total"] / mcp["mcp_samples"] if mcp["mcp_samples"] else 0.0
         print(
-            f"Avg tool calls: {avg_tools:.2f}  |  Cypher tool calls: {mcp['cypher_query_calls']}  |  "
+            f"Avg tool calls: {avg_tools:.2f}  |  Cypher tool calls: {mcp['cypher_query_calls']}  |  "  # noqa: E501
             f"Non-cypher tool calls: {mcp['non_cypher_tool_calls']}  |  "
             f"Failed tool calls: {mcp['failed_tool_calls']}  |  "
             f"Policy violations: {mcp['policy_violations']}"

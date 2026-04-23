@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import time
 
-from ..graph import ACE, ADGraph, ADNode, PlantedPath, TypedPrincipal
+from ..graph import ACE, ADGraph, ADNode, PlantedPath
 
 
 def plant_kerberoast_chain(graph: ADGraph) -> PlantedPath:
@@ -29,7 +29,8 @@ def plant_kerberoast_chain(graph: ADGraph) -> PlantedPath:
     da_sid = graph.sid_alloc.get("Domain Admins")
 
     servers = [
-        c for c in graph.nodes_by_type("Computer")
+        c
+        for c in graph.nodes_by_type("Computer")
         if "SRV" in c.properties.get("name", "") and not c.properties.get("isdc", False)
     ]
     if not servers:
@@ -66,7 +67,9 @@ def plant_kerberoast_chain(graph: ADGraph) -> PlantedPath:
         },
         extra={
             "AllowedToDelegate": [],
-            "SPNTargets": [{"ComputerSID": target_server.object_id, "Port": 1433, "Service": "MSSQLSvc"}],
+            "SPNTargets": [
+                {"ComputerSID": target_server.object_id, "Port": 1433, "Service": "MSSQLSvc"}
+            ],
             "HasSIDHistory": [],
         },
     )
@@ -88,10 +91,14 @@ def plant_kerberoast_chain(graph: ADGraph) -> PlantedPath:
 
     # DA has GenericAll on this account (default ACL)
     if da_sid:
-        svc_node.aces.append(ACE(
-            principal_sid=da_sid, principal_type="Group",
-            right_name="GenericAll", is_inherited=True,
-        ))
+        svc_node.aces.append(
+            ACE(
+                principal_sid=da_sid,
+                principal_type="Group",
+                right_name="GenericAll",
+                is_inherited=True,
+            )
+        )
 
     cypher = (
         f"MATCH p=shortestPath( "
@@ -148,9 +155,9 @@ def plant_acl_chain(graph: ADGraph) -> PlantedPath:
     }
 
     candidates = [
-        u for u in graph.nodes_by_type("User")
-        if u.object_id not in privileged_sids
-        and u.properties.get("department") not in ("IT", None)
+        u
+        for u in graph.nodes_by_type("User")
+        if u.object_id not in privileged_sids and u.properties.get("department") not in ("IT", None)
     ]
     if not candidates:
         raise RuntimeError("No eligible users for t2_acl_chain")
@@ -158,16 +165,19 @@ def plant_acl_chain(graph: ADGraph) -> PlantedPath:
     attacker = graph.rng.choice(candidates)
 
     # Plant: GenericAll ACE from attacker onto Server-Admins
-    server_admins_node.aces.append(ACE(
-        principal_sid=attacker.object_id,
-        principal_type="User",
-        right_name="GenericAll",
-        is_inherited=False,
-    ))
+    server_admins_node.aces.append(
+        ACE(
+            principal_sid=attacker.object_id,
+            principal_type="User",
+            right_name="GenericAll",
+            is_inherited=False,
+        )
+    )
     graph.add_edge(attacker.object_id, "GenericAll", server_admins_sid)
 
     servers = [
-        c for c in graph.nodes_by_type("Computer")
+        c
+        for c in graph.nodes_by_type("Computer")
         if "SRV" in c.properties.get("name", "") and not c.properties.get("isdc", False)
     ]
     target_server = servers[0] if servers else graph.nodes_by_type("Computer")[0]
@@ -209,7 +219,8 @@ def plant_nested_groups(graph: ADGraph) -> PlantedPath:
     The nesting obscures the privilege escalation path — a common real-world pattern
     where groups accumulate membership over time without auditing.
 
-    Path: USER → MemberOf → INFRA-TEAM → MemberOf → INFRA-LEADS → MemberOf → SERVER-ADMINS → AdminTo → SRV
+    Path: USER → MemberOf → INFRA-TEAM → MemberOf → INFRA-LEADS →
+    MemberOf → SERVER-ADMINS → AdminTo → SRV
 
     Attack: the nested membership grants transitive AdminTo on servers.
     """
@@ -218,7 +229,7 @@ def plant_nested_groups(graph: ADGraph) -> PlantedPath:
     if not server_admins_node:
         raise RuntimeError("Server-Admins not found for t2_nested_groups")
 
-    domain_users_sid = graph.sid_alloc.get("Domain Users")
+    graph.sid_alloc.get("Domain Users")
     da_sid = graph.sid_alloc.get("Domain Admins")
     cn_users_dn = f"CN=Users,{graph.dn.domain_root()}"
 
@@ -261,10 +272,14 @@ def plant_nested_groups(graph: ADGraph) -> PlantedPath:
 
     # Wire the nesting: INFRA-TEAM → MemberOf → INFRA-LEADS → MemberOf → Server-Admins
     graph.add_edge(infra_team_sid, "MemberOf", infra_leads_sid)
-    infra_leads_node.extra["Members"].append({"ObjectIdentifier": infra_team_sid, "ObjectType": "Group"})
+    infra_leads_node.extra["Members"].append(
+        {"ObjectIdentifier": infra_team_sid, "ObjectType": "Group"}
+    )
 
     graph.add_edge(infra_leads_sid, "MemberOf", server_admins_sid)
-    server_admins_node.extra["Members"].append({"ObjectIdentifier": infra_leads_sid, "ObjectType": "Group"})
+    server_admins_node.extra["Members"].append(
+        {"ObjectIdentifier": infra_leads_sid, "ObjectType": "Group"}
+    )
 
     # Pick a non-IT, non-privileged user and add them to INFRA-TEAM
     it_admins_sid = graph.sid_alloc.get("IT-Admins")
@@ -275,13 +290,13 @@ def plant_nested_groups(graph: ADGraph) -> PlantedPath:
     }
 
     candidates = [
-        u for u in graph.nodes_by_type("User")
-        if u.object_id not in privileged_sids
-        and u.properties.get("department") == "Engineering"
+        u
+        for u in graph.nodes_by_type("User")
+        if u.object_id not in privileged_sids and u.properties.get("department") == "Engineering"
     ] or [
-        u for u in graph.nodes_by_type("User")
-        if u.object_id not in privileged_sids
-        and u.properties.get("department") not in ("IT", None)
+        u
+        for u in graph.nodes_by_type("User")
+        if u.object_id not in privileged_sids and u.properties.get("department") not in ("IT", None)
     ]
     if not candidates:
         raise RuntimeError("No eligible users for t2_nested_groups")
@@ -297,13 +312,18 @@ def plant_nested_groups(graph: ADGraph) -> PlantedPath:
     # DA has GenericAll on both groups
     for node in (infra_leads_node, infra_team_node):
         if da_sid:
-            node.aces.append(ACE(
-                principal_sid=da_sid, principal_type="Group",
-                right_name="GenericAll", is_inherited=True,
-            ))
+            node.aces.append(
+                ACE(
+                    principal_sid=da_sid,
+                    principal_type="Group",
+                    right_name="GenericAll",
+                    is_inherited=True,
+                )
+            )
 
     servers = [
-        c for c in graph.nodes_by_type("Computer")
+        c
+        for c in graph.nodes_by_type("Computer")
         if "SRV" in c.properties.get("name", "") and not c.properties.get("isdc", False)
     ]
     target_server = servers[0] if servers else graph.nodes_by_type("Computer")[0]

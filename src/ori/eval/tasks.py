@@ -10,10 +10,10 @@ class Task:
     id: str
     template_id: str
     tier: int
-    category: str         # path_finding | enumeration | cypher_generation
+    category: str  # path_finding | enumeration | cypher_generation
     question: str
     reference_cypher: str
-    grade_mode: str       # path_exists | node_set | row_count
+    grade_mode: str  # path_exists | node_set | row_count
     tags: list[str] = field(default_factory=list)
     metadata: dict = field(default_factory=dict)
 
@@ -28,7 +28,9 @@ _TEMPLATE_QUESTIONS: dict[str, list[tuple[str, str, str, list[str], str | None]]
     "t1_admin_to": [
         (
             "What is the attack path from {source_name} to {target_name}? Show the full path.",
-            "path_finding", "path_exists", ["admin_to", "member_of"],
+            "path_finding",
+            "path_exists",
+            ["admin_to", "member_of"],
             None,  # use verification_cypher from manifest
         ),
     ],
@@ -36,7 +38,9 @@ _TEMPLATE_QUESTIONS: dict[str, list[tuple[str, str, str, list[str], str | None]]
         (
             "Which computers have active sessions from members of the Domain Admins group "
             "or groups nested within it?",
-            "enumeration", "node_set", ["has_session", "lateral_movement"],
+            "enumeration",
+            "node_set",
+            ["has_session", "lateral_movement"],
             # Returns the computers themselves, not the full path
             "MATCH (c:Computer)-[:HasSession]->(u:User)-[:MemberOf*1..]->(g:Group"
             " {{name: 'DOMAIN ADMINS@{domain}'}}) RETURN c",
@@ -44,20 +48,26 @@ _TEMPLATE_QUESTIONS: dict[str, list[tuple[str, str, str, list[str], str | None]]
         (
             "Find all workstations where a privileged user (Domain Admin or IT Admin) "
             "has an active session.",
-            "path_finding", "path_exists", ["has_session"],
+            "path_finding",
+            "path_exists",
+            ["has_session"],
             None,
         ),
     ],
     "t1_group_membership": [
         (
             "Is {source_name} a member of any privileged groups? Show the membership path.",
-            "path_finding", "path_exists", ["member_of", "privilege_escalation"],
+            "path_finding",
+            "path_exists",
+            ["member_of", "privilege_escalation"],
             None,
         ),
         (
             "Find all users who are direct members of the Domain Admins group "
             "(not through nested group membership).",
-            "enumeration", "node_set", ["member_of", "domain_admins"],
+            "enumeration",
+            "node_set",
+            ["member_of", "domain_admins"],
             # Direct MemberOf only — not transitive
             "MATCH (u:User)-[:MemberOf]->(g:Group {{name: 'DOMAIN ADMINS@{domain}'}}) RETURN u",
         ),
@@ -66,13 +76,17 @@ _TEMPLATE_QUESTIONS: dict[str, list[tuple[str, str, str, list[str], str | None]]
         (
             "Find all Kerberoastable service accounts (hasspn = true) and show their path "
             "to any server computer.",
-            "path_finding", "path_exists", ["kerberoasting", "service_accounts"],
+            "path_finding",
+            "path_exists",
+            ["kerberoasting", "service_accounts"],
             None,
         ),
         (
             "List all user accounts that have a Service Principal Name (SPN) set, "
             "making them vulnerable to Kerberoasting.",
-            "enumeration", "node_set", ["kerberoasting", "spn"],
+            "enumeration",
+            "node_set",
+            ["kerberoasting", "spn"],
             "MATCH (u:User {{hasspn: true}}) RETURN u",
         ),
     ],
@@ -80,13 +94,17 @@ _TEMPLATE_QUESTIONS: dict[str, list[tuple[str, str, str, list[str], str | None]]
         (
             "Find users with GenericAll rights on any privileged group that has AdminTo "
             "access on servers.",
-            "path_finding", "path_exists", ["acl", "generic_all", "admin_to"],
+            "path_finding",
+            "path_exists",
+            ["acl", "generic_all", "admin_to"],
             None,
         ),
         (
             "Find all ACL-based attack paths where a regular user can reach server admin "
             "access through group rights abuse.",
-            "path_finding", "path_exists", ["acl", "privilege_escalation"],
+            "path_finding",
+            "path_exists",
+            ["acl", "privilege_escalation"],
             None,
         ),
     ],
@@ -94,13 +112,17 @@ _TEMPLATE_QUESTIONS: dict[str, list[tuple[str, str, str, list[str], str | None]]
         (
             "Find the full attack path from {source_name} to any server computer, "
             "including all nested group membership hops.",
-            "path_finding", "path_exists", ["nested_groups", "member_of"],
+            "path_finding",
+            "path_exists",
+            ["nested_groups", "member_of"],
             None,
         ),
         (
             "Show the complete group nesting chain that connects INFRA-TEAM@{domain} "
             "to Server-Admins.",
-            "path_finding", "path_exists", ["nested_groups"],
+            "path_finding",
+            "path_exists",
+            ["nested_groups"],
             "MATCH p=(g:Group {{name: 'INFRA-TEAM@{domain}'}})-[:MemberOf*1..]->"
             "(sa:Group {{name: 'SERVER-ADMINS@{domain}'}}) RETURN p",
         ),
@@ -109,12 +131,16 @@ _TEMPLATE_QUESTIONS: dict[str, list[tuple[str, str, str, list[str], str | None]]
         (
             "Find all non-domain-controller computers that have unconstrained Kerberos "
             "delegation enabled and also have active sessions from privileged users.",
-            "path_finding", "path_exists", ["unconstrained_delegation", "kerberos"],
+            "path_finding",
+            "path_exists",
+            ["unconstrained_delegation", "kerberos"],
             None,
         ),
         (
             "Which computers have unconstrained delegation configured? Exclude domain controllers.",
-            "enumeration", "node_set", ["unconstrained_delegation"],
+            "enumeration",
+            "node_set",
+            ["unconstrained_delegation"],
             "MATCH (c:Computer {{unconstraineddelegation: true}}) WHERE NOT c.isdc = true RETURN c",
         ),
     ],
@@ -122,13 +148,17 @@ _TEMPLATE_QUESTIONS: dict[str, list[tuple[str, str, str, list[str], str | None]]
         (
             "Find all service accounts configured with constrained delegation "
             "(trustedtoauth = true) that can delegate access to domain controllers.",
-            "path_finding", "path_exists", ["constrained_delegation", "s4u2proxy"],
+            "path_finding",
+            "path_exists",
+            ["constrained_delegation", "s4u2proxy"],
             None,
         ),
         (
             "List all accounts with the 'Trust this computer for delegation to specified "
             "services only' (trustedtoauth) flag set.",
-            "enumeration", "node_set", ["constrained_delegation"],
+            "enumeration",
+            "node_set",
+            ["constrained_delegation"],
             "MATCH (u:User {{trustedtoauth: true}}) RETURN u",
         ),
     ],
@@ -140,28 +170,38 @@ _GLOBAL_TASKS: list[tuple[str, str, str, str, list[str]]] = [
     (
         "global-kerberoastable",
         "List all user accounts with a Service Principal Name (SPN) set (hasspn = true).",
-        "enumeration", "node_set", ["kerberoasting"],
+        "enumeration",
+        "node_set",
+        ["kerberoasting"],
     ),
     (
         "global-admin-to",
         "Find all computers where the Domain Admins group has AdminTo (local admin) access.",
-        "enumeration", "node_set", ["admin_to", "domain_admins"],
+        "enumeration",
+        "node_set",
+        ["admin_to", "domain_admins"],
     ),
     (
         "global-da-members",
         "List all users who are direct or transitive members of the Domain Admins group.",
-        "enumeration", "node_set", ["domain_admins", "member_of"],
+        "enumeration",
+        "node_set",
+        ["domain_admins", "member_of"],
     ),
     (
         "global-unconstrained",
         "Find all computers with unconstrained Kerberos delegation enabled, "
         "excluding domain controllers.",
-        "enumeration", "node_set", ["unconstrained_delegation"],
+        "enumeration",
+        "node_set",
+        ["unconstrained_delegation"],
     ),
     (
         "global-privileged-sessions",
         "Find all computers that have active sessions from members of the Domain Admins group.",
-        "enumeration", "node_set", ["has_session", "lateral_movement"],
+        "enumeration",
+        "node_set",
+        ["has_session", "lateral_movement"],
     ),
 ]
 
@@ -194,51 +234,50 @@ def generate_tasks(manifest: dict) -> list[Task]:
                 )
             else:
                 reference_cypher = path["verification_cypher"]
-            tasks.append(Task(
-                id=f"{tid}-{i:02d}",
-                template_id=tid,
-                tier=path["tier"],
-                category=category,
-                question=question,
-                reference_cypher=reference_cypher,
-                grade_mode=grade_mode,
-                tags=tags,
-                metadata={
-                    "source_name": source_name,
-                    "target_name": target_name,
-                    "domain": domain,
-                    "description": path["description"],
-                    "mitre": path.get("mitre", []),
-                },
-            ))
+            tasks.append(
+                Task(
+                    id=f"{tid}-{i:02d}",
+                    template_id=tid,
+                    tier=path["tier"],
+                    category=category,
+                    question=question,
+                    reference_cypher=reference_cypher,
+                    grade_mode=grade_mode,
+                    tags=tags,
+                    metadata={
+                        "source_name": source_name,
+                        "target_name": target_name,
+                        "domain": domain,
+                        "description": path["description"],
+                        "mitre": path.get("mitre", []),
+                    },
+                )
+            )
 
     # Global tasks use a placeholder reference Cypher (will be graded path_exists / node_set
     # against the actual BH CE results — reference Cypher runs live)
     _GLOBAL_REFERENCE_CYPHER = {
-        "global-kerberoastable":
-            "MATCH (u:User {hasspn: true}) RETURN u",
-        "global-admin-to":
-            f"MATCH (g:Group {{name: 'DOMAIN ADMINS@{domain}'}})-[:AdminTo]->(c:Computer) RETURN c",
-        "global-da-members":
-            f"MATCH (u:User)-[:MemberOf*1..]->(g:Group {{name: 'DOMAIN ADMINS@{domain}'}}) RETURN u",
-        "global-unconstrained":
-            "MATCH (c:Computer {unconstraineddelegation: true}) WHERE NOT c.isdc = true RETURN c",
-        "global-privileged-sessions":
-            f"MATCH (c:Computer)-[:HasSession]->(u:User)-[:MemberOf*1..]->(g:Group {{name: 'DOMAIN ADMINS@{domain}'}}) RETURN c",
+        "global-kerberoastable": "MATCH (u:User {hasspn: true}) RETURN u",
+        "global-admin-to": f"MATCH (g:Group {{name: 'DOMAIN ADMINS@{domain}'}})-[:AdminTo]->(c:Computer) RETURN c",  # noqa: E501
+        "global-da-members": f"MATCH (u:User)-[:MemberOf*1..]->(g:Group {{name: 'DOMAIN ADMINS@{domain}'}}) RETURN u",  # noqa: E501
+        "global-unconstrained": "MATCH (c:Computer {unconstraineddelegation: true}) WHERE NOT c.isdc = true RETURN c",  # noqa: E501
+        "global-privileged-sessions": f"MATCH (c:Computer)-[:HasSession]->(u:User)-[:MemberOf*1..]->(g:Group {{name: 'DOMAIN ADMINS@{domain}'}}) RETURN c",  # noqa: E501
     }
 
     for id_suffix, question, category, grade_mode, tags in _GLOBAL_TASKS:
-        tasks.append(Task(
-            id=id_suffix,
-            template_id="global",
-            tier=1,
-            category=category,
-            question=question.format(domain=domain),
-            reference_cypher=_GLOBAL_REFERENCE_CYPHER[id_suffix],
-            grade_mode=grade_mode,
-            tags=tags,
-            metadata={"domain": domain},
-        ))
+        tasks.append(
+            Task(
+                id=id_suffix,
+                template_id="global",
+                tier=1,
+                category=category,
+                question=question.format(domain=domain),
+                reference_cypher=_GLOBAL_REFERENCE_CYPHER[id_suffix],
+                grade_mode=grade_mode,
+                tags=tags,
+                metadata={"domain": domain},
+            )
+        )
 
     return tasks
 
@@ -267,25 +306,18 @@ def generate_mcp_tasks(manifest: dict) -> list[Task]:
 
 def _global_reference_cypher_map(domain: str) -> dict[str, str]:
     return {
-        "global-kerberoastable":
-            "MATCH (u:User {hasspn: true}) RETURN u",
-        "global-admin-to":
-            f"MATCH (g:Group {{name: 'DOMAIN ADMINS@{domain}'}})-[:AdminTo]->(c:Computer) RETURN c",
-        "global-da-members":
-            f"MATCH (u:User)-[:MemberOf*1..]->(g:Group {{name: 'DOMAIN ADMINS@{domain}'}}) RETURN u",
-        "global-unconstrained":
-            "MATCH (c:Computer {unconstraineddelegation: true}) WHERE NOT c.isdc = true RETURN c",
-        "global-privileged-sessions":
-            f"MATCH (c:Computer)-[:HasSession]->(u:User)-[:MemberOf*1..]->(g:Group {{name: 'DOMAIN ADMINS@{domain}'}}) RETURN c",
+        "global-kerberoastable": "MATCH (u:User {hasspn: true}) RETURN u",
+        "global-admin-to": f"MATCH (g:Group {{name: 'DOMAIN ADMINS@{domain}'}})-[:AdminTo]->(c:Computer) RETURN c",  # noqa: E501
+        "global-da-members": f"MATCH (u:User)-[:MemberOf*1..]->(g:Group {{name: 'DOMAIN ADMINS@{domain}'}}) RETURN u",  # noqa: E501
+        "global-unconstrained": "MATCH (c:Computer {unconstraineddelegation: true}) WHERE NOT c.isdc = true RETURN c",  # noqa: E501
+        "global-privileged-sessions": f"MATCH (c:Computer)-[:HasSession]->(u:User)-[:MemberOf*1..]->(g:Group {{name: 'DOMAIN ADMINS@{domain}'}}) RETURN c",  # noqa: E501
     }
 
 
 def _generate_mcp_native_tasks(manifest: dict) -> list[Task]:
     domain = manifest.get("domain", "CORP.LOCAL")
     reference_globals = _global_reference_cypher_map(domain)
-    planted_by_template = {
-        path["template_id"]: path for path in manifest.get("planted_paths", [])
-    }
+    planted_by_template = {path["template_id"]: path for path in manifest.get("planted_paths", [])}
     tasks: list[Task] = []
 
     def add_task(
@@ -306,17 +338,19 @@ def _generate_mcp_native_tasks(manifest: dict) -> list[Task]:
         }
         if metadata:
             task_metadata.update(metadata)
-        tasks.append(Task(
-            id=id,
-            template_id=template_id,
-            tier=tier,
-            category="mcp_analysis",
-            question=question,
-            reference_cypher=reference_cypher,
-            grade_mode=grade_mode,
-            tags=tags,
-            metadata=task_metadata,
-        ))
+        tasks.append(
+            Task(
+                id=id,
+                template_id=template_id,
+                tier=tier,
+                category="mcp_analysis",
+                question=question,
+                reference_cypher=reference_cypher,
+                grade_mode=grade_mode,
+                tags=tags,
+                metadata=task_metadata,
+            )
+        )
 
     # Global / domain-level MCP-native tasks
     add_task(
@@ -395,7 +429,7 @@ def _generate_mcp_native_tasks(manifest: dict) -> list[Task]:
             template_id="t1_group_membership",
             tier=1,
             question=(
-                f"Use BloodHound MCP user and group tools to list all groups {source_name} belongs to. "
+                f"Use BloodHound MCP user and group tools to list all groups {source_name} belongs to. "  # noqa: E501
                 "Prefer user membership inspection over raw Cypher."
             ),
             reference_cypher=(
@@ -415,7 +449,7 @@ def _generate_mcp_native_tasks(manifest: dict) -> list[Task]:
             template_id="t1_has_session",
             tier=1,
             question=(
-                f"Using BloodHound MCP tools, list the users with active sessions on {source_name}. "
+                f"Using BloodHound MCP tools, list the users with active sessions on {source_name}. "  # noqa: E501
                 "Prefer computer/session-focused tools."
             ),
             reference_cypher=(
@@ -430,7 +464,7 @@ def _generate_mcp_native_tasks(manifest: dict) -> list[Task]:
             template_id="t1_has_session",
             tier=1,
             question=(
-                f"Using BloodHound MCP tools, list the computers where {target_name} currently has an active session. "
+                f"Using BloodHound MCP tools, list the computers where {target_name} currently has an active session. "  # noqa: E501
                 "Prefer user/session-focused tools."
             ),
             reference_cypher=(
@@ -445,7 +479,7 @@ def _generate_mcp_native_tasks(manifest: dict) -> list[Task]:
             template_id="t1_has_session",
             tier=1,
             question=(
-                f"Use BloodHound MCP graph tools to show the session path connecting {source_name} to {target_name}. "
+                f"Use BloodHound MCP graph tools to show the session path connecting {source_name} to {target_name}. "  # noqa: E501
                 "Prefer graph/path tools before raw Cypher."
             ),
             reference_cypher=session_path["verification_cypher"],
@@ -476,7 +510,7 @@ def _generate_mcp_native_tasks(manifest: dict) -> list[Task]:
             template_id="t1_admin_to",
             tier=1,
             question=(
-                f"Using BloodHound MCP computer tools, list the users or groups that have admin rights on {target_name}. "
+                f"Using BloodHound MCP computer tools, list the users or groups that have admin rights on {target_name}. "  # noqa: E501
                 "Prefer computer-focused rights inspection over raw Cypher."
             ),
             reference_cypher=(
@@ -497,7 +531,7 @@ def _generate_mcp_native_tasks(manifest: dict) -> list[Task]:
             tier=2,
             question=(
                 f"Use BloodHound MCP graph and membership tools to show the complete path from "
-                f"{source_name} to {target_name}. Prefer higher-level graph tools before raw Cypher."
+                f"{source_name} to {target_name}. Prefer higher-level graph tools before raw Cypher."  # noqa: E501
             ),
             reference_cypher=nested["verification_cypher"],
             grade_mode="path_exists",
@@ -523,11 +557,11 @@ def _generate_mcp_native_tasks(manifest: dict) -> list[Task]:
             template_id="t2_nested_groups",
             tier=2,
             question=(
-                f"Using BloodHound MCP group tools, list the groups that INFRA-TEAM@{domain} belongs to. "
+                f"Using BloodHound MCP group tools, list the groups that INFRA-TEAM@{domain} belongs to. "  # noqa: E501
                 "Prefer group membership inspection over raw Cypher."
             ),
             reference_cypher=(
-                f"MATCH (g1:Group {{name: 'INFRA-TEAM@{domain}'}})-[:MemberOf*1..]->(g2:Group) RETURN g2"
+                f"MATCH (g1:Group {{name: 'INFRA-TEAM@{domain}'}})-[:MemberOf*1..]->(g2:Group) RETURN g2"  # noqa: E501
             ),
             grade_mode="node_set",
             tags=["mcp_native", "group_memberships", "nested_groups"],
@@ -537,11 +571,11 @@ def _generate_mcp_native_tasks(manifest: dict) -> list[Task]:
             template_id="t2_nested_groups",
             tier=2,
             question=(
-                "Using BloodHound MCP group tools, list the computers that SERVER-ADMINS has admin rights over. "
+                "Using BloodHound MCP group tools, list the computers that SERVER-ADMINS has admin rights over. "  # noqa: E501
                 "Prefer group rights inspection over raw Cypher."
             ),
             reference_cypher=(
-                f"MATCH (g:Group {{name: 'SERVER-ADMINS@{domain}'}})-[:AdminTo]->(c:Computer) RETURN c"
+                f"MATCH (g:Group {{name: 'SERVER-ADMINS@{domain}'}})-[:AdminTo]->(c:Computer) RETURN c"  # noqa: E501
             ),
             grade_mode="node_set",
             tags=["mcp_native", "admin_rights", "server_admins"],
@@ -551,7 +585,7 @@ def _generate_mcp_native_tasks(manifest: dict) -> list[Task]:
             template_id="t2_nested_groups",
             tier=2,
             question=(
-                f"Using BloodHound MCP computer tools, list the users or groups that have admin rights on {target_name}. "
+                f"Using BloodHound MCP computer tools, list the users or groups that have admin rights on {target_name}. "  # noqa: E501
                 "Prefer computer-focused rights inspection over raw Cypher."
             ),
             reference_cypher=(
@@ -571,7 +605,7 @@ def _generate_mcp_native_tasks(manifest: dict) -> list[Task]:
             template_id="t2_kerberoast_chain",
             tier=2,
             question=(
-                f"Use BloodHound MCP graph and group tools to find the path from {source_name} to {target_name}. "
+                f"Use BloodHound MCP graph and group tools to find the path from {source_name} to {target_name}. "  # noqa: E501
                 "Prefer graph/path tools before raw Cypher."
             ),
             reference_cypher=kerberoast["verification_cypher"],
@@ -589,7 +623,7 @@ def _generate_mcp_native_tasks(manifest: dict) -> list[Task]:
             template_id="t2_acl_chain",
             tier=2,
             question=(
-                f"Use BloodHound MCP graph tools to find the ACL abuse path from {source_name} to {target_name}. "
+                f"Use BloodHound MCP graph tools to find the ACL abuse path from {source_name} to {target_name}. "  # noqa: E501
                 "Prefer graph/path tools before raw Cypher."
             ),
             reference_cypher=acl_chain["verification_cypher"],
@@ -607,7 +641,7 @@ def _generate_mcp_native_tasks(manifest: dict) -> list[Task]:
             template_id="t3_unconstrained_delegation",
             tier=3,
             question=(
-                f"Using BloodHound MCP tools, list the users with active sessions on {target_name}. "
+                f"Using BloodHound MCP tools, list the users with active sessions on {target_name}. "  # noqa: E501
                 "Prefer computer/session-focused tools."
             ),
             reference_cypher=(
@@ -627,7 +661,7 @@ def _generate_mcp_native_tasks(manifest: dict) -> list[Task]:
             template_id="t3_constrained_delegation",
             tier=3,
             question=(
-                f"Using BloodHound MCP user delegation tools, list the computers or services that {source_name} "
+                f"Using BloodHound MCP user delegation tools, list the computers or services that {source_name} "  # noqa: E501
                 "can delegate to. Prefer delegation-focused tools before raw Cypher."
             ),
             reference_cypher=(

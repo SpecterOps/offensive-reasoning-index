@@ -7,15 +7,14 @@ from click.testing import CliRunner
 from ori.cli import _build_run_specs, main
 from ori.eval.bhce import BHHealthResult, CypherResult
 from ori.eval.ops import (
-    PreflightResult,
     SMOKE_EXPECTATIONS,
+    PreflightResult,
     SmokeCheck,
     _edge_query,
-    print_smoke_eval,
     print_preflight,
+    print_smoke_eval,
     print_verify_bh_health,
     print_verify_ingest,
-    run_preflight,
     verify_bh_health,
     verify_ingest,
 )
@@ -24,7 +23,7 @@ from ori.eval.tasks import Task
 
 
 class FakeBHCEClient:
-    async def __aenter__(self) -> "FakeBHCEClient":
+    async def __aenter__(self) -> FakeBHCEClient:
         return self
 
     async def __aexit__(self, *args) -> None:
@@ -156,7 +155,9 @@ def test_verify_bh_health_threads_explicit_bhce_url(monkeypatch) -> None:
 def test_cli_verify_bh_health(monkeypatch) -> None:
     monkeypatch.setattr("ori.eval.ops.BHCEClient", lambda domain=None: FakeBHCEClient())
     runner = CliRunner()
-    result = runner.invoke(main, ["verify-bh-health", "--timeout", "0.1", "--poll-interval", "0.01"])
+    result = runner.invoke(
+        main, ["verify-bh-health", "--timeout", "0.1", "--poll-interval", "0.01"]
+    )
     assert result.exit_code == 0
     assert "BH HEALTH: PASS" in result.output
 
@@ -177,10 +178,9 @@ def test_smoke_check_passes_only_single_expected_outcome() -> None:
 
 
 def test_cli_smoke_eval(tmp_path: Path, monkeypatch) -> None:
-    import asyncio
-    from ori.eval.ops import SmokeEvalResult
     from ori.eval.adapter import ModelResponse
     from ori.eval.grader import GradeResult
+    from ori.eval.ops import SmokeEvalResult
 
     async def fake_smoke_eval(manifest_path: Path, output_dir: Path, bhce_url: str | None = None):
         task = Task(
@@ -232,7 +232,6 @@ def test_cli_smoke_eval(tmp_path: Path, monkeypatch) -> None:
 
 
 def test_cli_preflight(tmp_path: Path, monkeypatch) -> None:
-    import asyncio
     from ori.eval.ops import (
         CountCheck,
         PathCheck,
@@ -269,7 +268,17 @@ def test_cli_preflight(tmp_path: Path, monkeypatch) -> None:
     runner = CliRunner()
     result = runner.invoke(
         main,
-        ["preflight", "-m", str(_manifest(tmp_path)), "-o", str(tmp_path / "smoke"), "--timeout", "0.1", "--poll-interval", "0.01"],
+        [
+            "preflight",
+            "-m",
+            str(_manifest(tmp_path)),
+            "-o",
+            str(tmp_path / "smoke"),
+            "--timeout",
+            "0.1",
+            "--poll-interval",
+            "0.01",
+        ],
     )
     assert result.exit_code == 0
     assert "PREFLIGHT: PASS" in result.output
@@ -288,16 +297,23 @@ def test_cli_eval_parses_ollama_options(tmp_path: Path, monkeypatch) -> None:
         main,
         [
             "eval",
-            "-m", str(manifest),
-            "--model", "ollama/gemma4:e4b",
-            "-o", str(tmp_path / "out.csv"),
-            "--ollama-option", "num_ctx=16384",
-            "--ollama-option", "temperature=0.2",
+            "-m",
+            str(manifest),
+            "--model",
+            "ollama/gemma4:e4b",
+            "-o",
+            str(tmp_path / "out.csv"),
+            "--ollama-option",
+            "num_ctx=16384",
+            "--ollama-option",
+            "temperature=0.2",
         ],
     )
     assert result.exit_code == 0
     assert captured["ollama_options"] == {"num_ctx": 16384, "temperature": 0.2}
-    assert captured["run_name"] == 'ollama/gemma4:e4b [options.num_ctx=16384, options.temperature=0.2]'
+    assert (
+        captured["run_name"] == "ollama/gemma4:e4b [options.num_ctx=16384, options.temperature=0.2]"
+    )
     assert captured["run_config"] == {
         "model": "ollama/gemma4:e4b",
         "options": {"num_ctx": 16384, "temperature": 0.2},
@@ -319,19 +335,28 @@ def test_cli_eval_mcp_parses_ollama_options(tmp_path: Path, monkeypatch) -> None
         main,
         [
             "eval-mcp",
-            "-m", str(manifest),
-            "--model", "ollama/gemma4:e4b",
-            "-o", str(tmp_path / "out.csv"),
-            "--mcp-dir", str(mcp_dir),
-            "--resource-mode", "on-demand",
-            "--ollama-option", "num_ctx=16384",
-            "--ollama-option", "temperature=0.2",
+            "-m",
+            str(manifest),
+            "--model",
+            "ollama/gemma4:e4b",
+            "-o",
+            str(tmp_path / "out.csv"),
+            "--mcp-dir",
+            str(mcp_dir),
+            "--resource-mode",
+            "on-demand",
+            "--ollama-option",
+            "num_ctx=16384",
+            "--ollama-option",
+            "temperature=0.2",
         ],
     )
     assert result.exit_code == 0
     assert captured["ollama_options"] == {"num_ctx": 16384, "temperature": 0.2}
     assert captured["resource_mode"] == "on-demand"
-    assert captured["run_name"] == 'ollama/gemma4:e4b [options.num_ctx=16384, options.temperature=0.2]'
+    assert (
+        captured["run_name"] == "ollama/gemma4:e4b [options.num_ctx=16384, options.temperature=0.2]"
+    )
     assert captured["run_config"] == {
         "model": "ollama/gemma4:e4b",
         "options": {"num_ctx": 16384, "temperature": 0.2},
@@ -437,7 +462,6 @@ models:
 
 
 def test_cli_baseline_separates_same_model_different_contexts(tmp_path: Path, monkeypatch) -> None:
-    import asyncio
 
     manifest = _manifest(tmp_path)
     models_file = tmp_path / "models.yaml"
@@ -468,9 +492,12 @@ models:
         main,
         [
             "baseline",
-            "-m", str(manifest),
-            "--models-file", str(models_file),
-            "-o", str(tmp_path / "out"),
+            "-m",
+            str(manifest),
+            "--models-file",
+            str(models_file),
+            "-o",
+            str(tmp_path / "out"),
         ],
     )
     assert result.exit_code == 0
@@ -558,7 +585,9 @@ profiles:
         captured.update(kwargs)
         return PreflightResult(
             health=BHHealthResult(ok=True, detail="ok", query="q", classification="ok"),
-            ingest=__import__("ori.eval.ops", fromlist=["VerifyIngestResult"]).VerifyIngestResult([], []),
+            ingest=__import__("ori.eval.ops", fromlist=["VerifyIngestResult"]).VerifyIngestResult(
+                [], []
+            ),
             smoke=__import__("ori.eval.ops", fromlist=["SmokeEvalResult"]).SmokeEvalResult([], {}),
         )
 
@@ -598,7 +627,9 @@ profiles:
         calls.append(("preflight", str(kwargs["output_dir"])))
         return PreflightResult(
             health=BHHealthResult(ok=True, detail="ok", query="q", classification="ok"),
-            ingest=__import__("ori.eval.ops", fromlist=["VerifyIngestResult"]).VerifyIngestResult([], []),
+            ingest=__import__("ori.eval.ops", fromlist=["VerifyIngestResult"]).VerifyIngestResult(
+                [], []
+            ),
             smoke=__import__("ori.eval.ops", fromlist=["SmokeEvalResult"]).SmokeEvalResult([], {}),
         )
 
@@ -685,7 +716,9 @@ profiles:
         calls.append("preflight")
         return PreflightResult(
             health=BHHealthResult(ok=True, detail="ok", query="q", classification="ok"),
-            ingest=__import__("ori.eval.ops", fromlist=["VerifyIngestResult"]).VerifyIngestResult([], []),
+            ingest=__import__("ori.eval.ops", fromlist=["VerifyIngestResult"]).VerifyIngestResult(
+                [], []
+            ),
             smoke=__import__("ori.eval.ops", fromlist=["SmokeEvalResult"]).SmokeEvalResult([], {}),
         )
 
@@ -696,7 +729,9 @@ profiles:
     monkeypatch.setattr("ori.eval.ops.run_preflight", fake_preflight)
     monkeypatch.setattr("ori.eval.ops.run_smoke_eval", fake_smoke_eval)
     runner = CliRunner()
-    result = runner.invoke(main, ["run", "--config", str(config), "--run-all-profiles", "--keep-going"])
+    result = runner.invoke(
+        main, ["run", "--config", str(config), "--run-all-profiles", "--keep-going"]
+    )
     assert calls == ["preflight", "smoke_eval"]
     assert result.exit_code != 0
     assert "Profile failed: smoke (boom)" in result.output
@@ -733,7 +768,9 @@ profiles:
         calls.append("preflight")
         return PreflightResult(
             health=BHHealthResult(ok=True, detail="ok", query="q", classification="ok"),
-            ingest=__import__("ori.eval.ops", fromlist=["VerifyIngestResult"]).VerifyIngestResult([], []),
+            ingest=__import__("ori.eval.ops", fromlist=["VerifyIngestResult"]).VerifyIngestResult(
+                [], []
+            ),
             smoke=__import__("ori.eval.ops", fromlist=["SmokeEvalResult"]).SmokeEvalResult([], {}),
         )
 
@@ -761,11 +798,16 @@ def test_cli_baseline_mcp_parses_resource_mode(tmp_path: Path, monkeypatch) -> N
         main,
         [
             "baseline-mcp",
-            "-m", str(manifest),
-            "--model", "mock/mcp_perfect",
-            "-o", str(tmp_path / "out"),
-            "--mcp-dir", str(mcp_dir),
-            "--resource-mode", "on-demand",
+            "-m",
+            str(manifest),
+            "--model",
+            "mock/mcp_perfect",
+            "-o",
+            str(tmp_path / "out"),
+            "--mcp-dir",
+            str(mcp_dir),
+            "--resource-mode",
+            "on-demand",
         ],
     )
     assert result.exit_code == 0
@@ -788,10 +830,14 @@ def test_cli_baseline_mcp_resources_uses_on_demand_mode(tmp_path: Path, monkeypa
         main,
         [
             "baseline-mcp-resources",
-            "-m", str(manifest),
-            "--model", "mock/mcp_perfect",
-            "-o", str(tmp_path / "out"),
-            "--mcp-dir", str(mcp_dir),
+            "-m",
+            str(manifest),
+            "--model",
+            "mock/mcp_perfect",
+            "-o",
+            str(tmp_path / "out"),
+            "--mcp-dir",
+            str(mcp_dir),
         ],
     )
     assert result.exit_code == 0

@@ -1,10 +1,10 @@
 from __future__ import annotations
 
+import csv
+
 from ori.eval.adapter import ModelResponse
 from ori.eval.bhce import CypherResult
 from ori.eval.grader import GradeResult
-import csv
-
 from ori.eval.report import print_comparison, print_summary, write_combined_csv, write_summary_csv
 from ori.eval.runner import EvalResult
 from ori.eval.tasks import Task

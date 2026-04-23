@@ -6,15 +6,14 @@ import re
 from dataclasses import dataclass
 
 from .adapter import ModelResponse
-from .bhce import BHCEClient
-from .bhce import CypherResult
+from .bhce import BHCEClient, CypherResult
 from .tasks import Task
 
 
 @dataclass
 class GradeResult:
-    score: float        # 0.0 or 1.0
-    outcome: str        # CORRECT | INCORRECT | PARSE_FAIL | CYPHER_ERROR | HALLUCINATION | MODEL_ERROR | INFRA_ERROR
+    score: float  # 0.0 or 1.0
+    outcome: str  # CORRECT | INCORRECT | PARSE_FAIL | CYPHER_ERROR | HALLUCINATION | MODEL_ERROR | INFRA_ERROR  # noqa: E501
     hallucination: bool
     details: str
 
@@ -31,7 +30,8 @@ def grade(
     # Model-level error (API call failed)
     if model_response.error:
         return GradeResult(
-            score=0.0, outcome="MODEL_ERROR",
+            score=0.0,
+            outcome="MODEL_ERROR",
             hallucination=False,
             details=f"Model call failed: {model_response.error}",
         )
@@ -39,7 +39,8 @@ def grade(
     # Cypher parse failure
     if model_response.cypher is None:
         return GradeResult(
-            score=0.0, outcome="PARSE_FAIL",
+            score=0.0,
+            outcome="PARSE_FAIL",
             hallucination=False,
             details="Could not extract Cypher query from model response",
         )
@@ -50,7 +51,7 @@ def grade(
             score=0.0,
             outcome="INFRA_ERROR",
             hallucination=False,
-            details=f"Reference Cypher could not be graded due to BHCE availability: {ref_result.error}",
+            details=f"Reference Cypher could not be graded due to BHCE availability: {ref_result.error}",  # noqa: E501
         )
 
     # Cypher execution error
@@ -60,10 +61,11 @@ def grade(
                 score=0.0,
                 outcome="INFRA_ERROR",
                 hallucination=False,
-                details=f"BloodHound CE unavailable during model query execution: {model_result.error}",
+                details=f"BloodHound CE unavailable during model query execution: {model_result.error}",  # noqa: E501
             )
         return GradeResult(
-            score=0.0, outcome="CYPHER_ERROR",
+            score=0.0,
+            outcome="CYPHER_ERROR",
             hallucination=False,
             details=f"Cypher execution failed: {model_result.error}",
         )
@@ -72,7 +74,8 @@ def grade(
     hallucination = _check_hallucination(model_response.raw_text, valid_node_names, task)
     if hallucination:
         return GradeResult(
-            score=0.0, outcome="HALLUCINATION",
+            score=0.0,
+            outcome="HALLUCINATION",
             hallucination=True,
             details="Response references node names not present in the graph",
         )
@@ -140,7 +143,8 @@ def grade(
 
     else:
         return GradeResult(
-            score=0.0, outcome="INCORRECT",
+            score=0.0,
+            outcome="INCORRECT",
             hallucination=False,
             details=f"Unknown grade_mode: {mode!r}",
         )
@@ -168,7 +172,7 @@ def grade_mcp(
             score=0.0,
             outcome="INFRA_ERROR",
             hallucination=False,
-            details=f"Reference Cypher could not be graded due to BHCE availability: {ref_result.error}",
+            details=f"Reference Cypher could not be graded due to BHCE availability: {ref_result.error}",  # noqa: E501
         )
 
     if final_answer is None:
@@ -177,7 +181,7 @@ def grade_mcp(
                 score=0.0,
                 outcome="INFRA_ERROR",
                 hallucination=False,
-                details="Structured final answer missing after MCP/BloodHound infrastructure errors",
+                details="Structured final answer missing after MCP/BloodHound infrastructure errors",  # noqa: E501
             )
         return GradeResult(
             score=0.0,

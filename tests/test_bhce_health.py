@@ -14,7 +14,10 @@ def test_classify_error_query() -> None:
     assert BHCEClient.classify_error("Cypher syntax error: bad query") == "query"
     assert BHCEClient.classify_error("HTTP 400: no viable alternative") == "query"
     assert BHCEClient.classify_error("HTTP 404: { resource not found}") == "query"
-    assert BHCEClient.classify_error("HTTP 500: Neo4jError: Neo.ClientError.Statement.SyntaxError") == "query"
+    assert (
+        BHCEClient.classify_error("HTTP 500: Neo4jError: Neo.ClientError.Statement.SyntaxError")
+        == "query"
+    )
 
 
 class FakeHealthClient(BHCEClient):

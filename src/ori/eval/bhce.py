@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import datetime
 import hashlib
 import hmac
-import asyncio
 import os
 import re
 from dataclasses import dataclass, field
@@ -131,7 +131,7 @@ class BHCEClient:
             "nodename nor servname provided",
             "tls",
             "certificate verify failed",
-            "internal error has occurred that is preventing the service from servicing this request",
+            "internal error has occurred that is preventing the service from servicing this request",  # noqa: E501
         )
         if any(marker in text for marker in infra_markers):
             return "infra"
@@ -179,6 +179,7 @@ class BHCEClient:
     async def run_cypher(self, query: str) -> CypherResult:
         """Execute a Cypher query against BH CE and return normalized result."""
         import json
+
         path = "/api/v2/graphs/cypher"
         query = self._normalize_cypher(query)
         body = json.dumps({"query": query, "includeproperties": True}).encode()
@@ -262,7 +263,9 @@ class BHCEClient:
         """Check whether BHCE is reachable and can execute a safe query."""
         result = await self.run_cypher(query)
         if result.success:
-            return BHHealthResult(ok=True, detail="query succeeded", query=query, classification="ok")
+            return BHHealthResult(
+                ok=True, detail="query succeeded", query=query, classification="ok"
+            )
         classification = self.classify_error(result.error)
         return BHHealthResult(
             ok=False,
@@ -291,7 +294,7 @@ class BHCEClient:
     async def close(self) -> None:
         await self._client.aclose()
 
-    async def __aenter__(self) -> "BHCEClient":
+    async def __aenter__(self) -> BHCEClient:
         return self
 
     async def __aexit__(self, *_) -> None:

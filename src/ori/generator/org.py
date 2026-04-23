@@ -3,12 +3,10 @@
 from __future__ import annotations
 
 import time
-import uuid
 
 from faker import Faker
 
-from .graph import ACE, ADGraph, ADNode, TypedPrincipal
-
+from .graph import ADGraph, ADNode, TypedPrincipal
 
 # Departments used for OU hierarchy and group generation
 DEPARTMENTS = ["IT", "HR", "Finance", "Engineering", "Operations"]
@@ -94,18 +92,14 @@ def _create_ous(graph: ADGraph, domain_node: ADNode) -> dict[str, str]:
                 "highvalue": False,
                 "isaclprotected": False,
             },
-            contained_by=TypedPrincipal(
-                object_id=graph.domain_sid, object_type="Domain"
-            ),
+            contained_by=TypedPrincipal(object_id=graph.domain_sid, object_type="Domain"),
             extra={"ChildObjects": [], "Links": []},
         )
         graph.add_node(ou_node)
         ou_map[ou_name] = ou_dn
 
         # Register as child of domain
-        domain_node.extra["ChildObjects"].append(
-            {"ObjectIdentifier": ou_sid, "ObjectType": "OU"}
-        )
+        domain_node.extra["ChildObjects"].append({"ObjectIdentifier": ou_sid, "ObjectType": "OU"})
 
     # Sub-OUs under IT
     for sub in ["Workstations", "Admins"]:
@@ -125,7 +119,7 @@ def _create_ous(graph: ADGraph, domain_node: ADNode) -> dict[str, str]:
                 "isaclprotected": False,
             },
             contained_by=TypedPrincipal(
-                object_id=graph.sid_alloc.get_or_alloc(f"OU-IT"), object_type="OU"
+                object_id=graph.sid_alloc.get_or_alloc("OU-IT"), object_type="OU"
             ),
             extra={"ChildObjects": [], "Links": []},
         )
@@ -135,13 +129,11 @@ def _create_ous(graph: ADGraph, domain_node: ADNode) -> dict[str, str]:
     return ou_map
 
 
-def _create_builtin_groups(
-    graph: ADGraph, domain_node: ADNode, ou_map: dict[str, str]
-) -> None:
+def _create_builtin_groups(graph: ADGraph, domain_node: ADNode, ou_map: dict[str, str]) -> None:
     """Create well-known AD groups with canonical SIDs."""
-    now = int(time.time())
+    int(time.time())
     cn_users_dn = f"CN=Users,{graph.dn.domain_root()}"
-    builtin_dn = f"CN=Builtin,{graph.dn.domain_root()}"
+    f"CN=Builtin,{graph.dn.domain_root()}"
 
     for group_name in BUILTIN_GROUPS:
         sid = graph.sid_alloc.alloc(group_name)
@@ -213,7 +205,7 @@ def _create_users(
 
     for i in range(num_users):
         dept = dept_ou_keys[i % len(dept_ou_keys)]
-        ou_dn = ou_map[dept]
+        ou_map[dept]
 
         # Generate unique samaccountname
         for _ in range(10):
@@ -274,14 +266,11 @@ def _create_computers(
     num_dcs: int,
 ) -> None:
     """Create workstations, servers, and domain controllers."""
-    now = int(time.time())
+    int(time.time())
 
     # Workstations
     ws_ou_dn = ou_map.get("IT/Workstations", ou_map["IT"])
-    ws_ou_sid = (
-        graph.sid_alloc.get("OU-IT-Workstations")
-        or graph.sid_alloc.get("OU-IT")
-    )
+    ws_ou_sid = graph.sid_alloc.get("OU-IT-Workstations") or graph.sid_alloc.get("OU-IT")
     for i in range(1, num_workstations + 1):
         name = f"WS-IT-{i:02d}"
         _add_computer(graph, name, ws_ou_dn, is_dc=False, ou_sid=ws_ou_sid)
@@ -323,8 +312,10 @@ def _create_computers(
         _add_computer(graph, name, dc_ou_dn, is_dc=True, ou_sid=dc_ou_sid)
 
 
-def _add_computer(graph: ADGraph, name: str, ou_dn: str, is_dc: bool, ou_sid: str | None = None) -> ADNode:
-    fqdn = f"{name}.{graph.domain.lower()}"
+def _add_computer(
+    graph: ADGraph, name: str, ou_dn: str, is_dc: bool, ou_sid: str | None = None
+) -> ADNode:
+    f"{name}.{graph.domain.lower()}"
     sam = f"{name}$"
     sid = graph.sid_alloc.alloc(name)
     now = int(time.time())

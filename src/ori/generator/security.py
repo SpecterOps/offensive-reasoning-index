@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from .graph import ACE, ADGraph, TypedPrincipal
+from .graph import ACE, ADGraph
 
 
 def apply_baseline_security(graph: ADGraph) -> None:
@@ -46,7 +46,7 @@ def _apply_default_memberships(graph: ADGraph) -> None:
     domain_controllers_sid = _sid(graph, "Domain Controllers")
     domain_admins_sid = _sid(graph, "Domain Admins")
     it_admins_sid = _sid(graph, "IT-Admins")
-    server_admins_sid = _sid(graph, "Server-Admins")
+    _sid(graph, "Server-Admins")
     enterprise_admins_sid = _sid(graph, "Enterprise Admins")
 
     if domain_users_sid is None or domain_computers_sid is None:
@@ -106,10 +106,7 @@ def _apply_default_memberships(graph: ADGraph) -> None:
                 )
 
     # Wire a few IT users into IT-Admins and IT-Users
-    it_users = [
-        n for n in graph.nodes_by_type("User")
-        if n.properties.get("department") == "IT"
-    ]
+    it_users = [n for n in graph.nodes_by_type("User") if n.properties.get("department") == "IT"]
     it_users_sid = _sid(graph, "IT-Users")
     for idx, user in enumerate(it_users):
         if it_users_sid and graph.get_node(it_users_sid):
@@ -148,7 +145,8 @@ def _apply_admin_edges(graph: ADGraph) -> None:
 
     all_computers = graph.nodes_by_type("Computer")
     server_comps = [
-        c for c in all_computers
+        c
+        for c in all_computers
         if "SRV" in c.properties.get("name", "") and not c.properties.get("isdc", False)
     ]
 
@@ -156,29 +154,47 @@ def _apply_admin_edges(graph: ADGraph) -> None:
 
     def _add_admin_to(group_sid: str, comp) -> None:
         graph.add_edge(group_sid, "AdminTo", comp.object_id)
-        comp.extra["LocalAdmins"]["Results"].append({"ObjectIdentifier": group_sid, "ObjectType": "Group"})
+        comp.extra["LocalAdmins"]["Results"].append(
+            {"ObjectIdentifier": group_sid, "ObjectType": "Group"}
+        )
 
     def _add_rdp(group_sid: str, comp) -> None:
         graph.add_edge(group_sid, "CanRDP", comp.object_id)
-        comp.extra["RemoteDesktopUsers"]["Results"].append({"ObjectIdentifier": group_sid, "ObjectType": "Group"})
+        comp.extra["RemoteDesktopUsers"]["Results"].append(
+            {"ObjectIdentifier": group_sid, "ObjectType": "Group"}
+        )
         # UserRights URA entry — BH CE's PostCanRDP requires SeRemoteInteractiveLogonRight
         # on the Computer object to create CanRDP edges (FetchComputersWithURA path).
         ur = next(
-            (u for u in comp.extra["UserRights"] if u["Privilege"] == "SeRemoteInteractiveLogonRight"),
+            (
+                u
+                for u in comp.extra["UserRights"]
+                if u["Privilege"] == "SeRemoteInteractiveLogonRight"
+            ),
             None,
         )
         if ur is None:
-            ur = {"Privilege": "SeRemoteInteractiveLogonRight", "Results": [], "Collected": True, "FailureReason": None, "LocalNames": []}
+            ur = {
+                "Privilege": "SeRemoteInteractiveLogonRight",
+                "Results": [],
+                "Collected": True,
+                "FailureReason": None,
+                "LocalNames": [],
+            }
             comp.extra["UserRights"].append(ur)
         ur["Results"].append({"ObjectIdentifier": group_sid, "ObjectType": "Group"})
 
     def _add_dcom(group_sid: str, comp) -> None:
         graph.add_edge(group_sid, "ExecuteDCOM", comp.object_id)
-        comp.extra["DcomUsers"]["Results"].append({"ObjectIdentifier": group_sid, "ObjectType": "Group"})
+        comp.extra["DcomUsers"]["Results"].append(
+            {"ObjectIdentifier": group_sid, "ObjectType": "Group"}
+        )
 
     def _add_psremote(group_sid: str, comp) -> None:
         graph.add_edge(group_sid, "CanPSRemote", comp.object_id)
-        comp.extra["PSRemoteUsers"]["Results"].append({"ObjectIdentifier": group_sid, "ObjectType": "Group"})
+        comp.extra["PSRemoteUsers"]["Results"].append(
+            {"ObjectIdentifier": group_sid, "ObjectType": "Group"}
+        )
 
     if domain_admins_sid and graph.get_node(domain_admins_sid):
         for comp in all_computers:
@@ -201,8 +217,7 @@ def _apply_admin_edges(graph: ADGraph) -> None:
     domain_nodes = graph.nodes_by_type("Domain")
     if domain_nodes and domain_admins_sid:
         it_admins_entry = (
-            [{"ObjectIdentifier": it_admins_sid, "ObjectType": "Group"}]
-            if it_admins_sid else []
+            [{"ObjectIdentifier": it_admins_sid, "ObjectType": "Group"}] if it_admins_sid else []
         )
         domain_nodes[0].extra["GPOChanges"] = {
             "LocalAdmins": [{"ObjectIdentifier": domain_admins_sid, "ObjectType": "Group"}],
@@ -210,8 +225,7 @@ def _apply_admin_edges(graph: ADGraph) -> None:
             "DcomUsers": it_admins_entry,
             "PSRemoteUsers": it_admins_entry,
             "AffectedComputers": [
-                {"ObjectIdentifier": c.object_id, "ObjectType": "Computer"}
-                for c in all_computers
+                {"ObjectIdentifier": c.object_id, "ObjectType": "Computer"} for c in all_computers
             ],
         }
 
@@ -226,8 +240,7 @@ def _apply_admin_edges(graph: ADGraph) -> None:
             "DcomUsers": [],
             "PSRemoteUsers": sa_entry,
             "AffectedComputers": [
-                {"ObjectIdentifier": c.object_id, "ObjectType": "Computer"}
-                for c in server_comps
+                {"ObjectIdentifier": c.object_id, "ObjectType": "Computer"} for c in server_comps
             ],
         }
 
@@ -238,8 +251,7 @@ def _apply_has_sessions(graph: ADGraph) -> None:
     A few DA/privileged users have sessions on workstations (common misconfiguration).
     """
     workstations = [
-        c for c in graph.nodes_by_type("Computer")
-        if "WS-" in c.properties.get("name", "")
+        c for c in graph.nodes_by_type("Computer") if "WS-" in c.properties.get("name", "")
     ]
     users = graph.nodes_by_type("User")
 
@@ -248,13 +260,15 @@ def _apply_has_sessions(graph: ADGraph) -> None:
 
     def _add_session(ws, user) -> None:
         graph.add_edge(ws.object_id, "HasSession", user.object_id)
-        ws.extra["Sessions"]["Results"].append({
-            "UserSID": user.object_id,
-            "ComputerSID": ws.object_id,
-        })
+        ws.extra["Sessions"]["Results"].append(
+            {
+                "UserSID": user.object_id,
+                "ComputerSID": ws.object_id,
+            }
+        )
 
     # Regular users get sessions on workstations
-    for i, user in enumerate(users[:min(len(users), len(workstations))]):
+    for i, user in enumerate(users[: min(len(users), len(workstations))]):
         ws = workstations[i % len(workstations)]
         _add_session(ws, user)
 
@@ -285,9 +299,11 @@ def _apply_default_aces(graph: ADGraph) -> None:
         return
 
     for node in list(graph.nodes_by_type("User")) + list(graph.nodes_by_type("Computer")):
-        node.aces.append(ACE(
-            principal_sid=da_sid,
-            principal_type="Group",
-            right_name="GenericAll",
-            is_inherited=True,
-        ))
+        node.aces.append(
+            ACE(
+                principal_sid=da_sid,
+                principal_type="Group",
+                right_name="GenericAll",
+                is_inherited=True,
+            )
+        )

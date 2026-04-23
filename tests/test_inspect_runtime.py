@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ori.eval.bhce import CypherResult
 from ori.eval.adapter import ModelResponse
+from ori.eval.bhce import CypherResult
 from ori.eval.inspect_runtime import _resolve_model_base_url, run_eval_with_inspect
 from ori.eval.tasks import Task
 
@@ -12,7 +12,7 @@ class FakeBHCEClient:
     def __init__(self, *args, **kwargs) -> None:
         pass
 
-    async def __aenter__(self) -> "FakeBHCEClient":
+    async def __aenter__(self) -> FakeBHCEClient:
         return self
 
     async def __aexit__(self, *args) -> None:
@@ -122,8 +122,8 @@ def test_run_eval_with_inspect_ollama_uses_adapter_path_and_preserves_thinking(
 
     async def fake_call_model(*args, **kwargs):
         return ModelResponse(
-            raw_text="MATCH p=shortestPath((u:User {name: 'JDOE@TEST.LOCAL'})-[*1..]->(c:Computer {name: 'DC01.TEST.LOCAL'})) RETURN p",
-            cypher="MATCH p=shortestPath((u:User {name: 'JDOE@TEST.LOCAL'})-[*1..]->(c:Computer {name: 'DC01.TEST.LOCAL'})) RETURN p",
+            raw_text="MATCH p=shortestPath((u:User {name: 'JDOE@TEST.LOCAL'})-[*1..]->(c:Computer {name: 'DC01.TEST.LOCAL'})) RETURN p",  # noqa: E501
+            cypher="MATCH p=shortestPath((u:User {name: 'JDOE@TEST.LOCAL'})-[*1..]->(c:Computer {name: 'DC01.TEST.LOCAL'})) RETURN p",  # noqa: E501
             parse_stage="bare_match",
             tokens_input=12,
             tokens_output=8,

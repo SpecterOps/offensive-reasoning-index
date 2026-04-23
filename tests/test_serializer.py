@@ -2,7 +2,6 @@
 
 import json
 import zipfile
-from pathlib import Path
 
 import pytest
 
@@ -128,8 +127,13 @@ def test_planted_paths_are_in_manifest(sample_graph):
     ids = {p.template_id for p in sample_graph.planted_paths}
     # All 8 templates should be planted
     expected = {
-        "t1_admin_to", "t1_has_session", "t1_group_membership",
-        "t2_kerberoast_chain", "t2_acl_chain", "t2_nested_groups",
-        "t3_unconstrained_delegation", "t3_constrained_delegation",
+        "t1_admin_to",
+        "t1_has_session",
+        "t1_group_membership",
+        "t2_kerberoast_chain",
+        "t2_acl_chain",
+        "t2_nested_groups",
+        "t3_unconstrained_delegation",
+        "t3_constrained_delegation",
     }
     assert expected == ids

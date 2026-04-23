@@ -100,7 +100,9 @@ def _normalize_kind(raw_kind: Any) -> str:
         return _KIND_ALIASES[raw_kind]
     except KeyError as exc:
         supported = ", ".join(sorted(_KIND_ALIASES))
-        raise ValueError(f"Unsupported profile kind {raw_kind!r}. Supported values: {supported}") from exc
+        raise ValueError(
+            f"Unsupported profile kind {raw_kind!r}. Supported values: {supported}"
+        ) from exc
 
 
 def _pick_profile_name(profiles: dict[str, Any], requested: str | None) -> str:
@@ -153,7 +155,9 @@ def _normalize_resource_mode(raw_mode: Any) -> str:
     if not isinstance(raw_mode, str):
         raise ValueError("MCP resource_mode must be a string when present.")
     if raw_mode not in {"off", "on-demand"}:
-        raise ValueError("Unsupported resource_mode {!r}. Supported values: off, on-demand".format(raw_mode))
+        raise ValueError(
+            f"Unsupported resource_mode {raw_mode!r}. Supported values: off, on-demand"
+        )
     return raw_mode
 
 
@@ -278,7 +282,9 @@ def load_run_profile(
     if kind in {"eval", "eval_mcp"}:
         if model_entry is None and model_entries is not None:
             if not isinstance(model_entries, list) or len(model_entries) != 1:
-                raise ValueError(f"Profile {chosen_name!r} must define exactly one model for {kind}.")
+                raise ValueError(
+                    f"Profile {chosen_name!r} must define exactly one model for {kind}."
+                )
             model_entry = model_entries[0]
         if model_entry is None:
             raise ValueError(f"Profile {chosen_name!r} must define model for {kind}.")
@@ -293,7 +299,15 @@ def load_run_profile(
         if output_dir is None:
             raise ValueError(f"Profile {chosen_name!r} must define output_dir for {kind}.")
 
-    if kind in {"eval", "eval_mcp", "baseline", "baseline_mcp", "smoke_eval", "smoke_mcp", "preflight"}:
+    if kind in {
+        "eval",
+        "eval_mcp",
+        "baseline",
+        "baseline_mcp",
+        "smoke_eval",
+        "smoke_mcp",
+        "preflight",
+    }:
         if manifest is None:
             raise ValueError(f"Profile {chosen_name!r} must define manifest for {kind}.")
 

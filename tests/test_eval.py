@@ -2,18 +2,17 @@
 
 from __future__ import annotations
 
-import pytest
-
 import asyncio
 
 from ori.eval.adapter import call_model, extract_cypher
 from ori.eval.bhce import _extract_node_names, _extract_nodes
-from ori.eval.grader import GradeResult, _check_hallucination, grade
+from ori.eval.grader import _check_hallucination, grade
 from ori.eval.tasks import Task, generate_tasks
 
 # ---------------------------------------------------------------------------
 # extract_cypher
 # ---------------------------------------------------------------------------
+
 
 def test_extract_cypher_fenced_with_language():
     text = "Here is the query:\n```cypher\nMATCH (u:User) RETURN u\n```"
@@ -69,12 +68,21 @@ def test_extract_cypher_multiline_fenced():
 # BH CE response normalization
 # ---------------------------------------------------------------------------
 
+
 def test_extract_nodes_dict_format():
     data = {
         "data": {
             "nodes": {
-                "1": {"label": "DJOHNSON@CORP.LOCAL", "kind": "User", "properties": {"name": "DJOHNSON@CORP.LOCAL"}},
-                "2": {"label": "DC01.CORP.LOCAL", "kind": "Computer", "properties": {"name": "DC01.CORP.LOCAL"}},
+                "1": {
+                    "label": "DJOHNSON@CORP.LOCAL",
+                    "kind": "User",
+                    "properties": {"name": "DJOHNSON@CORP.LOCAL"},
+                },
+                "2": {
+                    "label": "DC01.CORP.LOCAL",
+                    "kind": "Computer",
+                    "properties": {"name": "DC01.CORP.LOCAL"},
+                },
             },
             "edges": [],
         }
@@ -93,7 +101,7 @@ def test_extract_node_names_old_format():
     nodes = [
         {"properties": {"name": "DJOHNSON@CORP.LOCAL"}},
         {"properties": {"name": "IT-ADMINS@CORP.LOCAL"}},
-        {"properties": {}},          # no name — should be skipped
+        {"properties": {}},  # no name — should be skipped
     ]
     names = _extract_node_names(nodes)
     assert names == {"DJOHNSON@CORP.LOCAL", "IT-ADMINS@CORP.LOCAL"}
@@ -104,7 +112,7 @@ def test_extract_node_names_new_format():
     nodes = [
         {"label": "DJOHNSON@CORP.LOCAL", "kind": "User", "objectId": "S-1-5-21-1-2-3-100"},
         {"label": "DC01.CORP.LOCAL", "kind": "Computer", "objectId": "S-1-5-21-1-2-3-101"},
-        {"kind": "Group"},   # no label, no name — should be skipped
+        {"kind": "Group"},  # no label, no name — should be skipped
     ]
     names = _extract_node_names(nodes)
     assert names == {"DJOHNSON@CORP.LOCAL", "DC01.CORP.LOCAL"}
@@ -113,8 +121,8 @@ def test_extract_node_names_new_format():
 def test_extract_node_names_mixed_format():
     """Handle mix of old and new formats in same response"""
     nodes = [
-        {"label": "DJOHNSON@CORP.LOCAL", "kind": "User"},         # new format
-        {"properties": {"name": "IT-ADMINS@CORP.LOCAL"}},          # old format
+        {"label": "DJOHNSON@CORP.LOCAL", "kind": "User"},  # new format
+        {"properties": {"name": "IT-ADMINS@CORP.LOCAL"}},  # old format
     ]
     names = _extract_node_names(nodes)
     assert names == {"DJOHNSON@CORP.LOCAL", "IT-ADMINS@CORP.LOCAL"}
@@ -123,6 +131,7 @@ def test_extract_node_names_mixed_format():
 # ---------------------------------------------------------------------------
 # Grader
 # ---------------------------------------------------------------------------
+
 
 def _make_task(grade_mode: str = "path_exists") -> Task:
     return Task(
@@ -139,12 +148,14 @@ def _make_task(grade_mode: str = "path_exists") -> Task:
 
 def _make_cypher_result(names: list[str], success: bool = True):
     from ori.eval.bhce import CypherResult
+
     nodes = [{"properties": {"name": n}} for n in names]
     return CypherResult(success=success, nodes=nodes, node_names=set(names))
 
 
 def _make_model_response(cypher: str | None = "MATCH (u:User) RETURN u", error: str | None = None):
     from ori.eval.adapter import ModelResponse
+
     return ModelResponse(
         raw_text=cypher or "",
         cypher=cypher,
@@ -160,7 +171,9 @@ def _make_model_response(cypher: str | None = "MATCH (u:User) RETURN u", error: 
 def test_grade_parse_fail():
     task = _make_task()
     resp = _make_model_response(cypher=None)
-    result = grade(task, resp, _make_cypher_result([]), _make_cypher_result(["A@CORP.LOCAL"]), set())
+    result = grade(
+        task, resp, _make_cypher_result([]), _make_cypher_result(["A@CORP.LOCAL"]), set()
+    )
     assert result.score == 0.0
     assert result.outcome == "PARSE_FAIL"
 
@@ -272,7 +285,7 @@ def test_grade_row_count_within_tolerance():
     task = _make_task("row_count")
     resp = _make_model_response()
     ref = _make_cypher_result(["A@D", "B@D", "C@D", "D@D", "E@D"])  # 5 nodes
-    model = _make_cypher_result(["A@D", "B@D", "C@D", "D@D"])       # 4 nodes — 20% diff
+    model = _make_cypher_result(["A@D", "B@D", "C@D", "D@D"])  # 4 nodes — 20% diff
     result = grade(task, resp, model, ref, set())
     assert result.score == 1.0
 
@@ -281,7 +294,7 @@ def test_grade_row_count_outside_tolerance():
     task = _make_task("row_count")
     resp = _make_model_response()
     ref = _make_cypher_result(["A@D", "B@D", "C@D", "D@D", "E@D"])  # 5 nodes
-    model = _make_cypher_result(["A@D"])                              # 1 node — 80% diff
+    model = _make_cypher_result(["A@D"])  # 1 node — 80% diff
     result = grade(task, resp, model, ref, set())
     assert result.score == 0.0
 
@@ -289,6 +302,7 @@ def test_grade_row_count_outside_tolerance():
 # ---------------------------------------------------------------------------
 # Hallucination detection
 # ---------------------------------------------------------------------------
+
 
 def test_hallucination_no_domain_names():
     task = _make_task()
@@ -298,7 +312,10 @@ def test_hallucination_no_domain_names():
 def test_hallucination_real_name_not_flagged():
     task = _make_task()
     valid = {"DJOHNSON@CORP.LOCAL", "DC01.CORP.LOCAL"}
-    assert _check_hallucination("MATCH (u:User {name: 'DJOHNSON@CORP.LOCAL'}) RETURN u", valid, task) is False
+    assert (
+        _check_hallucination("MATCH (u:User {name: 'DJOHNSON@CORP.LOCAL'}) RETURN u", valid, task)
+        is False
+    )
 
 
 def test_hallucination_invented_name_flagged():
@@ -319,6 +336,7 @@ def test_hallucination_case_insensitive():
 # Task generation
 # ---------------------------------------------------------------------------
 
+
 def _make_manifest() -> dict:
     return {
         "domain": "TEST.LOCAL",
@@ -335,7 +353,7 @@ def _make_manifest() -> dict:
                 "target_node": "S-1-5-21-1-2-3-1101",
                 "target_name": "DC01.TEST.LOCAL",
                 "path_edges": [],
-                "verification_cypher": "MATCH p=shortestPath((u:User {name: 'JDOE@TEST.LOCAL'})-[*1..]->(c:Computer {name: 'DC01.TEST.LOCAL'})) RETURN p",
+                "verification_cypher": "MATCH p=shortestPath((u:User {name: 'JDOE@TEST.LOCAL'})-[*1..]->(c:Computer {name: 'DC01.TEST.LOCAL'})) RETURN p",  # noqa: E501
                 "mitre": ["T1078.002"],
             },
             {
@@ -348,7 +366,7 @@ def _make_manifest() -> dict:
                 "target_node": "S-1-5-21-1-2-3-512",
                 "target_name": "DOMAIN ADMINS@TEST.LOCAL",
                 "path_edges": [],
-                "verification_cypher": "MATCH p=(u:User {name: 'RSMITH@TEST.LOCAL'})-[:MemberOf]->(g:Group {name: 'DOMAIN ADMINS@TEST.LOCAL'}) RETURN p",
+                "verification_cypher": "MATCH p=(u:User {name: 'RSMITH@TEST.LOCAL'})-[:MemberOf]->(g:Group {name: 'DOMAIN ADMINS@TEST.LOCAL'}) RETURN p",  # noqa: E501
                 "mitre": ["T1078.002"],
             },
         ],
@@ -372,8 +390,7 @@ def test_enumeration_task_has_own_reference_cypher():
     """Enumeration tasks must NOT use the planted path's verification_cypher."""
     tasks = generate_tasks(_make_manifest())
     enum_task = next(
-        t for t in tasks
-        if t.template_id == "t1_group_membership" and t.grade_mode == "node_set"
+        t for t in tasks if t.template_id == "t1_group_membership" and t.grade_mode == "node_set"
     )
     # Reference Cypher should query all DA members, not just the planted user
     assert "RSMITH@TEST.LOCAL" not in enum_task.reference_cypher
@@ -414,6 +431,7 @@ def test_global_privileged_sessions_returns_computers_not_paths():
 # Mock providers
 # ---------------------------------------------------------------------------
 
+
 def _make_task_for_mock() -> Task:
     return Task(
         id="mock-test",
@@ -421,7 +439,7 @@ def _make_task_for_mock() -> Task:
         tier=1,
         category="path_finding",
         question="Find the attack path",
-        reference_cypher="MATCH p=shortestPath((u:User {name: 'JDOE@TEST.LOCAL'})-[*1..]->(c:Computer)) RETURN p",
+        reference_cypher="MATCH p=shortestPath((u:User {name: 'JDOE@TEST.LOCAL'})-[*1..]->(c:Computer)) RETURN p",  # noqa: E501
         grade_mode="path_exists",
         metadata={"domain": "TEST.LOCAL"},
     )

@@ -2,7 +2,7 @@
 
 import pytest
 
-from ori.generator.graph import ACE, ADEdge, ADGraph, ADNode, SIDAllocator
+from ori.generator.graph import ADGraph, ADNode, SIDAllocator
 
 
 def test_sid_allocator_well_known():
@@ -31,7 +31,11 @@ def test_graph_add_and_get_node():
     node = ADNode(
         object_id="S-1-5-21-1-2-3-512",
         node_type="Group",
-        properties={"name": "DOMAIN ADMINS@CORP.LOCAL", "domain": "CORP.LOCAL", "domainsid": "S-1-5-21-1-2-3"},
+        properties={
+            "name": "DOMAIN ADMINS@CORP.LOCAL",
+            "domain": "CORP.LOCAL",
+            "domainsid": "S-1-5-21-1-2-3",
+        },
     )
     graph.add_node(node)
     assert graph.get_node("S-1-5-21-1-2-3-512") is node

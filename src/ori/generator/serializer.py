@@ -13,12 +13,10 @@ from __future__ import annotations
 
 import json
 import zipfile
-from dataclasses import asdict
 from io import BytesIO
 from pathlib import Path
 
 from .graph import ADGraph, ADNode
-
 
 # SharpHound ingest version numbers per object type
 _VERSIONS: dict[str, int] = {
@@ -210,7 +208,9 @@ def _serialize_computer(node: ADNode) -> dict:
         "PrivilegedSessions": {"Results": [], "Collected": True},
         "RegistrySessions": {"Results": [], "Collected": True},
         "LocalAdmins": node.extra.get("LocalAdmins", {"Results": [], "Collected": True}),
-        "RemoteDesktopUsers": node.extra.get("RemoteDesktopUsers", {"Results": [], "Collected": True}),
+        "RemoteDesktopUsers": node.extra.get(
+            "RemoteDesktopUsers", {"Results": [], "Collected": True}
+        ),
         "DcomUsers": node.extra.get("DcomUsers", {"Results": [], "Collected": True}),
         "PSRemoteUsers": node.extra.get("PSRemoteUsers", {"Results": [], "Collected": True}),
         "UserRights": node.extra.get("UserRights", []),
@@ -258,13 +258,16 @@ def _serialize_ou(node: ADNode) -> dict:
         },
         "ChildObjects": node.extra.get("ChildObjects", []),
         "Links": node.extra.get("Links", []),
-        "GPOChanges": node.extra.get("GPOChanges", {
-            "LocalAdmins": [],
-            "RemoteDesktopUsers": [],
-            "DcomUsers": [],
-            "PSRemoteUsers": [],
-            "AffectedComputers": [],
-        }),
+        "GPOChanges": node.extra.get(
+            "GPOChanges",
+            {
+                "LocalAdmins": [],
+                "RemoteDesktopUsers": [],
+                "DcomUsers": [],
+                "PSRemoteUsers": [],
+                "AffectedComputers": [],
+            },
+        ),
         "Aces": _aces(node),
         "IsACLProtected": p.get("isaclprotected", False),
     }
@@ -286,13 +289,16 @@ def _serialize_domain(node: ADNode) -> dict:
         "Trusts": node.extra.get("Trusts", []),
         "ChildObjects": node.extra.get("ChildObjects", []),
         "Links": node.extra.get("Links", []),
-        "GPOChanges": node.extra.get("GPOChanges", {
-            "LocalAdmins": [],
-            "RemoteDesktopUsers": [],
-            "DcomUsers": [],
-            "PSRemoteUsers": [],
-            "AffectedComputers": [],
-        }),
+        "GPOChanges": node.extra.get(
+            "GPOChanges",
+            {
+                "LocalAdmins": [],
+                "RemoteDesktopUsers": [],
+                "DcomUsers": [],
+                "PSRemoteUsers": [],
+                "AffectedComputers": [],
+            },
+        ),
         "Aces": _aces(node),
         "IsACLProtected": p.get("isaclprotected", False),
     }

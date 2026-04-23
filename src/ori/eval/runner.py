@@ -8,14 +8,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ..telemetry import record_eval_telemetry
 from .adapter import ModelResponse, call_model
 from .bhce import BHCEClient, CypherResult, parse_bhce_url
 from .grader import GradeResult, grade
 from .inspect_runtime import InspectEvalMetadata, run_eval_with_inspect
-from .mcp_runtime import MCPRunMetadata, RESOURCE_MODE_OFF, run_mcp_eval_with_inspect
-from .report import write_csv, print_summary
+from .mcp_runtime import RESOURCE_MODE_OFF, MCPRunMetadata, run_mcp_eval_with_inspect
+from .report import print_summary, write_csv
 from .tasks import Task, generate_mcp_tasks, generate_tasks
-from ..telemetry import record_eval_telemetry
 
 
 @dataclass
@@ -50,12 +50,12 @@ async def run_eval(
 ) -> list[EvalResult]:
     """Run evaluation for a list of tasks. Returns EvalResult per task."""
 
-    print(f"Fetching valid node names for hallucination detection...")
+    print("Fetching valid node names for hallucination detection...")
     valid_names = await bhce.get_all_node_names()
     if len(valid_names) == 0:
-        print(f"  WARNING: 0 node names loaded — BH CE graph appears empty.")
-        print(f"  Make sure you have uploaded and ingested the generated zip before running eval.")
-        print(f"  Continuing, but all tasks will likely fail with CYPHER_ERROR.")
+        print("  WARNING: 0 node names loaded — BH CE graph appears empty.")
+        print("  Make sure you have uploaded and ingested the generated zip before running eval.")
+        print("  Continuing, but all tasks will likely fail with CYPHER_ERROR.")
     else:
         print(f"  {len(valid_names)} node names loaded")
 
@@ -63,7 +63,7 @@ async def run_eval(
     ref_results: dict[str, CypherResult] = {}
     for task in tasks:
         ref_results[task.id] = await bhce.run_cypher_resilient(task.reference_cypher)
-    print(f"  Done")
+    print("  Done")
 
     sem = asyncio.Semaphore(concurrency)
     results: list[EvalResult] = []
@@ -72,7 +72,9 @@ async def run_eval(
         async with sem:
             task_t0 = asyncio.get_running_loop().time()
             print(f"  [{idx}/{len(tasks)}] {task.id} ({task.tier=}, {task.grade_mode})")
-            model_resp = await call_model(task, model, base_url=base_url, ollama_options=ollama_options)
+            model_resp = await call_model(
+                task, model, base_url=base_url, ollama_options=ollama_options
+            )
 
             if model_resp.cypher:
                 model_result = await bhce.run_cypher_resilient(model_resp.cypher)
@@ -157,7 +159,7 @@ async def run_eval_cli_bare(
         attempt += 1
         print(
             f"\nDetected INFRA_ERROR during {model} run. "
-            f"Re-running full model benchmark ({attempt}/{max_model_reruns_on_infra}) after recovery wait..."
+            f"Re-running full model benchmark ({attempt}/{max_model_reruns_on_infra}) after recovery wait..."  # noqa: E501
         )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -196,7 +198,7 @@ async def run_eval_cli(
     tasks = generate_tasks(manifest)
     print(f"Generated {len(tasks)} tasks from {manifest_path.name}")
     print(f"Model: {run_name or model}")
-    print(f"Running evaluation...\n")
+    print("Running evaluation...\n")
 
     # Parse bhce_url if provided
     bhce_kwargs = parse_bhce_url(bhce_url)
@@ -311,7 +313,7 @@ async def run_eval_mcp_cli_bare(
         attempt += 1
         print(
             f"\nDetected INFRA_ERROR during {model} MCP run. "
-            f"Re-running full model benchmark ({attempt}/{max_model_reruns_on_infra}) after recovery wait..."
+            f"Re-running full model benchmark ({attempt}/{max_model_reruns_on_infra}) after recovery wait..."  # noqa: E501
         )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)

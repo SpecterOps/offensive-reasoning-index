@@ -7,7 +7,7 @@ Models should solve these reliably (~90% expected pass rate).
 
 from __future__ import annotations
 
-from ..graph import ACE, ADGraph, PlantedPath
+from ..graph import ADGraph, PlantedPath
 
 
 def plant_group_membership(graph: ADGraph) -> PlantedPath:
@@ -37,9 +37,9 @@ def plant_group_membership(graph: ADGraph) -> PlantedPath:
         privileged_sids.add(m["ObjectIdentifier"])
 
     candidates = [
-        u for u in graph.nodes_by_type("User")
-        if u.object_id not in privileged_sids
-        and u.properties.get("department") not in ("IT", None)
+        u
+        for u in graph.nodes_by_type("User")
+        if u.object_id not in privileged_sids and u.properties.get("department") not in ("IT", None)
     ]
     if not candidates:
         raise RuntimeError("No eligible users for t1_group_membership")
@@ -117,7 +117,7 @@ def plant_admin_to(graph: ADGraph) -> PlantedPath:
         raise RuntimeError("No domain controllers found — run build_org first")
     dc = dcs[0]
 
-    # The path goes through Domain Admins (since IT-Admins → MemberOf → Domain Admins → AdminTo → DC)
+    # The path goes through Domain Admins (since IT-Admins → MemberOf → Domain Admins → AdminTo → DC)  # noqa: E501
     da_sid = graph.sid_alloc.get("Domain Admins")
     da_node = graph.get_node(da_sid) if da_sid else None
 
@@ -133,8 +133,8 @@ def plant_admin_to(graph: ADGraph) -> PlantedPath:
             f"which has AdminTo access to {dc.properties['name']}."
         )
         cypher = f"""MATCH p=shortestPath(
-  (u:User {{name: '{source_user.properties['name']}'}})
-  -[*1..]->(c:Computer {{name: '{dc.properties['name']}'}})
+  (u:User {{name: '{source_user.properties["name"]}'}})
+  -[*1..]->(c:Computer {{name: '{dc.properties["name"]}'}})
 )
 RETURN p"""
     else:
@@ -147,8 +147,8 @@ RETURN p"""
             f"which has AdminTo access to {dc.properties['name']}."
         )
         cypher = f"""MATCH p=shortestPath(
-  (u:User {{name: '{source_user.properties['name']}'}})
-  -[*1..]->(c:Computer {{name: '{dc.properties['name']}'}})
+  (u:User {{name: '{source_user.properties["name"]}'}})
+  -[*1..]->(c:Computer {{name: '{dc.properties["name"]}'}})
 )
 RETURN p"""
 
@@ -195,8 +195,7 @@ def plant_has_session(graph: ADGraph) -> PlantedPath:
 
     # Find workstations that have a DA user session
     workstations = [
-        c for c in graph.nodes_by_type("Computer")
-        if "WS-" in c.properties.get("name", "")
+        c for c in graph.nodes_by_type("Computer") if "WS-" in c.properties.get("name", "")
     ]
 
     da_user_sids = privileged_user_sids

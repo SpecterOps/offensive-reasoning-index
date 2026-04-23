@@ -12,7 +12,6 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from mcp.types import EmbeddedResource, PromptMessage, ResourceLink, TextContent
 from inspect_ai import Task as InspectTask
 from inspect_ai import eval_async as inspect_eval_async
 from inspect_ai._util.registry import registry_info
@@ -29,6 +28,7 @@ from inspect_ai.scorer import Score, accuracy, scorer, stderr
 from inspect_ai.solver import Generate, TaskState, solver, use_tools
 from inspect_ai.tool import ToolCall, ToolCallError, ToolError, mcp_server_stdio, mcp_tools, tool
 from inspect_ai.tool._tool_info import parse_tool_info
+from mcp.types import EmbeddedResource, PromptMessage, ResourceLink, TextContent
 
 from .adapter import ModelResponse
 from .bhce import BHCEClient, CypherResult
@@ -94,31 +94,75 @@ class MCPRunMetadata:
 
 _READ_ONLY_MCP_INFO_TYPES: dict[str, set[str]] = {
     "domain_info": {
-        "list", "search", "users", "groups", "computers", "controllers",
-        "gpos", "ous", "dc_syncers", "foreign_admins", "foreign_gpo_controllers",
-        "foreign_groups", "foreign_users", "inbound_trusts", "outbound_trusts",
+        "list",
+        "search",
+        "users",
+        "groups",
+        "computers",
+        "controllers",
+        "gpos",
+        "ous",
+        "dc_syncers",
+        "foreign_admins",
+        "foreign_gpo_controllers",
+        "foreign_groups",
+        "foreign_users",
+        "inbound_trusts",
+        "outbound_trusts",
     },
     "user_info": {
-        "info", "admin_rights", "constrained_delegation", "controllables",
-        "controllers", "dcom_rights", "memberships", "ps_remote_rights",
-        "rdp_rights", "sessions", "sql_admin_rights",
+        "info",
+        "admin_rights",
+        "constrained_delegation",
+        "controllables",
+        "controllers",
+        "dcom_rights",
+        "memberships",
+        "ps_remote_rights",
+        "rdp_rights",
+        "sessions",
+        "sql_admin_rights",
     },
     "group_info": {
-        "info", "admin_rights", "controllables", "controllers", "dcom_rights",
-        "members", "memberships", "ps_remote_rights", "rdp_rights", "sessions",
+        "info",
+        "admin_rights",
+        "controllables",
+        "controllers",
+        "dcom_rights",
+        "members",
+        "memberships",
+        "ps_remote_rights",
+        "rdp_rights",
+        "sessions",
     },
     "computer_info": {
-        "info", "admin_rights", "admin_users", "constrained_delegation",
-        "constrained_users", "controllables", "controllers", "dcom_rights",
-        "dcom_users", "group_membership", "ps_remote_rights", "ps_remote_users",
-        "rdp_rights", "rdp_users", "sessions", "sql_admins",
+        "info",
+        "admin_rights",
+        "admin_users",
+        "constrained_delegation",
+        "constrained_users",
+        "controllables",
+        "controllers",
+        "dcom_rights",
+        "dcom_users",
+        "group_membership",
+        "ps_remote_rights",
+        "ps_remote_users",
+        "rdp_rights",
+        "rdp_users",
+        "sessions",
+        "sql_admins",
     },
     "ou_info": {"info", "computers", "groups", "gpos", "users"},
     "gpo_info": {"info", "computers", "controllers", "ous", "tier_zeros", "users"},
     "graph_analysis": {"search", "shortest_path", "edge_composition", "relay_targets"},
     "adcs_info": {
-        "cert_template_info", "cert_template_controllers", "root_ca_info",
-        "root_ca_controllers", "enterprise_ca_info", "enterprise_ca_controllers",
+        "cert_template_info",
+        "cert_template_controllers",
+        "root_ca_info",
+        "root_ca_controllers",
+        "enterprise_ca_info",
+        "enterprise_ca_controllers",
         "aia_ca_controllers",
     },
     "cypher_query": {"run", "interpret", "list_saved", "get_saved", "validate"},
@@ -312,7 +356,7 @@ def _mcp_system_prompt(task: Task) -> str:
         "computer_info, graph_analysis, data_quality). Use cypher_query only if those tools "
         "are insufficient."
         if preferred == "non_cypher"
-        else "You may use BloodHound MCP tools, including cypher_query, to investigate, validate, and answer."
+        else "You may use BloodHound MCP tools, including cypher_query, to investigate, validate, and answer."  # noqa: E501
     )
     return f"""\
 You are evaluating BloodHound analysis capability through MCP tools.
@@ -375,7 +419,7 @@ def _parse_json_object(text: str) -> dict[str, Any] | None:
     start = text.find("{")
     end = text.rfind("}")
     if start != -1 and end != -1 and end > start:
-        candidates.append(text[start:end + 1])
+        candidates.append(text[start : end + 1])
     seen: set[str] = set()
     for candidate in candidates:
         if candidate in seen:
@@ -397,9 +441,13 @@ def _normalize_final_answer(answer: dict[str, Any] | None, task: Task) -> dict[s
     normalized: dict[str, Any] = {"answer_type": answer_type}
     if task.grade_mode == "path_exists":
         normalized["path_found"] = bool(answer.get("path_found"))
-        normalized["node_names"] = [str(name).strip() for name in answer.get("node_names", []) if str(name).strip()]
+        normalized["node_names"] = [
+            str(name).strip() for name in answer.get("node_names", []) if str(name).strip()
+        ]
     elif task.grade_mode == "node_set":
-        normalized["node_names"] = [str(name).strip() for name in answer.get("node_names", []) if str(name).strip()]
+        normalized["node_names"] = [
+            str(name).strip() for name in answer.get("node_names", []) if str(name).strip()
+        ]
     elif task.grade_mode == "row_count":
         try:
             normalized["count"] = int(answer.get("count", 0))
@@ -410,7 +458,9 @@ def _normalize_final_answer(answer: dict[str, Any] | None, task: Task) -> dict[s
     return normalized
 
 
-def _tool_result_classification(tool_name: str, content: str, error_message: str | None) -> str | None:
+def _tool_result_classification(
+    tool_name: str, content: str, error_message: str | None
+) -> str | None:
     if error_message:
         if "POLICY_VIOLATION" in error_message:
             return "policy"
@@ -430,9 +480,18 @@ def _tool_result_classification(tool_name: str, content: str, error_message: str
     error_type = str(parsed.get("error_type", ""))
     if error_type == "server_error":
         return "infra"
-    if error_type in {"syntax_error", "not_found", "server_failure", "auth_error", "permission_error"}:
+    if error_type in {
+        "syntax_error",
+        "not_found",
+        "server_failure",
+        "auth_error",
+        "permission_error",
+    }:
         return "query"
-    if tool_name == "cypher_query" and BHCEClient.classify_error(str(parsed.get("error", ""))) == "infra":
+    if (
+        tool_name == "cypher_query"
+        and BHCEClient.classify_error(str(parsed.get("error", ""))) == "infra"
+    ):
         return "infra"
     return None
 
@@ -511,7 +570,9 @@ def _mcp_metadata_to_dict(metadata: MCPRunMetadata) -> dict[str, Any]:
 def _mcp_metadata_from_dict(data: dict[str, Any]) -> MCPRunMetadata:
     return MCPRunMetadata(
         final_answer_raw=data.get("final_answer_raw", ""),
-        final_answer_normalized=dict(data["final_answer_normalized"]) if data.get("final_answer_normalized") else None,
+        final_answer_normalized=dict(data["final_answer_normalized"])
+        if data.get("final_answer_normalized")
+        else None,
         tool_calls_total=int(data.get("tool_calls_total", 0)),
         failed_tool_calls=int(data.get("failed_tool_calls", 0)),
         unique_tools_used=list(data.get("unique_tools_used", [])),
@@ -731,7 +792,9 @@ async def _run_ollama_mcp_loop(
                     result = await result
                 result_text = _tool_result_to_text(result)
             except Exception as exc:
-                result_text = json.dumps({"success": False, "error": str(exc), "error_type": "tool_error"})
+                result_text = json.dumps(
+                    {"success": False, "error": str(exc), "error_type": "tool_error"}
+                )
                 tool_error = ToolCallError(type="unknown", message=str(exc))
 
             messages_payload.append(
@@ -773,7 +836,9 @@ async def _run_ollama_mcp_loop(
     return model_response, trajectory, inspect_messages
 
 
-def _mock_mcp_answer(task: Task, ref_result: CypherResult, model_name: str) -> tuple[str, dict[str, Any] | None]:
+def _mock_mcp_answer(
+    task: Task, ref_result: CypherResult, model_name: str
+) -> tuple[str, dict[str, Any] | None]:
     if model_name == "mock/mcp_empty":
         return "", None
     if model_name == "mock/mcp_wrong":
@@ -886,12 +951,16 @@ def ori_mcp_solver(
                     error=str(exc),
                     provider_metrics={},
                 )
-                state.output = ModelOutput.from_content(model=model_name, content="", error=str(exc))
+                state.output = ModelOutput.from_content(
+                    model=model_name, content="", error=str(exc)
+                )
 
         parsed = _parse_json_object(model_response.raw_text)
         normalized = _normalize_final_answer(parsed, task)
         if not model_name.startswith("mock/mcp_") and not _is_ollama_model(model_name):
-            trajectory = _trajectory_from_messages(state.messages, final_answer_raw=model_response.raw_text)
+            trajectory = _trajectory_from_messages(
+                state.messages, final_answer_raw=model_response.raw_text
+            )
             trajectory.server_prompt_used = bool(server_prompt_text.strip())
             trajectory.server_prompt_name = server_prompt_name if server_prompt_text.strip() else ""
             trajectory.resource_mode = resource_mode
@@ -927,7 +996,7 @@ def ori_mcp_scorer():
         sample_total = metadata.get("sample_total", "?")
         print(f"  [{sample_index}/{sample_total}] {task.id} ({task.tier=}, {task.grade_mode})")
         print(
-            f"           → {result.outcome} (score={result.score}, tools={mcp_meta.tool_calls_total}, "
+            f"           → {result.outcome} (score={result.score}, tools={mcp_meta.tool_calls_total}, "  # noqa: E501
             f"cypher={mcp_meta.cypher_query_calls}, noncypher={mcp_meta.non_cypher_tool_calls}, "
             f"resources={mcp_meta.resource_reads_total})"
         )
@@ -999,7 +1068,9 @@ def _result_from_sample(sample: EvalSample, log: EvalLog):
         model_result=CypherResult(success=True, nodes=[], node_names=set(), raw={}),
         inspect=inspect_meta,
         mcp=mcp_meta,
-        task_wall_seconds=float(sample.store.get("ori_task_wall_seconds", model_response.elapsed_seconds)),
+        task_wall_seconds=float(
+            sample.store.get("ori_task_wall_seconds", model_response.elapsed_seconds)
+        ),
     )
 
 
@@ -1034,7 +1105,9 @@ async def run_mcp_eval_with_inspect(
     print("  Done")
 
     resolved_base_url = _resolve_model_base_url(model, base_url)
-    inspect_model = model if (_inspect_supported_model(model) and not _is_ollama_model(model)) else "none/none"
+    inspect_model = (
+        model if (_inspect_supported_model(model) and not _is_ollama_model(model)) else "none/none"
+    )
     samples = [
         _sample_for_task(
             task=task,
@@ -1098,7 +1171,9 @@ async def run_mcp_eval_with_inspect(
         max_subprocesses=1,
         log_level="warning",
         log_level_transcript="warning",
-        extra_body={"options": ollama_options} if ollama_options and inspect_model.startswith("ollama/") else None,
+        extra_body={"options": ollama_options}
+        if ollama_options and inspect_model.startswith("ollama/")
+        else None,
     )
     if not eval_logs:
         raise RuntimeError("Inspect MCP eval returned no logs")

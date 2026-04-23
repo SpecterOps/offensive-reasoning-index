@@ -12,10 +12,9 @@ from ori.cli import main
 from ori.eval.adapter import ModelResponse
 from ori.eval.bhce import BHHealthResult, CypherResult
 from ori.eval.grader import GradeResult, grade_mcp
-
 from ori.eval.mcp_runtime import (
-    MCPRunMetadata,
     RESOURCE_READ_TOOL_NAME,
+    MCPRunMetadata,
     _mcp_subprocess_env,
     _normalize_final_answer,
     _ollama_chat_turn,
@@ -40,7 +39,7 @@ def _manifest() -> dict:
                 "description": "admin path",
                 "source_name": "JDOE@TEST.LOCAL",
                 "target_name": "DC01.TEST.LOCAL",
-                "verification_cypher": "MATCH p=(u:User {name: 'JDOE@TEST.LOCAL'})-[*1..]->(c:Computer {name: 'DC01.TEST.LOCAL'}) RETURN p",
+                "verification_cypher": "MATCH p=(u:User {name: 'JDOE@TEST.LOCAL'})-[*1..]->(c:Computer {name: 'DC01.TEST.LOCAL'}) RETURN p",  # noqa: E501
                 "path_edges": [],
             },
             {
@@ -49,7 +48,7 @@ def _manifest() -> dict:
                 "description": "session path",
                 "source_name": "WS-01.TEST.LOCAL",
                 "target_name": "JDOE@TEST.LOCAL",
-                "verification_cypher": "MATCH p=(c:Computer {name: 'WS-01.TEST.LOCAL'})-[:HasSession]->(u:User {name: 'JDOE@TEST.LOCAL'}) RETURN p",
+                "verification_cypher": "MATCH p=(c:Computer {name: 'WS-01.TEST.LOCAL'})-[:HasSession]->(u:User {name: 'JDOE@TEST.LOCAL'}) RETURN p",  # noqa: E501
                 "path_edges": [],
             },
             {
@@ -58,7 +57,7 @@ def _manifest() -> dict:
                 "description": "membership path",
                 "source_name": "MMOORE@TEST.LOCAL",
                 "target_name": "DOMAIN ADMINS@TEST.LOCAL",
-                "verification_cypher": "MATCH p=(u:User {name: 'MMOORE@TEST.LOCAL'})-[:MemberOf*1..]->(g:Group {name: 'DOMAIN ADMINS@TEST.LOCAL'}) RETURN p",
+                "verification_cypher": "MATCH p=(u:User {name: 'MMOORE@TEST.LOCAL'})-[:MemberOf*1..]->(g:Group {name: 'DOMAIN ADMINS@TEST.LOCAL'}) RETURN p",  # noqa: E501
                 "path_edges": [],
             },
             {
@@ -67,7 +66,7 @@ def _manifest() -> dict:
                 "description": "nested path",
                 "source_name": "CDAVIS@TEST.LOCAL",
                 "target_name": "SRV-01.TEST.LOCAL",
-                "verification_cypher": "MATCH p=(u:User {name: 'CDAVIS@TEST.LOCAL'})-[:MemberOf*1..]->(:Group)-[:AdminTo]->(c:Computer {name: 'SRV-01.TEST.LOCAL'}) RETURN p",
+                "verification_cypher": "MATCH p=(u:User {name: 'CDAVIS@TEST.LOCAL'})-[:MemberOf*1..]->(:Group)-[:AdminTo]->(c:Computer {name: 'SRV-01.TEST.LOCAL'}) RETURN p",  # noqa: E501
                 "path_edges": [],
             },
         ],
@@ -81,7 +80,7 @@ def _task() -> Task:
         tier=1,
         category="mcp_analysis",
         question="List all computers where Domain Admins has admin rights",
-        reference_cypher="MATCH (g:Group {name: 'DOMAIN ADMINS@TEST.LOCAL'})-[:AdminTo]->(c:Computer) RETURN c",
+        reference_cypher="MATCH (g:Group {name: 'DOMAIN ADMINS@TEST.LOCAL'})-[:AdminTo]->(c:Computer) RETURN c",  # noqa: E501
         grade_mode="node_set",
         metadata={"domain": "TEST.LOCAL", "mcp_track": "mcp_non_cypher_analysis"},
     )
@@ -286,7 +285,10 @@ def test_run_ollama_mcp_loop_preserves_thinking_and_final_answer(monkeypatch) ->
                         "id": "call-1",
                         "function": {
                             "name": "group_info",
-                            "arguments": {"group_name": "DOMAIN ADMINS@TEST.LOCAL", "info_type": "members"},
+                            "arguments": {
+                                "group_name": "DOMAIN ADMINS@TEST.LOCAL",
+                                "info_type": "members",
+                            },
                         },
                     }
                 ],
