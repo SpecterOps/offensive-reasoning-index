@@ -7,6 +7,25 @@ import pytest
 from ori.run_config import RunConfigOverrides, list_run_profiles, load_run_profile
 
 
+def test_shipped_run_configs_load_all_profiles() -> None:
+    """Every checked-in run config profile should load with real YAML parsing."""
+    for config in (
+        Path("run-config.example.yaml"),
+        Path("run-config-phase3-m4.yaml"),
+    ):
+        profiles = list_run_profiles(config)
+        assert profiles, f"{config} should define at least one profile"
+        for profile in profiles:
+            resolved = load_run_profile(config, profile_name=profile.profile_name)
+            assert resolved.profile_name == profile.profile_name
+
+
+def test_phase3_m4_preflight_loads_with_unquoted_resource_mode_off() -> None:
+    resolved = load_run_profile(Path("run-config-phase3-m4.yaml"), profile_name="preflight_local")
+    assert resolved.kind == "preflight"
+    assert resolved.resource_mode == "off"
+
+
 def test_load_run_profile_resolves_paths_and_defaults(tmp_path: Path) -> None:
     mcp_dir = tmp_path / "bloodhound-mcp"
     mcp_dir.mkdir()
