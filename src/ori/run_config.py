@@ -152,6 +152,10 @@ def _merged_nested_value(
 def _normalize_resource_mode(raw_mode: Any) -> str:
     if raw_mode is None:
         return "off"
+    if raw_mode is False:
+        # PyYAML parses unquoted `off` as boolean False. Accept it so users can
+        # write resource_mode: off in run configs without quoting the value.
+        return "off"
     if not isinstance(raw_mode, str):
         raise ValueError("MCP resource_mode must be a string when present.")
     if raw_mode not in {"off", "on-demand"}:

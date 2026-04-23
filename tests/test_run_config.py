@@ -130,6 +130,26 @@ profiles:
     assert resolved.telemetry_enabled is True
 
 
+def test_load_run_profile_accepts_unquoted_yaml_off_resource_mode(tmp_path: Path) -> None:
+    config = tmp_path / "run.yaml"
+    config.write_text(
+        """
+version: 1
+defaults:
+  mcp:
+    resource_mode: off
+profiles:
+  smoke:
+    kind: smoke-mcp
+    manifest: manifest.json
+    output_dir: out
+"""
+    )
+
+    resolved = load_run_profile(config, profile_name="smoke")
+    assert resolved.resource_mode == "off"
+
+
 def test_load_run_profile_applies_telemetry_override(tmp_path: Path) -> None:
     config = tmp_path / "run.yaml"
     config.write_text(
