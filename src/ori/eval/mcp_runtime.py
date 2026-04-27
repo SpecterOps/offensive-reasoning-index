@@ -613,7 +613,9 @@ def _tool_result_to_text(result: Any) -> str:
 
 def _ollama_tool_spec(tool_obj: Any) -> tuple[dict[str, Any], Any]:
     canonical_name = _canonical_tool_name(tool_obj)
-    executor = tool_obj()
+    # Tools loaded from MCP are already Inspect executor callables. Local test
+    # tools may still be passed as @tool factories, so only instantiate those.
+    executor = tool_obj if hasattr(tool_obj, "__registry_params__") else tool_obj()
     info = parse_tool_info(executor)
     return (
         {

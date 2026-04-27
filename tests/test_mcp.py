@@ -18,6 +18,7 @@ from ori.eval.mcp_runtime import (
     _mcp_subprocess_env,
     _normalize_final_answer,
     _ollama_chat_turn,
+    _ollama_tool_spec,
     _parse_json_object,
     _run_ollama_mcp_loop,
     _trajectory_from_messages,
@@ -266,6 +267,27 @@ def test_ollama_chat_turn_streams_payload_options_and_tool_calls(monkeypatch) ->
     assert turn["tool_calls"][0]["function"]["name"] == "group_info"
     assert turn["prompt_eval_count"] == 11
     assert turn["eval_count"] == 7
+
+
+def test_ollama_tool_spec_accepts_executor_callable_without_calling_it() -> None:
+    import asyncio
+
+    @tool(name="group_info")
+    def group_info():
+        async def execute(group_name: str, info_type: str) -> str:
+            return f"{group_name}:{info_type}"
+
+        return execute
+
+    executor_tool = group_info()
+    spec, executor = _ollama_tool_spec(executor_tool)
+
+    assert executor is executor_tool
+    assert spec["function"]["name"] == "group_info"
+    assert set(spec["function"]["parameters"]["properties"]) == {"group_name", "info_type"}
+    assert asyncio.run(executor(group_name="DOMAIN ADMINS@TEST.LOCAL", info_type="members")) == (
+        "DOMAIN ADMINS@TEST.LOCAL:members"
+    )
 
 
 def test_run_ollama_mcp_loop_preserves_thinking_and_final_answer(monkeypatch) -> None:
