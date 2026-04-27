@@ -13,7 +13,12 @@ from .adapter import ModelResponse, call_model
 from .bhce import BHCEClient, CypherResult, parse_bhce_url
 from .grader import GradeResult, grade
 from .inspect_runtime import InspectEvalMetadata, run_eval_with_inspect
-from .mcp_runtime import RESOURCE_MODE_OFF, MCPRunMetadata, run_mcp_eval_with_inspect
+from .mcp_runtime import (
+    DEFAULT_MCP_OLLAMA_READ_TIMEOUT_SECONDS,
+    RESOURCE_MODE_OFF,
+    MCPRunMetadata,
+    run_mcp_eval_with_inspect,
+)
 from .report import print_summary, write_csv
 from .tasks import Task, generate_mcp_tasks, generate_tasks
 
@@ -289,6 +294,7 @@ async def run_eval_mcp_cli_bare(
     mcp_dir: Path | None = None,
     max_steps: int = 12,
     resource_mode: str = RESOURCE_MODE_OFF,
+    mcp_ollama_read_timeout_seconds: float = DEFAULT_MCP_OLLAMA_READ_TIMEOUT_SECONDS,
     model_base_url: str | None = None,
     health_timeout_seconds: float = 60.0,
     health_poll_interval: float = 5.0,
@@ -329,6 +335,7 @@ async def run_eval_mcp_cli_bare(
                 mcp_dir=mcp_dir,
                 max_steps=max_steps,
                 resource_mode=resource_mode,
+                ollama_read_timeout_seconds=mcp_ollama_read_timeout_seconds,
             )
             for result in batch_results:
                 result.run_name = run_name or model
@@ -373,6 +380,7 @@ async def run_eval_mcp_cli(
     max_steps: int = 12,
     ollama_options: dict | None = None,
     resource_mode: str = RESOURCE_MODE_OFF,
+    mcp_ollama_read_timeout_seconds: float = DEFAULT_MCP_OLLAMA_READ_TIMEOUT_SECONDS,
     model_base_url: str | None = None,
     health_timeout_seconds: float = 60.0,
     health_poll_interval: float = 5.0,
@@ -416,6 +424,7 @@ async def run_eval_mcp_cli(
                 mcp_dir=mcp_dir,
                 max_steps=max_steps,
                 resource_mode=resource_mode,
+                ollama_read_timeout_seconds=mcp_ollama_read_timeout_seconds,
             )
             for result in batch_results:
                 result.run_name = run_name or model

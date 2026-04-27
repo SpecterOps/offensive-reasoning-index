@@ -45,6 +45,7 @@ defaults:
     mcp_dir: bloodhound-mcp
     max_steps: 22
     resource_mode: on-demand
+    ollama_read_timeout_seconds: 1200
   telemetry:
     enabled: false
 profiles:
@@ -67,6 +68,7 @@ profiles:
     assert resolved.health_poll_interval == 1.5
     assert resolved.max_steps == 22
     assert resolved.resource_mode == "on-demand"
+    assert resolved.mcp_ollama_read_timeout_seconds == 1200.0
     assert resolved.telemetry_enabled is False
     assert resolved.manifest == str((tmp_path / "datasets/phase3b_manifest.json").resolve())
     assert resolved.output_dir == str((tmp_path / "results/out").resolve())
@@ -120,6 +122,7 @@ profiles:
             concurrency=4,
             max_steps=30,
             resource_mode="on-demand",
+            mcp_ollama_read_timeout_seconds=1800,
             health_timeout_seconds=10,
             health_poll_interval=0.5,
         ),
@@ -127,6 +130,7 @@ profiles:
     assert resolved.concurrency == 4
     assert resolved.max_steps == 30
     assert resolved.resource_mode == "on-demand"
+    assert resolved.mcp_ollama_read_timeout_seconds == 1800.0
     assert resolved.health_timeout_seconds == 10.0
     assert resolved.health_poll_interval == 0.5
 
@@ -146,6 +150,7 @@ profiles:
 
     resolved = load_run_profile(config, profile_name="smoke")
     assert resolved.resource_mode == "off"
+    assert resolved.mcp_ollama_read_timeout_seconds == 900.0
     assert resolved.telemetry_enabled is True
 
 

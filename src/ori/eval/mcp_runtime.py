@@ -32,7 +32,7 @@ from mcp.types import EmbeddedResource, PromptMessage, ResourceLink, TextContent
 
 from .adapter import ModelResponse
 from .bhce import BHCEClient, CypherResult
-from .grader import grade_mcp
+from .grader import GradeResult, grade_mcp
 from .inspect_runtime import (
     InspectEvalMetadata,
     _configure_inspect_runtime_dirs,
@@ -56,6 +56,7 @@ RESOURCE_MODE_ON_DEMAND = "on-demand"
 BLOODHOUND_PROMPT_NAME = "bloodhound_assistant"
 RESOURCE_LIST_TOOL_NAME = "list_bloodhound_resources"
 RESOURCE_READ_TOOL_NAME = "read_bloodhound_resource"
+DEFAULT_MCP_OLLAMA_READ_TIMEOUT_SECONDS = 900.0
 
 
 @dataclass
@@ -637,6 +638,7 @@ async def _ollama_chat_turn(
     messages: list[dict[str, Any]],
     tools: list[dict[str, Any]],
     ollama_options: dict[str, Any] | None,
+    read_timeout_seconds: float = DEFAULT_MCP_OLLAMA_READ_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "model": model_name.split("/", 1)[1],
@@ -655,7 +657,7 @@ async def _ollama_chat_turn(
     final_model = model_name
     done_metrics: dict[str, int] = {}
 
-    timeout = httpx.Timeout(connect=10.0, read=300.0, write=30.0, pool=30.0)
+    timeout = httpx.Timeout(connect=10.0, read=read_timeout_seconds, write=30.0, pool=30.0)
     async with httpx.AsyncClient(timeout=timeout) as client:
         async with client.stream("POST", url, json=payload) as resp:
             resp.raise_for_status()
@@ -705,6 +707,7 @@ async def _run_ollama_mcp_loop(
     max_steps: int,
     server_prompt_text: str = "",
     resource_mode: str = RESOURCE_MODE_OFF,
+    ollama_read_timeout_seconds: float = DEFAULT_MCP_OLLAMA_READ_TIMEOUT_SECONDS,
 ) -> tuple[ModelResponse, MCPRunMetadata, list[Any]]:
     url = _native_ollama_chat_url(base_url)
     messages_payload: list[dict[str, Any]] = []
@@ -741,6 +744,7 @@ async def _run_ollama_mcp_loop(
             messages=messages_payload,
             tools=tool_specs,
             ollama_options=ollama_options,
+            read_timeout_seconds=ollama_read_timeout_seconds,
         )
         total_prompt_tokens += int(turn["prompt_eval_count"])
         total_completion_tokens += int(turn["eval_count"])
@@ -876,6 +880,7 @@ def ori_mcp_solver(
     server_prompt_text: str = "",
     server_prompt_name: str = "",
     resource_mode: str = RESOURCE_MODE_OFF,
+    ollama_read_timeout_seconds: float = DEFAULT_MCP_OLLAMA_READ_TIMEOUT_SECONDS,
 ) -> Generate:
     async def solve(state: TaskState, generate: Generate) -> TaskState:
         task_t0 = time.monotonic()
@@ -916,6 +921,7 @@ def ori_mcp_solver(
                 max_steps=max_steps,
                 server_prompt_text=server_prompt_text,
                 resource_mode=resource_mode,
+                ollama_read_timeout_seconds=ollama_read_timeout_seconds,
             )
             state.messages = ollama_messages
             state.output = ModelOutput.from_content(
@@ -1044,24 +1050,82 @@ def _sample_for_task(
     )
 
 
-def _result_from_sample(sample: EvalSample, log: EvalLog):
-    from .runner import EvalResult
+def _sample_error_detail(sample: EvalSample, fallback: str) -> str:
+    error = getattr(sample, "error", None)
+    if error:
+        message = getattr(error, "message", None)
+        return str(message or error)
+    return fallback
 
-    task = _task_from_dict(sample.metadata["ori_task"])
-    model_response = _model_response_from_dict(sample.store["ori_model_response"])
-    if not sample.scores:
-        raise ValueError(f"Inspect MCP sample {sample.id!r} missing scores")
-    score = next(iter(sample.scores.values()))
-    grade_result = _score_metadata_to_grade_result(score)
-    mcp_meta = _mcp_metadata_from_dict(score.metadata["mcp"])
-    mcp_meta.trajectory_log = log.location or ""
-    inspect_meta = InspectEvalMetadata(
+
+def _inspect_meta_from_sample(sample: EvalSample, log: EvalLog) -> InspectEvalMetadata:
+    return InspectEvalMetadata(
         log_location=log.location or None,
         sample_id=str(sample.id),
         sample_uuid=sample.uuid,
         model_calls=int(sample.store.get("ori_model_calls", 0)),
         error_retries=len(sample.error_retries or []),
     )
+
+
+def _incomplete_result_from_sample(sample: EvalSample, log: EvalLog, detail: str):
+    from .runner import EvalResult
+
+    task = _task_from_dict(sample.metadata["ori_task"])
+    model_response_data = sample.store.get("ori_model_response")
+    model_response = (
+        _model_response_from_dict(model_response_data)
+        if model_response_data
+        else ModelResponse(
+            raw_text="",
+            cypher=None,
+            parse_stage="none",
+            tokens_input=0,
+            tokens_output=0,
+            elapsed_seconds=0.0,
+            model=sample.metadata.get("requested_model", ""),
+            thinking="",
+            error=detail,
+            provider_metrics={},
+        )
+    )
+    mcp_meta = _mcp_metadata_from_dict(sample.store.get("ori_mcp_trajectory", {}))
+    mcp_meta.trajectory_log = log.location or ""
+    return EvalResult(
+        task=task,
+        model_response=model_response,
+        grade=GradeResult(
+            score=0.0,
+            outcome="INFRA_ERROR",
+            hallucination=False,
+            details=f"Inspect MCP sample incomplete: {detail}",
+        ),
+        ref_result=_cypher_result_from_dict(sample.metadata["ref_result"]),
+        model_result=CypherResult(success=False, error=detail),
+        inspect=_inspect_meta_from_sample(sample, log),
+        mcp=mcp_meta,
+        task_wall_seconds=float(
+            sample.store.get("ori_task_wall_seconds", model_response.elapsed_seconds)
+        ),
+    )
+
+
+def _result_from_sample(sample: EvalSample, log: EvalLog):
+    from .runner import EvalResult
+
+    task = _task_from_dict(sample.metadata["ori_task"])
+    if "ori_model_response" not in sample.store:
+        detail = _sample_error_detail(sample, "missing ori_model_response")
+        return _incomplete_result_from_sample(sample, log, detail)
+    model_response = _model_response_from_dict(sample.store["ori_model_response"])
+    if not sample.scores:
+        detail = _sample_error_detail(sample, f"Inspect MCP sample {sample.id!r} missing scores")
+        return _incomplete_result_from_sample(sample, log, detail)
+    score = next(iter(sample.scores.values()))
+    grade_result = _score_metadata_to_grade_result(score)
+    mcp_meta = _mcp_metadata_from_dict(score.metadata["mcp"])
+    mcp_meta.trajectory_log = log.location or ""
+    inspect_meta = _inspect_meta_from_sample(sample, log)
     return EvalResult(
         task=task,
         model_response=model_response,
@@ -1089,6 +1153,7 @@ async def run_mcp_eval_with_inspect(
     mcp_dir: Path | None = None,
     max_steps: int = 12,
     resource_mode: str = RESOURCE_MODE_OFF,
+    ollama_read_timeout_seconds: float = DEFAULT_MCP_OLLAMA_READ_TIMEOUT_SECONDS,
 ):
     if resource_mode not in {RESOURCE_MODE_OFF, RESOURCE_MODE_ON_DEMAND}:
         raise ValueError(f"Unsupported resource mode: {resource_mode!r}")
@@ -1155,6 +1220,7 @@ async def run_mcp_eval_with_inspect(
             server_prompt_text=server_prompt_text,
             server_prompt_name=server_prompt_name,
             resource_mode=resource_mode,
+            ollama_read_timeout_seconds=ollama_read_timeout_seconds,
         ),
         scorer=ori_mcp_scorer(),
         name=f"{_task_name_for_model(model)}_mcp",

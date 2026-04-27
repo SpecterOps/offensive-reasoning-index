@@ -358,8 +358,11 @@ def test_cli_eval_mcp_parses_ollama_options(tmp_path: Path, monkeypatch) -> None
         captured["run_name"] == "ollama/gemma4:e4b [options.num_ctx=16384, options.temperature=0.2]"
     )
     assert captured["run_config"] == {
+        "max_steps": 12,
+        "mcp_ollama_read_timeout_seconds": 900.0,
         "model": "ollama/gemma4:e4b",
         "options": {"num_ctx": 16384, "temperature": 0.2},
+        "resource_mode": "on-demand",
     }
 
 
@@ -399,6 +402,7 @@ models:
     model: ollama/gemma4:26b
     model_base_url: http://127.0.0.1:11434/v1
     max_steps: 24
+    mcp_ollama_read_timeout_seconds: 1200
     options:
       num_ctx: 32768
 """
@@ -406,8 +410,10 @@ models:
     spec = _build_run_specs(models=(), models_file=str(models_file))[0]
     assert spec.model_base_url == "http://127.0.0.1:11434/v1"
     assert spec.max_steps == 24
+    assert spec.mcp_ollama_read_timeout_seconds == 1200
     assert spec.config_identity == {
         "max_steps": 24,
+        "mcp_ollama_read_timeout_seconds": 1200,
         "model": "ollama/gemma4:26b",
         "model_base_url": "http://127.0.0.1:11434/v1",
         "options": {"num_ctx": 32768},
@@ -527,6 +533,7 @@ defaults:
   mcp:
     mcp_dir: {mcp_dir}
     max_steps: 20
+    ollama_read_timeout_seconds: 1200
 profiles:
   phase3b:
     kind: baseline-mcp
@@ -540,6 +547,7 @@ profiles:
         concurrency: 1
         max_steps: 24
         model_base_url: http://custom.local/v1
+        mcp_ollama_read_timeout_seconds: 1500
 """
     )
     calls: list[dict] = []
@@ -555,11 +563,13 @@ profiles:
     assert len(calls) == 2
     assert calls[0]["concurrency"] == 2
     assert calls[0]["max_steps"] == 20
+    assert calls[0]["mcp_ollama_read_timeout_seconds"] == 1200.0
     assert calls[0]["max_model_reruns_on_infra"] == 3
     assert calls[0]["bhce_url"] == "http://bh.local"
     assert calls[0]["model_base_url"] == "http://127.0.0.1:11434/v1"
     assert calls[1]["concurrency"] == 1
     assert calls[1]["max_steps"] == 24
+    assert calls[1]["mcp_ollama_read_timeout_seconds"] == 1500
     assert calls[1]["model_base_url"] == "http://custom.local/v1"
 
 

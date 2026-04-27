@@ -12,6 +12,7 @@ defaults:
     mcp_dir: ../bloodhound-mcp
     max_steps: 12
     resource_mode: off
+    ollama_read_timeout_seconds: 900
   telemetry:
     # Writes results/<run>/telemetry/{run_environment.json,models/,samples/,telemetry_summary.csv}
     # Disable only for fast smoke/debug loops: `ori run ... --no-telemetry`.

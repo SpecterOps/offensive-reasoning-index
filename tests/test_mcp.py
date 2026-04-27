@@ -15,12 +15,15 @@ from ori.eval.grader import GradeResult, grade_mcp
 from ori.eval.mcp_runtime import (
     RESOURCE_READ_TOOL_NAME,
     MCPRunMetadata,
+    _cypher_result_to_dict,
     _mcp_subprocess_env,
     _normalize_final_answer,
     _ollama_chat_turn,
     _ollama_tool_spec,
     _parse_json_object,
+    _result_from_sample,
     _run_ollama_mcp_loop,
+    _task_to_dict,
     _trajectory_from_messages,
     run_mcp_eval_with_inspect,
 )
@@ -258,6 +261,7 @@ def test_ollama_chat_turn_streams_payload_options_and_tool_calls(monkeypatch) ->
 
     assert captured["method"] == "POST"
     assert captured["url"] == "http://127.0.0.1:11434/api/chat"
+    assert captured["timeout"].read == 900.0
     payload = captured["payload"]
     assert payload["model"] == "ori-test"
     assert payload["stream"] is True
@@ -288,6 +292,41 @@ def test_ollama_tool_spec_accepts_executor_callable_without_calling_it() -> None
     assert asyncio.run(executor(group_name="DOMAIN ADMINS@TEST.LOCAL", info_type="members")) == (
         "DOMAIN ADMINS@TEST.LOCAL:members"
     )
+
+
+def test_result_from_sample_missing_model_response_returns_infra_error() -> None:
+    from types import SimpleNamespace
+
+    ref_result = CypherResult(
+        success=True,
+        nodes=[{"name": "WS-01.TEST.LOCAL"}],
+        node_names={"WS-01.TEST.LOCAL"},
+        raw={},
+    )
+    sample = SimpleNamespace(
+        id="mcp-test",
+        uuid="sample-uuid",
+        metadata={
+            "ori_task": _task_to_dict(_task()),
+            "ref_result": _cypher_result_to_dict(ref_result),
+            "requested_model": "ollama/gemma4-e4b-32k",
+        },
+        store={},
+        scores=None,
+        error=TimeoutError("ReadTimeout"),
+        error_retries=[object()],
+    )
+    log = SimpleNamespace(location="trace.eval")
+
+    result = _result_from_sample(sample, log)
+
+    assert result.grade.outcome == "INFRA_ERROR"
+    assert result.model_response.model == "ollama/gemma4-e4b-32k"
+    assert result.model_response.error == "ReadTimeout"
+    assert result.inspect is not None
+    assert result.inspect.error_retries == 1
+    assert result.mcp is not None
+    assert result.mcp.trajectory_log == "trace.eval"
 
 
 def test_run_ollama_mcp_loop_preserves_thinking_and_final_answer(monkeypatch) -> None:

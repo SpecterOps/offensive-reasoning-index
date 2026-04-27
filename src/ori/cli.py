@@ -28,6 +28,7 @@ class RunSpec:
     ollama_options: dict | None
     model_base_url: str | None
     max_steps: int | None
+    mcp_ollama_read_timeout_seconds: float | None
     config_identity: dict[str, Any]
     config_identity_json: str
     file_slug: str
@@ -109,6 +110,7 @@ def _run_spec_from_entry(
         ollama_options=identity.get("options") or None,
         model_base_url=identity.get("model_base_url"),
         max_steps=identity.get("max_steps"),
+        mcp_ollama_read_timeout_seconds=identity.get("mcp_ollama_read_timeout_seconds"),
         config_identity=identity,
         config_identity_json=config_identity_json,
         file_slug=_slugify_run_name(run_name),
@@ -143,6 +145,7 @@ def _dedupe_run_specs(run_specs: list[RunSpec]) -> list[RunSpec]:
                 ollama_options=run_spec.ollama_options,
                 model_base_url=run_spec.model_base_url,
                 max_steps=run_spec.max_steps,
+                mcp_ollama_read_timeout_seconds=run_spec.mcp_ollama_read_timeout_seconds,
                 config_identity=run_spec.config_identity,
                 config_identity_json=run_spec.config_identity_json,
                 file_slug=file_slug,
@@ -184,6 +187,7 @@ def _build_inline_run_spec(model: str, ollama_options: dict | None = None) -> Ru
         ollama_options=ollama_options,
         model_base_url=None,
         max_steps=None,
+        mcp_ollama_read_timeout_seconds=None,
         config_identity=identity,
         config_identity_json=config_identity_json,
         file_slug=_slugify_run_name(run_name),
@@ -196,6 +200,7 @@ def _effective_run_config(
     model_base_url: str | None = None,
     max_steps: int | None = None,
     resource_mode: str | None = None,
+    mcp_ollama_read_timeout_seconds: float | None = None,
     telemetry_enabled: bool | None = None,
 ) -> dict[str, Any]:
     config = dict(run_spec.config_identity)
@@ -205,6 +210,11 @@ def _effective_run_config(
         config["max_steps"] = max_steps
     if resource_mode is not None and "resource_mode" not in config:
         config["resource_mode"] = resource_mode
+    if (
+        mcp_ollama_read_timeout_seconds is not None
+        and "mcp_ollama_read_timeout_seconds" not in config
+    ):
+        config["mcp_ollama_read_timeout_seconds"] = mcp_ollama_read_timeout_seconds
     return config
 
 
@@ -274,6 +284,7 @@ async def _run_baseline_mcp_with_specs(
     mcp_dir: Path,
     max_steps: int,
     resource_mode: str,
+    mcp_ollama_read_timeout_seconds: float,
     default_model_base_url: str | None = None,
     max_steps_override: int | None = None,
     model_base_url_override: str | None = None,
@@ -302,6 +313,11 @@ async def _run_baseline_mcp_with_specs(
             if model_base_url_override is not None
             else run_spec.model_base_url or default_model_base_url
         )
+        effective_mcp_ollama_read_timeout_seconds = (
+            run_spec.mcp_ollama_read_timeout_seconds
+            if run_spec.mcp_ollama_read_timeout_seconds is not None
+            else mcp_ollama_read_timeout_seconds
+        )
         csv_path = output_dir / f"{run_spec.file_slug}.csv"
         opts_str = f", options={run_spec.ollama_options}" if run_spec.ollama_options else ""
         base_url_str = f", base_url={effective_model_base_url}" if effective_model_base_url else ""
@@ -320,12 +336,14 @@ async def _run_baseline_mcp_with_specs(
             mcp_dir=mcp_dir,
             max_steps=effective_max_steps,
             resource_mode=resource_mode,
+            mcp_ollama_read_timeout_seconds=effective_mcp_ollama_read_timeout_seconds,
             run_name=run_spec.run_name,
             run_config=_effective_run_config(
                 run_spec,
                 model_base_url=effective_model_base_url,
                 max_steps=effective_max_steps,
                 resource_mode=resource_mode,
+                mcp_ollama_read_timeout_seconds=effective_mcp_ollama_read_timeout_seconds,
                 telemetry_enabled=telemetry_enabled,
             ),
             model_base_url=effective_model_base_url,
@@ -490,6 +508,13 @@ def eval(
     help="Whether MCP reference resources are available to the model.",
 )
 @click.option(
+    "--mcp-ollama-read-timeout",
+    default=900.0,
+    show_default=True,
+    type=float,
+    help="Read timeout in seconds for native Ollama MCP chat streams.",
+)
+@click.option(
     "--ollama-option",
     "ollama_options_raw",
     multiple=True,
@@ -511,6 +536,7 @@ def eval_mcp(
     mcp_dir: str,
     max_steps: int,
     resource_mode: str,
+    mcp_ollama_read_timeout: float,
     ollama_options_raw: tuple[str, ...],
     telemetry_enabled: bool,
 ) -> None:
@@ -533,9 +559,15 @@ def eval_mcp(
             mcp_dir=Path(mcp_dir),
             max_steps=max_steps,
             resource_mode=resource_mode,
+            mcp_ollama_read_timeout_seconds=mcp_ollama_read_timeout,
             ollama_options=run_spec.ollama_options,
             run_name=run_spec.run_name,
-            run_config=run_spec.config_identity,
+            run_config=_effective_run_config(
+                run_spec,
+                max_steps=max_steps,
+                resource_mode=resource_mode,
+                mcp_ollama_read_timeout_seconds=mcp_ollama_read_timeout,
+            ),
             telemetry_enabled=telemetry_enabled,
         )
     )
@@ -717,6 +749,12 @@ def smoke_mcp(
     default=None,
     help="Override MCP resource mode for config-driven runs.",
 )
+@click.option(
+    "--mcp-ollama-read-timeout",
+    type=float,
+    default=None,
+    help="Override native Ollama MCP stream read timeout in seconds.",
+)
 @click.option("--model-base-url", default=None, help="Override model provider base URL")
 @click.option(
     "--max-model-reruns-on-infra",
@@ -755,6 +793,7 @@ def run_from_config(
     mcp_dir: str | None,
     max_steps: int | None,
     resource_mode: str | None,
+    mcp_ollama_read_timeout: float | None,
     model_base_url: str | None,
     max_model_reruns_on_infra: int | None,
     health_timeout: float | None,
@@ -788,6 +827,7 @@ def run_from_config(
         mcp_dir=mcp_dir,
         max_steps=max_steps,
         resource_mode=resource_mode,
+        mcp_ollama_read_timeout_seconds=mcp_ollama_read_timeout,
         model_base_url=model_base_url,
         max_model_reruns_on_infra=max_model_reruns_on_infra,
         health_timeout_seconds=health_timeout,
@@ -867,6 +907,7 @@ def run_from_config(
                     mcp_dir=Path(resolved.mcp_dir),
                     max_steps=effective_max_steps,
                     resource_mode=resolved.resource_mode,
+                    mcp_ollama_read_timeout_seconds=resolved.mcp_ollama_read_timeout_seconds,
                     ollama_options=run_spec.ollama_options,
                     run_name=run_spec.run_name,
                     run_config=_effective_run_config(
@@ -874,6 +915,7 @@ def run_from_config(
                         model_base_url=effective_model_base_url,
                         max_steps=effective_max_steps,
                         resource_mode=resolved.resource_mode,
+                        mcp_ollama_read_timeout_seconds=resolved.mcp_ollama_read_timeout_seconds,
                         telemetry_enabled=resolved.telemetry_enabled,
                     ),
                     model_base_url=effective_model_base_url,
@@ -933,6 +975,7 @@ def run_from_config(
                     mcp_dir=Path(resolved.mcp_dir),
                     max_steps=resolved.max_steps,
                     resource_mode=resolved.resource_mode,
+                    mcp_ollama_read_timeout_seconds=resolved.mcp_ollama_read_timeout_seconds,
                     default_model_base_url=resolved.model_base_url,
                     max_steps_override=max_steps,
                     model_base_url_override=model_base_url,
@@ -1167,6 +1210,7 @@ def _run_baseline_mcp(
     mcp_dir: str,
     max_steps: int,
     resource_mode: str,
+    mcp_ollama_read_timeout_seconds: float = 900.0,
     telemetry_enabled: bool = True,
 ) -> None:
     import asyncio
@@ -1185,6 +1229,7 @@ def _run_baseline_mcp(
             mcp_dir=Path(mcp_dir),
             max_steps=max_steps,
             resource_mode=resource_mode,
+            mcp_ollama_read_timeout_seconds=mcp_ollama_read_timeout_seconds,
             telemetry_enabled=telemetry_enabled,
         )
     )
@@ -1233,6 +1278,13 @@ def _run_baseline_mcp(
     help="Whether MCP reference resources are available to the model.",
 )
 @click.option(
+    "--mcp-ollama-read-timeout",
+    default=900.0,
+    show_default=True,
+    type=float,
+    help="Read timeout in seconds for native Ollama MCP chat streams.",
+)
+@click.option(
     "--telemetry/--no-telemetry",
     "telemetry_enabled",
     default=True,
@@ -1249,6 +1301,7 @@ def baseline_mcp(
     mcp_dir: str,
     max_steps: int,
     resource_mode: str,
+    mcp_ollama_read_timeout: float,
     telemetry_enabled: bool,
 ) -> None:
     """Evaluate multiple models in MCP mode and print a comparison table."""
@@ -1262,6 +1315,7 @@ def baseline_mcp(
         mcp_dir=mcp_dir,
         max_steps=max_steps,
         resource_mode=resource_mode,
+        mcp_ollama_read_timeout_seconds=mcp_ollama_read_timeout,
         telemetry_enabled=telemetry_enabled,
     )
 
@@ -1293,6 +1347,13 @@ def baseline_mcp(
 )
 @click.option("--max-steps", default=12, show_default=True, help="Max agent/tool steps")
 @click.option(
+    "--mcp-ollama-read-timeout",
+    default=900.0,
+    show_default=True,
+    type=float,
+    help="Read timeout in seconds for native Ollama MCP chat streams.",
+)
+@click.option(
     "--telemetry/--no-telemetry",
     "telemetry_enabled",
     default=True,
@@ -1308,6 +1369,7 @@ def baseline_mcp_resources(
     bhce_url: str | None,
     mcp_dir: str,
     max_steps: int,
+    mcp_ollama_read_timeout: float,
     telemetry_enabled: bool,
 ) -> None:
     """Run the Phase 3C resources-enabled multi-model MCP baseline sweep."""
@@ -1321,6 +1383,7 @@ def baseline_mcp_resources(
         mcp_dir=mcp_dir,
         max_steps=max_steps,
         resource_mode="on-demand",
+        mcp_ollama_read_timeout_seconds=mcp_ollama_read_timeout,
         telemetry_enabled=telemetry_enabled,
     )
 

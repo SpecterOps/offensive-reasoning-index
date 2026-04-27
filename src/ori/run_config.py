@@ -23,6 +23,7 @@ class RunConfigOverrides:
     health_timeout_seconds: float | None = None
     health_poll_interval: float | None = None
     resource_mode: str | None = None
+    mcp_ollama_read_timeout_seconds: float | None = None
     telemetry_enabled: bool | None = None
 
 
@@ -42,6 +43,7 @@ class ResolvedRunProfile:
     mcp_dir: str | None
     max_steps: int | None
     resource_mode: str
+    mcp_ollama_read_timeout_seconds: float
     telemetry_enabled: bool
     model_entry: str | dict[str, Any] | None
     model_entries: list[str | dict[str, Any]] | None
@@ -269,6 +271,14 @@ def load_run_profile(
             fallback="off",
         )
     )
+    mcp_ollama_read_timeout_seconds = _merged_nested_value(
+        overrides.mcp_ollama_read_timeout_seconds,
+        profile,
+        defaults,
+        "mcp",
+        "ollama_read_timeout_seconds",
+        fallback=900,
+    )
     telemetry_enabled = _normalize_telemetry_enabled(
         _merged_nested_value(
             overrides.telemetry_enabled,
@@ -330,6 +340,7 @@ def load_run_profile(
         mcp_dir=mcp_dir,
         max_steps=int(max_steps) if max_steps is not None else None,
         resource_mode=resource_mode,
+        mcp_ollama_read_timeout_seconds=float(mcp_ollama_read_timeout_seconds),
         telemetry_enabled=telemetry_enabled,
         model_entry=model_entry,
         model_entries=model_entries,
