@@ -14,6 +14,7 @@ from ori.eval.bhce import BHHealthResult, CypherResult
 from ori.eval.grader import GradeResult, grade_mcp
 from ori.eval.mcp_runtime import (
     RESOURCE_READ_TOOL_NAME,
+    RESOURCE_LIST_TOOL_NAME,
     MCPRunMetadata,
     _cypher_result_to_dict,
     _mcp_subprocess_env,
@@ -21,6 +22,7 @@ from ori.eval.mcp_runtime import (
     _ollama_chat_turn,
     _ollama_tool_spec,
     _parse_json_object,
+    _resource_tools,
     _result_from_sample,
     _run_ollama_mcp_loop,
     _task_to_dict,
@@ -292,6 +294,20 @@ def test_ollama_tool_spec_accepts_executor_callable_without_calling_it() -> None
     assert asyncio.run(executor(group_name="DOMAIN ADMINS@TEST.LOCAL", info_type="members")) == (
         "DOMAIN ADMINS@TEST.LOCAL:members"
     )
+
+
+def test_resource_tools_construct_read_tool_without_uri() -> None:
+    class FakeServer:
+        pass
+
+    tools = _resource_tools(FakeServer())
+    specs = [_ollama_tool_spec(tool_obj)[0] for tool_obj in tools]
+    specs_by_name = {spec["function"]["name"]: spec for spec in specs}
+
+    assert set(specs_by_name) == {RESOURCE_LIST_TOOL_NAME, RESOURCE_READ_TOOL_NAME}
+    read_params = specs_by_name[RESOURCE_READ_TOOL_NAME]["function"]["parameters"]
+    assert set(read_params["properties"]) == {"uri"}
+    assert read_params["required"] == ["uri"]
 
 
 def test_result_from_sample_missing_model_response_returns_infra_error() -> None:

@@ -297,7 +297,7 @@ def _resource_tools(server: Any) -> list[Any]:
         return execute
 
     @tool(name=RESOURCE_READ_TOOL_NAME)
-    def read_bloodhound_resource(uri: str) -> Any:
+    def read_bloodhound_resource() -> Any:
         """Read a BloodHound MCP reference resource by URI."""
 
         async def execute(uri: str) -> str:
