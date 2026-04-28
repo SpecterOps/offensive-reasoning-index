@@ -289,6 +289,7 @@ def _resource_tools(server: Any) -> list[Any]:
         """List available BloodHound MCP reference resources."""
 
         async def execute() -> str:
+            """List available BloodHound MCP reference resources."""
             session_handle = server._task_session()
             async with session_handle._client_session() as session:
                 result = await session.list_resources()
@@ -301,6 +302,11 @@ def _resource_tools(server: Any) -> list[Any]:
         """Read a BloodHound MCP reference resource by URI."""
 
         async def execute(uri: str) -> str:
+            """Read a BloodHound MCP reference resource by URI.
+
+            Args:
+                uri: BloodHound MCP resource URI to read.
+            """
             print(f"           → resource read: {uri}")
             session_handle = server._task_session()
             async with session_handle._client_session() as session:

@@ -7,6 +7,7 @@ from pathlib import Path
 from click.testing import CliRunner
 from inspect_ai.model import ChatMessageAssistant, ChatMessageTool
 from inspect_ai.tool import ToolCall, tool
+from inspect_ai.tool._tool_def import ToolDef
 
 from ori.cli import main
 from ori.eval.adapter import ModelResponse
@@ -301,13 +302,21 @@ def test_resource_tools_construct_read_tool_without_uri() -> None:
         pass
 
     tools = _resource_tools(FakeServer())
-    specs = [_ollama_tool_spec(tool_obj)[0] for tool_obj in tools]
+    tool_defs = [ToolDef(tool_obj) for tool_obj in tools]
+    assert {tool_def.name for tool_def in tool_defs} == {
+        RESOURCE_LIST_TOOL_NAME,
+        RESOURCE_READ_TOOL_NAME,
+    }
+    assert all(tool_def.description for tool_def in tool_defs)
+
+    specs = [_ollama_tool_spec(tool_def.tool)[0] for tool_def in tool_defs]
     specs_by_name = {spec["function"]["name"]: spec for spec in specs}
 
     assert set(specs_by_name) == {RESOURCE_LIST_TOOL_NAME, RESOURCE_READ_TOOL_NAME}
     read_params = specs_by_name[RESOURCE_READ_TOOL_NAME]["function"]["parameters"]
     assert set(read_params["properties"]) == {"uri"}
     assert read_params["required"] == ["uri"]
+    assert read_params["properties"]["uri"]["description"] == "BloodHound MCP resource URI to read."
 
 
 def test_result_from_sample_missing_model_response_returns_infra_error() -> None:
