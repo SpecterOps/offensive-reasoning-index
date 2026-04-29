@@ -146,6 +146,57 @@ def test_run_eval_mcp_cli_bare_reruns_only_infra_tasks(
     assert [result.grade.outcome for result in results] == ["CORRECT", "CORRECT"]
 
 
+def test_run_eval_mcp_cli_bare_accounts_for_missing_partial_results(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import asyncio
+    import csv
+
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps({"domain": "TEST.LOCAL"}))
+
+    tasks = [_task("m1"), _task("m2"), _task("m3")]
+    monkeypatch.setattr("ori.eval.runner.generate_mcp_tasks", lambda manifest: tasks)
+    monkeypatch.setattr("ori.eval.runner.BHCEClient", lambda **kwargs: FakeBHCEClient(**kwargs))
+
+    calls: list[list[str]] = []
+
+    async def fake_run_mcp_eval_with_inspect(**kwargs):
+        task_ids = [task.id for task in kwargs["tasks"]]
+        calls.append(task_ids)
+        if len(calls) == 1:
+            return [_result("CORRECT", "m1")]
+        return [_result("CORRECT", "m2")]
+
+    monkeypatch.setattr("ori.eval.runner.run_mcp_eval_with_inspect", fake_run_mcp_eval_with_inspect)
+
+    output_path = tmp_path / "results.csv"
+    results = asyncio.run(
+        run_eval_mcp_cli_bare(
+            manifest_path=manifest_path,
+            model="ollama/test:latest",
+            output_path=output_path,
+            max_model_reruns_on_infra=1,
+            resource_mode="on-demand",
+        )
+    )
+
+    assert calls == [["m1", "m2", "m3"], ["m2", "m3"]]
+    assert [result.task.id for result in results] == ["m1", "m2", "m3"]
+    assert [result.grade.outcome for result in results] == [
+        "CORRECT",
+        "CORRECT",
+        "INFRA_ERROR",
+    ]
+    assert [result.partial_result for result in results] == [False, False, True]
+    with output_path.open() as f:
+        rows = list(csv.DictReader(f))
+    assert len(rows) == 3
+    assert rows[-1]["task_id"] == "m3"
+    assert rows[-1]["partial_result"] == "True"
+    assert rows[-1]["resource_mode"] == "on-demand"
+
+
 def test_run_eval_cli_bare_threads_health_and_base_url(tmp_path: Path, monkeypatch) -> None:
     import asyncio
 

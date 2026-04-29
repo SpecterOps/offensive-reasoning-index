@@ -37,6 +37,7 @@ class EvalResult:
     run_config: dict[str, Any] | None = None
     task_wall_seconds: float | None = None
     telemetry: dict[str, Any] | None = None
+    partial_result: bool = False
 
 
 def _infra_task_ids(results: list[EvalResult]) -> set[str]:
@@ -53,6 +54,66 @@ def _merge_results_by_task(
     for result in new_results:
         by_task_id[result.task.id] = result
     return [by_task_id[task.id] for task in task_order if task.id in by_task_id]
+
+
+def _missing_mcp_results(
+    requested_tasks: list[Task],
+    batch_results: list[EvalResult],
+    *,
+    model: str,
+    run_name: str | None,
+    run_config: dict[str, Any] | None,
+    resource_mode: str,
+) -> list[EvalResult]:
+    """Represent interrupted Inspect samples that never reached result extraction."""
+    returned_task_ids = {result.task.id for result in batch_results}
+    missing_tasks = [task for task in requested_tasks if task.id not in returned_task_ids]
+    if not missing_tasks:
+        return []
+
+    detail = (
+        "MCP run returned no sample result for this task; "
+        "the model run likely interrupted before the full task set completed"
+    )
+    missing_results: list[EvalResult] = []
+    for task in missing_tasks:
+        response = ModelResponse(
+            raw_text="",
+            cypher=None,
+            parse_stage="none",
+            tokens_input=0,
+            tokens_output=0,
+            elapsed_seconds=0.0,
+            model=model,
+            thinking="",
+            error=detail,
+            provider_metrics={},
+        )
+        missing_results.append(
+            EvalResult(
+                task=task,
+                model_response=response,
+                grade=GradeResult(
+                    score=0.0,
+                    outcome="INFRA_ERROR",
+                    hallucination=False,
+                    details=detail,
+                ),
+                ref_result=CypherResult(success=False, error=detail),
+                model_result=CypherResult(success=False, error=detail),
+                mcp=MCPRunMetadata(resource_mode=resource_mode),
+                run_name=run_name or model,
+                requested_model=model,
+                run_config=run_config,
+                task_wall_seconds=0.0,
+                partial_result=True,
+            )
+        )
+    print(
+        f"  WARNING: MCP run returned {len(batch_results)}/{len(requested_tasks)} "
+        f"requested task result(s); marking {len(missing_results)} missing task(s) as INFRA_ERROR."
+    )
+    return missing_results
 
 
 async def run_eval(
@@ -341,6 +402,15 @@ async def run_eval_mcp_cli_bare(
                 result.run_name = run_name or model
                 result.requested_model = model
                 result.run_config = run_config
+            missing_results = _missing_mcp_results(
+                pending_tasks,
+                batch_results,
+                model=model,
+                run_name=run_name,
+                run_config=run_config,
+                resource_mode=resource_mode,
+            )
+            batch_results = [*batch_results, *missing_results]
             results = _merge_results_by_task(tasks, results, batch_results)
         infra_task_ids = _infra_task_ids(batch_results)
         if not infra_task_ids or attempt >= max_model_reruns_on_infra:
@@ -430,6 +500,15 @@ async def run_eval_mcp_cli(
                 result.run_name = run_name or model
                 result.requested_model = model
                 result.run_config = run_config
+            missing_results = _missing_mcp_results(
+                pending_tasks,
+                batch_results,
+                model=model,
+                run_name=run_name,
+                run_config=run_config,
+                resource_mode=resource_mode,
+            )
+            batch_results = [*batch_results, *missing_results]
             results = _merge_results_by_task(tasks, results, batch_results)
         infra_task_ids = _infra_task_ids(batch_results)
         if not infra_task_ids or attempt >= max_model_reruns_on_infra:

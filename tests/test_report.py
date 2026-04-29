@@ -138,7 +138,26 @@ def test_write_summary_csv_writes_one_row_per_model(tmp_path) -> None:
     by_model = {row["model"]: row for row in rows}
     assert by_model["ollama/a:latest"]["correct"] == "1"
     assert by_model["ollama/a:latest"]["parse_fails"] == "1"
+    assert by_model["ollama/a:latest"]["completed_tasks"] == "2"
+    assert by_model["ollama/a:latest"]["expected_tasks"] == "2"
+    assert by_model["ollama/a:latest"]["run_complete"] == "True"
+    assert by_model["ollama/a:latest"]["partial_result"] == "False"
     assert by_model["ollama/b:latest"]["infra_errors"] == "1"
+
+
+def test_write_summary_csv_flags_partial_results(tmp_path) -> None:
+    output = tmp_path / "baseline_summary.csv"
+    completed = _result("CORRECT", score=1.0)
+    missing = _result("INFRA_ERROR")
+    missing.partial_result = True
+    write_summary_csv({"ollama/a:latest": [completed, missing]}, output)
+    with output.open() as f:
+        row = next(csv.DictReader(f))
+    assert row["completed_tasks"] == "1"
+    assert row["expected_tasks"] == "2"
+    assert row["run_complete"] == "False"
+    assert row["partial_result"] == "True"
+    assert row["infra_errors"] == "1"
 
 
 def test_write_summary_csv_tracks_query_too_expensive(tmp_path) -> None:

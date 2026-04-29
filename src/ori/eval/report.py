@@ -67,6 +67,7 @@ CSV_FIELDNAMES = [
     "ollama_model_size_vram_bytes",
     "model_quantization_level",
     "telemetry_sample_ref",
+    "partial_result",
 ]
 
 
@@ -164,6 +165,7 @@ def _row_for_result(r: EvalResult) -> dict[str, object]:
         "ollama_model_size_vram_bytes": telemetry.get("ollama_model_size_vram_bytes", ""),
         "model_quantization_level": telemetry.get("model_quantization_level", ""),
         "telemetry_sample_ref": telemetry.get("sample_ref", ""),
+        "partial_result": getattr(r, "partial_result", False),
     }
 
 
@@ -195,6 +197,8 @@ def _stats(results: list[EvalResult]) -> dict:
     parse_fails = sum(1 for r in results if r.grade.outcome == "PARSE_FAIL")
     model_errors = sum(1 for r in results if r.grade.outcome == "MODEL_ERROR")
     infra_errors = sum(1 for r in results if r.grade.outcome == "INFRA_ERROR")
+    partial_results = sum(1 for r in results if getattr(r, "partial_result", False))
+    completed_tasks = total - partial_results
     tool_calls_total = sum(r.mcp.tool_calls_total for r in results if r.mcp)
     cypher_query_calls = sum(r.mcp.cypher_query_calls for r in results if r.mcp)
     non_cypher_tool_calls = sum(r.mcp.non_cypher_tool_calls for r in results if r.mcp)
@@ -222,6 +226,10 @@ def _stats(results: list[EvalResult]) -> dict:
         "parse_fails": parse_fails,
         "model_errors": model_errors,
         "infra_errors": infra_errors,
+        "completed_tasks": completed_tasks,
+        "expected_tasks": total,
+        "partial_results": partial_results,
+        "run_complete": partial_results == 0,
         "tool_calls_total": tool_calls_total,
         "cypher_query_calls": cypher_query_calls,
         "non_cypher_tool_calls": non_cypher_tool_calls,
@@ -247,6 +255,10 @@ def write_summary_csv(all_results: dict[str, list[EvalResult]], output_path: Pat
         "config_identity_json",
         "options_json",
         "model",
+        "completed_tasks",
+        "expected_tasks",
+        "run_complete",
+        "partial_result",
         "total_tasks",
         "correct",
         "score_pct",
@@ -314,6 +326,10 @@ def write_summary_csv(all_results: dict[str, list[EvalResult]], output_path: Pat
                     "config_identity_json": config_identity_json,
                     "options_json": options_json,
                     "model": model,
+                    "completed_tasks": s["completed_tasks"],
+                    "expected_tasks": s["expected_tasks"],
+                    "run_complete": s["run_complete"],
+                    "partial_result": s["partial_results"] > 0,
                     "total_tasks": s["total"],
                     "correct": s["correct"],
                     "score_pct": (100 * s["correct"] // s["total"]) if s["total"] else 0,
