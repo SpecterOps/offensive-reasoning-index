@@ -56,7 +56,10 @@ CSV_FIELDNAMES = [
     "trajectory_log",
     "server_prompt_used",
     "server_prompt_name",
+    "available_prompt_names",
+    "prompt_discovery_status",
     "resource_mode",
+    "mcp_tool_loop",
     "resource_reads_total",
     "unique_resources_used",
     "resource_characters_total",
@@ -154,7 +157,12 @@ def _row_for_result(r: EvalResult) -> dict[str, object]:
         "trajectory_log": mcp_meta.trajectory_log if mcp_meta else "",
         "server_prompt_used": mcp_meta.server_prompt_used if mcp_meta else False,
         "server_prompt_name": mcp_meta.server_prompt_name if mcp_meta else "",
+        "available_prompt_names": (
+            ",".join(mcp_meta.available_prompt_names) if mcp_meta else ""
+        ),
+        "prompt_discovery_status": mcp_meta.prompt_discovery_status if mcp_meta else "",
         "resource_mode": mcp_meta.resource_mode if mcp_meta else "",
+        "mcp_tool_loop": mcp_meta.tool_loop if mcp_meta else "",
         "resource_reads_total": mcp_meta.resource_reads_total if mcp_meta else 0,
         "unique_resources_used": ",".join(mcp_meta.unique_resources_used) if mcp_meta else "",
         "resource_characters_total": mcp_meta.resource_characters_total if mcp_meta else 0,
@@ -214,7 +222,7 @@ def _stats(results: list[EvalResult]) -> dict:
     ]
     mcp_samples = sum(1 for r in results if r.mcp)
     tiers = {}
-    for tier in (1, 2, 3):
+    for tier in (1, 2, 3, 4, 5):
         t = [r for r in results if r.task.tier == tier]
         tiers[tier] = (sum(1 for r in t if r.grade.score == 1.0), len(t)) if t else (0, 0)
     return {
@@ -271,6 +279,12 @@ def write_summary_csv(all_results: dict[str, list[EvalResult]], output_path: Pat
         "tier3_correct",
         "tier3_total",
         "tier3_pct",
+        "tier4_correct",
+        "tier4_total",
+        "tier4_pct",
+        "tier5_correct",
+        "tier5_total",
+        "tier5_pct",
         "hallucinations",
         "cypher_errors",
         "query_too_expensive",
@@ -318,6 +332,8 @@ def write_summary_csv(all_results: dict[str, list[EvalResult]], output_path: Pat
             t1c, t1t, t1p = tier_fields(1)
             t2c, t2t, t2p = tier_fields(2)
             t3c, t3t, t3p = tier_fields(3)
+            t4c, t4t, t4p = tier_fields(4)
+            t5c, t5t, t5p = tier_fields(5)
             writer.writerow(
                 {
                     "run_name": run_name,
@@ -342,6 +358,12 @@ def write_summary_csv(all_results: dict[str, list[EvalResult]], output_path: Pat
                     "tier3_correct": t3c,
                     "tier3_total": t3t,
                     "tier3_pct": t3p,
+                    "tier4_correct": t4c,
+                    "tier4_total": t4t,
+                    "tier4_pct": t4p,
+                    "tier5_correct": t5c,
+                    "tier5_total": t5t,
+                    "tier5_pct": t5p,
                     "hallucinations": s["hallucs"],
                     "cypher_errors": s["cypher_errors"],
                     "query_too_expensive": s["query_too_expensive"],
@@ -382,7 +404,8 @@ def print_comparison(all_results: dict[str, list[EvalResult]]) -> None:
     print("BASELINE COMPARISON")
     print("=" * 129)
     header = (
-        f"{'Model':<{col_w}} {'Overall':>8} {'Tier1':>7} {'Tier2':>7} {'Tier3':>7} "
+        f"{'Model':<{col_w}} {'Overall':>8} {'Tier1':>7} {'Tier2':>7} "
+        f"{'Tier3':>7} {'Tier4':>7} {'Tier5':>7} "
         f"{'Hallucs':>8} {'CyErr':>7} {'QExp':>6} {'Fails':>6} {'ModelErr':>9} {'InfraErr':>9}"
     )
     print(header)
@@ -399,7 +422,7 @@ def print_comparison(all_results: dict[str, list[EvalResult]]) -> None:
         short_model = model.split("/", 1)[-1][:col_w]
         print(
             f"{short_model:<{col_w}} {s['correct']:>4}/{s['total']:<3} "
-            f"{tp(1):>7} {tp(2):>7} {tp(3):>7} "
+            f"{tp(1):>7} {tp(2):>7} {tp(3):>7} {tp(4):>7} {tp(5):>7} "
             f"{s['hallucs']:>8} {s['cypher_errors']:>7} {s['query_too_expensive']:>6} "
             f"{s['parse_fails']:>6} "
             f"{s['model_errors']:>9} {s['infra_errors']:>9}"
@@ -437,7 +460,10 @@ def print_summary(results: list[EvalResult], model: str) -> None:
     print("\n" + "=" * 60)
     print(f"Model:  {model}")
     print(f"Tasks:  {total}  |  Score: {correct}/{total} ({pct})")
-    print(f"Tier 1: {tier_score(1)}  |  Tier 2: {tier_score(2)}  |  Tier 3: {tier_score(3)}")
+    print(
+        f"Tier 1: {tier_score(1)}  |  Tier 2: {tier_score(2)}  |  "
+        f"Tier 3: {tier_score(3)}  |  Tier 4: {tier_score(4)}  |  Tier 5: {tier_score(5)}"
+    )
     print(
         f"Hallucinations: {hallucinations}  |  Parse failures: {parse_fails}  |  "
         f"Cypher errors: {cypher_errors}  |  Query too expensive: {query_too_expensive}  |  "

@@ -162,6 +162,38 @@ _TEMPLATE_QUESTIONS: dict[str, list[tuple[str, str, str, list[str], str | None]]
             "MATCH (u:User {{trustedtoauth: true}}) RETURN u",
         ),
     ],
+    "t4_adcs_esc1": [
+        (
+            "Identify the ESC1-style certificate abuse path from {source_name}. "
+            "Include the enrollee, enrollment group, certificate template, issuing CA, "
+            "root CA, NTAuth trust object, and the privileged target.",
+            "path_finding",
+            "path_exists",
+            ["phase4", "adcs", "esc1", "certificate_abuse"],
+            None,
+        ),
+    ],
+    "t4_rbcd_delegation": [
+        (
+            "Identify the advanced delegation abuse path from {source_name} to the affected "
+            "target computer or service. Include the principal, delegation edge, and target.",
+            "path_finding",
+            "path_exists",
+            ["phase4", "delegation", "rbcd"],
+            None,
+        ),
+    ],
+    "t5_adcs_to_delegation_composite": [
+        (
+            "Find the composite Phase 4 path that chains ADCS certificate abuse into "
+            "delegation-based domain compromise. Include all critical ADCS, service, "
+            "delegation, and target nodes.",
+            "path_finding",
+            "path_exists",
+            ["phase4", "adcs", "delegation", "composite"],
+            None,
+        ),
+    ],
 }
 
 # Global enumeration tasks that don't depend on specific planted paths
@@ -250,6 +282,10 @@ def generate_tasks(manifest: dict) -> list[Task]:
                         "domain": domain,
                         "description": path["description"],
                         "mitre": path.get("mitre", []),
+                        "scenario_family": path.get("scenario_family", ""),
+                        "critical_nodes": path.get("critical_nodes", []),
+                        "required_capabilities": path.get("required_capabilities", []),
+                        "template_version": path.get("template_version", ""),
                     },
                 )
             )

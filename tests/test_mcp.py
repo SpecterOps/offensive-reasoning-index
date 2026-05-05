@@ -14,18 +14,22 @@ from ori.eval.adapter import ModelResponse
 from ori.eval.bhce import BHHealthResult, CypherResult
 from ori.eval.grader import GradeResult, grade_mcp
 from ori.eval.mcp_runtime import (
-    RESOURCE_READ_TOOL_NAME,
     RESOURCE_LIST_TOOL_NAME,
+    RESOURCE_READ_TOOL_NAME,
     MCPRunMetadata,
     _cypher_result_to_dict,
+    _discover_bloodhound_mcp_prompt,
     _mcp_subprocess_env,
     _normalize_final_answer,
     _ollama_chat_turn,
     _ollama_tool_spec,
+    _openai_compat_chat_turn,
+    _openai_compat_provider_metrics,
     _parse_json_object,
     _resource_tools,
     _result_from_sample,
     _run_ollama_mcp_loop,
+    _run_openai_compat_mcp_loop,
     _task_to_dict,
     _trajectory_from_messages,
     run_mcp_eval_with_inspect,
@@ -276,6 +280,134 @@ def test_ollama_chat_turn_streams_payload_options_and_tool_calls(monkeypatch) ->
     assert turn["eval_count"] == 7
 
 
+def test_openai_compat_chat_turn_posts_tool_payload(monkeypatch) -> None:
+    import asyncio
+
+    captured: dict[str, object] = {}
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            return {
+                "model": "ori-test",
+                "system_fingerprint": "fp-local",
+                "choices": [
+                    {
+                        "finish_reason": "tool_calls",
+                        "message": {
+                            "content": "<think>inspect group</think>",
+                            "tool_calls": [
+                                {
+                                    "id": "call-1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "group_info",
+                                        "arguments": '{"group_name":"DOMAIN ADMINS@TEST.LOCAL"}',
+                                    },
+                                }
+                            ],
+                        }
+                    }
+                ],
+                "usage": {"prompt_tokens": 13, "completion_tokens": 5, "total_tokens": 18},
+            }
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            captured["timeout"] = kwargs.get("timeout")
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def post(self, url: str, json: dict, headers: dict):
+            captured["url"] = url
+            captured["payload"] = json
+            captured["headers"] = headers
+            return FakeResponse()
+
+    monkeypatch.setattr("ori.eval.mcp_runtime.httpx.AsyncClient", FakeAsyncClient)
+
+    turn = asyncio.run(
+        _openai_compat_chat_turn(
+            url="http://127.0.0.1:8080/v1/chat/completions",
+            model_name="openai-compat/ori-test@http://127.0.0.1:8080/v1",
+            messages=[{"role": "user", "content": "q"}],
+            tools=[{"type": "function", "function": {"name": "group_info"}}],
+            extra_body={"temperature": 0},
+            telemetry_adapter="llama-cpp",
+        )
+    )
+
+    assert captured["url"] == "http://127.0.0.1:8080/v1/chat/completions"
+    assert captured["headers"]["Authorization"].startswith("Bearer ")
+    payload = captured["payload"]
+    assert payload["model"] == "ori-test"
+    assert payload["stream"] is False
+    assert payload["tool_choice"] == "auto"
+    assert payload["temperature"] == 0
+    assert turn["content"] == ""
+    assert turn["thinking"] == "inspect group"
+    assert turn["finish_reason"] == "tool_calls"
+    assert turn["provider_metrics"]["telemetry_adapter"] == "llama-cpp"
+    assert turn["provider_metrics"]["system_fingerprint"] == "fp-local"
+    assert turn["tool_calls"][0]["function"]["name"] == "group_info"
+    assert turn["prompt_tokens"] == 13
+    assert turn["completion_tokens"] == 5
+
+
+def test_openai_compat_provider_metrics_extracts_backend_specific_fields() -> None:
+    llama_metrics = _openai_compat_provider_metrics(
+        data={
+            "id": "cmpl-1",
+            "model": "qwen",
+            "timings": {"predicted_per_second": 42.0},
+            "tokens_cached": 100,
+            "tokens_evaluated": 120,
+            "truncated": False,
+        },
+        choice={"finish_reason": "stop"},
+        message={"content": "ok"},
+        usage={"prompt_tokens": 10, "completion_tokens": 4, "total_tokens": 14},
+        telemetry_adapter="llama-cpp",
+    )
+    assert llama_metrics["llama_cpp_timings"] == {"predicted_per_second": 42.0}
+    assert llama_metrics["llama_cpp_tokens_cached"] == 100
+    assert llama_metrics["llama_cpp_tokens_evaluated"] == 120
+
+    mlx_metrics = _openai_compat_provider_metrics(
+        data={},
+        choice={"finish_reason": "stop", "logprobs": {"tokens": [1, 2]}},
+        message={"reasoning_content": "reason"},
+        usage={},
+        telemetry_adapter="mlx-lm",
+    )
+    assert mlx_metrics["mlx_lm_logprobs"] == {"tokens": [1, 2]}
+    assert mlx_metrics["reasoning_source"] == "structured_field"
+
+    vllm_metrics = _openai_compat_provider_metrics(
+        data={"request_id": "req-1"},
+        choice={},
+        message={},
+        usage={},
+        telemetry_adapter="vllm",
+    )
+    assert vllm_metrics["vllm_request_id"] == "req-1"
+
+    lm_studio_metrics = _openai_compat_provider_metrics(
+        data={"stats": {"tokens_per_second": 100.0}},
+        choice={},
+        message={},
+        usage={},
+        telemetry_adapter="lm-studio",
+    )
+    assert lm_studio_metrics["lm_studio_stats"] == {"tokens_per_second": 100.0}
+
+
 def test_ollama_tool_spec_accepts_executor_callable_without_calling_it() -> None:
     import asyncio
 
@@ -317,6 +449,82 @@ def test_resource_tools_construct_read_tool_without_uri() -> None:
     assert set(read_params["properties"]) == {"uri"}
     assert read_params["required"] == ["uri"]
     assert read_params["properties"]["uri"]["description"] == "BloodHound MCP resource URI to read."
+
+
+def test_prompt_discovery_selects_best_bloodhound_prompt() -> None:
+    import asyncio
+    from types import SimpleNamespace
+
+    class FakeSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def list_prompts(self):
+            return SimpleNamespace(
+                prompts=[
+                    SimpleNamespace(name="generic_helper"),
+                    SimpleNamespace(name="bloodhound_assistant"),
+                ]
+            )
+
+        async def get_prompt(self, name: str):
+            assert name == "bloodhound_assistant"
+            return SimpleNamespace(
+                messages=[
+                    SimpleNamespace(
+                        role="system",
+                        content=SimpleNamespace(text="Use BloodHound safely."),
+                    )
+                ]
+            )
+
+    class FakeHandle:
+        def _client_session(self):
+            return FakeSession()
+
+    class FakeServer:
+        def _task_session(self):
+            return FakeHandle()
+
+    text, selected, available, status = asyncio.run(
+        _discover_bloodhound_mcp_prompt(FakeServer())
+    )
+    assert selected == "bloodhound_assistant"
+    assert available == ["bloodhound_assistant", "generic_helper"]
+    assert status == "selected"
+    assert "Use BloodHound safely." in text
+
+
+def test_prompt_discovery_warns_and_continues_without_prompts(capsys) -> None:
+    import asyncio
+    from types import SimpleNamespace
+
+    class FakeSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def list_prompts(self):
+            return SimpleNamespace(prompts=[])
+
+    class FakeHandle:
+        def _client_session(self):
+            return FakeSession()
+
+    class FakeServer:
+        def _task_session(self):
+            return FakeHandle()
+
+    text, selected, available, status = asyncio.run(
+        _discover_bloodhound_mcp_prompt(FakeServer())
+    )
+    assert (text, selected, available, status) == ("", "", [], "no_prompts")
+    assert "exposed no prompts" in capsys.readouterr().out
 
 
 def test_result_from_sample_missing_model_response_returns_infra_error() -> None:
@@ -421,6 +629,87 @@ def test_run_ollama_mcp_loop_preserves_thinking_and_final_answer(monkeypatch) ->
     assert trajectory.non_cypher_tool_calls == 1
     assert trajectory.cypher_query_calls == 0
     assert trajectory.final_answer_raw == response.raw_text
+    assert len(messages) >= 4
+
+
+def test_run_openai_compat_mcp_loop_executes_tool_calls(monkeypatch) -> None:
+    import asyncio
+
+    calls = {"count": 0}
+
+    async def fake_turn(**kwargs):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return {
+                "model": "ori-mlx",
+                "content": "",
+                "thinking": "look up group members",
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {
+                            "name": "group_info",
+                            "arguments": json.dumps(
+                                {
+                                    "group_name": "DOMAIN ADMINS@TEST.LOCAL",
+                                    "info_type": "members",
+                                }
+                            ),
+                        },
+                    }
+                ],
+                "prompt_tokens": 70,
+                "completion_tokens": 12,
+                "finish_reason": "tool_calls",
+                "provider_metrics": {
+                    "telemetry_adapter": "mlx-lm",
+                    "finish_reason": "tool_calls",
+                },
+            }
+        return {
+            "model": "ori-mlx",
+            "content": '{"answer_type":"node_set","node_names":["WS-01.TEST.LOCAL"]}',
+            "tool_calls": [],
+            "prompt_tokens": 80,
+            "completion_tokens": 10,
+            "finish_reason": "stop",
+            "provider_metrics": {"telemetry_adapter": "mlx-lm", "finish_reason": "stop"},
+        }
+
+    monkeypatch.setattr("ori.eval.mcp_runtime._openai_compat_chat_turn", fake_turn)
+
+    @tool(name="group_info")
+    def group_info():
+        async def execute(group_name: str, info_type: str) -> str:
+            return '{"success": true, "nodes": ["WS-01.TEST.LOCAL"]}'
+
+        return execute
+
+    response, trajectory, messages = asyncio.run(
+        _run_openai_compat_mcp_loop(
+            task=_task(),
+            model_name="openai-compat/ori-mlx@http://127.0.0.1:8080/v1",
+            base_url=None,
+            extra_body={"temperature": 0},
+            tools=[group_info],
+            max_steps=4,
+            telemetry_adapter="mlx-lm",
+        )
+    )
+
+    assert response.error is None
+    assert response.parse_stage == "mcp_final_answer"
+    assert response.raw_text == '{"answer_type":"node_set","node_names":["WS-01.TEST.LOCAL"]}'
+    assert response.tokens_input == 150
+    assert response.tokens_output == 22
+    assert response.thinking == "look up group members"
+    assert response.provider_metrics["provider"] == "openai_compat_native_chat_mcp_loop"
+    assert response.provider_metrics["telemetry_adapter"] == "mlx-lm"
+    assert response.provider_metrics["finish_reasons"] == ["tool_calls", "stop"]
+    assert response.provider_metrics["turn_metrics"][0]["telemetry_adapter"] == "mlx-lm"
+    assert trajectory.tool_calls_total == 1
+    assert trajectory.tool_loop == "native-openai-compatible"
     assert len(messages) >= 4
 
 
@@ -574,7 +863,10 @@ def test_report_includes_mcp_fields(tmp_path: Path) -> None:
             trajectory_log="trace.eval",
             server_prompt_used=True,
             server_prompt_name="bloodhound_assistant",
+            available_prompt_names=["bloodhound_assistant", "generic_helper"],
+            prompt_discovery_status="selected",
             resource_mode="on-demand",
+            tool_loop="native-openai-compatible",
             resource_reads_total=2,
             unique_resources_used=["bloodhound://domains/TEST.LOCAL"],
             resource_characters_total=1234,
@@ -591,7 +883,10 @@ def test_report_includes_mcp_fields(tmp_path: Path) -> None:
     assert row["cypher_query_calls"] == "1"
     assert row["server_prompt_used"] == "True"
     assert row["server_prompt_name"] == "bloodhound_assistant"
+    assert row["available_prompt_names"] == "bloodhound_assistant,generic_helper"
+    assert row["prompt_discovery_status"] == "selected"
     assert row["resource_mode"] == "on-demand"
+    assert row["mcp_tool_loop"] == "native-openai-compatible"
     assert row["resource_reads_total"] == "2"
     assert row["unique_resources_used"] == "bloodhound://domains/TEST.LOCAL"
     assert row["resource_characters_total"] == "1234"

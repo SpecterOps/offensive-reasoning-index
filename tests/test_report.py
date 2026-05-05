@@ -51,6 +51,21 @@ def _result(outcome: str, score: float = 0.0, hallucination: bool = False) -> Ev
     )
 
 
+def _result_for_tier(tier: int, outcome: str, score: float = 0.0) -> EvalResult:
+    result = _result(outcome, score=score)
+    result.task = Task(
+        id=f"t{tier}",
+        template_id=f"tier{tier}",
+        tier=tier,
+        category="path_finding",
+        question="q",
+        reference_cypher="MATCH (n) RETURN n",
+        grade_mode="path_exists",
+        metadata={"domain": "CORP.LOCAL"},
+    )
+    return result
+
+
 def test_print_summary_includes_model_errors(capsys) -> None:
     print_summary([_result("MODEL_ERROR"), _result("CORRECT", score=1.0)], "ollama/test:latest")
     out = capsys.readouterr().out
@@ -143,6 +158,27 @@ def test_write_summary_csv_writes_one_row_per_model(tmp_path) -> None:
     assert by_model["ollama/a:latest"]["run_complete"] == "True"
     assert by_model["ollama/a:latest"]["partial_result"] == "False"
     assert by_model["ollama/b:latest"]["infra_errors"] == "1"
+
+
+def test_write_summary_csv_includes_tier4_and_tier5(tmp_path) -> None:
+    output = tmp_path / "baseline_summary.csv"
+    write_summary_csv(
+        {
+            "ollama/a:latest": [
+                _result_for_tier(4, "CORRECT", score=1.0),
+                _result_for_tier(5, "INCORRECT", score=0.0),
+            ],
+        },
+        output,
+    )
+    with output.open() as f:
+        row = next(csv.DictReader(f))
+    assert row["tier4_correct"] == "1"
+    assert row["tier4_total"] == "1"
+    assert row["tier4_pct"] == "100"
+    assert row["tier5_correct"] == "0"
+    assert row["tier5_total"] == "1"
+    assert row["tier5_pct"] == "0"
 
 
 def test_write_summary_csv_flags_partial_results(tmp_path) -> None:

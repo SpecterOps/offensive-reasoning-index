@@ -115,6 +115,7 @@ class PlantedPath:
     path_edges: list[tuple[str, str, str]]  # [(source, edge_kind, target), ...]
     verification_cypher: str
     mitre: list[str] = field(default_factory=list)
+    metadata: dict = field(default_factory=dict)
 
 
 class SIDAllocator:

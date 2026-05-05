@@ -355,6 +355,8 @@ async def run_eval_mcp_cli_bare(
     mcp_dir: Path | None = None,
     max_steps: int = 12,
     resource_mode: str = RESOURCE_MODE_OFF,
+    mcp_tool_loop: str = "auto",
+    openai_compat_telemetry_adapter: str = "auto",
     mcp_ollama_read_timeout_seconds: float = DEFAULT_MCP_OLLAMA_READ_TIMEOUT_SECONDS,
     model_base_url: str | None = None,
     health_timeout_seconds: float = 60.0,
@@ -396,6 +398,8 @@ async def run_eval_mcp_cli_bare(
                 mcp_dir=mcp_dir,
                 max_steps=max_steps,
                 resource_mode=resource_mode,
+                mcp_tool_loop=mcp_tool_loop,
+                openai_compat_telemetry_adapter=openai_compat_telemetry_adapter,
                 ollama_read_timeout_seconds=mcp_ollama_read_timeout_seconds,
             )
             for result in batch_results:
@@ -450,6 +454,8 @@ async def run_eval_mcp_cli(
     max_steps: int = 12,
     ollama_options: dict | None = None,
     resource_mode: str = RESOURCE_MODE_OFF,
+    mcp_tool_loop: str = "auto",
+    openai_compat_telemetry_adapter: str = "auto",
     mcp_ollama_read_timeout_seconds: float = DEFAULT_MCP_OLLAMA_READ_TIMEOUT_SECONDS,
     model_base_url: str | None = None,
     health_timeout_seconds: float = 60.0,
@@ -494,6 +500,8 @@ async def run_eval_mcp_cli(
                 mcp_dir=mcp_dir,
                 max_steps=max_steps,
                 resource_mode=resource_mode,
+                mcp_tool_loop=mcp_tool_loop,
+                openai_compat_telemetry_adapter=openai_compat_telemetry_adapter,
                 ollama_read_timeout_seconds=mcp_ollama_read_timeout_seconds,
             )
             for result in batch_results:

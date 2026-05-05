@@ -75,7 +75,9 @@ def _build_zip(graph: ADGraph) -> bytes:
     with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         for file_type, nodes in _group_nodes(graph).items():
             data = _build_file_data(nodes, file_type)
-            zf.writestr(f"{file_type}.json", json.dumps(data))
+            info = zipfile.ZipInfo(f"{file_type}.json", date_time=(2024, 1, 1, 0, 0, 0))
+            info.compress_type = zipfile.ZIP_DEFLATED
+            zf.writestr(info, json.dumps(data))
     return buf.getvalue()
 
 

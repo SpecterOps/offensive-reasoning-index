@@ -12,6 +12,7 @@ def test_shipped_run_configs_load_all_profiles() -> None:
     for config in (
         Path("run-config.example.yaml"),
         Path("run-config-phase3-m4.yaml"),
+        Path("run-config-phase4-v1.yaml"),
     ):
         profiles = list_run_profiles(config)
         assert profiles, f"{config} should define at least one profile"
@@ -45,6 +46,8 @@ defaults:
     mcp_dir: bloodhound-mcp
     max_steps: 22
     resource_mode: on-demand
+    tool_loop: native-openai-compatible
+    openai_compat_telemetry_adapter: llama-cpp
     ollama_read_timeout_seconds: 1200
   telemetry:
     enabled: false
@@ -68,11 +71,48 @@ profiles:
     assert resolved.health_poll_interval == 1.5
     assert resolved.max_steps == 22
     assert resolved.resource_mode == "on-demand"
+    assert resolved.mcp_tool_loop == "native-openai-compatible"
+    assert resolved.openai_compat_telemetry_adapter == "llama-cpp"
     assert resolved.mcp_ollama_read_timeout_seconds == 1200.0
     assert resolved.telemetry_enabled is False
     assert resolved.manifest == str((tmp_path / "datasets/phase3b_manifest.json").resolve())
     assert resolved.output_dir == str((tmp_path / "results/out").resolve())
     assert resolved.mcp_dir == str(mcp_dir.resolve())
+
+
+def test_load_generate_profile_resolves_phase4_outputs(tmp_path: Path) -> None:
+    config = tmp_path / "run.yaml"
+    config.write_text(
+        """
+version: 1
+profiles:
+  phase4_v1:
+    kind: generate
+    domain: corp.local
+    seed: 4401
+    generator:
+      profile: phase4_v1
+    sizing:
+      users: 12
+      workstations: 5
+      servers: 3
+    output_zip: datasets/phase4-v1.zip
+    output_manifest: datasets/phase4-v1_manifest.json
+"""
+    )
+
+    resolved = load_run_profile(config, profile_name="phase4_v1")
+    assert resolved.kind == "generate"
+    assert resolved.domain == "corp.local"
+    assert resolved.seed == 4401
+    assert resolved.generator_profile == "phase4_v1"
+    assert resolved.users == 12
+    assert resolved.workstations == 5
+    assert resolved.servers == 3
+    assert resolved.output_zip == str((tmp_path / "datasets/phase4-v1.zip").resolve())
+    assert resolved.output_manifest == str(
+        (tmp_path / "datasets/phase4-v1_manifest.json").resolve()
+    )
 
 
 def test_load_run_profile_requires_explicit_profile_when_multiple(tmp_path: Path) -> None:
@@ -122,6 +162,8 @@ profiles:
             concurrency=4,
             max_steps=30,
             resource_mode="on-demand",
+            mcp_tool_loop="inspect",
+            openai_compat_telemetry_adapter="vllm",
             mcp_ollama_read_timeout_seconds=1800,
             health_timeout_seconds=10,
             health_poll_interval=0.5,
@@ -130,6 +172,8 @@ profiles:
     assert resolved.concurrency == 4
     assert resolved.max_steps == 30
     assert resolved.resource_mode == "on-demand"
+    assert resolved.mcp_tool_loop == "inspect"
+    assert resolved.openai_compat_telemetry_adapter == "vllm"
     assert resolved.mcp_ollama_read_timeout_seconds == 1800.0
     assert resolved.health_timeout_seconds == 10.0
     assert resolved.health_poll_interval == 0.5
@@ -150,6 +194,8 @@ profiles:
 
     resolved = load_run_profile(config, profile_name="smoke")
     assert resolved.resource_mode == "off"
+    assert resolved.mcp_tool_loop == "auto"
+    assert resolved.openai_compat_telemetry_adapter == "auto"
     assert resolved.mcp_ollama_read_timeout_seconds == 900.0
     assert resolved.telemetry_enabled is True
 

@@ -23,8 +23,14 @@ class RunConfigOverrides:
     health_timeout_seconds: float | None = None
     health_poll_interval: float | None = None
     resource_mode: str | None = None
+    mcp_tool_loop: str | None = None
+    openai_compat_telemetry_adapter: str | None = None
     mcp_ollama_read_timeout_seconds: float | None = None
     telemetry_enabled: bool | None = None
+    seed: int | None = None
+    domain: str | None = None
+    output_zip: str | None = None
+    output_manifest: str | None = None
 
 
 @dataclass(frozen=True)
@@ -43,10 +49,20 @@ class ResolvedRunProfile:
     mcp_dir: str | None
     max_steps: int | None
     resource_mode: str
+    mcp_tool_loop: str
+    openai_compat_telemetry_adapter: str
     mcp_ollama_read_timeout_seconds: float
     telemetry_enabled: bool
     model_entry: str | dict[str, Any] | None
     model_entries: list[str | dict[str, Any]] | None
+    seed: int | None = None
+    domain: str | None = None
+    generator_profile: str | None = None
+    users: int | None = None
+    workstations: int | None = None
+    servers: int | None = None
+    output_zip: str | None = None
+    output_manifest: str | None = None
 
 
 @dataclass(frozen=True)
@@ -68,6 +84,7 @@ _KIND_ALIASES = {
     "smoke_mcp": "smoke_mcp",
     "smoke-mcp": "smoke_mcp",
     "preflight": "preflight",
+    "generate": "generate",
 }
 
 
@@ -165,6 +182,34 @@ def _normalize_resource_mode(raw_mode: Any) -> str:
             f"Unsupported resource_mode {raw_mode!r}. Supported values: off, on-demand"
         )
     return raw_mode
+
+
+def _normalize_mcp_tool_loop(raw_mode: Any) -> str:
+    if raw_mode is None:
+        return "auto"
+    if not isinstance(raw_mode, str):
+        raise ValueError("MCP tool_loop must be a string when present.")
+    supported = {"auto", "inspect", "native-ollama", "native-openai-compatible"}
+    if raw_mode not in supported:
+        raise ValueError(
+            f"Unsupported MCP tool_loop {raw_mode!r}. Supported values: "
+            "auto, inspect, native-ollama, native-openai-compatible"
+        )
+    return raw_mode
+
+
+def _normalize_openai_compat_telemetry_adapter(raw_adapter: Any) -> str:
+    if raw_adapter is None:
+        return "auto"
+    if not isinstance(raw_adapter, str):
+        raise ValueError("MCP openai_compat_telemetry_adapter must be a string when present.")
+    supported = {"auto", "generic", "llama-cpp", "mlx-lm", "vllm", "lm-studio"}
+    if raw_adapter not in supported:
+        raise ValueError(
+            f"Unsupported MCP openai_compat_telemetry_adapter {raw_adapter!r}. "
+            "Supported values: auto, generic, llama-cpp, mlx-lm, vllm, lm-studio"
+        )
+    return raw_adapter
 
 
 def _normalize_telemetry_enabled(raw_value: Any) -> bool:
@@ -271,6 +316,26 @@ def load_run_profile(
             fallback="off",
         )
     )
+    mcp_tool_loop = _normalize_mcp_tool_loop(
+        _merged_nested_value(
+            overrides.mcp_tool_loop,
+            profile,
+            defaults,
+            "mcp",
+            "tool_loop",
+            fallback="auto",
+        )
+    )
+    openai_compat_telemetry_adapter = _normalize_openai_compat_telemetry_adapter(
+        _merged_nested_value(
+            overrides.openai_compat_telemetry_adapter,
+            profile,
+            defaults,
+            "mcp",
+            "openai_compat_telemetry_adapter",
+            fallback="auto",
+        )
+    )
     mcp_ollama_read_timeout_seconds = _merged_nested_value(
         overrides.mcp_ollama_read_timeout_seconds,
         profile,
@@ -292,8 +357,44 @@ def load_run_profile(
 
     model_entry = profile.get("model")
     model_entries = profile.get("models")
+    generator_section = profile.get("generator") or {}
+    if generator_section and not isinstance(generator_section, dict):
+        raise ValueError("generator must be a mapping when present.")
+    sizing_section = profile.get("sizing") or {}
+    if sizing_section and not isinstance(sizing_section, dict):
+        raise ValueError("sizing must be a mapping when present.")
 
-    if kind in {"eval", "eval_mcp"}:
+    seed = _merged_value(overrides.seed, profile, defaults, "seed")
+    domain = _merged_value(overrides.domain, profile, defaults, "domain")
+    generator_profile = generator_section.get("profile", profile.get("generator_profile"))
+    users = sizing_section.get("users", profile.get("users"))
+    workstations = sizing_section.get("workstations", profile.get("workstations"))
+    servers = sizing_section.get("servers", profile.get("servers"))
+    output_zip = _resolve_path(
+        config_dir,
+        _merged_value(overrides.output_zip, profile, defaults, "output_zip"),
+    )
+    output_manifest = _resolve_path(
+        config_dir,
+        _merged_value(overrides.output_manifest, profile, defaults, "output_manifest"),
+    )
+
+    if kind == "generate":
+        if domain is None:
+            raise ValueError(f"Profile {chosen_name!r} must define domain for generate.")
+        if seed is None:
+            raise ValueError(f"Profile {chosen_name!r} must define seed for generate.")
+        if not isinstance(generator_profile, str) or not generator_profile:
+            raise ValueError(
+                f"Profile {chosen_name!r} must define generator.profile for generate."
+            )
+        if output_zip is None:
+            raise ValueError(f"Profile {chosen_name!r} must define output_zip for generate.")
+        if output_manifest is None:
+            raise ValueError(
+                f"Profile {chosen_name!r} must define output_manifest for generate."
+            )
+    elif kind in {"eval", "eval_mcp"}:
         if model_entry is None and model_entries is not None:
             if not isinstance(model_entries, list) or len(model_entries) != 1:
                 raise ValueError(
@@ -340,10 +441,20 @@ def load_run_profile(
         mcp_dir=mcp_dir,
         max_steps=int(max_steps) if max_steps is not None else None,
         resource_mode=resource_mode,
+        mcp_tool_loop=mcp_tool_loop,
+        openai_compat_telemetry_adapter=openai_compat_telemetry_adapter,
         mcp_ollama_read_timeout_seconds=float(mcp_ollama_read_timeout_seconds),
         telemetry_enabled=telemetry_enabled,
         model_entry=model_entry,
         model_entries=model_entries,
+        seed=int(seed) if seed is not None else None,
+        domain=str(domain) if domain is not None else None,
+        generator_profile=generator_profile,
+        users=int(users) if users is not None else None,
+        workstations=int(workstations) if workstations is not None else None,
+        servers=int(servers) if servers is not None else None,
+        output_zip=output_zip,
+        output_manifest=output_manifest,
     )
 
 

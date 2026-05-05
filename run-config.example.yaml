@@ -12,6 +12,12 @@ defaults:
     mcp_dir: ../bloodhound-mcp
     max_steps: 12
     resource_mode: off
+    # auto keeps Ollama on ORI's native MCP tool loop and uses Inspect for other supported providers.
+    # Use native-openai-compatible for mlx/llama.cpp-style OpenAI-compatible servers with tools.
+    tool_loop: auto
+    # For native-openai-compatible runs, parse provider-specific metrics when available:
+    # generic, llama-cpp, mlx-lm, vllm, lm-studio, or auto.
+    openai_compat_telemetry_adapter: auto
     ollama_read_timeout_seconds: 900
   telemetry:
     # Writes results/<run>/telemetry/{run_environment.json,models/,samples/,telemetry_summary.csv}

@@ -15,6 +15,7 @@ import yaml
 from .generator.attack_paths import plant_all_paths
 from .generator.graph import ADGraph
 from .generator.org import build_org
+from .generator.phase4 import build_phase4_v1_graph
 from .generator.security import apply_baseline_security
 from .generator.serializer import serialize_to_dir, serialize_to_zip
 from .run_config import RunConfigOverrides, list_run_profiles, load_run_profile
@@ -28,6 +29,8 @@ class RunSpec:
     ollama_options: dict | None
     model_base_url: str | None
     max_steps: int | None
+    mcp_tool_loop: str | None
+    openai_compat_telemetry_adapter: str | None
     mcp_ollama_read_timeout_seconds: float | None
     config_identity: dict[str, Any]
     config_identity_json: str
@@ -110,6 +113,9 @@ def _run_spec_from_entry(
         ollama_options=identity.get("options") or None,
         model_base_url=identity.get("model_base_url"),
         max_steps=identity.get("max_steps"),
+        mcp_tool_loop=identity.get("mcp_tool_loop") or identity.get("tool_loop"),
+        openai_compat_telemetry_adapter=identity.get("openai_compat_telemetry_adapter")
+        or identity.get("telemetry_adapter"),
         mcp_ollama_read_timeout_seconds=identity.get("mcp_ollama_read_timeout_seconds"),
         config_identity=identity,
         config_identity_json=config_identity_json,
@@ -145,6 +151,8 @@ def _dedupe_run_specs(run_specs: list[RunSpec]) -> list[RunSpec]:
                 ollama_options=run_spec.ollama_options,
                 model_base_url=run_spec.model_base_url,
                 max_steps=run_spec.max_steps,
+                mcp_tool_loop=run_spec.mcp_tool_loop,
+                openai_compat_telemetry_adapter=run_spec.openai_compat_telemetry_adapter,
                 mcp_ollama_read_timeout_seconds=run_spec.mcp_ollama_read_timeout_seconds,
                 config_identity=run_spec.config_identity,
                 config_identity_json=run_spec.config_identity_json,
@@ -187,10 +195,63 @@ def _build_inline_run_spec(model: str, ollama_options: dict | None = None) -> Ru
         ollama_options=ollama_options,
         model_base_url=None,
         max_steps=None,
+        mcp_tool_loop=None,
+        openai_compat_telemetry_adapter=None,
         mcp_ollama_read_timeout_seconds=None,
         config_identity=identity,
         config_identity_json=config_identity_json,
         file_slug=_slugify_run_name(run_name),
+    )
+
+
+def _write_generated_dataset(
+    *,
+    graph: ADGraph,
+    seed: int,
+    output_zip: Path,
+    output_manifest: Path,
+    generator_profile: str,
+) -> dict:
+    serialize_to_zip(graph, output_zip)
+    manifest = _build_manifest(graph, seed)
+    manifest.setdefault("metadata", {})
+    manifest["metadata"].update(
+        {
+            "generator_profile": generator_profile,
+            "profile_kind": "generate",
+        }
+    )
+    output_manifest.parent.mkdir(parents=True, exist_ok=True)
+    output_manifest.write_text(json.dumps(manifest, indent=2))
+    return manifest
+
+
+def _generate_profile_dataset(resolved) -> None:
+    if resolved.generator_profile != "phase4_v1":
+        raise click.UsageError(
+            f"Unsupported generator profile {resolved.generator_profile!r}; expected phase4_v1."
+        )
+    graph = build_phase4_v1_graph(
+        domain=resolved.domain,
+        seed=resolved.seed,
+        users=resolved.users or 32,
+        workstations=resolved.workstations or 12,
+        servers=resolved.servers or 6,
+    )
+    manifest = _write_generated_dataset(
+        graph=graph,
+        seed=resolved.seed,
+        output_zip=Path(resolved.output_zip),
+        output_manifest=Path(resolved.output_manifest),
+        generator_profile=resolved.generator_profile,
+    )
+    click.echo(f"Generated {resolved.generator_profile}:")
+    click.echo(f"  Zip: {resolved.output_zip}")
+    click.echo(f"  Manifest: {resolved.output_manifest}")
+    click.echo(
+        f"  Nodes: {manifest['stats']['total_nodes']} | "
+        f"Edges: {manifest['stats']['total_edges']} | "
+        f"Paths: {len(manifest['planted_paths'])}"
     )
 
 
@@ -200,6 +261,8 @@ def _effective_run_config(
     model_base_url: str | None = None,
     max_steps: int | None = None,
     resource_mode: str | None = None,
+    mcp_tool_loop: str | None = None,
+    openai_compat_telemetry_adapter: str | None = None,
     mcp_ollama_read_timeout_seconds: float | None = None,
     telemetry_enabled: bool | None = None,
 ) -> dict[str, Any]:
@@ -210,6 +273,14 @@ def _effective_run_config(
         config["max_steps"] = max_steps
     if resource_mode is not None and "resource_mode" not in config:
         config["resource_mode"] = resource_mode
+    if mcp_tool_loop is not None and "mcp_tool_loop" not in config and "tool_loop" not in config:
+        config["mcp_tool_loop"] = mcp_tool_loop
+    if (
+        openai_compat_telemetry_adapter is not None
+        and "openai_compat_telemetry_adapter" not in config
+        and "telemetry_adapter" not in config
+    ):
+        config["openai_compat_telemetry_adapter"] = openai_compat_telemetry_adapter
     if (
         mcp_ollama_read_timeout_seconds is not None
         and "mcp_ollama_read_timeout_seconds" not in config
@@ -284,6 +355,8 @@ async def _run_baseline_mcp_with_specs(
     mcp_dir: Path,
     max_steps: int,
     resource_mode: str,
+    mcp_tool_loop: str,
+    openai_compat_telemetry_adapter: str,
     mcp_ollama_read_timeout_seconds: float,
     default_model_base_url: str | None = None,
     max_steps_override: int | None = None,
@@ -318,6 +391,10 @@ async def _run_baseline_mcp_with_specs(
             if run_spec.mcp_ollama_read_timeout_seconds is not None
             else mcp_ollama_read_timeout_seconds
         )
+        effective_mcp_tool_loop = run_spec.mcp_tool_loop or mcp_tool_loop
+        effective_openai_compat_telemetry_adapter = (
+            run_spec.openai_compat_telemetry_adapter or openai_compat_telemetry_adapter
+        )
         csv_path = output_dir / f"{run_spec.file_slug}.csv"
         opts_str = f", options={run_spec.ollama_options}" if run_spec.ollama_options else ""
         base_url_str = f", base_url={effective_model_base_url}" if effective_model_base_url else ""
@@ -336,6 +413,8 @@ async def _run_baseline_mcp_with_specs(
             mcp_dir=mcp_dir,
             max_steps=effective_max_steps,
             resource_mode=resource_mode,
+            mcp_tool_loop=effective_mcp_tool_loop,
+            openai_compat_telemetry_adapter=effective_openai_compat_telemetry_adapter,
             mcp_ollama_read_timeout_seconds=effective_mcp_ollama_read_timeout_seconds,
             run_name=run_spec.run_name,
             run_config=_effective_run_config(
@@ -343,6 +422,8 @@ async def _run_baseline_mcp_with_specs(
                 model_base_url=effective_model_base_url,
                 max_steps=effective_max_steps,
                 resource_mode=resource_mode,
+                mcp_tool_loop=effective_mcp_tool_loop,
+                openai_compat_telemetry_adapter=effective_openai_compat_telemetry_adapter,
                 mcp_ollama_read_timeout_seconds=effective_mcp_ollama_read_timeout_seconds,
                 telemetry_enabled=telemetry_enabled,
             ),
@@ -508,6 +589,20 @@ def eval(
     help="Whether MCP reference resources are available to the model.",
 )
 @click.option(
+    "--mcp-tool-loop",
+    type=click.Choice(["auto", "inspect", "native-ollama", "native-openai-compatible"]),
+    default="auto",
+    show_default=True,
+    help="MCP tool-calling loop implementation.",
+)
+@click.option(
+    "--openai-compat-telemetry-adapter",
+    type=click.Choice(["auto", "generic", "llama-cpp", "mlx-lm", "vllm", "lm-studio"]),
+    default="auto",
+    show_default=True,
+    help="Telemetry parser for native OpenAI-compatible MCP runs.",
+)
+@click.option(
     "--mcp-ollama-read-timeout",
     default=900.0,
     show_default=True,
@@ -536,6 +631,8 @@ def eval_mcp(
     mcp_dir: str,
     max_steps: int,
     resource_mode: str,
+    mcp_tool_loop: str,
+    openai_compat_telemetry_adapter: str,
     mcp_ollama_read_timeout: float,
     ollama_options_raw: tuple[str, ...],
     telemetry_enabled: bool,
@@ -559,6 +656,8 @@ def eval_mcp(
             mcp_dir=Path(mcp_dir),
             max_steps=max_steps,
             resource_mode=resource_mode,
+            mcp_tool_loop=mcp_tool_loop,
+            openai_compat_telemetry_adapter=openai_compat_telemetry_adapter,
             mcp_ollama_read_timeout_seconds=mcp_ollama_read_timeout,
             ollama_options=run_spec.ollama_options,
             run_name=run_spec.run_name,
@@ -566,6 +665,8 @@ def eval_mcp(
                 run_spec,
                 max_steps=max_steps,
                 resource_mode=resource_mode,
+                mcp_tool_loop=mcp_tool_loop,
+                openai_compat_telemetry_adapter=openai_compat_telemetry_adapter,
                 mcp_ollama_read_timeout_seconds=mcp_ollama_read_timeout,
             ),
             telemetry_enabled=telemetry_enabled,
@@ -750,6 +851,18 @@ def smoke_mcp(
     help="Override MCP resource mode for config-driven runs.",
 )
 @click.option(
+    "--mcp-tool-loop",
+    type=click.Choice(["auto", "inspect", "native-ollama", "native-openai-compatible"]),
+    default=None,
+    help="Override MCP tool-calling loop for config-driven runs.",
+)
+@click.option(
+    "--openai-compat-telemetry-adapter",
+    type=click.Choice(["auto", "generic", "llama-cpp", "mlx-lm", "vllm", "lm-studio"]),
+    default=None,
+    help="Override telemetry parser for native OpenAI-compatible MCP runs.",
+)
+@click.option(
     "--mcp-ollama-read-timeout",
     type=float,
     default=None,
@@ -793,6 +906,8 @@ def run_from_config(
     mcp_dir: str | None,
     max_steps: int | None,
     resource_mode: str | None,
+    mcp_tool_loop: str | None,
+    openai_compat_telemetry_adapter: str | None,
     mcp_ollama_read_timeout: float | None,
     model_base_url: str | None,
     max_model_reruns_on_infra: int | None,
@@ -827,6 +942,8 @@ def run_from_config(
         mcp_dir=mcp_dir,
         max_steps=max_steps,
         resource_mode=resource_mode,
+        mcp_tool_loop=mcp_tool_loop,
+        openai_compat_telemetry_adapter=openai_compat_telemetry_adapter,
         mcp_ollama_read_timeout_seconds=mcp_ollama_read_timeout,
         model_base_url=model_base_url,
         max_model_reruns_on_infra=max_model_reruns_on_infra,
@@ -837,6 +954,10 @@ def run_from_config(
 
     def _run_one_profile(resolved) -> None:
         click.echo(f"Using config profile: {resolved.profile_name} ({resolved.kind})")
+
+        if resolved.kind == "generate":
+            _generate_profile_dataset(resolved)
+            return
 
         if resolved.kind == "eval":
             run_spec = _dedupe_run_specs(
@@ -907,6 +1028,11 @@ def run_from_config(
                     mcp_dir=Path(resolved.mcp_dir),
                     max_steps=effective_max_steps,
                     resource_mode=resolved.resource_mode,
+                    mcp_tool_loop=run_spec.mcp_tool_loop or resolved.mcp_tool_loop,
+                    openai_compat_telemetry_adapter=(
+                        run_spec.openai_compat_telemetry_adapter
+                        or resolved.openai_compat_telemetry_adapter
+                    ),
                     mcp_ollama_read_timeout_seconds=resolved.mcp_ollama_read_timeout_seconds,
                     ollama_options=run_spec.ollama_options,
                     run_name=run_spec.run_name,
@@ -915,6 +1041,11 @@ def run_from_config(
                         model_base_url=effective_model_base_url,
                         max_steps=effective_max_steps,
                         resource_mode=resolved.resource_mode,
+                        mcp_tool_loop=run_spec.mcp_tool_loop or resolved.mcp_tool_loop,
+                        openai_compat_telemetry_adapter=(
+                            run_spec.openai_compat_telemetry_adapter
+                            or resolved.openai_compat_telemetry_adapter
+                        ),
                         mcp_ollama_read_timeout_seconds=resolved.mcp_ollama_read_timeout_seconds,
                         telemetry_enabled=resolved.telemetry_enabled,
                     ),
@@ -975,6 +1106,8 @@ def run_from_config(
                     mcp_dir=Path(resolved.mcp_dir),
                     max_steps=resolved.max_steps,
                     resource_mode=resolved.resource_mode,
+                    mcp_tool_loop=resolved.mcp_tool_loop,
+                    openai_compat_telemetry_adapter=resolved.openai_compat_telemetry_adapter,
                     mcp_ollama_read_timeout_seconds=resolved.mcp_ollama_read_timeout_seconds,
                     default_model_base_url=resolved.model_base_url,
                     max_steps_override=max_steps,
@@ -1210,6 +1343,8 @@ def _run_baseline_mcp(
     mcp_dir: str,
     max_steps: int,
     resource_mode: str,
+    mcp_tool_loop: str = "auto",
+    openai_compat_telemetry_adapter: str = "auto",
     mcp_ollama_read_timeout_seconds: float = 900.0,
     telemetry_enabled: bool = True,
 ) -> None:
@@ -1229,6 +1364,8 @@ def _run_baseline_mcp(
             mcp_dir=Path(mcp_dir),
             max_steps=max_steps,
             resource_mode=resource_mode,
+            mcp_tool_loop=mcp_tool_loop,
+            openai_compat_telemetry_adapter=openai_compat_telemetry_adapter,
             mcp_ollama_read_timeout_seconds=mcp_ollama_read_timeout_seconds,
             telemetry_enabled=telemetry_enabled,
         )
@@ -1278,6 +1415,20 @@ def _run_baseline_mcp(
     help="Whether MCP reference resources are available to the model.",
 )
 @click.option(
+    "--mcp-tool-loop",
+    type=click.Choice(["auto", "inspect", "native-ollama", "native-openai-compatible"]),
+    default="auto",
+    show_default=True,
+    help="MCP tool-calling loop implementation.",
+)
+@click.option(
+    "--openai-compat-telemetry-adapter",
+    type=click.Choice(["auto", "generic", "llama-cpp", "mlx-lm", "vllm", "lm-studio"]),
+    default="auto",
+    show_default=True,
+    help="Telemetry parser for native OpenAI-compatible MCP runs.",
+)
+@click.option(
     "--mcp-ollama-read-timeout",
     default=900.0,
     show_default=True,
@@ -1301,6 +1452,8 @@ def baseline_mcp(
     mcp_dir: str,
     max_steps: int,
     resource_mode: str,
+    mcp_tool_loop: str,
+    openai_compat_telemetry_adapter: str,
     mcp_ollama_read_timeout: float,
     telemetry_enabled: bool,
 ) -> None:
@@ -1315,6 +1468,8 @@ def baseline_mcp(
         mcp_dir=mcp_dir,
         max_steps=max_steps,
         resource_mode=resource_mode,
+        mcp_tool_loop=mcp_tool_loop,
+        openai_compat_telemetry_adapter=openai_compat_telemetry_adapter,
         mcp_ollama_read_timeout_seconds=mcp_ollama_read_timeout,
         telemetry_enabled=telemetry_enabled,
     )
@@ -1347,6 +1502,20 @@ def baseline_mcp(
 )
 @click.option("--max-steps", default=12, show_default=True, help="Max agent/tool steps")
 @click.option(
+    "--mcp-tool-loop",
+    type=click.Choice(["auto", "inspect", "native-ollama", "native-openai-compatible"]),
+    default="auto",
+    show_default=True,
+    help="MCP tool-calling loop implementation.",
+)
+@click.option(
+    "--openai-compat-telemetry-adapter",
+    type=click.Choice(["auto", "generic", "llama-cpp", "mlx-lm", "vllm", "lm-studio"]),
+    default="auto",
+    show_default=True,
+    help="Telemetry parser for native OpenAI-compatible MCP runs.",
+)
+@click.option(
     "--mcp-ollama-read-timeout",
     default=900.0,
     show_default=True,
@@ -1369,6 +1538,8 @@ def baseline_mcp_resources(
     bhce_url: str | None,
     mcp_dir: str,
     max_steps: int,
+    mcp_tool_loop: str,
+    openai_compat_telemetry_adapter: str,
     mcp_ollama_read_timeout: float,
     telemetry_enabled: bool,
 ) -> None:
@@ -1383,6 +1554,8 @@ def baseline_mcp_resources(
         mcp_dir=mcp_dir,
         max_steps=max_steps,
         resource_mode="on-demand",
+        mcp_tool_loop=mcp_tool_loop,
+        openai_compat_telemetry_adapter=openai_compat_telemetry_adapter,
         mcp_ollama_read_timeout_seconds=mcp_ollama_read_timeout,
         telemetry_enabled=telemetry_enabled,
     )
@@ -1430,6 +1603,11 @@ def _build_manifest(graph: ADGraph, seed: int) -> dict:
                 ],
                 "verification_cypher": p.verification_cypher,
                 "mitre": p.mitre,
+                "metadata": p.metadata,
+                "scenario_family": p.metadata.get("scenario_family", ""),
+                "critical_nodes": p.metadata.get("critical_nodes", []),
+                "required_capabilities": p.metadata.get("required_capabilities", []),
+                "template_version": p.metadata.get("template_version", ""),
             }
             for p in graph.planted_paths
         ],

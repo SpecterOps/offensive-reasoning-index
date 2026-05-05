@@ -354,11 +354,15 @@ def test_cli_eval_mcp_parses_ollama_options(tmp_path: Path, monkeypatch) -> None
     assert result.exit_code == 0
     assert captured["ollama_options"] == {"num_ctx": 16384, "temperature": 0.2}
     assert captured["resource_mode"] == "on-demand"
+    assert captured["mcp_tool_loop"] == "auto"
+    assert captured["openai_compat_telemetry_adapter"] == "auto"
     assert (
         captured["run_name"] == "ollama/gemma4:e4b [options.num_ctx=16384, options.temperature=0.2]"
     )
     assert captured["run_config"] == {
         "max_steps": 12,
+        "mcp_tool_loop": "auto",
+        "openai_compat_telemetry_adapter": "auto",
         "mcp_ollama_read_timeout_seconds": 900.0,
         "model": "ollama/gemma4:e4b",
         "options": {"num_ctx": 16384, "temperature": 0.2},
@@ -402,6 +406,8 @@ models:
     model: ollama/gemma4:26b
     model_base_url: http://127.0.0.1:11434/v1
     max_steps: 24
+    mcp_tool_loop: native-openai-compatible
+    openai_compat_telemetry_adapter: lm-studio
     mcp_ollama_read_timeout_seconds: 1200
     options:
       num_ctx: 32768
@@ -410,9 +416,13 @@ models:
     spec = _build_run_specs(models=(), models_file=str(models_file))[0]
     assert spec.model_base_url == "http://127.0.0.1:11434/v1"
     assert spec.max_steps == 24
+    assert spec.mcp_tool_loop == "native-openai-compatible"
+    assert spec.openai_compat_telemetry_adapter == "lm-studio"
     assert spec.mcp_ollama_read_timeout_seconds == 1200
     assert spec.config_identity == {
         "max_steps": 24,
+        "mcp_tool_loop": "native-openai-compatible",
+        "openai_compat_telemetry_adapter": "lm-studio",
         "mcp_ollama_read_timeout_seconds": 1200,
         "model": "ollama/gemma4:26b",
         "model_base_url": "http://127.0.0.1:11434/v1",
@@ -533,6 +543,8 @@ defaults:
   mcp:
     mcp_dir: {mcp_dir}
     max_steps: 20
+    tool_loop: native-openai-compatible
+    openai_compat_telemetry_adapter: llama-cpp
     ollama_read_timeout_seconds: 1200
 profiles:
   phase3b:
@@ -547,6 +559,8 @@ profiles:
         concurrency: 1
         max_steps: 24
         model_base_url: http://custom.local/v1
+        mcp_tool_loop: inspect
+        openai_compat_telemetry_adapter: vllm
         mcp_ollama_read_timeout_seconds: 1500
 """
     )
@@ -563,12 +577,16 @@ profiles:
     assert len(calls) == 2
     assert calls[0]["concurrency"] == 2
     assert calls[0]["max_steps"] == 20
+    assert calls[0]["mcp_tool_loop"] == "native-openai-compatible"
+    assert calls[0]["openai_compat_telemetry_adapter"] == "llama-cpp"
     assert calls[0]["mcp_ollama_read_timeout_seconds"] == 1200.0
     assert calls[0]["max_model_reruns_on_infra"] == 3
     assert calls[0]["bhce_url"] == "http://bh.local"
     assert calls[0]["model_base_url"] == "http://127.0.0.1:11434/v1"
     assert calls[1]["concurrency"] == 1
     assert calls[1]["max_steps"] == 24
+    assert calls[1]["mcp_tool_loop"] == "inspect"
+    assert calls[1]["openai_compat_telemetry_adapter"] == "vllm"
     assert calls[1]["mcp_ollama_read_timeout_seconds"] == 1500
     assert calls[1]["model_base_url"] == "http://custom.local/v1"
 
@@ -818,10 +836,16 @@ def test_cli_baseline_mcp_parses_resource_mode(tmp_path: Path, monkeypatch) -> N
             str(mcp_dir),
             "--resource-mode",
             "on-demand",
+            "--mcp-tool-loop",
+            "native-openai-compatible",
+            "--openai-compat-telemetry-adapter",
+            "llama-cpp",
         ],
     )
     assert result.exit_code == 0
     assert captured[0]["resource_mode"] == "on-demand"
+    assert captured[0]["mcp_tool_loop"] == "native-openai-compatible"
+    assert captured[0]["openai_compat_telemetry_adapter"] == "llama-cpp"
 
 
 def test_cli_baseline_mcp_resources_uses_on_demand_mode(tmp_path: Path, monkeypatch) -> None:
@@ -852,6 +876,8 @@ def test_cli_baseline_mcp_resources_uses_on_demand_mode(tmp_path: Path, monkeypa
     )
     assert result.exit_code == 0
     assert captured[0]["resource_mode"] == "on-demand"
+    assert captured[0]["mcp_tool_loop"] == "auto"
+    assert captured[0]["openai_compat_telemetry_adapter"] == "auto"
 
 
 def test_print_helpers(capsys) -> None:

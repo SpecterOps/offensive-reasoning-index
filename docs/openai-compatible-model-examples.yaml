@@ -1,0 +1,146 @@
+# Example model/profile entries for ORI MCP resources runs.
+#
+# These examples are intentionally disabled. Copy one into run-config-phase4-v1.yaml
+# or a Hermes-generated run config, then update model names, URLs, and env vars.
+#
+# Secret handling:
+# - Native OpenAI-compatible MCP calls use OPENAI_COMPAT_API_KEY first, then OPENAI_API_KEY.
+# - Some gateways need provider-specific headers. Add those at the gateway/proxy layer for now.
+
+version: 1
+
+defaults:
+  bhce_url: https://bloodhound.example.com
+  concurrency: 1
+  max_model_reruns_on_infra: 1
+  mcp:
+    mcp_dir: ../bloodhound-mcp
+    max_steps: 16
+    resource_mode: on-demand
+    ollama_read_timeout_seconds: 1800
+
+profiles:
+  phase4_ollama_native:
+    enabled: false
+    kind: eval-mcp
+    manifest: datasets/phase4-v1_manifest.json
+    output: results/phase4-v1/ollama-native-qwen.csv
+    model:
+      name: ollama-native-qwen
+      model: ollama/ori-qwen35-9b-64k
+      mcp_tool_loop: auto
+      options:
+        temperature: 0
+
+  phase4_ollama_openai_compat:
+    enabled: false
+    kind: eval-mcp
+    manifest: datasets/phase4-v1_manifest.json
+    output: results/phase4-v1/ollama-openai-compat-qwen.csv
+    model:
+      name: ollama-openai-compat-qwen
+      model: openai-compat/ori-qwen35-9b-64k
+      model_base_url: http://127.0.0.1:11434/v1
+      mcp_tool_loop: native-openai-compatible
+      openai_compat_telemetry_adapter: generic
+      options:
+        temperature: 0
+
+  phase4_llama_cpp:
+    enabled: false
+    kind: eval-mcp
+    manifest: datasets/phase4-v1_manifest.json
+    output: results/phase4-v1/llama-cpp-qwen.csv
+    model:
+      name: llama-cpp-qwen
+      model: openai-compat/qwen
+      model_base_url: http://127.0.0.1:8080/v1
+      mcp_tool_loop: native-openai-compatible
+      openai_compat_telemetry_adapter: llama-cpp
+      options:
+        temperature: 0
+
+  phase4_mlx_lm:
+    enabled: false
+    kind: eval-mcp
+    manifest: datasets/phase4-v1_manifest.json
+    output: results/phase4-v1/mlx-lm-qwen.csv
+    model:
+      name: mlx-lm-qwen
+      model: openai-compat/qwen
+      model_base_url: http://127.0.0.1:8080/v1
+      mcp_tool_loop: native-openai-compatible
+      openai_compat_telemetry_adapter: mlx-lm
+      options:
+        temperature: 0
+
+  phase4_vllm:
+    enabled: false
+    kind: eval-mcp
+    manifest: datasets/phase4-v1_manifest.json
+    output: results/phase4-v1/vllm-qwen.csv
+    model:
+      name: vllm-qwen
+      model: openai-compat/qwen
+      model_base_url: http://127.0.0.1:8000/v1
+      mcp_tool_loop: native-openai-compatible
+      openai_compat_telemetry_adapter: vllm
+      options:
+        temperature: 0
+
+  phase4_lm_studio:
+    enabled: false
+    kind: eval-mcp
+    manifest: datasets/phase4-v1_manifest.json
+    output: results/phase4-v1/lm-studio-qwen.csv
+    model:
+      name: lm-studio-qwen
+      model: openai-compat/qwen
+      model_base_url: http://127.0.0.1:1234/v1
+      mcp_tool_loop: native-openai-compatible
+      openai_compat_telemetry_adapter: lm-studio
+      options:
+        temperature: 0
+
+  phase4_openrouter:
+    enabled: false
+    kind: eval-mcp
+    manifest: datasets/phase4-v1_manifest.json
+    output: results/phase4-v1/openrouter-qwen.csv
+    model:
+      name: openrouter-qwen
+      model: openai-compat/qwen/qwen3-32b
+      model_base_url: https://openrouter.ai/api/v1
+      mcp_tool_loop: native-openai-compatible
+      openai_compat_telemetry_adapter: generic
+      options:
+        temperature: 0
+
+  phase4_nvidia_nim:
+    enabled: false
+    kind: eval-mcp
+    manifest: datasets/phase4-v1_manifest.json
+    output: results/phase4-v1/nvidia-nim.csv
+    model:
+      name: nvidia-nim
+      model: openai-compat/nvidia/model-name
+      model_base_url: https://integrate.api.nvidia.com/v1
+      mcp_tool_loop: native-openai-compatible
+      openai_compat_telemetry_adapter: generic
+      options:
+        temperature: 0
+
+  phase4_hermes_portal:
+    enabled: false
+    kind: eval-mcp
+    manifest: datasets/phase4-v1_manifest.json
+    output: results/phase4-v1/hermes-portal.csv
+    model:
+      name: hermes-portal
+      model: openai-compat/hermes-model-name
+      model_base_url: https://hermes.example.com/v1
+      mcp_tool_loop: native-openai-compatible
+      openai_compat_telemetry_adapter: generic
+      options:
+        temperature: 0
+
