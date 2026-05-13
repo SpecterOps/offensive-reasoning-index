@@ -13,12 +13,14 @@ from ori.cli import main
 from ori.eval.adapter import ModelResponse
 from ori.eval.bhce import BHHealthResult, CypherResult
 from ori.eval.grader import GradeResult, grade_mcp
+from ori.eval.inspect_runtime import _model_response_to_dict
 from ori.eval.mcp_runtime import (
     RESOURCE_LIST_TOOL_NAME,
     RESOURCE_READ_TOOL_NAME,
     MCPRunMetadata,
     _cypher_result_to_dict,
     _discover_bloodhound_mcp_prompt,
+    _mcp_metadata_to_dict,
     _mcp_subprocess_env,
     _normalize_final_answer,
     _ollama_chat_turn,
@@ -32,6 +34,8 @@ from ori.eval.mcp_runtime import (
     _run_openai_compat_mcp_loop,
     _task_to_dict,
     _trajectory_from_messages,
+    ori_mcp_scorer,
+    ori_mcp_solver,
     run_mcp_eval_with_inspect,
 )
 from ori.eval.report import write_combined_csv, write_summary_csv
@@ -560,6 +564,150 @@ def test_result_from_sample_missing_model_response_returns_infra_error() -> None
     assert result.inspect.error_retries == 1
     assert result.mcp is not None
     assert result.mcp.trajectory_log == "trace.eval"
+    assert result.mcp.infra_error_subtype == "missing_model_response"
+
+
+def _score_state(store: dict) -> object:
+    from types import SimpleNamespace
+
+    ref_result = CypherResult(
+        success=True,
+        nodes=[{"name": "WS-01.TEST.LOCAL"}],
+        node_names={"WS-01.TEST.LOCAL"},
+        raw={},
+    )
+    return SimpleNamespace(
+        metadata={
+            "ori_task": _task_to_dict(_task()),
+            "ref_result": _cypher_result_to_dict(ref_result),
+            "valid_node_names": ["WS-01.TEST.LOCAL"],
+            "requested_model": "ollama/ori-qwen35-9b-64k",
+            "sample_index": 1,
+            "sample_total": 43,
+        },
+        store=store,
+    )
+
+
+def test_ori_mcp_scorer_missing_model_response_returns_infra_error() -> None:
+    import asyncio
+
+    score = asyncio.run(ori_mcp_scorer()(_score_state({}), None))
+
+    assert score.value == 0.0
+    assert score.metadata["grade"]["outcome"] == "INFRA_ERROR"
+    assert "missing ori_model_response" in score.explanation
+    assert score.metadata["mcp"]["infra_error_subtype"] == (
+        "missing_model_response_and_mcp_trajectory"
+    )
+
+
+def test_ori_mcp_scorer_missing_mcp_trajectory_returns_infra_error() -> None:
+    import asyncio
+
+    response = ModelResponse(
+        raw_text="partial",
+        cypher=None,
+        parse_stage="none",
+        tokens_input=0,
+        tokens_output=0,
+        elapsed_seconds=0.0,
+        model="ollama/ori-qwen35-9b-64k",
+    )
+    score = asyncio.run(
+        ori_mcp_scorer()(
+            _score_state({"ori_model_response": _model_response_to_dict(response)}),
+            None,
+        )
+    )
+
+    assert score.value == 0.0
+    assert score.answer == "partial"
+    assert score.metadata["grade"]["outcome"] == "INFRA_ERROR"
+    assert "missing ori_mcp_trajectory" in score.explanation
+    assert score.metadata["mcp"]["infra_error_subtype"] == "missing_mcp_trajectory"
+
+
+def test_ori_mcp_scorer_with_both_keys_present_still_grades_normally() -> None:
+    import asyncio
+
+    response = ModelResponse(
+        raw_text='{"answer_type":"node_set","node_names":["WS-01.TEST.LOCAL"]}',
+        cypher=None,
+        parse_stage="mcp_final_answer",
+        tokens_input=0,
+        tokens_output=0,
+        elapsed_seconds=0.0,
+        model="mock/mcp_perfect",
+    )
+    trajectory = MCPRunMetadata(
+        final_answer_raw=response.raw_text,
+        final_answer_normalized={"answer_type": "node_set", "node_names": ["WS-01.TEST.LOCAL"]},
+    )
+
+    score = asyncio.run(
+        ori_mcp_scorer()(
+            _score_state(
+                {
+                    "ori_model_response": _model_response_to_dict(response),
+                    "ori_mcp_trajectory": _mcp_metadata_to_dict(trajectory),
+                }
+            ),
+            None,
+        )
+    )
+
+    assert score.value == 1.0
+    assert score.metadata["grade"]["outcome"] == "CORRECT"
+
+
+def test_native_ollama_solver_exception_persists_fallback_state(monkeypatch) -> None:
+    import asyncio
+    from types import SimpleNamespace
+
+    class Store(dict):
+        def set(self, key, value):
+            self[key] = value
+
+    async def fake_loop(**kwargs):
+        raise RuntimeError("native loop died before assistant")
+
+    def fake_use_tools(tools, tool_choice="auto"):
+        async def apply(state, generate):
+            return state
+
+        return apply
+
+    monkeypatch.setattr("ori.eval.mcp_runtime._run_ollama_mcp_loop", fake_loop)
+    monkeypatch.setattr("ori.eval.mcp_runtime.use_tools", fake_use_tools)
+
+    ref_result = CypherResult(
+        success=True,
+        nodes=[{"name": "WS-01.TEST.LOCAL"}],
+        node_names={"WS-01.TEST.LOCAL"},
+        raw={},
+    )
+    state = SimpleNamespace(
+        metadata={
+            "ori_task": _task_to_dict(_task()),
+            "ref_result": _cypher_result_to_dict(ref_result),
+            "requested_model": "ollama/ori-qwen35-9b-64k",
+        },
+        model="ollama/ori-qwen35-9b-64k",
+        messages=[],
+        store=Store(),
+    )
+    solver = ori_mcp_solver([], mcp_tool_loop="native-ollama")
+    solved = asyncio.run(solver(state, None))
+
+    assert solved.store["ori_model_response"]["error"].startswith(
+        "MCP native Ollama solver exception: RuntimeError"
+    )
+    assert solved.store["ori_mcp_trajectory"]["tool_loop"] == "native-ollama"
+    assert solved.store["ori_mcp_trajectory"]["infra_error_subtype"] == "solver_exception"
+    score = asyncio.run(ori_mcp_scorer()(solved, None))
+    assert score.metadata["grade"]["outcome"] == "INFRA_ERROR"
+    assert score.metadata["mcp"]["infra_error_subtype"] == "solver_exception"
 
 
 def test_run_ollama_mcp_loop_preserves_thinking_and_final_answer(monkeypatch) -> None:

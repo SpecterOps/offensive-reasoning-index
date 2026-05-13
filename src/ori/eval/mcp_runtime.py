@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 import os
@@ -115,6 +116,7 @@ class MCPRunMetadata:
     resource_reads_total: int = 0
     unique_resources_used: list[str] = field(default_factory=list)
     resource_characters_total: int = 0
+    infra_error_subtype: str = ""
 
     @property
     def final_answer_normalized_json(self) -> str:
@@ -684,6 +686,7 @@ def _mcp_metadata_from_dict(data: dict[str, Any]) -> MCPRunMetadata:
         resource_characters_total=int(data.get("resource_characters_total", 0)),
         available_prompt_names=list(data.get("available_prompt_names", [])),
         prompt_discovery_status=data.get("prompt_discovery_status", ""),
+        infra_error_subtype=data.get("infra_error_subtype", ""),
     )
 
 
@@ -1391,6 +1394,123 @@ def _mock_mcp_answer(
     return json.dumps(answer), answer
 
 
+def _exception_detail(exc: BaseException) -> str:
+    message = str(exc).strip()
+    exc_type = type(exc).__name__
+    return f"{exc_type}: {message}" if message else exc_type
+
+
+def _fallback_mcp_state(
+    *,
+    model_name: str,
+    messages: list[Any],
+    detail: str,
+    subtype: str,
+    tool_loop: str,
+    server_prompt_text: str,
+    server_prompt_name: str,
+    available_prompt_names: list[str],
+    prompt_discovery_status: str,
+    resource_mode: str,
+    elapsed_seconds: float,
+) -> tuple[ModelResponse, MCPRunMetadata, list[Any]]:
+    model_response = ModelResponse(
+        raw_text="",
+        cypher=None,
+        parse_stage="none",
+        tokens_input=0,
+        tokens_output=0,
+        elapsed_seconds=elapsed_seconds,
+        model=model_name,
+        thinking="",
+        error=detail,
+        provider_metrics={"infra_error_subtype": subtype, "tool_loop": tool_loop},
+    )
+    trajectory = _trajectory_from_messages(messages, final_answer_raw="")
+    trajectory.server_prompt_used = bool(server_prompt_text.strip())
+    trajectory.server_prompt_name = server_prompt_name if server_prompt_text.strip() else ""
+    trajectory.available_prompt_names = sorted(available_prompt_names or [])
+    trajectory.prompt_discovery_status = prompt_discovery_status
+    trajectory.resource_mode = resource_mode
+    trajectory.tool_loop = tool_loop
+    trajectory.infra_error_subtype = subtype
+    return model_response, trajectory, messages
+
+
+def _persist_mcp_state(
+    state: TaskState,
+    *,
+    model_response: ModelResponse,
+    trajectory: MCPRunMetadata,
+    task_t0: float,
+    model_calls: int = 1,
+) -> None:
+    state.store.set("ori_model_response", _model_response_to_dict(model_response))
+    state.store.set("ori_mcp_trajectory", _mcp_metadata_to_dict(trajectory))
+    state.store.set("ori_model_calls", model_calls)
+    state.store.set("ori_task_wall_seconds", time.monotonic() - task_t0)
+
+
+def _metadata_task_id(metadata: dict[str, Any]) -> str:
+    task_data = metadata.get("ori_task") or {}
+    if isinstance(task_data, dict):
+        return str(task_data.get("id") or "?")
+    return "?"
+
+
+def _incomplete_mcp_score(
+    *,
+    metadata: dict[str, Any],
+    model_response: ModelResponse | None,
+    mcp_meta: MCPRunMetadata | None,
+    missing_keys: list[str],
+    subtype: str,
+    detail: str | None = None,
+) -> Score:
+    task_id = _metadata_task_id(metadata)
+    sample_index = metadata.get("sample_index", "?")
+    sample_total = metadata.get("sample_total", "?")
+    requested_model = metadata.get("requested_model", "")
+    missing_detail = ", ".join(f"missing {key}" for key in missing_keys)
+    diagnostic = detail or f"MCP sample incomplete: {missing_detail}"
+    details = (
+        f"{diagnostic}; subtype={subtype}; task_id={task_id}; "
+        f"sample={sample_index}/{sample_total}"
+    )
+    if model_response is None:
+        model_response = ModelResponse(
+            raw_text="",
+            cypher=None,
+            parse_stage="none",
+            tokens_input=0,
+            tokens_output=0,
+            elapsed_seconds=0.0,
+            model=str(requested_model),
+            thinking="",
+            error=details,
+            provider_metrics={"infra_error_subtype": subtype},
+        )
+    if mcp_meta is None:
+        mcp_meta = MCPRunMetadata(final_answer_raw=model_response.raw_text)
+    mcp_meta.infra_error_subtype = subtype
+    result = GradeResult(
+        score=0.0,
+        outcome="INFRA_ERROR",
+        hallucination=False,
+        details=details,
+    )
+    print(f"  [{sample_index}/{sample_total}] {task_id} → INFRA_ERROR ({details})")
+    return Score(
+        value=0.0,
+        answer=model_response.raw_text,
+        explanation=details,
+        metadata={
+            "grade": _grade_result_to_dict(result),
+            "mcp": _mcp_metadata_to_dict(mcp_meta),
+        },
+    )
+
+
 @solver
 def ori_mcp_solver(
     tools: list[Any],
@@ -1448,20 +1568,65 @@ def ori_mcp_solver(
             trajectory.resource_mode = resource_mode
             trajectory.tool_loop = "mock"
         elif resolved_tool_loop == MCP_TOOL_LOOP_NATIVE_OLLAMA:
-            model_response, trajectory, ollama_messages = await _run_ollama_mcp_loop(
-                task=task,
-                model_name=model_name,
-                base_url=metadata.get("model_base_url"),
-                ollama_options=metadata.get("ollama_options"),
-                tools=tools,
-                max_steps=max_steps,
-                server_prompt_text=server_prompt_text,
-                server_prompt_name=server_prompt_name,
-                available_prompt_names=prompt_names,
-                prompt_discovery_status=prompt_discovery_status,
-                resource_mode=resource_mode,
-                ollama_read_timeout_seconds=ollama_read_timeout_seconds,
-            )
+            try:
+                model_response, trajectory, ollama_messages = await _run_ollama_mcp_loop(
+                    task=task,
+                    model_name=model_name,
+                    base_url=metadata.get("model_base_url"),
+                    ollama_options=metadata.get("ollama_options"),
+                    tools=tools,
+                    max_steps=max_steps,
+                    server_prompt_text=server_prompt_text,
+                    server_prompt_name=server_prompt_name,
+                    available_prompt_names=prompt_names,
+                    prompt_discovery_status=prompt_discovery_status,
+                    resource_mode=resource_mode,
+                    ollama_read_timeout_seconds=ollama_read_timeout_seconds,
+                )
+            except asyncio.CancelledError as exc:
+                detail = f"MCP native Ollama sample cancelled: {_exception_detail(exc)}"
+                model_response, trajectory, ollama_messages = _fallback_mcp_state(
+                    model_name=model_name,
+                    messages=state.messages,
+                    detail=detail,
+                    subtype="sample_cancelled",
+                    tool_loop=MCP_TOOL_LOOP_NATIVE_OLLAMA,
+                    server_prompt_text=server_prompt_text,
+                    server_prompt_name=server_prompt_name,
+                    available_prompt_names=prompt_names,
+                    prompt_discovery_status=prompt_discovery_status,
+                    resource_mode=resource_mode,
+                    elapsed_seconds=time.monotonic() - task_t0,
+                )
+                state.messages = ollama_messages
+                state.output = ModelOutput.from_content(
+                    model=model_response.model,
+                    content="",
+                    error=model_response.error,
+                )
+                _persist_mcp_state(
+                    state,
+                    model_response=model_response,
+                    trajectory=trajectory,
+                    task_t0=task_t0,
+                    model_calls=0,
+                )
+                raise
+            except Exception as exc:
+                detail = f"MCP native Ollama solver exception: {_exception_detail(exc)}"
+                model_response, trajectory, ollama_messages = _fallback_mcp_state(
+                    model_name=model_name,
+                    messages=state.messages,
+                    detail=detail,
+                    subtype="solver_exception",
+                    tool_loop=MCP_TOOL_LOOP_NATIVE_OLLAMA,
+                    server_prompt_text=server_prompt_text,
+                    server_prompt_name=server_prompt_name,
+                    available_prompt_names=prompt_names,
+                    prompt_discovery_status=prompt_discovery_status,
+                    resource_mode=resource_mode,
+                    elapsed_seconds=time.monotonic() - task_t0,
+                )
             state.messages = ollama_messages
             state.output = ModelOutput.from_content(
                 model=model_response.model,
@@ -1537,10 +1702,12 @@ def ori_mcp_solver(
             trajectory.resource_mode = resource_mode
             trajectory.tool_loop = MCP_TOOL_LOOP_INSPECT
         trajectory.final_answer_normalized = normalized
-        state.store.set("ori_model_response", _model_response_to_dict(model_response))
-        state.store.set("ori_mcp_trajectory", _mcp_metadata_to_dict(trajectory))
-        state.store.set("ori_model_calls", 1)
-        state.store.set("ori_task_wall_seconds", time.monotonic() - task_t0)
+        _persist_mcp_state(
+            state,
+            model_response=model_response,
+            trajectory=trajectory,
+            task_t0=task_t0,
+        )
         return state
 
     return solve
@@ -1553,8 +1720,50 @@ def ori_mcp_scorer():
         task = _task_from_dict(metadata["ori_task"])
         ref_result = _cypher_result_from_dict(metadata["ref_result"])
         valid_names = set(metadata.get("valid_node_names", []))
-        model_response = _model_response_from_dict(state.store.get("ori_model_response"))
-        mcp_meta = _mcp_metadata_from_dict(state.store.get("ori_mcp_trajectory"))
+        model_response_data = state.store.get("ori_model_response")
+        mcp_meta_data = state.store.get("ori_mcp_trajectory")
+        missing_keys = [
+            key
+            for key, data in (
+                ("ori_model_response", model_response_data),
+                ("ori_mcp_trajectory", mcp_meta_data),
+            )
+            if not isinstance(data, dict)
+        ]
+        if missing_keys:
+            model_response = (
+                _model_response_from_dict(model_response_data)
+                if isinstance(model_response_data, dict)
+                else None
+            )
+            mcp_meta = (
+                _mcp_metadata_from_dict(mcp_meta_data) if isinstance(mcp_meta_data, dict) else None
+            )
+            subtype = (
+                "missing_model_response_and_mcp_trajectory"
+                if len(missing_keys) == 2
+                else "missing_model_response"
+                if missing_keys == ["ori_model_response"]
+                else "missing_mcp_trajectory"
+            )
+            return _incomplete_mcp_score(
+                metadata=metadata,
+                model_response=model_response,
+                mcp_meta=mcp_meta,
+                missing_keys=missing_keys,
+                subtype=subtype,
+            )
+        model_response = _model_response_from_dict(model_response_data)
+        mcp_meta = _mcp_metadata_from_dict(mcp_meta_data)
+        if mcp_meta.infra_error_subtype in {"sample_cancelled", "solver_exception"}:
+            return _incomplete_mcp_score(
+                metadata=metadata,
+                model_response=model_response,
+                mcp_meta=mcp_meta,
+                missing_keys=[],
+                subtype=mcp_meta.infra_error_subtype,
+                detail=model_response.error or "MCP sample failed before final answer",
+            )
 
         result = grade_mcp(
             task=task,
@@ -1632,7 +1841,12 @@ def _inspect_meta_from_sample(sample: EvalSample, log: EvalLog) -> InspectEvalMe
     )
 
 
-def _incomplete_result_from_sample(sample: EvalSample, log: EvalLog, detail: str):
+def _incomplete_result_from_sample(
+    sample: EvalSample,
+    log: EvalLog,
+    detail: str,
+    subtype: str = "incomplete_sample",
+):
     from .runner import EvalResult
 
     task = _task_from_dict(sample.metadata["ori_task"])
@@ -1655,6 +1869,7 @@ def _incomplete_result_from_sample(sample: EvalSample, log: EvalLog, detail: str
     )
     mcp_meta = _mcp_metadata_from_dict(sample.store.get("ori_mcp_trajectory", {}))
     mcp_meta.trajectory_log = log.location or ""
+    mcp_meta.infra_error_subtype = subtype
     return EvalResult(
         task=task,
         model_response=model_response,
@@ -1662,7 +1877,7 @@ def _incomplete_result_from_sample(sample: EvalSample, log: EvalLog, detail: str
             score=0.0,
             outcome="INFRA_ERROR",
             hallucination=False,
-            details=f"Inspect MCP sample incomplete: {detail}",
+            details=f"Inspect MCP sample incomplete: subtype={subtype}; {detail}",
         ),
         ref_result=_cypher_result_from_dict(sample.metadata["ref_result"]),
         model_result=CypherResult(success=False, error=detail),
@@ -1680,14 +1895,27 @@ def _result_from_sample(sample: EvalSample, log: EvalLog):
     task = _task_from_dict(sample.metadata["ori_task"])
     if "ori_model_response" not in sample.store:
         detail = _sample_error_detail(sample, "missing ori_model_response")
-        return _incomplete_result_from_sample(sample, log, detail)
+        return _incomplete_result_from_sample(sample, log, detail, "missing_model_response")
+    if "ori_mcp_trajectory" not in sample.store:
+        detail = _sample_error_detail(sample, "missing ori_mcp_trajectory")
+        return _incomplete_result_from_sample(sample, log, detail, "missing_mcp_trajectory")
     model_response = _model_response_from_dict(sample.store["ori_model_response"])
     if not sample.scores:
         detail = _sample_error_detail(sample, f"Inspect MCP sample {sample.id!r} missing scores")
-        return _incomplete_result_from_sample(sample, log, detail)
+        sample_subtype = sample.store.get("ori_mcp_trajectory", {}).get("infra_error_subtype")
+        subtype = (
+            sample_subtype
+            if sample_subtype in {"sample_cancelled", "solver_exception"}
+            else "sample_missing_scores"
+        )
+        return _incomplete_result_from_sample(sample, log, detail, subtype)
     score = next(iter(sample.scores.values()))
     grade_result = _score_metadata_to_grade_result(score)
-    mcp_meta = _mcp_metadata_from_dict(score.metadata["mcp"])
+    score_metadata = score.metadata or {}
+    if "mcp" not in score_metadata:
+        detail = _sample_error_detail(sample, f"Inspect MCP sample {sample.id!r} missing MCP score")
+        return _incomplete_result_from_sample(sample, log, detail, "missing_mcp_score_metadata")
+    mcp_meta = _mcp_metadata_from_dict(score_metadata["mcp"])
     mcp_meta.trajectory_log = log.location or ""
     inspect_meta = _inspect_meta_from_sample(sample, log)
     return EvalResult(

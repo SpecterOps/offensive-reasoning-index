@@ -5,7 +5,14 @@ import csv
 from ori.eval.adapter import ModelResponse
 from ori.eval.bhce import CypherResult
 from ori.eval.grader import GradeResult
-from ori.eval.report import print_comparison, print_summary, write_combined_csv, write_summary_csv
+from ori.eval.mcp_runtime import MCPRunMetadata
+from ori.eval.report import (
+    classify_summary_health,
+    print_comparison,
+    print_summary,
+    write_combined_csv,
+    write_summary_csv,
+)
 from ori.eval.runner import EvalResult
 from ori.eval.tasks import Task
 
@@ -194,6 +201,47 @@ def test_write_summary_csv_flags_partial_results(tmp_path) -> None:
     assert row["run_complete"] == "False"
     assert row["partial_result"] == "True"
     assert row["infra_errors"] == "1"
+    assert row["run_status"] == "partial"
+    assert "completed_tasks=1<expected_tasks=2" in row["run_status_detail"]
+
+
+def test_classify_summary_health_marks_fake_partial_summary_not_clean_complete() -> None:
+    row = {
+        "completed_tasks": "19",
+        "expected_tasks": "43",
+        "run_complete": "False",
+        "partial_result": "True",
+        "infra_errors": "26",
+    }
+
+    status, detail = classify_summary_health(row)
+
+    assert status == "partial"
+    assert "run_complete=False" in detail
+    assert "partial_result=True" in detail
+    assert "completed_tasks=19<expected_tasks=43" in detail
+    assert "infra_errors=26" in detail
+
+
+def test_write_combined_csv_includes_attempt_source_and_infra_subtype(tmp_path) -> None:
+    output = tmp_path / "baseline_combined.csv"
+    result = _result("INFRA_ERROR")
+    result.mcp = MCPRunMetadata(
+        resource_mode="on-demand",
+        tool_loop="native-ollama",
+        infra_error_subtype="batch_interrupted_missing_result",
+    )
+    result.partial_result = True
+    result.attempt_number = 2
+    result.result_source = "retry_interrupted_placeholder"
+
+    write_combined_csv({"ollama/a:latest": [result]}, output)
+
+    with output.open() as f:
+        row = next(csv.DictReader(f))
+    assert row["infra_error_subtype"] == "batch_interrupted_missing_result"
+    assert row["attempt_number"] == "2"
+    assert row["result_source"] == "retry_interrupted_placeholder"
 
 
 def test_write_summary_csv_tracks_query_too_expensive(tmp_path) -> None:

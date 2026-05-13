@@ -195,6 +195,9 @@ def test_run_eval_mcp_cli_bare_accounts_for_missing_partial_results(
     assert rows[-1]["task_id"] == "m3"
     assert rows[-1]["partial_result"] == "True"
     assert rows[-1]["resource_mode"] == "on-demand"
+    assert rows[-1]["infra_error_subtype"] == "batch_interrupted_missing_result"
+    assert rows[-1]["attempt_number"] == "2"
+    assert rows[-1]["result_source"] == "retry_interrupted_placeholder"
 
 
 def test_run_eval_cli_bare_threads_health_and_base_url(tmp_path: Path, monkeypatch) -> None:

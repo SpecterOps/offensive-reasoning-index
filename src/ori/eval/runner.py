@@ -38,6 +38,8 @@ class EvalResult:
     task_wall_seconds: float | None = None
     telemetry: dict[str, Any] | None = None
     partial_result: bool = False
+    attempt_number: int = 1
+    result_source: str = "first_pass"
 
 
 def _infra_task_ids(results: list[EvalResult]) -> set[str]:
@@ -64,6 +66,8 @@ def _missing_mcp_results(
     run_name: str | None,
     run_config: dict[str, Any] | None,
     resource_mode: str,
+    attempt_number: int = 1,
+    result_source: str = "first_pass",
 ) -> list[EvalResult]:
     """Represent interrupted Inspect samples that never reached result extraction."""
     returned_task_ids = {result.task.id for result in batch_results}
@@ -72,6 +76,7 @@ def _missing_mcp_results(
         return []
 
     detail = (
+        "subtype=batch_interrupted_missing_result; "
         "MCP run returned no sample result for this task; "
         "the model run likely interrupted before the full task set completed"
     )
@@ -101,12 +106,17 @@ def _missing_mcp_results(
                 ),
                 ref_result=CypherResult(success=False, error=detail),
                 model_result=CypherResult(success=False, error=detail),
-                mcp=MCPRunMetadata(resource_mode=resource_mode),
+                mcp=MCPRunMetadata(
+                    resource_mode=resource_mode,
+                    infra_error_subtype="batch_interrupted_missing_result",
+                ),
                 run_name=run_name or model,
                 requested_model=model,
                 run_config=run_config,
                 task_wall_seconds=0.0,
                 partial_result=True,
+                attempt_number=attempt_number,
+                result_source=result_source,
             )
         )
     print(
@@ -234,6 +244,8 @@ async def run_eval_cli_bare(
                 result.run_name = run_name or model
                 result.requested_model = model
                 result.run_config = run_config
+                result.attempt_number = attempt + 1
+                result.result_source = "first_pass" if attempt == 0 else "retry"
             results = _merge_results_by_task(tasks, results, batch_results)
         infra_task_ids = _infra_task_ids(batch_results)
         if not infra_task_ids or attempt >= max_model_reruns_on_infra:
@@ -316,6 +328,8 @@ async def run_eval_cli(
                 result.run_name = run_name or model
                 result.requested_model = model
                 result.run_config = run_config
+                result.attempt_number = attempt + 1
+                result.result_source = "first_pass" if attempt == 0 else "retry"
             results = _merge_results_by_task(tasks, results, batch_results)
         infra_task_ids = _infra_task_ids(batch_results)
         if not infra_task_ids or attempt >= max_model_reruns_on_infra:
@@ -406,6 +420,8 @@ async def run_eval_mcp_cli_bare(
                 result.run_name = run_name or model
                 result.requested_model = model
                 result.run_config = run_config
+                result.attempt_number = attempt + 1
+                result.result_source = "first_pass" if attempt == 0 else "retry"
             missing_results = _missing_mcp_results(
                 pending_tasks,
                 batch_results,
@@ -413,6 +429,12 @@ async def run_eval_mcp_cli_bare(
                 run_name=run_name,
                 run_config=run_config,
                 resource_mode=resource_mode,
+                attempt_number=attempt + 1,
+                result_source=(
+                    "first_pass_interrupted_placeholder"
+                    if attempt == 0
+                    else "retry_interrupted_placeholder"
+                ),
             )
             batch_results = [*batch_results, *missing_results]
             results = _merge_results_by_task(tasks, results, batch_results)
@@ -508,6 +530,8 @@ async def run_eval_mcp_cli(
                 result.run_name = run_name or model
                 result.requested_model = model
                 result.run_config = run_config
+                result.attempt_number = attempt + 1
+                result.result_source = "first_pass" if attempt == 0 else "retry"
             missing_results = _missing_mcp_results(
                 pending_tasks,
                 batch_results,
@@ -515,6 +539,12 @@ async def run_eval_mcp_cli(
                 run_name=run_name,
                 run_config=run_config,
                 resource_mode=resource_mode,
+                attempt_number=attempt + 1,
+                result_source=(
+                    "first_pass_interrupted_placeholder"
+                    if attempt == 0
+                    else "retry_interrupted_placeholder"
+                ),
             )
             batch_results = [*batch_results, *missing_results]
             results = _merge_results_by_task(tasks, results, batch_results)
