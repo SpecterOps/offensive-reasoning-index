@@ -194,9 +194,7 @@ def _row_for_result(r: EvalResult) -> dict[str, object]:
         "trajectory_log": mcp_meta.trajectory_log if mcp_meta else "",
         "server_prompt_used": mcp_meta.server_prompt_used if mcp_meta else False,
         "server_prompt_name": mcp_meta.server_prompt_name if mcp_meta else "",
-        "available_prompt_names": (
-            ",".join(mcp_meta.available_prompt_names) if mcp_meta else ""
-        ),
+        "available_prompt_names": (",".join(mcp_meta.available_prompt_names) if mcp_meta else ""),
         "prompt_discovery_status": mcp_meta.prompt_discovery_status if mcp_meta else "",
         "resource_mode": mcp_meta.resource_mode if mcp_meta else "",
         "mcp_tool_loop": mcp_meta.tool_loop if mcp_meta else "",
@@ -247,6 +245,17 @@ def _stats(results: list[EvalResult]) -> dict:
     infra_errors = sum(1 for r in results if r.grade.outcome == "INFRA_ERROR")
     partial_results = sum(1 for r in results if getattr(r, "partial_result", False))
     completed_tasks = total - partial_results
+    correct_completed = sum(
+        1 for r in results if r.grade.score == 1.0 and not getattr(r, "partial_result", False)
+    )
+    timeout_errors = sum(
+        1
+        for r in results
+        if r.mcp
+        and r.mcp.infra_error_subtype
+        in {"MCP_TURN_TIMEOUT", "NO_PROGRESS_TIMEOUT", "SAMPLE_TIMEOUT", "OLLAMA_STREAM_TIMEOUT"}
+    )
+    tool_error_results = cypher_errors + query_too_expensive
     tool_calls_total = sum(r.mcp.tool_calls_total for r in results if r.mcp)
     cypher_query_calls = sum(r.mcp.cypher_query_calls for r in results if r.mcp)
     non_cypher_tool_calls = sum(r.mcp.non_cypher_tool_calls for r in results if r.mcp)
@@ -268,6 +277,13 @@ def _stats(results: list[EvalResult]) -> dict:
     return {
         "total": total,
         "correct": correct,
+        "completed_samples": completed_tasks,
+        "correct_completed": correct_completed,
+        "reasoning_accuracy": correct_completed / completed_tasks if completed_tasks else 0.0,
+        "effective_accuracy": correct / total if total else 0.0,
+        "infra_failure_rate": infra_errors / total if total else 0.0,
+        "tool_error_rate": tool_error_results / total if total else 0.0,
+        "timeout_rate": timeout_errors / total if total else 0.0,
         "hallucs": hallucs,
         "cypher_errors": cypher_errors,
         "query_too_expensive": query_too_expensive,
@@ -536,6 +552,13 @@ def print_summary(results: list[EvalResult], model: str) -> None:
     if any(r.mcp for r in results):
         mcp = _stats(results)
         avg_tools = mcp["tool_calls_total"] / mcp["mcp_samples"] if mcp["mcp_samples"] else 0.0
+        print(
+            f"Reasoning accuracy: {mcp['correct_completed']}/{mcp['completed_samples']} "
+            f"({100 * mcp['reasoning_accuracy']:.1f}%)  |  "
+            f"Effective accuracy: {100 * mcp['effective_accuracy']:.1f}%  |  "
+            f"Infra/tool/timeout rates: {100 * mcp['infra_failure_rate']:.1f}%/"
+            f"{100 * mcp['tool_error_rate']:.1f}%/{100 * mcp['timeout_rate']:.1f}%"
+        )
         print(
             f"Avg tool calls: {avg_tools:.2f}  |  Cypher tool calls: {mcp['cypher_query_calls']}  |  "  # noqa: E501
             f"Non-cypher tool calls: {mcp['non_cypher_tool_calls']}  |  "

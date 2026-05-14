@@ -504,6 +504,82 @@ def generate(
         click.echo(f"  [{path.tier}] {path.template_id}: {path.description[:80]}...")
 
 
+@main.command(name="preflight-tasks")
+@click.option(
+    "--manifest",
+    "manifest_path",
+    required=True,
+    type=click.Path(exists=True),
+    help="Generated task manifest JSON",
+)
+@click.option("--track", type=click.Choice(["mcp", "cypher"]), default="mcp", show_default=True)
+@click.option("--valid-nodes", "valid_nodes_path", type=click.Path(exists=True), default=None)
+@click.option(
+    "--output", "output_path", type=click.Path(), default=None, help="Optional JSON report path"
+)
+def preflight_tasks_command(
+    manifest_path: str, track: str, valid_nodes_path: str | None, output_path: str | None
+) -> None:
+    """Run task/scorer consistency preflight checks before a campaign."""
+    from .eval.preflight import preflight_manifest
+
+    report = preflight_manifest(
+        Path(manifest_path),
+        track=track,
+        valid_nodes_path=Path(valid_nodes_path) if valid_nodes_path else None,
+    )
+    if output_path:
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(output_path).write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
+    summary = report["summary"]
+    click.echo(
+        f"Preflight checked {summary['tasks_checked']} tasks: "
+        f"{summary['errors']} errors, {summary['warnings']} warnings"
+    )
+    if output_path:
+        click.echo(f"Report written to {output_path}")
+    if not report["ok"]:
+        raise SystemExit(1)
+
+
+@main.command(name="score-answers")
+@click.option(
+    "--manifest",
+    "manifest_path",
+    required=True,
+    type=click.Path(exists=True),
+    help="Generated task manifest JSON",
+)
+@click.option(
+    "--answers",
+    "answers_path",
+    required=True,
+    type=click.Path(exists=True),
+    help="Structured answer JSON to grade",
+)
+@click.option("--track", type=click.Choice(["mcp", "cypher"]), default="mcp", show_default=True)
+@click.option(
+    "--output", "output_path", required=True, type=click.Path(), help="Projection JSON output path"
+)
+def score_answers(manifest_path: str, answers_path: str, track: str, output_path: str) -> None:
+    """Grade a structured answers file without launching a model campaign."""
+    from .eval.answer_scoring import write_score_answers_projection
+
+    projection = write_score_answers_projection(
+        manifest_path=Path(manifest_path),
+        answers_path=Path(answers_path),
+        track=track,
+        output_path=Path(output_path),
+    )
+    summary = projection["summary"]
+    click.echo(
+        f"Scored {summary['completed_samples']}/{summary['total_samples']} samples; "
+        f"reasoning_accuracy={summary['reasoning_accuracy']:.3f}; "
+        f"effective_accuracy={summary['effective_accuracy']:.3f}"
+    )
+    click.echo(f"Projection written to {output_path}")
+
+
 @main.command()
 @click.option(
     "--manifest", "-m", required=True, type=click.Path(exists=True), help="Path to manifest.json"

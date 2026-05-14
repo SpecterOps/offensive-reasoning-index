@@ -59,6 +59,9 @@ BLOODHOUND_PROMPT_NAME = "bloodhound_assistant"
 RESOURCE_LIST_TOOL_NAME = "list_bloodhound_resources"
 RESOURCE_READ_TOOL_NAME = "read_bloodhound_resource"
 DEFAULT_MCP_OLLAMA_READ_TIMEOUT_SECONDS = 900.0
+DEFAULT_MCP_NO_PROGRESS_TIMEOUT_SECONDS = float(
+    os.getenv("ORI_MCP_NO_PROGRESS_TIMEOUT_SECONDS", "300")
+)
 MCP_TOOL_LOOP_AUTO = "auto"
 MCP_TOOL_LOOP_INSPECT = "inspect"
 MCP_TOOL_LOOP_NATIVE_OLLAMA = "native-ollama"
@@ -83,6 +86,29 @@ OPENAI_COMPAT_TELEMETRY_VALUES = {
     OPENAI_COMPAT_TELEMETRY_VLLM,
     OPENAI_COMPAT_TELEMETRY_LM_STUDIO,
 }
+
+
+class MCPNoProgressTimeout(TimeoutError):
+    """Raised when an MCP/model turn makes no observable progress before its watchdog expires."""
+
+    def __init__(self, *, subtype: str, scope: str, timeout_seconds: float) -> None:
+        self.subtype = subtype
+        self.scope = scope
+        self.timeout_seconds = timeout_seconds
+        super().__init__(
+            f"{subtype}: no progress observed for {timeout_seconds:.1f}s during MCP {scope}"
+        )
+
+
+def _raise_if_no_progress(
+    *, last_activity: float, now: float, timeout_seconds: float | None, scope: str
+) -> None:
+    if not timeout_seconds or timeout_seconds <= 0:
+        return
+    if now - last_activity <= timeout_seconds:
+        return
+    subtype = "MCP_TURN_TIMEOUT" if scope == "turn" else "NO_PROGRESS_TIMEOUT"
+    raise MCPNoProgressTimeout(subtype=subtype, scope=scope, timeout_seconds=timeout_seconds)
 
 
 @dataclass
@@ -335,9 +361,7 @@ async def _discover_bloodhound_mcp_prompt(server: Any) -> tuple[str, str, list[s
             prompt = await session.get_prompt(selected)
         text = _prompt_messages_to_text(prompt.messages)
         if not text:
-            print(
-                f"  WARNING: MCP prompt {selected!r} was empty; using built-in ORI MCP prompt."
-            )
+            print(f"  WARNING: MCP prompt {selected!r} was empty; using built-in ORI MCP prompt.")
             return "", selected, names, "empty_selected_prompt"
         return text, selected, names, "selected"
     except Exception as exc:
@@ -470,6 +494,14 @@ JSON contract:
 
 Rules:
 - node_names must be BloodHound object names, not object IDs
+- If you use Cypher, never duplicate RETURN columns; alias repeated or derived expressions
+- Prefer scalar RETURN columns (u.name, g.name, c.name) over path/list projections
+  such as nodes(p) or [n IN nodes(p)|...]
+- avoid unsupported UNION in the BloodHound CE API path; use separate queries or OR conditions
+- Use COALESCE(list_prop, []) for nullable list properties
+- If a tool returns structured syntax_error or query_error, revise the query instead of repeating it
+- Final node_names should include only task-required graph-valid nodes unless
+  optional nodes are explicitly acceptable
 - If you cannot find a path, set path_found to false and return an empty node_names list
 - Keep the final JSON compact and valid
 """
@@ -905,6 +937,7 @@ async def _ollama_chat_turn(
     tools: list[dict[str, Any]],
     ollama_options: dict[str, Any] | None,
     read_timeout_seconds: float = DEFAULT_MCP_OLLAMA_READ_TIMEOUT_SECONDS,
+    no_progress_timeout_seconds: float = DEFAULT_MCP_NO_PROGRESS_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "model": model_name.split("/", 1)[1],
@@ -927,9 +960,30 @@ async def _ollama_chat_turn(
     async with httpx.AsyncClient(timeout=timeout) as client:
         async with client.stream("POST", url, json=payload) as resp:
             resp.raise_for_status()
-            async for line in resp.aiter_lines():
+            lines = resp.aiter_lines()
+            last_activity = time.monotonic()
+            while True:
+                _raise_if_no_progress(
+                    last_activity=last_activity,
+                    now=time.monotonic(),
+                    timeout_seconds=no_progress_timeout_seconds,
+                    scope="turn",
+                )
+                try:
+                    line = await asyncio.wait_for(
+                        lines.__anext__(), timeout=no_progress_timeout_seconds
+                    )
+                except StopAsyncIteration:
+                    break
+                except TimeoutError as exc:
+                    raise MCPNoProgressTimeout(
+                        subtype="MCP_TURN_TIMEOUT",
+                        scope="turn",
+                        timeout_seconds=no_progress_timeout_seconds,
+                    ) from exc
                 if not line.strip():
                     continue
+                last_activity = time.monotonic()
                 data = json.loads(line)
                 final_model = data.get("model") or final_model
                 message = data.get("message") or {}
@@ -1474,8 +1528,7 @@ def _incomplete_mcp_score(
     missing_detail = ", ".join(f"missing {key}" for key in missing_keys)
     diagnostic = detail or f"MCP sample incomplete: {missing_detail}"
     details = (
-        f"{diagnostic}; subtype={subtype}; task_id={task_id}; "
-        f"sample={sample_index}/{sample_total}"
+        f"{diagnostic}; subtype={subtype}; task_id={task_id}; sample={sample_index}/{sample_total}"
     )
     if model_response is None:
         model_response = ModelResponse(
@@ -1612,6 +1665,21 @@ def ori_mcp_solver(
                     model_calls=0,
                 )
                 raise
+            except MCPNoProgressTimeout as exc:
+                detail = f"MCP native Ollama no-progress timeout: {_exception_detail(exc)}"
+                model_response, trajectory, ollama_messages = _fallback_mcp_state(
+                    model_name=model_name,
+                    messages=state.messages,
+                    detail=detail,
+                    subtype=exc.subtype,
+                    tool_loop=MCP_TOOL_LOOP_NATIVE_OLLAMA,
+                    server_prompt_text=server_prompt_text,
+                    server_prompt_name=server_prompt_name,
+                    available_prompt_names=prompt_names,
+                    prompt_discovery_status=prompt_discovery_status,
+                    resource_mode=resource_mode,
+                    elapsed_seconds=time.monotonic() - task_t0,
+                )
             except Exception as exc:
                 detail = f"MCP native Ollama solver exception: {_exception_detail(exc)}"
                 model_response, trajectory, ollama_messages = _fallback_mcp_state(
@@ -1755,7 +1823,14 @@ def ori_mcp_scorer():
             )
         model_response = _model_response_from_dict(model_response_data)
         mcp_meta = _mcp_metadata_from_dict(mcp_meta_data)
-        if mcp_meta.infra_error_subtype in {"sample_cancelled", "solver_exception"}:
+        if mcp_meta.infra_error_subtype in {
+            "sample_cancelled",
+            "solver_exception",
+            "MCP_TURN_TIMEOUT",
+            "NO_PROGRESS_TIMEOUT",
+            "SAMPLE_TIMEOUT",
+            "OLLAMA_STREAM_TIMEOUT",
+        }:
             return _incomplete_mcp_score(
                 metadata=metadata,
                 model_response=model_response,
@@ -2026,8 +2101,7 @@ async def run_mcp_eval_with_inspect(
         print(f"MCP tool loop: {resolved_tool_loop}")
         if resolved_tool_loop == MCP_TOOL_LOOP_NATIVE_OPENAI_COMPAT:
             print(
-                "OpenAI-compatible telemetry adapter: "
-                f"{resolved_openai_compat_telemetry_adapter}"
+                f"OpenAI-compatible telemetry adapter: {resolved_openai_compat_telemetry_adapter}"
             )
 
     inspect_task = InspectTask(
