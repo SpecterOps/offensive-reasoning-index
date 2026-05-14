@@ -35,7 +35,77 @@ def _answer_final(answer: dict[str, Any]) -> dict[str, Any] | None:
         except json.JSONDecodeError:
             return None
         return parsed if isinstance(parsed, dict) else None
-    return final if isinstance(final, dict) else None
+    if isinstance(final, dict):
+        return final
+
+    if not isinstance(answer.get("answer_type"), str):
+        return None
+    normalized: dict[str, Any] = {"answer_type": str(answer["answer_type"])}
+    for key in ("node_names", "path", "paths", "count", "path_found", "relationships"):
+        if key in answer:
+            normalized[key] = answer[key]
+    if normalized["answer_type"] == "path":
+        normalized["answer_type"] = "path_exists"
+        normalized["path_found"] = True
+        if "node_names" not in normalized and isinstance(answer.get("path"), list):
+            normalized["node_names"] = answer["path"]
+    return normalized
+
+
+def _coerce_cypher_result(value: Any) -> CypherResult | None:
+    if not isinstance(value, dict):
+        return None
+    node_names = value.get("node_names") or value.get("ref_names") or []
+    if not isinstance(node_names, list):
+        node_names = []
+    return CypherResult(
+        success=bool(value.get("success", value.get("ref_success", True))),
+        node_names={str(node) for node in node_names},
+        error=value.get("error") or value.get("ref_error"),
+        raw=value,
+    )
+
+
+def _reference_results(answer_data: dict[str, Any], answers_path: Path) -> dict[str, CypherResult]:
+    references: dict[str, CypherResult] = {}
+    raw_references = answer_data.get("reference_results") or answer_data.get("references") or {}
+    if isinstance(raw_references, dict):
+        for task_id, value in raw_references.items():
+            result = _coerce_cypher_result(value)
+            if result is not None:
+                references[str(task_id)] = result
+
+    sidecar_path = answers_path.with_name("scorer_projection.json")
+    if sidecar_path.exists():
+        sidecar = json.loads(sidecar_path.read_text())
+        rows = sidecar.get("rows", []) if isinstance(sidecar, dict) else []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            task_id = row.get("task_id") or row.get("id")
+            if not task_id or str(task_id) in references:
+                continue
+            result = _coerce_cypher_result(row)
+            if result is not None:
+                references[str(task_id)] = result
+    return references
+
+
+def _inventory_nodes(answer_data: dict[str, Any], answers_path: Path) -> set[str]:
+    nodes = {str(node) for node in answer_data.get("valid_node_names", [])}
+    inventory_path = answers_path.with_name("inventory_results.json")
+    if not inventory_path.exists():
+        return nodes
+    inventory = json.loads(inventory_path.read_text())
+    for section in inventory.values() if isinstance(inventory, dict) else []:
+        data = section.get("json", {}).get("data", {}) if isinstance(section, dict) else {}
+        for literal in data.get("literals", []):
+            if not isinstance(literal, dict):
+                continue
+            value = literal.get("value")
+            if isinstance(value, str) and ("@" in value or "." in value):
+                nodes.add(value)
+    return nodes
 
 
 def _answer_reference_nodes(answer: dict[str, Any], task: Task) -> set[str]:
@@ -54,6 +124,28 @@ def _answer_ref_error(answer: dict[str, Any]) -> str | None:
     return str(value) if value else None
 
 
+def _answer_ref_result(
+    answer: dict[str, Any], task: Task, reference_results: dict[str, CypherResult]
+) -> CypherResult:
+    task_id = _answer_task_id(answer)
+    if task_id in reference_results:
+        return reference_results[task_id]
+    ref_error = _answer_ref_error(answer)
+    reference_nodes = _answer_reference_nodes(answer, task)
+    if not reference_nodes and ref_error is None:
+        raise ValueError(
+            f"Missing reference nodes for task {task_id!r}. Offline scoring cannot grade "
+            "non-contract tasks without materialized reference results. Add a "
+            "reference_results object to the answers JSON or place scorer_projection.json "
+            "next to the answers file with rows containing task_id and node_names."
+        )
+    return CypherResult(
+        success=ref_error is None,
+        node_names=reference_nodes,
+        error=ref_error,
+    )
+
+
 def score_answers_projection(
     *,
     manifest_path: Path,
@@ -68,7 +160,8 @@ def score_answers_projection(
     if not isinstance(answers, list):
         raise ValueError("answers JSON object must contain an answers list")
 
-    valid_nodes = {str(node) for node in answer_data.get("valid_node_names", [])}
+    valid_nodes = _inventory_nodes(answer_data, answers_path)
+    reference_results = _reference_results(answer_data, answers_path)
     diagnostics: list[dict[str, Any]] = []
     for answer in answers:
         if not isinstance(answer, dict):
@@ -86,24 +179,13 @@ def score_answers_projection(
             )
             continue
         contract = task_contract_for(task)
-        answer_nodes = {
-            str(node)
-            for node in (_answer_final(answer) or {}).get("node_names", [])
-            if str(node).strip()
-        }
-        reference_nodes = _answer_reference_nodes(answer, task)
-        merged_valid_nodes = (
-            set(valid_nodes) | reference_nodes | contract_nodes(contract) | answer_nodes
-        )
-        ref_error = _answer_ref_error(answer)
-        ref_result = CypherResult(
-            success=ref_error is None,
-            node_names=reference_nodes,
-            error=ref_error,
-        )
+        final_answer = _answer_final(answer)
+        ref_result = _answer_ref_result(answer, task, reference_results)
+        reference_nodes = set(ref_result.node_names)
+        merged_valid_nodes = set(valid_nodes) | reference_nodes | contract_nodes(contract)
         diagnostic = grade_mcp_diagnostic(
             task=task,
-            final_answer=_answer_final(answer),
+            final_answer=final_answer,
             ref_result=ref_result,
             valid_node_names=merged_valid_nodes,
             contract=contract,

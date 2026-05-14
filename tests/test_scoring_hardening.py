@@ -5,6 +5,7 @@ import json
 from click.testing import CliRunner
 
 from ori.cli import main
+from ori.eval.answer_scoring import score_answers_projection
 from ori.eval.bhce import CypherResult
 from ori.eval.contracts import AnswerContract, task_contract_for
 from ori.eval.grader import grade_mcp_diagnostic
@@ -189,3 +190,193 @@ def test_mcp_prompt_includes_bloodhound_cypher_quirks() -> None:
     assert "never duplicate RETURN columns" in prompt
     assert "avoid unsupported UNION" in prompt
     assert "COALESCE" in prompt
+
+
+def test_score_answers_accepts_top_level_manual_answer_shape(tmp_path) -> None:
+    manifest = {
+        "domain": "CORP.LOCAL",
+        "planted_paths": [
+            {
+                "template_id": "t4_adcs_esc1",
+                "tier": 4,
+                "source_name": "ALICE@CORP.LOCAL",
+                "target_name": "DOMAIN ADMINS@CORP.LOCAL",
+                "description": "adcs",
+                "verification_cypher": "MATCH p=() RETURN p",
+                "critical_nodes": ["ALICE@CORP.LOCAL", "ROOTCA@CORP.LOCAL"],
+            }
+        ],
+    }
+    manifest_path = tmp_path / "manifest.json"
+    answers_path = tmp_path / "answers.json"
+    manifest_path.write_text(json.dumps(manifest))
+    answers_path.write_text(
+        json.dumps(
+            {
+                "valid_node_names": ["ALICE@CORP.LOCAL", "ROOTCA@CORP.LOCAL"],
+                "answers": [
+                    {
+                        "id": "t4_adcs_esc1-01",
+                        "answer_type": "path",
+                        "path": ["ALICE@CORP.LOCAL", "ROOTCA@CORP.LOCAL"],
+                    }
+                ],
+            }
+        )
+    )
+
+    projection = score_answers_projection(
+        manifest_path=manifest_path,
+        answers_path=answers_path,
+        track="mcp",
+    )
+
+    assert projection["tasks"][0]["outcome"] != "PARSE_FAIL"
+    assert projection["tasks"][0]["answer_nodes"] == ["ALICE@CORP.LOCAL", "ROOTCA@CORP.LOCAL"]
+
+
+def test_score_answers_requires_reference_input_for_non_contract_tasks(tmp_path) -> None:
+    manifest = {
+        "domain": "CORP.LOCAL",
+        "planted_paths": [
+            {
+                "template_id": "custom_path",
+                "tier": 1,
+                "source_name": "ALICE@CORP.LOCAL",
+                "target_name": "DC01.CORP.LOCAL",
+                "description": "custom",
+                "verification_cypher": "MATCH p=() RETURN p",
+            }
+        ],
+    }
+    manifest_path = tmp_path / "manifest.json"
+    answers_path = tmp_path / "answers.json"
+    manifest_path.write_text(json.dumps(manifest))
+    answers_path.write_text(
+        json.dumps(
+            {
+                "valid_node_names": ["ALICE@CORP.LOCAL", "DC01.CORP.LOCAL"],
+                "answers": [
+                    {
+                        "task_id": "mcp-global-admin-to",
+                        "answer_type": "path_exists",
+                        "path_found": True,
+                        "node_names": ["ALICE@CORP.LOCAL", "DC01.CORP.LOCAL"],
+                    }
+                ],
+            }
+        )
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "score-answers",
+            "--manifest",
+            str(manifest_path),
+            "--answers",
+            str(answers_path),
+            "--track",
+            "mcp",
+            "--output",
+            str(tmp_path / "projection.json"),
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "reference_results" in result.output
+    assert "scorer_projection.json" in result.output
+
+
+def test_score_answers_uses_reference_sidecar_for_non_contract_tasks(tmp_path) -> None:
+    manifest = {
+        "domain": "CORP.LOCAL",
+        "planted_paths": [
+            {
+                "template_id": "custom_path",
+                "tier": 1,
+                "source_name": "ALICE@CORP.LOCAL",
+                "target_name": "DC01.CORP.LOCAL",
+                "description": "custom",
+                "verification_cypher": "MATCH p=() RETURN p",
+            }
+        ],
+    }
+    manifest_path = tmp_path / "manifest.json"
+    answers_path = tmp_path / "answers.json"
+    manifest_path.write_text(json.dumps(manifest))
+    answers_path.write_text(
+        json.dumps(
+            {
+                "valid_node_names": ["ALICE@CORP.LOCAL", "DC01.CORP.LOCAL"],
+                "answers": [
+                    {
+                        "task_id": "mcp-global-admin-to",
+                        "answer_type": "path_exists",
+                        "path_found": True,
+                        "node_names": ["ALICE@CORP.LOCAL", "DC01.CORP.LOCAL"],
+                    }
+                ],
+                "reference_results": {
+                    "mcp-global-admin-to": {
+                        "success": True,
+                        "node_names": ["ALICE@CORP.LOCAL", "DC01.CORP.LOCAL"],
+                    }
+                },
+            }
+        )
+    )
+
+    projection = score_answers_projection(
+        manifest_path=manifest_path,
+        answers_path=answers_path,
+        track="mcp",
+    )
+
+    assert projection["tasks"][0]["reference_nodes"] == ["ALICE@CORP.LOCAL", "DC01.CORP.LOCAL"]
+    assert projection["tasks"][0]["outcome"] == "CORRECT"
+
+
+def test_score_answers_does_not_treat_answer_nodes_as_valid_inventory(tmp_path) -> None:
+    manifest = {
+        "domain": "CORP.LOCAL",
+        "planted_paths": [
+            {
+                "template_id": "custom_path",
+                "tier": 1,
+                "source_name": "ALICE@CORP.LOCAL",
+                "target_name": "DC01.CORP.LOCAL",
+                "description": "custom",
+                "verification_cypher": "MATCH p=() RETURN p",
+            }
+        ],
+    }
+    manifest_path = tmp_path / "manifest.json"
+    answers_path = tmp_path / "answers.json"
+    manifest_path.write_text(json.dumps(manifest))
+    answers_path.write_text(
+        json.dumps(
+            {
+                "valid_node_names": ["ALICE@CORP.LOCAL", "DC01.CORP.LOCAL"],
+                "answers": [
+                    {
+                        "task_id": "mcp-global-admin-to",
+                        "answer_type": "node_set",
+                        "node_names": ["ALICE@CORP.LOCAL", "PHANTOM@CORP.LOCAL"],
+                    }
+                ],
+                "reference_results": {
+                    "mcp-global-admin-to": {"success": True, "node_names": ["ALICE@CORP.LOCAL"]}
+                },
+            }
+        )
+    )
+
+    projection = score_answers_projection(
+        manifest_path=manifest_path,
+        answers_path=answers_path,
+        track="mcp",
+    )
+
+    assert projection["tasks"][0]["outcome"] == "HALLUCINATION"
+    assert projection["tasks"][0]["hallucinated_nodes"] == ["PHANTOM@CORP.LOCAL"]

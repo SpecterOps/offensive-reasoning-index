@@ -565,12 +565,15 @@ def score_answers(manifest_path: str, answers_path: str, track: str, output_path
     """Grade a structured answers file without launching a model campaign."""
     from .eval.answer_scoring import write_score_answers_projection
 
-    projection = write_score_answers_projection(
-        manifest_path=Path(manifest_path),
-        answers_path=Path(answers_path),
-        track=track,
-        output_path=Path(output_path),
-    )
+    try:
+        projection = write_score_answers_projection(
+            manifest_path=Path(manifest_path),
+            answers_path=Path(answers_path),
+            track=track,
+            output_path=Path(output_path),
+        )
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
     summary = projection["summary"]
     click.echo(
         f"Scored {summary['completed_samples']}/{summary['total_samples']} samples; "
