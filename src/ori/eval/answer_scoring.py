@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from .bhce import CypherResult
-from .contracts import contract_nodes, task_contract_for
+from .contracts import AnswerContract, contract_nodes, task_contract_for
 from .grader import grade_mcp_diagnostic
 from .tasks import Task, generate_mcp_tasks, generate_tasks
 
@@ -49,6 +49,14 @@ def _answer_final(answer: dict[str, Any]) -> dict[str, Any] | None:
         normalized["path_found"] = True
         if "node_names" not in normalized and isinstance(answer.get("path"), list):
             normalized["node_names"] = answer["path"]
+    elif normalized["answer_type"] == "paths":
+        normalized["answer_type"] = "path_exists"
+        normalized["path_found"] = True
+        node_names: list[str] = []
+        for path in answer.get("paths", []):
+            if isinstance(path, list):
+                node_names.extend(str(node) for node in path)
+        normalized["node_names"] = node_names
     return normalized
 
 
@@ -129,7 +137,7 @@ def _answer_ref_result(
 ) -> CypherResult:
     task_id = _answer_task_id(answer)
     if task_id in reference_results:
-        return reference_results[task_id]
+        return _normalize_reference_result(task, reference_results[task_id])
     ref_error = _answer_ref_error(answer)
     reference_nodes = _answer_reference_nodes(answer, task)
     if not reference_nodes and ref_error is None:
@@ -139,10 +147,34 @@ def _answer_ref_result(
             "reference_results object to the answers JSON or place scorer_projection.json "
             "next to the answers file with rows containing task_id and node_names."
         )
+    return _normalize_reference_result(
+        task,
+        CypherResult(
+            success=ref_error is None,
+            node_names=reference_nodes,
+            error=ref_error,
+        ),
+    )
+
+
+def _normalize_reference_result(task: Task, ref_result: CypherResult) -> CypherResult:
+    node_names = set(ref_result.node_names)
+    if task.id == "mcp-user-privileged-group-memberships":
+        domain = str(task.metadata.get("domain") or "").upper()
+        low_privilege_builtin_groups = {f"DOMAIN USERS@{domain}"} if domain else set()
+        node_names -= low_privilege_builtin_groups
+    elif task.id == "t3_unconstrained_delegation-01":
+        required = {
+            str(task.metadata.get("source_name") or "").strip(),
+            str(task.metadata.get("target_name") or "").strip(),
+        }
+        node_names = {node for node in required if node}
     return CypherResult(
-        success=ref_error is None,
-        node_names=reference_nodes,
-        error=ref_error,
+        success=ref_result.success,
+        nodes=ref_result.nodes,
+        node_names=node_names,
+        error=ref_result.error,
+        raw=ref_result.raw,
     )
 
 
@@ -178,9 +210,20 @@ def score_answers_projection(
                 }
             )
             continue
-        contract = task_contract_for(task)
-        final_answer = _answer_final(answer)
         ref_result = _answer_ref_result(answer, task, reference_results)
+        contract = (
+            AnswerContract(
+                task_id=task.id,
+                required_nodes=tuple(sorted(ref_result.node_names)),
+                grade_mode=task.grade_mode,
+                question=task.question,
+                notes="Materialized offline reference nodes.",
+                metadata={"source": "materialized_reference"},
+            )
+            if set(ref_result.node_names)
+            else task_contract_for(task)
+        )
+        final_answer = _answer_final(answer)
         reference_nodes = set(ref_result.node_names)
         merged_valid_nodes = set(valid_nodes) | reference_nodes | contract_nodes(contract)
         diagnostic = grade_mcp_diagnostic(

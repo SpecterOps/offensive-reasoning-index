@@ -235,6 +235,58 @@ def test_score_answers_accepts_top_level_manual_answer_shape(tmp_path) -> None:
     assert projection["tasks"][0]["answer_nodes"] == ["ALICE@CORP.LOCAL", "ROOTCA@CORP.LOCAL"]
 
 
+def test_score_answers_flattens_top_level_manual_paths_shape(tmp_path) -> None:
+    manifest = {
+        "domain": "CORP.LOCAL",
+        "planted_paths": [
+            {
+                "template_id": "custom_path",
+                "tier": 1,
+                "source_name": "ALICE@CORP.LOCAL",
+                "target_name": "DC01.CORP.LOCAL",
+                "description": "custom",
+                "verification_cypher": "MATCH p=() RETURN p",
+            }
+        ],
+    }
+    manifest_path = tmp_path / "manifest.json"
+    answers_path = tmp_path / "answers.json"
+    manifest_path.write_text(json.dumps(manifest))
+    answers_path.write_text(
+        json.dumps(
+            {
+                "valid_node_names": ["ALICE@CORP.LOCAL", "BOB@CORP.LOCAL", "DC01.CORP.LOCAL"],
+                "answers": [
+                    {
+                        "task_id": "mcp-global-admin-to",
+                        "answer_type": "paths",
+                        "paths": [["ALICE@CORP.LOCAL", "DC01.CORP.LOCAL"], ["BOB@CORP.LOCAL"]],
+                    }
+                ],
+                "reference_results": {
+                    "mcp-global-admin-to": {
+                        "success": True,
+                        "node_names": ["ALICE@CORP.LOCAL", "DC01.CORP.LOCAL"],
+                    }
+                },
+            }
+        )
+    )
+
+    projection = score_answers_projection(
+        manifest_path=manifest_path,
+        answers_path=answers_path,
+        track="mcp",
+    )
+
+    assert projection["tasks"][0]["outcome"] == "CORRECT"
+    assert projection["tasks"][0]["answer_nodes"] == [
+        "ALICE@CORP.LOCAL",
+        "BOB@CORP.LOCAL",
+        "DC01.CORP.LOCAL",
+    ]
+
+
 def test_score_answers_requires_reference_input_for_non_contract_tasks(tmp_path) -> None:
     manifest = {
         "domain": "CORP.LOCAL",
@@ -380,3 +432,242 @@ def test_score_answers_does_not_treat_answer_nodes_as_valid_inventory(tmp_path) 
 
     assert projection["tasks"][0]["outcome"] == "HALLUCINATION"
     assert projection["tasks"][0]["hallucinated_nodes"] == ["PHANTOM@CORP.LOCAL"]
+
+
+def test_score_answers_uses_sidecar_rows_id_key_and_count(tmp_path) -> None:
+    manifest = {
+        "domain": "CORP.LOCAL",
+        "planted_paths": [
+            {
+                "template_id": "custom_path",
+                "tier": 1,
+                "source_name": "ALICE@CORP.LOCAL",
+                "target_name": "DC01.CORP.LOCAL",
+                "description": "custom",
+                "verification_cypher": "MATCH p=() RETURN p",
+            }
+        ],
+    }
+    manifest_path = tmp_path / "manifest.json"
+    answers_path = tmp_path / "answers.json"
+    sidecar_path = tmp_path / "scorer_projection.json"
+    manifest_path.write_text(json.dumps(manifest))
+    answers_path.write_text(
+        json.dumps(
+            {
+                "valid_node_names": ["IT-ADMINS@CORP.LOCAL", "MSMITH@CORP.LOCAL"],
+                "answers": [
+                    {
+                        "task_id": "mcp-global-da-direct-member-count",
+                        "answer_type": "row_count",
+                        "count": 2,
+                    }
+                ],
+            }
+        )
+    )
+    sidecar_path.write_text(
+        json.dumps(
+            {
+                "rows": [
+                    {
+                        "id": "mcp-global-da-direct-member-count",
+                        "ref_success": True,
+                        "ref_names": ["IT-ADMINS@CORP.LOCAL", "MSMITH@CORP.LOCAL"],
+                    }
+                ]
+            }
+        )
+    )
+
+    projection = score_answers_projection(
+        manifest_path=manifest_path,
+        answers_path=answers_path,
+        track="mcp",
+    )
+
+    assert projection["tasks"][0]["outcome"] == "CORRECT"
+    assert projection["tasks"][0]["metrics"]["reference_count_literal"] == 2
+
+
+def test_score_answers_filters_builtin_low_privilege_group_for_privileged_group_task(
+    tmp_path,
+) -> None:
+    manifest = {
+        "domain": "CORP.LOCAL",
+        "planted_paths": [
+            {
+                "template_id": "t1_group_membership",
+                "tier": 1,
+                "source_name": "MMOORE@CORP.LOCAL",
+                "target_name": "DOMAIN ADMINS@CORP.LOCAL",
+                "description": "membership",
+                "verification_cypher": "MATCH p=() RETURN p",
+            }
+        ],
+    }
+    manifest_path = tmp_path / "manifest.json"
+    answers_path = tmp_path / "answers.json"
+    manifest_path.write_text(json.dumps(manifest))
+    answers_path.write_text(
+        json.dumps(
+            {
+                "valid_node_names": [
+                    "DOMAIN ADMINS@CORP.LOCAL",
+                    "DOMAIN USERS@CORP.LOCAL",
+                    "ENTERPRISE ADMINS@CORP.LOCAL",
+                ],
+                "answers": [
+                    {
+                        "task_id": "mcp-user-privileged-group-memberships",
+                        "answer_type": "node_set",
+                        "node_names": ["DOMAIN ADMINS@CORP.LOCAL", "ENTERPRISE ADMINS@CORP.LOCAL"],
+                    }
+                ],
+                "reference_results": {
+                    "mcp-user-privileged-group-memberships": {
+                        "success": True,
+                        "node_names": [
+                            "DOMAIN ADMINS@CORP.LOCAL",
+                            "DOMAIN USERS@CORP.LOCAL",
+                            "ENTERPRISE ADMINS@CORP.LOCAL",
+                        ],
+                    }
+                },
+            }
+        )
+    )
+
+    projection = score_answers_projection(
+        manifest_path=manifest_path,
+        answers_path=answers_path,
+        track="mcp",
+    )
+
+    assert projection["tasks"][0]["outcome"] == "CORRECT"
+    assert projection["tasks"][0]["reference_nodes"] == [
+        "DOMAIN ADMINS@CORP.LOCAL",
+        "ENTERPRISE ADMINS@CORP.LOCAL",
+    ]
+
+
+def test_score_answers_sidecar_reference_names_override_manifest_object_id_contract(
+    tmp_path,
+) -> None:
+    manifest = {
+        "domain": "CORP.LOCAL",
+        "planted_paths": [
+            {
+                "template_id": "t4_adcs_esc1",
+                "tier": 4,
+                "source_name": "ALICE@CORP.LOCAL",
+                "target_name": "DOMAIN ADMINS@CORP.LOCAL",
+                "description": "adcs",
+                "verification_cypher": "MATCH p=() RETURN p",
+                "critical_nodes": ["S-1-5-21-1-ENTERPRISECA-PHASE4"],
+            }
+        ],
+    }
+    manifest_path = tmp_path / "manifest.json"
+    answers_path = tmp_path / "answers.json"
+    sidecar_path = tmp_path / "scorer_projection.json"
+    manifest_path.write_text(json.dumps(manifest))
+    answers_path.write_text(
+        json.dumps(
+            {
+                "valid_node_names": ["ORI-ENTERPRISE-CA@CORP.LOCAL"],
+                "answers": [
+                    {
+                        "task_id": "t4_adcs_esc1-01",
+                        "answer_type": "path",
+                        "path": ["ORI-ENTERPRISE-CA@CORP.LOCAL"],
+                    }
+                ],
+            }
+        )
+    )
+    sidecar_path.write_text(
+        json.dumps(
+            {
+                "rows": [
+                    {
+                        "id": "t4_adcs_esc1-01",
+                        "ref_success": True,
+                        "ref_names": ["ORI-ENTERPRISE-CA@CORP.LOCAL"],
+                    }
+                ]
+            }
+        )
+    )
+
+    projection = score_answers_projection(
+        manifest_path=manifest_path,
+        answers_path=answers_path,
+        track="mcp",
+    )
+
+    assert projection["tasks"][0]["outcome"] == "CORRECT"
+    assert projection["tasks"][0]["reference_nodes"] == ["ORI-ENTERPRISE-CA@CORP.LOCAL"]
+
+
+def test_score_answers_unconstrained_delegation_uses_planted_source_and_target(tmp_path) -> None:
+    manifest = {
+        "domain": "CORP.LOCAL",
+        "planted_paths": [
+            {
+                "template_id": "t3_unconstrained_delegation",
+                "tier": 3,
+                "source_name": "TTHOMAS@CORP.LOCAL",
+                "target_name": "WS-IT-12.CORP.LOCAL",
+                "description": "unconstrained",
+                "verification_cypher": "MATCH p=() RETURN p",
+            }
+        ],
+    }
+    manifest_path = tmp_path / "manifest.json"
+    answers_path = tmp_path / "answers.json"
+    sidecar_path = tmp_path / "scorer_projection.json"
+    manifest_path.write_text(json.dumps(manifest))
+    answers_path.write_text(
+        json.dumps(
+            {
+                "valid_node_names": [
+                    "TTHOMAS@CORP.LOCAL",
+                    "WS-IT-12.CORP.LOCAL",
+                    "RBAKER@CORP.LOCAL",
+                ],
+                "answers": [
+                    {
+                        "task_id": "t3_unconstrained_delegation-01",
+                        "answer_type": "paths",
+                        "paths": [["WS-IT-12.CORP.LOCAL", "TTHOMAS@CORP.LOCAL"]],
+                    }
+                ],
+            }
+        )
+    )
+    sidecar_path.write_text(
+        json.dumps(
+            {
+                "rows": [
+                    {
+                        "id": "t3_unconstrained_delegation-01",
+                        "ref_success": True,
+                        "ref_names": ["RBAKER@CORP.LOCAL", "WS-IT-12.CORP.LOCAL"],
+                    }
+                ]
+            }
+        )
+    )
+
+    projection = score_answers_projection(
+        manifest_path=manifest_path,
+        answers_path=answers_path,
+        track="mcp",
+    )
+
+    assert projection["tasks"][0]["outcome"] == "CORRECT"
+    assert projection["tasks"][0]["reference_nodes"] == [
+        "TTHOMAS@CORP.LOCAL",
+        "WS-IT-12.CORP.LOCAL",
+    ]

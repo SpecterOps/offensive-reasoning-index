@@ -213,7 +213,7 @@ def _row_count_from_ref(ref_result: CypherResult) -> int:
                 value = row.get(key)
                 if isinstance(value, int):
                     return value
-    return len(ref_result.nodes)
+    return len(ref_result.nodes) if ref_result.nodes else len(ref_result.node_names)
 
 
 def _metrics(reference_nodes: set[str], answer_nodes: set[str]) -> dict[str, Any]:
