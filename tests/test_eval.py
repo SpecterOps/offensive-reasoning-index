@@ -3,10 +3,20 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import os
+import time
+from types import SimpleNamespace
 
 from ori.eval.adapter import call_model, extract_cypher
 from ori.eval.bhce import _extract_node_names, _extract_nodes
-from ori.eval.grader import _check_hallucination, grade
+from ori.eval.grader import _check_hallucination, grade, grade_mcp_diagnostic
+from ori.eval.mcp_runtime import (
+    _inspect_eval_async_safe_print,
+    _inspect_eval_async_with_artifact_recovery,
+    _load_last_eval_log_from_runtime_dir,
+    _safe_print,
+)
 from ori.eval.tasks import Task, generate_tasks
 
 # ---------------------------------------------------------------------------
@@ -184,6 +194,189 @@ def test_grade_model_error():
     result = grade(task, resp, _make_cypher_result([]), _make_cypher_result([]), set())
     assert result.score == 0.0
     assert result.outcome == "MODEL_ERROR"
+
+
+def test_safe_print_ignores_broken_pipe(monkeypatch):
+    def broken_print(*args, **kwargs):
+        raise BrokenPipeError(32, "Broken pipe")
+
+    monkeypatch.setattr("builtins.print", broken_print)
+    _safe_print("progress that should not fail scoring")
+
+
+def test_inspect_eval_safe_print_restores_print(monkeypatch):
+    import builtins
+
+    original_print = builtins.print
+
+    async def fake_eval(*args, **kwargs):
+        builtins.print("inspect progress")
+        return []
+
+    async def run_case():
+        monkeypatch.setattr("ori.eval.mcp_runtime.inspect_eval_async", fake_eval)
+        return await _inspect_eval_async_safe_print("task")
+
+    result = asyncio.run(run_case())
+
+    assert result == []
+    assert builtins.print is original_print
+
+
+def test_inspect_eval_artifact_recovery_handles_shutdown_system_exit(monkeypatch, tmp_path):
+    marker_log = object()
+
+    async def fake_eval(*args, **kwargs):
+        raise BaseExceptionGroup("unhandled errors in a TaskGroup", [SystemExit(1)])
+
+    monkeypatch.setattr("ori.eval.mcp_runtime._inspect_eval_async_safe_print", fake_eval)
+    monkeypatch.setattr(
+        "ori.eval.mcp_runtime._load_last_eval_log_from_runtime_dir",
+        lambda log_dir, **kwargs: marker_log,
+    )
+
+    result = asyncio.run(
+        _inspect_eval_async_with_artifact_recovery(
+            "task", recovery_log_dir=tmp_path, expected_sample_count=1
+        )
+    )
+
+    assert result == [marker_log]
+
+
+def test_inspect_eval_artifact_recovery_reraises_non_shutdown_groups(monkeypatch, tmp_path):
+    async def fake_eval(*args, **kwargs):
+        raise BaseExceptionGroup("real failure", [RuntimeError("boom")])
+
+    monkeypatch.setattr("ori.eval.mcp_runtime._inspect_eval_async_safe_print", fake_eval)
+
+    try:
+        asyncio.run(
+            _inspect_eval_async_with_artifact_recovery(
+                "task", recovery_log_dir=tmp_path, expected_sample_count=1
+            )
+        )
+    except BaseExceptionGroup as exc:
+        assert "real failure" in str(exc)
+    else:
+        raise AssertionError("Expected non-SystemExit BaseExceptionGroup to be re-raised")
+
+
+def test_inspect_eval_artifact_recovery_reraises_without_complete_artifact(monkeypatch, tmp_path):
+    async def fake_eval(*args, **kwargs):
+        raise SystemExit(1)
+
+    monkeypatch.setattr("ori.eval.mcp_runtime._inspect_eval_async_safe_print", fake_eval)
+    monkeypatch.setattr(
+        "ori.eval.mcp_runtime._load_last_eval_log_from_runtime_dir", lambda log_dir, **kwargs: None
+    )
+
+    try:
+        asyncio.run(
+            _inspect_eval_async_with_artifact_recovery(
+                "task", recovery_log_dir=tmp_path, expected_sample_count=1
+            )
+        )
+    except SystemExit as exc:
+        assert exc.code == 1
+    else:
+        raise AssertionError("Expected SystemExit to be re-raised without a recoverable artifact")
+
+
+def test_inspect_eval_artifact_loader_rejects_stale_pointer(monkeypatch, tmp_path):
+    log_path = tmp_path / "old.eval"
+    log_path.write_text("placeholder")
+    pointer = tmp_path / "_inspect_runtime" / "view" / "last-eval-result"
+    pointer.parent.mkdir(parents=True)
+    pointer.write_text(json.dumps({"location": str(log_path)}))
+    old = time.time() - 120
+    os.utime(log_path, (old, old))
+    os.utime(pointer, (old, old))
+    monkeypatch.setattr(
+        "ori.eval.mcp_runtime.read_eval_log",
+        lambda path: SimpleNamespace(status="success", error=None, samples=[object()], results=None),
+    )
+
+    result = _load_last_eval_log_from_runtime_dir(
+        tmp_path,
+        started_at_monotonic=time.monotonic(),
+        expected_sample_count=1,
+    )
+
+    assert result is None
+
+
+def test_inspect_eval_artifact_loader_rejects_wrong_sample_count(monkeypatch, tmp_path):
+    log_path = tmp_path / "current.eval"
+    log_path.write_text("placeholder")
+    pointer = tmp_path / "_inspect_runtime" / "view" / "last-eval-result"
+    pointer.parent.mkdir(parents=True)
+    pointer.write_text(json.dumps({"location": str(log_path)}))
+    now = time.time()
+    os.utime(log_path, (now, now))
+    os.utime(pointer, (now, now))
+    monkeypatch.setattr(
+        "ori.eval.mcp_runtime.read_eval_log",
+        lambda path: SimpleNamespace(status="success", error=None, samples=[object()], results=None),
+    )
+
+    result = _load_last_eval_log_from_runtime_dir(
+        tmp_path,
+        started_at_monotonic=time.monotonic() - 10,
+        expected_sample_count=2,
+    )
+
+    assert result is None
+
+
+def test_grade_mcp_loop_exhausted_is_not_model_error():
+    task = _make_task()
+    diagnostic = grade_mcp_diagnostic(
+        task,
+        None,
+        _make_cypher_result(["A@CORP.LOCAL"]),
+        {"A@CORP.LOCAL"},
+        model_error="MCP loop exhausted without final answer",
+    )
+    assert diagnostic.grade.score == 0.0
+    assert diagnostic.grade.outcome == "LOOP_EXHAUSTED"
+    assert "MCP loop exhausted" in diagnostic.grade.details
+
+
+def test_mcp_no_path_reported_subtype():
+    task = _make_task("path_exists")
+    diagnostic = grade_mcp_diagnostic(
+        task,
+        {"answer_type": "path_exists", "path_found": False, "node_names": []},
+        _make_cypher_result(["A@CORP.LOCAL"]),
+        {"A@CORP.LOCAL"},
+    )
+    assert diagnostic.grade.outcome == "INCORRECT"
+    assert diagnostic.failure_subtype == "NO_PATH_REPORTED"
+
+
+def test_mcp_wrong_path_subtype():
+    task = _make_task("path_exists")
+    diagnostic = grade_mcp_diagnostic(
+        task,
+        {"answer_type": "path_exists", "path_found": True, "node_names": ["B@CORP.LOCAL"]},
+        _make_cypher_result(["A@CORP.LOCAL"]),
+        {"A@CORP.LOCAL", "B@CORP.LOCAL"},
+    )
+    assert diagnostic.grade.outcome == "INCORRECT"
+    assert diagnostic.failure_subtype == "WRONG_PATH"
+
+
+def test_mcp_incomplete_answer_subtype():
+    task = _make_task("path_exists")
+    diagnostic = grade_mcp_diagnostic(
+        task,
+        {"answer_type": "path_exists", "path_found": True, "node_names": ["A@CORP.LOCAL"]},
+        _make_cypher_result(["A@CORP.LOCAL", "B@CORP.LOCAL"]),
+        {"A@CORP.LOCAL", "B@CORP.LOCAL"},
+    )
+    assert diagnostic.grade.outcome == "INCORRECT"
+    assert diagnostic.failure_subtype == "INCOMPLETE_ANSWER"
 
 
 def test_grade_cypher_error():
@@ -369,14 +562,39 @@ def _make_manifest() -> dict:
                 "verification_cypher": "MATCH p=(u:User {name: 'RSMITH@TEST.LOCAL'})-[:MemberOf]->(g:Group {name: 'DOMAIN ADMINS@TEST.LOCAL'}) RETURN p",  # noqa: E501
                 "mitre": ["T1078.002"],
             },
+            {
+                "template_id": "t2_acl_chain",
+                "tier": 2,
+                "category": "path_finding",
+                "description": "DWOLFE has GenericAll on Server-Admins",
+                "source_node": "S-1-5-21-1-2-3-1119",
+                "source_name": "DWOLFE@TEST.LOCAL",
+                "target_node": "S-1-5-21-1-2-3-1150",
+                "target_name": "SRV-FILE-01.TEST.LOCAL",
+                "path_edges": [],
+                "verification_cypher": "MATCH p=shortestPath((u:User {name: 'DWOLFE@TEST.LOCAL'})-[*1..]->(c:Computer {name: 'SRV-FILE-01.TEST.LOCAL'})) RETURN p",
+                "mitre": ["T1222.001"],
+            },
+            {
+                "template_id": "t5_adcs_to_delegation_composite",
+                "tier": 5,
+                "category": "path_finding",
+                "description": "TBERGER chains ADCS to delegation",
+                "source_node": "S-1-5-21-1-2-3-1138",
+                "source_name": "TBERGER@TEST.LOCAL",
+                "target_node": "S-1-5-21-1-2-3-512",
+                "target_name": "DOMAIN ADMINS@TEST.LOCAL",
+                "path_edges": [],
+                "verification_cypher": "MATCH p=(u:User {name: 'TBERGER@TEST.LOCAL'}) RETURN p",
+                "mitre": ["T1649"],
+            },
         ],
     }
 
 
 def test_generate_tasks_count():
     tasks = generate_tasks(_make_manifest())
-    # t1_admin_to: 1 task, t1_group_membership: 2 tasks, 5 global = 8
-    assert len(tasks) == 8
+    assert len(tasks) == 11
 
 
 def test_generate_tasks_source_name_in_question():
@@ -425,6 +643,22 @@ def test_global_privileged_sessions_returns_computers_not_paths():
     task = next(t for t in tasks if t.id == "global-privileged-sessions")
     assert "RETURN c" in task.reference_cypher
     assert "RETURN p" not in task.reference_cypher
+
+
+def test_acl_chain_02_names_source_and_target():
+    tasks = generate_tasks(_make_manifest())
+    task = next(t for t in tasks if t.id == "t2_acl_chain-02")
+    assert "DWOLFE@TEST.LOCAL" in task.question
+    assert "SRV-FILE-01.TEST.LOCAL" in task.question
+    assert "abused group" in task.question
+
+
+def test_phase4_composite_names_bridge_and_delegation_target():
+    tasks = generate_tasks(_make_manifest())
+    task = next(t for t in tasks if t.id == "t5_adcs_to_delegation_composite-01")
+    assert "TBERGER@TEST.LOCAL" in task.question
+    assert "SVC_PHASE4_BRIDGE@TEST.LOCAL" in task.question
+    assert "WS-IT-04.TEST.LOCAL" in task.question
 
 
 # ---------------------------------------------------------------------------

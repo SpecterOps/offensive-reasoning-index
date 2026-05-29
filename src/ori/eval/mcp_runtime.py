@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import builtins
 import inspect
 import json
 import os
@@ -18,7 +19,7 @@ from inspect_ai import Task as InspectTask
 from inspect_ai import eval_async as inspect_eval_async
 from inspect_ai._util.registry import registry_info
 from inspect_ai.dataset import Sample
-from inspect_ai.log import EvalLog, EvalSample
+from inspect_ai.log import EvalLog, EvalSample, read_eval_log
 from inspect_ai.model import (
     ChatMessageAssistant,
     ChatMessageSystem,
@@ -34,7 +35,7 @@ from mcp.types import EmbeddedResource, PromptMessage, ResourceLink, TextContent
 
 from .adapter import ModelResponse
 from .bhce import BHCEClient, CypherResult
-from .grader import GradeResult, grade_mcp
+from .grader import GradeResult, grade_mcp_diagnostic
 from .inspect_runtime import (
     InspectEvalMetadata,
     _configure_inspect_runtime_dirs,
@@ -86,6 +87,124 @@ OPENAI_COMPAT_TELEMETRY_VALUES = {
     OPENAI_COMPAT_TELEMETRY_VLLM,
     OPENAI_COMPAT_TELEMETRY_LM_STUDIO,
 }
+_ORIGINAL_PRINT = builtins.print
+
+
+def _safe_print(*args: Any, **kwargs: Any) -> None:
+    """Best-effort CLI progress output that cannot fail an eval sample.
+
+    Inspect scorers may run under background launchers or pipes whose stdout closes
+    before sample scoring finishes. A raw print() can then raise BrokenPipeError and
+    turn an otherwise valid sample into an eval failure.
+    """
+    try:
+        _ORIGINAL_PRINT(*args, **kwargs)
+    except BrokenPipeError:
+        return
+
+
+def _load_last_eval_log_from_runtime_dir(
+    log_dir: Path,
+    *,
+    started_at_monotonic: float,
+    expected_sample_count: int,
+) -> EvalLog | None:
+    """Best-effort recovery for Inspect TaskGroup shutdown/SystemExit bugs.
+
+    Inspect can successfully write the .eval artifact and then still raise a
+    BaseExceptionGroup/SystemExit during display/task shutdown. In that case the
+    benchmark data is valid but the caller never reaches CSV/report writing.
+    The runtime `view/last-eval-result` pointer is the safest recovery handle.
+    Recovery is deliberately tied to this invocation so a stale successful
+    artifact cannot mask a real new failure.
+    """
+    pointer = log_dir / "_inspect_runtime" / "view" / "last-eval-result"
+    try:
+        data = json.loads(pointer.read_text())
+        location = data.get("location")
+        if not location:
+            return None
+        root = log_dir.resolve()
+        path = Path(location).resolve()
+        if not path.exists() or not path.is_relative_to(root):
+            return None
+        # `st_mtime` is wall-clock seconds; derive the invocation wall-clock start
+        # from the monotonic start so clock changes during a long eval do not matter.
+        invocation_started_at = time.time() - (time.monotonic() - started_at_monotonic)
+        if path.stat().st_mtime < invocation_started_at or pointer.stat().st_mtime < invocation_started_at:
+            return None
+        log = read_eval_log(str(path))
+    except Exception:
+        return None
+    if log.status != "success" or log.error is not None or not log.samples:
+        return None
+    if len(log.samples) != expected_sample_count:
+        return None
+    if log.results and log.results.completed_samples != expected_sample_count:
+        return None
+    return log
+
+
+def _exception_group_contains_only_system_exit(exc: BaseExceptionGroup) -> bool:
+    """Return true only for Inspect's observed shutdown-only SystemExit group."""
+    leaves: list[BaseException] = []
+
+    def collect(error: BaseException) -> None:
+        if isinstance(error, BaseExceptionGroup):
+            for child in error.exceptions:
+                collect(child)
+        else:
+            leaves.append(error)
+
+    collect(exc)
+    return bool(leaves) and all(isinstance(error, SystemExit) for error in leaves)
+
+
+async def _inspect_eval_async_safe_print(*args: Any, **kwargs: Any) -> list[EvalLog]:
+    """Run Inspect with builtins.print guarded against closed stdout pipes."""
+    previous_print = builtins.print
+    builtins.print = _safe_print
+    try:
+        return await inspect_eval_async(*args, **kwargs)
+    finally:
+        builtins.print = previous_print
+
+
+async def _inspect_eval_async_with_artifact_recovery(
+    *args: Any,
+    recovery_log_dir: Path,
+    expected_sample_count: int,
+    **kwargs: Any,
+) -> list[EvalLog]:
+    """Run Inspect and recover only from the known post-success SystemExit shutdown bug."""
+    started_at_monotonic = time.monotonic()
+    try:
+        return await _inspect_eval_async_safe_print(*args, **kwargs)
+    except BaseExceptionGroup as exc:
+        if not _exception_group_contains_only_system_exit(exc):
+            raise
+        recovered_log = _load_last_eval_log_from_runtime_dir(
+            recovery_log_dir,
+            started_at_monotonic=started_at_monotonic,
+            expected_sample_count=expected_sample_count,
+        )
+        if recovered_log:
+            _safe_print(
+                "Recovered Inspect MCP eval results from last-eval-result after "
+                "Inspect shutdown SystemExit"
+            )
+            return [recovered_log]
+        raise
+    except SystemExit:
+        recovered_log = _load_last_eval_log_from_runtime_dir(
+            recovery_log_dir,
+            started_at_monotonic=started_at_monotonic,
+            expected_sample_count=expected_sample_count,
+        )
+        if recovered_log:
+            _safe_print("Recovered Inspect MCP eval results from last-eval-result after SystemExit")
+            return [recovered_log]
+        raise
 
 
 class MCPNoProgressTimeout(TimeoutError):
@@ -143,6 +262,11 @@ class MCPRunMetadata:
     unique_resources_used: list[str] = field(default_factory=list)
     resource_characters_total: int = 0
     infra_error_subtype: str = ""
+    failure_subtype: str = ""
+    successful_tool_results: int = 0
+    finalization_guard_used: bool = False
+    loop_exhaustion_with_evidence: bool = False
+    minimum_evidence_satisfied: bool = False
 
     @property
     def final_answer_normalized_json(self) -> str:
@@ -635,6 +759,7 @@ def _trajectory_from_messages(messages: list[Any], final_answer_raw: str = "") -
     resource_reads_total = 0
     unique_resources: set[str] = set()
     resource_characters_total = 0
+    successful_tool_results = 0
     tool_calls_by_id: dict[str, tuple[str, dict[str, Any]]] = {}
 
     for message in messages:
@@ -665,6 +790,8 @@ def _trajectory_from_messages(messages: list[Any], final_answer_raw: str = "") -
                 attempted_policy_violations += 1
             if classification == "infra":
                 infra_tool_errors += 1
+            if not message.error and classification not in {"policy", "infra"}:
+                successful_tool_results += 1
             if tool_name == RESOURCE_READ_TOOL_NAME:
                 resource_reads_total += 1
                 uri = str(tool_args.get("uri", "")).strip()
@@ -685,6 +812,10 @@ def _trajectory_from_messages(messages: list[Any], final_answer_raw: str = "") -
         resource_reads_total=resource_reads_total,
         unique_resources_used=sorted(unique_resources),
         resource_characters_total=resource_characters_total,
+        successful_tool_results=successful_tool_results,
+        minimum_evidence_satisfied=(
+            tool_calls_total >= 3 and cypher_query_calls >= 2
+        ),
     )
 
 
@@ -719,6 +850,11 @@ def _mcp_metadata_from_dict(data: dict[str, Any]) -> MCPRunMetadata:
         available_prompt_names=list(data.get("available_prompt_names", [])),
         prompt_discovery_status=data.get("prompt_discovery_status", ""),
         infra_error_subtype=data.get("infra_error_subtype", ""),
+        failure_subtype=data.get("failure_subtype", ""),
+        successful_tool_results=int(data.get("successful_tool_results", 0)),
+        finalization_guard_used=bool(data.get("finalization_guard_used", False)),
+        loop_exhaustion_with_evidence=bool(data.get("loop_exhaustion_with_evidence", False)),
+        minimum_evidence_satisfied=bool(data.get("minimum_evidence_satisfied", False)),
     )
 
 
@@ -1092,6 +1228,23 @@ def _tool_call_arguments(raw_arguments: Any) -> dict[str, Any]:
     return {}
 
 
+FINALIZATION_GUARD_PROMPT = (
+    "You are at the MCP tool-call limit. Do not call another tool. Using the "
+    "evidence already gathered, return ONLY the required compact JSON object. "
+    "If the evidence is insufficient, return the best supported JSON answer "
+    "rather than continuing to search."
+)
+
+
+def _tool_result_has_successful_evidence(result_text: str, tool_error: ToolCallError | None) -> bool:
+    if tool_error is not None:
+        return False
+    normalized = (result_text or "").lower()
+    if '"success": false' in normalized or "error_type" in normalized and '"success": true' not in normalized:
+        return False
+    return bool(result_text.strip())
+
+
 async def _run_ollama_mcp_loop(
     *,
     task: Task,
@@ -1137,14 +1290,22 @@ async def _run_ollama_mcp_loop(
     thinking_parts: list[str] = []
     final_content = ""
     resolved_model = model_name
+    successful_tool_results = 0
+    finalization_guard_used = False
     t0 = time.monotonic()
 
     for step in range(max_steps):
+        use_finalization_guard = (
+            step >= max_steps - 1 and successful_tool_results > 0 and not finalization_guard_used
+        )
+        if use_finalization_guard:
+            messages_payload.append({"role": "user", "content": FINALIZATION_GUARD_PROMPT})
+            finalization_guard_used = True
         turn = await _ollama_chat_turn(
             url=url,
             model_name=model_name,
             messages=messages_payload,
-            tools=tool_specs,
+            tools=[] if use_finalization_guard else tool_specs,
             ollama_options=ollama_options,
             read_timeout_seconds=ollama_read_timeout_seconds,
         )
@@ -1205,6 +1366,8 @@ async def _run_ollama_mcp_loop(
                 )
                 tool_error = ToolCallError(type="unknown", message=str(exc))
 
+            if _tool_result_has_successful_evidence(result_text, tool_error):
+                successful_tool_results += 1
             messages_payload.append(
                 {"role": "tool", "tool_name": tool_name, "content": result_text}
             )
@@ -1238,6 +1401,9 @@ async def _run_ollama_mcp_loop(
         },
     )
     trajectory = _trajectory_from_messages(inspect_messages, final_answer_raw=final_content)
+    trajectory.finalization_guard_used = finalization_guard_used
+    trajectory.successful_tool_results = max(trajectory.successful_tool_results, successful_tool_results)
+    trajectory.loop_exhaustion_with_evidence = bool(not final_content and successful_tool_results > 0)
     trajectory.server_prompt_used = bool(server_prompt_text.strip())
     trajectory.server_prompt_name = server_prompt_name if server_prompt_text.strip() else ""
     trajectory.available_prompt_names = sorted(available_prompt_names or [])
@@ -1294,14 +1460,22 @@ async def _run_openai_compat_mcp_loop(
     thinking_parts: list[str] = []
     final_content = ""
     resolved_model = _openai_compat_model_name(model_name)
+    successful_tool_results = 0
+    finalization_guard_used = False
     t0 = time.monotonic()
 
     for step in range(max_steps):
+        use_finalization_guard = (
+            step >= max_steps - 1 and successful_tool_results > 0 and not finalization_guard_used
+        )
+        if use_finalization_guard:
+            messages_payload.append({"role": "user", "content": FINALIZATION_GUARD_PROMPT})
+            finalization_guard_used = True
         turn = await _openai_compat_chat_turn(
             url=url,
             model_name=model_name,
             messages=messages_payload,
-            tools=tool_specs,
+            tools=[] if use_finalization_guard else tool_specs,
             extra_body=extra_body,
             telemetry_adapter=resolved_telemetry_adapter,
             read_timeout_seconds=read_timeout_seconds,
@@ -1409,6 +1583,9 @@ async def _run_openai_compat_mcp_loop(
         },
     )
     trajectory = _trajectory_from_messages(inspect_messages, final_answer_raw=final_content)
+    trajectory.finalization_guard_used = finalization_guard_used
+    trajectory.successful_tool_results = max(trajectory.successful_tool_results, successful_tool_results)
+    trajectory.loop_exhaustion_with_evidence = bool(not final_content and successful_tool_results > 0)
     trajectory.server_prompt_used = bool(server_prompt_text.strip())
     trajectory.server_prompt_name = server_prompt_name if server_prompt_text.strip() else ""
     trajectory.available_prompt_names = sorted(available_prompt_names or [])
@@ -1552,7 +1729,7 @@ def _incomplete_mcp_score(
         hallucination=False,
         details=details,
     )
-    print(f"  [{sample_index}/{sample_total}] {task_id} → INFRA_ERROR ({details})")
+    _safe_print(f"  [{sample_index}/{sample_total}] {task_id} → INFRA_ERROR ({details})")
     return Score(
         value=0.0,
         answer=model_response.raw_text,
@@ -1840,18 +2017,23 @@ def ori_mcp_scorer():
                 detail=model_response.error or "MCP sample failed before final answer",
             )
 
-        result = grade_mcp(
+        diagnostic = grade_mcp_diagnostic(
             task=task,
-            model_response=model_response,
             final_answer=mcp_meta.final_answer_normalized,
             ref_result=ref_result,
             valid_node_names=valid_names,
+            model_error=model_response.error,
             infra_tool_errors=mcp_meta.infra_tool_errors,
+        )
+        result = diagnostic.grade
+        mcp_meta.failure_subtype = diagnostic.failure_subtype
+        mcp_meta.loop_exhaustion_with_evidence = (
+            result.outcome == "LOOP_EXHAUSTED" and mcp_meta.successful_tool_results > 0
         )
         sample_index = metadata.get("sample_index", "?")
         sample_total = metadata.get("sample_total", "?")
-        print(f"  [{sample_index}/{sample_total}] {task.id} ({task.tier=}, {task.grade_mode})")
-        print(
+        _safe_print(f"  [{sample_index}/{sample_total}] {task.id} ({task.tier=}, {task.grade_mode})")
+        _safe_print(
             f"           → {result.outcome} (score={result.score}, tools={mcp_meta.tool_calls_total}, "  # noqa: E501
             f"cypher={mcp_meta.cypher_query_calls}, noncypher={mcp_meta.non_cypher_tool_calls}, "
             f"resources={mcp_meta.resource_reads_total})"
@@ -1862,6 +2044,7 @@ def ori_mcp_scorer():
             explanation=result.details,
             metadata={
                 "grade": _grade_result_to_dict(result),
+                "diagnostic": diagnostic.to_jsonable(),
                 "mcp": _mcp_metadata_to_dict(mcp_meta),
             },
         )
@@ -2126,8 +2309,10 @@ async def run_mcp_eval_with_inspect(
     resolved_log_dir.mkdir(parents=True, exist_ok=True)
     _configure_inspect_runtime_dirs(resolved_log_dir)
 
-    eval_logs = await inspect_eval_async(
+    eval_logs = await _inspect_eval_async_with_artifact_recovery(
         inspect_task,
+        recovery_log_dir=resolved_log_dir,
+        expected_sample_count=len(samples),
         model=inspect_model,
         model_base_url=resolved_base_url,
         log_dir=str(resolved_log_dir),

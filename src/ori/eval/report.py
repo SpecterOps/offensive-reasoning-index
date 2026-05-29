@@ -24,6 +24,7 @@ CSV_FIELDNAMES = [
     "model",
     "score",
     "outcome",
+    "failure_subtype",
     "hallucination",
     "tokens_input",
     "tokens_output",
@@ -72,6 +73,10 @@ CSV_FIELDNAMES = [
     "telemetry_sample_ref",
     "partial_result",
     "infra_error_subtype",
+    "successful_tool_results",
+    "finalization_guard_used",
+    "loop_exhaustion_with_evidence",
+    "minimum_evidence_satisfied",
     "attempt_number",
     "result_source",
 ]
@@ -147,6 +152,7 @@ def _row_for_result(r: EvalResult) -> dict[str, object]:
         "model": r.model_response.model,
         "score": r.grade.score,
         "outcome": r.grade.outcome,
+        "failure_subtype": (mcp_meta.failure_subtype if mcp_meta else ""),
         "hallucination": r.grade.hallucination,
         "tokens_input": r.model_response.tokens_input,
         "tokens_output": r.model_response.tokens_output,
@@ -169,7 +175,7 @@ def _row_for_result(r: EvalResult) -> dict[str, object]:
         "error_detail": (
             r.grade.details
             if r.grade.outcome
-            in ("CYPHER_ERROR", "QUERY_TOO_EXPENSIVE", "MODEL_ERROR", "INFRA_ERROR")
+            in ("CYPHER_ERROR", "QUERY_TOO_EXPENSIVE", "MODEL_ERROR", "LOOP_EXHAUSTED", "INFRA_ERROR")
             else ""
         ),
         "parse_stage": r.model_response.parse_stage,
@@ -210,6 +216,10 @@ def _row_for_result(r: EvalResult) -> dict[str, object]:
         "telemetry_sample_ref": telemetry.get("sample_ref", ""),
         "partial_result": getattr(r, "partial_result", False),
         "infra_error_subtype": mcp_meta.infra_error_subtype if mcp_meta else "",
+        "successful_tool_results": mcp_meta.successful_tool_results if mcp_meta else 0,
+        "finalization_guard_used": mcp_meta.finalization_guard_used if mcp_meta else False,
+        "loop_exhaustion_with_evidence": mcp_meta.loop_exhaustion_with_evidence if mcp_meta else False,
+        "minimum_evidence_satisfied": mcp_meta.minimum_evidence_satisfied if mcp_meta else False,
         "attempt_number": getattr(r, "attempt_number", 1),
         "result_source": getattr(r, "result_source", "first_pass"),
     }
@@ -242,6 +252,10 @@ def _stats(results: list[EvalResult]) -> dict:
     query_too_expensive = sum(1 for r in results if r.grade.outcome == "QUERY_TOO_EXPENSIVE")
     parse_fails = sum(1 for r in results if r.grade.outcome == "PARSE_FAIL")
     model_errors = sum(1 for r in results if r.grade.outcome == "MODEL_ERROR")
+    loop_exhaustions = sum(1 for r in results if r.grade.outcome == "LOOP_EXHAUSTED")
+    no_path_reported = sum(1 for r in results if r.mcp and r.mcp.failure_subtype == "NO_PATH_REPORTED")
+    wrong_path = sum(1 for r in results if r.mcp and r.mcp.failure_subtype == "WRONG_PATH")
+    incomplete_answers = sum(1 for r in results if r.mcp and r.mcp.failure_subtype == "INCOMPLETE_ANSWER")
     infra_errors = sum(1 for r in results if r.grade.outcome == "INFRA_ERROR")
     partial_results = sum(1 for r in results if getattr(r, "partial_result", False))
     completed_tasks = total - partial_results
@@ -289,6 +303,10 @@ def _stats(results: list[EvalResult]) -> dict:
         "query_too_expensive": query_too_expensive,
         "parse_fails": parse_fails,
         "model_errors": model_errors,
+        "loop_exhaustions": loop_exhaustions,
+        "no_path_reported": no_path_reported,
+        "wrong_path": wrong_path,
+        "incomplete_answers": incomplete_answers,
         "infra_errors": infra_errors,
         "completed_tasks": completed_tasks,
         "expected_tasks": total,
@@ -346,6 +364,10 @@ def write_summary_csv(all_results: dict[str, list[EvalResult]], output_path: Pat
         "query_too_expensive",
         "parse_fails",
         "model_errors",
+        "loop_exhaustions",
+        "no_path_reported",
+        "wrong_path",
+        "incomplete_answers",
         "infra_errors",
         "avg_tool_calls",
         "cypher_query_calls",
@@ -426,6 +448,10 @@ def write_summary_csv(all_results: dict[str, list[EvalResult]], output_path: Pat
                 "query_too_expensive": s["query_too_expensive"],
                 "parse_fails": s["parse_fails"],
                 "model_errors": s["model_errors"],
+                "loop_exhaustions": s["loop_exhaustions"],
+                "no_path_reported": s["no_path_reported"],
+                "wrong_path": s["wrong_path"],
+                "incomplete_answers": s["incomplete_answers"],
                 "infra_errors": s["infra_errors"],
                 "avg_tool_calls": round((s["tool_calls_total"] / s["mcp_samples"]), 2)
                 if s["mcp_samples"]
@@ -464,7 +490,8 @@ def print_comparison(all_results: dict[str, list[EvalResult]]) -> None:
     header = (
         f"{'Model':<{col_w}} {'Overall':>8} {'Tier1':>7} {'Tier2':>7} "
         f"{'Tier3':>7} {'Tier4':>7} {'Tier5':>7} "
-        f"{'Hallucs':>8} {'CyErr':>7} {'QExp':>6} {'Fails':>6} {'ModelErr':>9} {'InfraErr':>9}"
+        f"{'Hallucs':>8} {'CyErr':>7} {'QExp':>6} {'Fails':>6} "
+        f"{'ModelErr':>9} {'LoopExh':>8} {'InfraErr':>9}"
     )
     print(header)
     print("-" * 129)
@@ -483,7 +510,7 @@ def print_comparison(all_results: dict[str, list[EvalResult]]) -> None:
             f"{tp(1):>7} {tp(2):>7} {tp(3):>7} {tp(4):>7} {tp(5):>7} "
             f"{s['hallucs']:>8} {s['cypher_errors']:>7} {s['query_too_expensive']:>6} "
             f"{s['parse_fails']:>6} "
-            f"{s['model_errors']:>9} {s['infra_errors']:>9}"
+            f"{s['model_errors']:>9} {s['loop_exhaustions']:>8} {s['infra_errors']:>9}"
         )
         if s["mcp_samples"]:
             avg_tools = s["tool_calls_total"] / s["mcp_samples"]
@@ -516,6 +543,10 @@ def print_summary(results: list[EvalResult], model: str) -> None:
     cypher_errors = sum(1 for r in results if r.grade.outcome == "CYPHER_ERROR")
     query_too_expensive = sum(1 for r in results if r.grade.outcome == "QUERY_TOO_EXPENSIVE")
     model_errors = sum(1 for r in results if r.grade.outcome == "MODEL_ERROR")
+    loop_exhaustions = sum(1 for r in results if r.grade.outcome == "LOOP_EXHAUSTED")
+    no_path_reported = sum(1 for r in results if r.mcp and r.mcp.failure_subtype == "NO_PATH_REPORTED")
+    wrong_path = sum(1 for r in results if r.mcp and r.mcp.failure_subtype == "WRONG_PATH")
+    incomplete_answers = sum(1 for r in results if r.mcp and r.mcp.failure_subtype == "INCOMPLETE_ANSWER")
     infra_errors = sum(1 for r in results if r.grade.outcome == "INFRA_ERROR")
 
     def tier_score(tier: int) -> str:
@@ -536,7 +567,8 @@ def print_summary(results: list[EvalResult], model: str) -> None:
     print(
         f"Hallucinations: {hallucinations}  |  Parse failures: {parse_fails}  |  "
         f"Cypher errors: {cypher_errors}  |  Query too expensive: {query_too_expensive}  |  "
-        f"Model errors: {model_errors}  |  Infra errors: {infra_errors}"
+        f"Model errors: {model_errors}  |  Loop exhausted: {loop_exhaustions}  |  "
+        f"Infra errors: {infra_errors}"
     )
     status, detail = classify_summary_health(
         {
