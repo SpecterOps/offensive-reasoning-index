@@ -12,10 +12,25 @@ from .contracts import AnswerContract, task_contract_for
 from .tasks import Task
 
 
+OUTCOME_CORRECT = "CORRECT"
+OUTCOME_INCORRECT = "INCORRECT"
+OUTCOME_PARSE_FAIL = "PARSE_FAIL"
+OUTCOME_CYPHER_ERROR = "CYPHER_ERROR"
+OUTCOME_QUERY_TOO_EXPENSIVE = "QUERY_TOO_EXPENSIVE"
+OUTCOME_HALLUCINATION = "HALLUCINATION"
+OUTCOME_MODEL_ERROR = "MODEL_ERROR"
+OUTCOME_LOOP_EXHAUSTED = "LOOP_EXHAUSTED"
+OUTCOME_INFRA_ERROR = "INFRA_ERROR"
+
+FAILURE_NO_PATH_REPORTED = "NO_PATH_REPORTED"
+FAILURE_WRONG_PATH = "WRONG_PATH"
+FAILURE_INCOMPLETE_ANSWER = "INCOMPLETE_ANSWER"
+
+
 @dataclass
 class GradeResult:
     score: float  # 0.0 or 1.0
-    outcome: str  # CORRECT | INCORRECT | PARSE_FAIL | CYPHER_ERROR | QUERY_TOO_EXPENSIVE | HALLUCINATION | MODEL_ERROR | INFRA_ERROR  # noqa: E501
+    outcome: str  # CORRECT | INCORRECT | PARSE_FAIL | CYPHER_ERROR | QUERY_TOO_EXPENSIVE | HALLUCINATION | MODEL_ERROR | LOOP_EXHAUSTED | INFRA_ERROR  # noqa: E501
     hallucination: bool
     details: str
 
@@ -36,6 +51,7 @@ class GradeDiagnostic:
     metrics: dict[str, Any] = field(default_factory=dict)
     ref_error: str | None = None
     contract: dict[str, Any] | None = None
+    failure_subtype: str = ""
 
     def to_jsonable(self) -> dict[str, Any]:
         return {
@@ -56,6 +72,7 @@ class GradeDiagnostic:
             "metrics": self.metrics,
             "ref_error": self.ref_error,
             "contract": self.contract,
+            "failure_subtype": self.failure_subtype,
         }
 
 
@@ -239,6 +256,37 @@ def _metrics(reference_nodes: set[str], answer_nodes: set[str]) -> dict[str, Any
     }
 
 
+def _classify_model_error(error: str) -> tuple[str, str]:
+    """Return (outcome, detail prefix) for model/runtime errors.
+
+    MCP loop exhaustion is a controller/termination failure, not an upstream
+    model API error. Keep it separate so reports do not inflate MODEL_ERROR.
+    """
+    normalized = error.strip().lower()
+    if "mcp loop exhausted" in normalized or "loop exhausted without final answer" in normalized:
+        return OUTCOME_LOOP_EXHAUSTED, "MCP loop exhausted"
+    return OUTCOME_MODEL_ERROR, "Model call failed"
+
+
+def _classify_mcp_incorrect(
+    task: Task,
+    final_answer: dict,
+    reference_nodes: set[str],
+    answer_nodes: set[str],
+    metrics: dict[str, Any],
+) -> str:
+    """Classify structured MCP wrong answers for post-run analysis."""
+    if task.grade_mode == "path_exists" and final_answer.get("path_found") is False and reference_nodes:
+        return FAILURE_NO_PATH_REPORTED
+    if answer_nodes and reference_nodes:
+        overlap = reference_nodes & answer_nodes
+        if not overlap:
+            return FAILURE_WRONG_PATH
+        if overlap and not reference_nodes.issubset(answer_nodes):
+            return FAILURE_INCOMPLETE_ANSWER
+    return ""
+
+
 def grade_mcp_diagnostic(
     task: Task,
     final_answer: dict | None,
@@ -263,9 +311,11 @@ def grade_mcp_diagnostic(
     forbidden = set(contract.forbidden_nodes) if contract else set()
     extra_valid = sorted((answer_nodes - reference_nodes - optional) - set(hallucinated))
     metrics = _metrics(reference_nodes, answer_nodes)
+    failure_subtype = ""
 
     if model_error:
-        grade_result = GradeResult(0.0, "MODEL_ERROR", False, f"Model call failed: {model_error}")
+        outcome, detail_prefix = _classify_model_error(model_error)
+        grade_result = GradeResult(0.0, outcome, False, f"{detail_prefix}: {model_error}")
     elif not ref_result.success and BHCEClient.classify_error(ref_result.error) == "infra":
         grade_result = GradeResult(
             0.0,
@@ -309,8 +359,12 @@ def grade_mcp_diagnostic(
                 f"ref={len(reference_nodes)} nodes, overlap={len(reference_nodes & answer_nodes)}, "
                 f"{detail_suffix}"
             )
+        if not correct and final_answer is not None:
+            failure_subtype = _classify_mcp_incorrect(
+                task, final_answer, reference_nodes, answer_nodes, metrics
+            )
         grade_result = GradeResult(
-            1.0 if correct else 0.0, "CORRECT" if correct else "INCORRECT", False, details
+            1.0 if correct else 0.0, OUTCOME_CORRECT if correct else OUTCOME_INCORRECT, False, details
         )
     elif task.grade_mode == "node_set":
         correct = (
@@ -322,8 +376,12 @@ def grade_mcp_diagnostic(
             f"overlap: {len(reference_nodes & answer_nodes)}, "
             f"precision={metrics['precision']:.3f}, recall={metrics['recall']:.3f}"
         )
+        if not correct and final_answer is not None:
+            failure_subtype = _classify_mcp_incorrect(
+                task, final_answer, reference_nodes, answer_nodes, metrics
+            )
         grade_result = GradeResult(
-            1.0 if correct else 0.0, "CORRECT" if correct else "INCORRECT", False, details
+            1.0 if correct else 0.0, OUTCOME_CORRECT if correct else OUTCOME_INCORRECT, False, details
         )
     elif task.grade_mode == "row_count":
         ref_count = _row_count_from_ref(ref_result)
@@ -361,6 +419,7 @@ def grade_mcp_diagnostic(
         metrics=metrics,
         ref_error=ref_result.error,
         contract=contract.to_jsonable() if contract else None,
+        failure_subtype=failure_subtype,
     )
 
 

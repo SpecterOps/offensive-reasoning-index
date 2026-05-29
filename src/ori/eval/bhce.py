@@ -281,10 +281,15 @@ class BHCEClient:
         CySQL doesn't support unlabeled MATCH (n) — query each type separately.
         Fails closed: if any query fails, returns empty set to disable hallucination
         checking rather than building a partial allowlist that would cause false positives.
+
+        The allowlist must be broad enough to cover the full benchmark fixture.
+        A small per-label cap creates false positives: reference/mock-perfect
+        Cypher can mention valid but later-page users such as ADUDLEY@CORP.LOCAL
+        or CDAVIS@CORP.LOCAL, which should never be scored as hallucinations.
         """
         names: set[str] = set()
         for label in ("User", "Computer", "Group", "Domain", "OU"):
-            result = await self.run_cypher(f"MATCH (n:{label}) RETURN n LIMIT 300")
+            result = await self.run_cypher(f"MATCH (n:{label}) RETURN n LIMIT 10000")
             if not result.success:
                 # Fail closed — partial allowlist is worse than no allowlist
                 return set()

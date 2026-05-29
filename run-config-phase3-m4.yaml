@@ -28,12 +28,12 @@ defaults:
 profiles:
   preflight_local:
     kind: preflight
-    manifest: datasets/phase3b_manifest.json
+    manifest: datasets/phase4-v1_manifest.json
     output_dir: results/preflight-phase3-m4
 
   phase3a_direct_m4:
     kind: baseline
-    manifest: datasets/phase3b_manifest.json
+    manifest: datasets/phase4-v1_manifest.json
     output_dir: results/phase3a-m4-direct-cypher
     models:
       - name: gemma4-26b-32k
@@ -80,7 +80,7 @@ profiles:
 
   phase3b_mcp_m4:
     kind: baseline-mcp
-    manifest: datasets/phase3b_manifest.json
+    manifest: datasets/phase4-v1_manifest.json
     output_dir: results/phase3b-m4-mcp
     models:
       - name: gemma4-26b-32k
@@ -127,7 +127,7 @@ profiles:
 
   phase3c_mcp_resources_m4:
     kind: baseline-mcp
-    manifest: datasets/phase3b_manifest.json
+    manifest: datasets/phase4-v1_manifest.json
     output_dir: results/phase3c-m4-mcp-resources
     mcp:
       resource_mode: on-demand

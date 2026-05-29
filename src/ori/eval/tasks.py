@@ -100,8 +100,9 @@ _TEMPLATE_QUESTIONS: dict[str, list[tuple[str, str, str, list[str], str | None]]
             None,
         ),
         (
-            "Find all ACL-based attack paths where a regular user can reach server admin "
-            "access through group rights abuse.",
+            "Find the ACL abuse path from {source_name} to admin access on {target_name} "
+            "through group rights abuse. Include the regular user, abused group, and "
+            "target server.",
             "path_finding",
             "path_exists",
             ["acl", "privilege_escalation"],
@@ -185,9 +186,10 @@ _TEMPLATE_QUESTIONS: dict[str, list[tuple[str, str, str, list[str], str | None]]
     ],
     "t5_adcs_to_delegation_composite": [
         (
-            "Find the composite Phase 4 path that chains ADCS certificate abuse into "
-            "delegation-based domain compromise. Include all critical ADCS, service, "
-            "delegation, and target nodes.",
+            "Find the composite Phase 4 path where {source_name} chains ESC1 certificate "
+            "abuse with GenericWrite over SVC_PHASE4_BRIDGE@{domain} and delegation to "
+            "WS-IT-04.{domain}. Include all critical ADCS, service, delegation, and "
+            "target nodes.",
             "path_finding",
             "path_exists",
             ["phase4", "adcs", "delegation", "composite"],
