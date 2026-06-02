@@ -12,10 +12,12 @@ from typing import Any
 import click
 import yaml
 
+from .eval.phase4_v2 import generate_phase4_v2_official_tasks
 from .generator.attack_paths import plant_all_paths
 from .generator.graph import ADGraph
 from .generator.org import build_org
 from .generator.phase4 import build_phase4_v1_graph
+from .generator.phase4_v2 import build_phase4_v2_forest
 from .generator.security import apply_baseline_security
 from .generator.serializer import serialize_to_dir, serialize_to_zip
 from .run_config import RunConfigOverrides, list_run_profiles, load_run_profile
@@ -226,10 +228,49 @@ def _write_generated_dataset(
     return manifest
 
 
+def _write_phase4_v2_artifacts(corpus: dict[str, Any], output_manifest: Path) -> None:
+    output_manifest.parent.mkdir(parents=True, exist_ok=True)
+    output_manifest.write_text(json.dumps(corpus, indent=2))
+    artifact_map = {
+        "generation_summary.json": corpus["generation_summary"],
+        "template_instances.json": corpus["template_instances"],
+        "tasks_official.json": corpus["tasks_official"],
+        "tasks_candidates.json": corpus["tasks_candidates"],
+        "answers.json": corpus["answers"],
+        "matrix_validation.json": corpus["matrix_validation"],
+        "run_summary.json": corpus["run_summary"],
+    }
+    for filename, payload in artifact_map.items():
+        (output_manifest.parent / filename).write_text(json.dumps(payload, indent=2) + "\n")
+
+
 def _generate_profile_dataset(resolved) -> None:
+    if resolved.generator_profile in {"phase4_v2_medium", "phase4_v2_small"}:
+        profile = resolved.generator_profile.removeprefix("phase4_v2_")
+        forest = build_phase4_v2_forest(
+            profile=profile,
+            seed=resolved.seed,
+            parent_domain=resolved.domain,
+        )
+        corpus = generate_phase4_v2_official_tasks(forest)
+        # Keep a SharpHound-compatible parent-domain zip for existing ingest tooling while
+        # writing the v2 forest/corpus schema artifacts next to the manifest.
+        serialize_to_zip(forest.parent_graph, Path(resolved.output_zip))
+        _write_phase4_v2_artifacts(corpus, Path(resolved.output_manifest))
+        click.echo(f"Generated {resolved.generator_profile}:")
+        click.echo(f"  Zip: {resolved.output_zip}")
+        click.echo(f"  Manifest: {resolved.output_manifest}")
+        click.echo(
+            f"  Official tasks: {corpus['official_count']} | "
+            f"Smoke: {corpus['matrix_validation']['startup_smoke_count']} | "
+            f"Matrix: {corpus['matrix_validation']['benchmark_matrix_count']}"
+        )
+        return
+
     if resolved.generator_profile != "phase4_v1":
         raise click.UsageError(
-            f"Unsupported generator profile {resolved.generator_profile!r}; expected phase4_v1."
+            f"Unsupported generator profile {resolved.generator_profile!r}; expected phase4_v1, "
+            "phase4_v2_small, or phase4_v2_medium."
         )
     graph = build_phase4_v1_graph(
         domain=resolved.domain,
