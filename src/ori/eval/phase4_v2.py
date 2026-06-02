@@ -50,6 +50,8 @@ def generate_phase4_v2_official_tasks(forest: Phase4V2Forest) -> dict[str, Any]:
         "profile": forest.profile,
         "official_count": len(tasks),
         "raw_score_denominator": len(tasks),
+        "stats": _forest_stats(forest),
+        "planted_paths": _planted_paths(forest),
         "generation_summary": generation_summary,
         "template_instances": forest.template_instances,
         "tasks_official": tasks,
@@ -84,8 +86,23 @@ def validate_phase4_v2_matrix(corpus: dict[str, Any]) -> dict[str, Any]:
         errors.append(f"benchmark matrix task count must be 96, got {len(matrix)}")
     if any(task.get("benchmark_weight") != "official_score" for task in smoke):
         errors.append("all startup smoke tasks must count toward official_score")
-    if matrix and (max(by_family.values()) - min(by_family.values()) > 1):
-        errors.append("scenario family matrix balance differs by more than one task")
+    expected_family = {family: 32 for family in _FAMILIES}
+    expected_track = {"cypher": 48, "mcp": 48}
+    expected_task_type = {task_type: 24 for task_type in _TASK_TYPES}
+    if dict(by_family) != expected_family:
+        errors.append(
+            "scenario family set/counts must be "
+            f"{expected_family}, got {dict(sorted(by_family.items()))}"
+        )
+    if dict(by_track) != expected_track:
+        errors.append(
+            f"track balance must be {expected_track}, got {dict(sorted(by_track.items()))}"
+        )
+    if dict(by_task_type) != expected_task_type:
+        errors.append(
+            "task type balance must be "
+            f"{expected_task_type}, got {dict(sorted(by_task_type.items()))}"
+        )
     return {
         "ok": not errors,
         "errors": errors,
@@ -167,6 +184,50 @@ def _matrix_task(forest: Phase4V2Forest, index: int) -> dict[str, Any]:
         }
     )
     return task
+
+
+def _forest_stats(forest: Phase4V2Forest) -> dict[str, int]:
+    graphs = (forest.parent_graph, forest.child_graph)
+    return {
+        "users": sum(len(graph.nodes_by_type("User")) for graph in graphs),
+        "computers": sum(len(graph.nodes_by_type("Computer")) for graph in graphs),
+        "groups": sum(len(graph.nodes_by_type("Group")) for graph in graphs),
+        "ous": sum(len(graph.nodes_by_type("OU")) for graph in graphs),
+        "domains": sum(len(graph.nodes_by_type("Domain")) for graph in graphs),
+        "total_nodes": sum(graph.node_count() for graph in graphs),
+        "total_edges": sum(graph.edge_count() for graph in graphs) + 2,
+        "planted_paths": len(forest.template_instances),
+    }
+
+
+def _planted_paths(forest: Phase4V2Forest) -> list[dict[str, Any]]:
+    paths: list[dict[str, Any]] = []
+    for domain_role, graph in (("parent", forest.parent_graph), ("child", forest.child_graph)):
+        for planted in graph.planted_paths:
+            source = graph.require_node(planted.source_node)
+            target = graph.require_node(planted.target_node)
+            paths.append(
+                {
+                    "template_id": planted.template_id,
+                    "domain_role": domain_role,
+                    "domain": graph.domain,
+                    "tier": planted.tier,
+                    "category": planted.category,
+                    "description": planted.description,
+                    "source": planted.source_node,
+                    "target": planted.target_node,
+                    "source_name": source.properties.get("name", ""),
+                    "target_name": target.properties.get("name", ""),
+                    "verification_cypher": planted.verification_cypher,
+                    "path_edges": [
+                        {"source": src, "edge": edge_kind, "target": dst}
+                        for src, edge_kind, dst in planted.path_edges
+                    ],
+                    "mitre": list(planted.mitre),
+                    "metadata": dict(planted.metadata),
+                }
+            )
+    return paths
 
 
 def _candidate_tasks(forest: Phase4V2Forest) -> list[dict[str, Any]]:

@@ -16,7 +16,8 @@ import zipfile
 from io import BytesIO
 from pathlib import Path
 
-from .graph import ADGraph, ADNode
+from .graph import ADEdge, ADGraph, ADNode
+from .phase4_v2 import Phase4V2Forest
 
 # SharpHound ingest version numbers per object type
 _VERSIONS: dict[str, int] = {
@@ -56,6 +57,64 @@ def serialize_to_zip(graph: ADGraph, output_path: Path) -> Path:
     zip_data = _build_zip(graph)
     output_path.write_bytes(zip_data)
     return output_path
+
+
+def serialize_forest_to_zip(forest: Phase4V2Forest, output_path: Path) -> Path:
+    """Serialize a Phase 4B/v2 parent/child forest to one SharpHound-compatible zip."""
+
+    combined = _combined_forest_graph(forest)
+    return serialize_to_zip(combined, output_path)
+
+
+def _combined_forest_graph(forest: Phase4V2Forest) -> ADGraph:
+    combined = ADGraph(forest.parent_domain, seed=forest.seed)
+    combined._nodes = {
+        **forest.parent_graph._nodes,
+        **forest.child_graph._nodes,
+    }
+    combined._edges = [*forest.parent_graph.get_edges(), *forest.child_graph.get_edges()]
+    combined.planted_paths = [*forest.parent_graph.planted_paths, *forest.child_graph.planted_paths]
+    parent_domain_node = forest.parent_graph.nodes_by_type("Domain")[0]
+    child_domain_node = forest.child_graph.nodes_by_type("Domain")[0]
+    _add_bidirectional_domain_trusts(parent_domain_node, child_domain_node)
+    combined._edges.extend(
+        [
+            ADEdge(
+                source=child_domain_node.object_id,
+                target=parent_domain_node.object_id,
+                edge_kind="TrustedBy",
+                properties={"trust_type": "parent_child"},
+            ),
+            ADEdge(
+                source=parent_domain_node.object_id,
+                target=child_domain_node.object_id,
+                edge_kind="TrustedBy",
+                properties={"trust_type": "parent_child"},
+            ),
+        ]
+    )
+    return combined
+
+
+def _add_bidirectional_domain_trusts(parent_domain_node: ADNode, child_domain_node: ADNode) -> None:
+    parent_domain_node.extra.setdefault("Trusts", [])
+    child_domain_node.extra.setdefault("Trusts", [])
+    trust_to_child = _trust_entry(child_domain_node)
+    trust_to_parent = _trust_entry(parent_domain_node)
+    if trust_to_child not in parent_domain_node.extra["Trusts"]:
+        parent_domain_node.extra["Trusts"].append(trust_to_child)
+    if trust_to_parent not in child_domain_node.extra["Trusts"]:
+        child_domain_node.extra["Trusts"].append(trust_to_parent)
+
+
+def _trust_entry(domain_node: ADNode) -> dict:
+    return {
+        "TargetDomainSid": domain_node.properties["domainsid"],
+        "TargetDomainName": domain_node.properties["domain"],
+        "IsTransitive": True,
+        "TrustDirection": "Bidirectional",
+        "TrustType": "ParentChild",
+    }
 
 
 def serialize_to_dir(graph: ADGraph, output_dir: Path) -> list[Path]:

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import zipfile
+from copy import deepcopy
 from pathlib import Path
 
 from click.testing import CliRunner
@@ -41,8 +43,18 @@ def test_phase4_v2_matrix_validation_scopes_balance_to_benchmark_tasks() -> None
     assert validation["official_count"] == 100
     assert validation["startup_smoke_count"] == 4
     assert validation["benchmark_matrix_count"] == 96
-    assert sum(validation["matrix_balance"]["by_family"].values()) == 96
-    assert sum(validation["matrix_balance"]["by_track"].values()) == 96
+    assert validation["matrix_balance"]["by_family"] == {
+        "adcs_delegation_composite": 32,
+        "adcs_esc1": 32,
+        "delegation_rbcd": 32,
+    }
+    assert validation["matrix_balance"]["by_track"] == {"cypher": 48, "mcp": 48}
+    assert validation["matrix_balance"]["by_task_type"] == {
+        "cypher_generation": 24,
+        "enumeration": 24,
+        "mcp_analysis": 24,
+        "path_finding": 24,
+    }
 
 
 def test_phase4_v2_scoring_is_mechanical_and_includes_smoke_in_raw_score(tmp_path: Path) -> None:
@@ -105,3 +117,119 @@ profiles:
     assert manifest["profile"] == "medium"
     assert manifest["official_count"] == 100
     assert manifest["matrix_validation"]["ok"] is True
+
+
+def test_phase4_v2_generated_zip_and_manifest_cover_parent_child_forest(tmp_path: Path) -> None:
+    config = tmp_path / "run.yaml"
+    config.write_text(
+        """
+version: 1
+profiles:
+  phase4_v2_small:
+    kind: generate
+    domain: forest.example
+    seed: 4402
+    generator:
+      profile: phase4_v2_small
+    output_manifest: out/manifest.json
+    output_zip: out/forest.zip
+"""
+    )
+
+    result = CliRunner().invoke(
+        main,
+        ["run", "--config", str(config), "--profile", "phase4_v2_small"],
+    )
+
+    assert result.exit_code == 0, result.output
+    out = tmp_path / "out"
+    manifest = json.loads((out / "manifest.json").read_text())
+    with zipfile.ZipFile(out / "forest.zip") as zf:
+        domains = json.loads(zf.read("domains.json"))["data"]
+    domain_names = {item["Properties"]["domain"] for item in domains}
+    assert domain_names == {"FOREST.EXAMPLE", "CHILD.FOREST.EXAMPLE"}
+    assert all(item["Trusts"] for item in domains)
+    assert manifest["generation_summary"]["forest"]["type"] == "parent_child"
+    assert manifest["generation_summary"]["stats"]["domains"] == 2
+    assert manifest["stats"]["domains"] == 2
+    assert manifest["planted_paths"]
+    assert {path["domain_role"] for path in manifest["planted_paths"]} == {"parent", "child"}
+
+
+def test_phase4_v2_manifest_preflight_fields_cannot_be_empty_zero_of_zero() -> None:
+    forest = build_phase4_v2_forest(profile="small", seed=4402)
+    corpus = generate_phase4_v2_official_tasks(forest)
+
+    assert corpus["stats"]["users"] > 0
+    assert corpus["stats"]["computers"] > 0
+    assert corpus["stats"]["groups"] > 0
+    assert corpus["stats"]["ous"] > 0
+    assert corpus["stats"]["domains"] == 2
+    assert len(corpus["planted_paths"]) == len(forest.template_instances)
+    assert all(path["path_edges"] for path in corpus["planted_paths"])
+
+
+def test_phase4_v2_score_answers_cli_uses_official_projection(tmp_path: Path) -> None:
+    forest = build_phase4_v2_forest(profile="medium", seed=4402)
+    corpus = generate_phase4_v2_official_tasks(forest)
+    manifest_path = tmp_path / "manifest.json"
+    answers_path = tmp_path / "answers.json"
+    output_path = tmp_path / "projection.json"
+    manifest_path.write_text(json.dumps(corpus))
+    answers_path.write_text(
+        json.dumps(
+            {
+                "answers": [
+                    {"task_id": task["id"], "correct": index < 7}
+                    for index, task in enumerate(corpus["tasks_official"])
+                ]
+            }
+        )
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "score-answers",
+            "--manifest",
+            str(manifest_path),
+            "--answers",
+            str(answers_path),
+            "--output",
+            str(output_path),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Scored 7/100 official answers" in result.output
+    projection = json.loads(output_path.read_text())
+    assert projection["summary"]["raw_score"] == 7
+    assert projection["summary"]["official_count"] == 100
+    assert projection["summary"]["startup_smoke"] == {"count": 4, "correct": 4}
+    assert projection["summary"]["benchmark_matrix"] == {"count": 96, "correct": 3}
+
+
+def test_phase4_v2_matrix_validation_rejects_invalid_reported_balances() -> None:
+    forest = build_phase4_v2_forest(profile="medium", seed=4402)
+    corpus = generate_phase4_v2_official_tasks(forest)
+    bad_track = deepcopy(corpus)
+    for task in bad_track["tasks_official"]:
+        if task["phase"] == "benchmark_matrix" and task["track"] == "mcp":
+            task["track"] = "cypher"
+            break
+    bad_type = deepcopy(corpus)
+    for task in bad_type["tasks_official"]:
+        if task["phase"] == "benchmark_matrix" and task["category"] == "enumeration":
+            task["category"] = "path_finding"
+            break
+    bad_family = deepcopy(corpus)
+    for task in bad_family["tasks_official"]:
+        if task["phase"] == "benchmark_matrix":
+            task["scenario_family"] = "unexpected_family"
+            break
+
+    assert validate_phase4_v2_matrix(bad_track)["ok"] is False
+    assert validate_phase4_v2_matrix(bad_type)["ok"] is False
+    validation = validate_phase4_v2_matrix(bad_family)
+    assert validation["ok"] is False
+    assert any("scenario family set" in error for error in validation["errors"])

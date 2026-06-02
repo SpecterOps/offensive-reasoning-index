@@ -19,7 +19,7 @@ from .generator.org import build_org
 from .generator.phase4 import build_phase4_v1_graph
 from .generator.phase4_v2 import build_phase4_v2_forest
 from .generator.security import apply_baseline_security
-from .generator.serializer import serialize_to_dir, serialize_to_zip
+from .generator.serializer import serialize_forest_to_zip, serialize_to_dir, serialize_to_zip
 from .run_config import RunConfigOverrides, list_run_profiles, load_run_profile
 
 
@@ -253,9 +253,7 @@ def _generate_profile_dataset(resolved) -> None:
             parent_domain=resolved.domain,
         )
         corpus = generate_phase4_v2_official_tasks(forest)
-        # Keep a SharpHound-compatible parent-domain zip for existing ingest tooling while
-        # writing the v2 forest/corpus schema artifacts next to the manifest.
-        serialize_to_zip(forest.parent_graph, Path(resolved.output_zip))
+        serialize_forest_to_zip(forest, Path(resolved.output_zip))
         _write_phase4_v2_artifacts(corpus, Path(resolved.output_manifest))
         click.echo(f"Generated {resolved.generator_profile}:")
         click.echo(f"  Zip: {resolved.output_zip}")
@@ -604,23 +602,41 @@ def preflight_tasks_command(
 )
 def score_answers(manifest_path: str, answers_path: str, track: str, output_path: str) -> None:
     """Grade a structured answers file without launching a model campaign."""
-    from .eval.answer_scoring import write_score_answers_projection
+    from .eval.answer_scoring import (
+        score_official_answers_projection,
+        write_score_answers_projection,
+    )
 
     try:
-        projection = write_score_answers_projection(
-            manifest_path=Path(manifest_path),
-            answers_path=Path(answers_path),
-            track=track,
-            output_path=Path(output_path),
-        )
+        manifest = json.loads(Path(manifest_path).read_text())
+        if manifest.get("schema_version") == "phase4b_v2.0" and "tasks_official" in manifest:
+            projection = score_official_answers_projection(
+                manifest_path=Path(manifest_path),
+                answers_path=Path(answers_path),
+            )
+            Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+            Path(output_path).write_text(json.dumps(projection, indent=2, sort_keys=True) + "\n")
+        else:
+            projection = write_score_answers_projection(
+                manifest_path=Path(manifest_path),
+                answers_path=Path(answers_path),
+                track=track,
+                output_path=Path(output_path),
+            )
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
     summary = projection["summary"]
-    click.echo(
-        f"Scored {summary['completed_samples']}/{summary['total_samples']} samples; "
-        f"reasoning_accuracy={summary['reasoning_accuracy']:.3f}; "
-        f"effective_accuracy={summary['effective_accuracy']:.3f}"
-    )
+    if "raw_score" in summary:
+        click.echo(
+            f"Scored {summary['raw_score']}/{summary['official_count']} official answers; "
+            f"official_accuracy={summary['official_accuracy']:.3f}"
+        )
+    else:
+        click.echo(
+            f"Scored {summary['completed_samples']}/{summary['total_samples']} samples; "
+            f"reasoning_accuracy={summary['reasoning_accuracy']:.3f}; "
+            f"effective_accuracy={summary['effective_accuracy']:.3f}"
+        )
     click.echo(f"Projection written to {output_path}")
 
 
