@@ -1,6 +1,6 @@
-# Phase 4 v1 Hermes Runbook
+# Phase 4 v1 Runbook
 
-This runbook is the operator contract for Hermes automation around Phase 4 v1.
+This runbook describes the standalone operator workflow for Phase 4 v1.
 It covers dataset generation, generated artifacts, BloodHound CE handoff points,
 and the MCP resources run profile.
 
@@ -40,7 +40,7 @@ them, but explicit `--profile` invocations still run them.
 
 ## Generate Dataset
 
-Hermes should generate the dataset before any Phase 4 eval run:
+Generate the dataset before any Phase 4 eval run:
 
 ```bash
 uv run ori run --config run-config-phase4-v1.yaml --profile phase4_v1
@@ -88,7 +88,7 @@ scenario principals needed by the advanced paths.
 
 ## BloodHound CE Handoff
 
-Hermes should not assume ingest has happened after generation. The zip must be
+Do not assume ingest has happened after generation. The zip must be
 uploaded into BloodHound CE before live MCP grading is meaningful.
 
 Operator handoff artifact:
@@ -115,8 +115,7 @@ Do not mark Phase 4 ingest accepted until this verification passes.
 
 ## Required Eval Surfaces
 
-After BloodHound CE contains the Phase 4 graph, Hermes should run both eval
-surfaces.
+After BloodHound CE contains the Phase 4 graph, run both eval surfaces.
 
 No-MCP direct Cypher eval:
 
@@ -192,8 +191,8 @@ Reusable examples live in:
 docs/openai-compatible-model-examples.yaml
 ```
 
-Hermes can copy one disabled profile from that file into a generated run config
-or into `run-config-phase4-v1.yaml`, then update the provider URL, model name,
+Copy one disabled profile from that file into a generated run config or into
+`run-config-phase4-v1.yaml`, then update the provider URL, model name,
 and output path.
 
 Local llama.cpp example:
@@ -267,12 +266,12 @@ resource_mode
 mcp_tool_loop
 ```
 
-Hermes should preserve these fields in run summaries because they explain which
-prompt surface the model actually saw.
+Preserve these fields in run summaries because they explain which prompt surface
+the model actually saw.
 
-## Hermes Acceptance Checklist
+## Acceptance Checklist
 
-Use this checklist for automated status reporting:
+Use this checklist for run acceptance:
 
 - Dataset generated with `phase4_v1`.
 - `datasets/phase4-v1.zip` exists.
