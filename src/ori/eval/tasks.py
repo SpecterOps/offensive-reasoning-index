@@ -240,15 +240,30 @@ _GLOBAL_TASKS: list[tuple[str, str, str, str, list[str]]] = [
 ]
 
 
+def _manifest_domain(manifest: dict) -> str:
+    domain = manifest.get("domain")
+    if domain:
+        return str(domain).upper()
+    forest = manifest.get("generation_summary", {}).get("forest", {})
+    domains = forest.get("domains", [])
+    if domains:
+        return str(domains[0]).upper()
+    return "CORP.LOCAL"
+
+
 def generate_tasks(manifest: dict) -> list[Task]:
     """Generate evaluation tasks from a manifest dict."""
-    domain = manifest.get("domain", "CORP.LOCAL")
+    domain = _manifest_domain(manifest)
     tasks: list[Task] = []
 
     for path in manifest.get("planted_paths", []):
         tid = path["template_id"]
         source_name = path.get("source_name", path.get("source_node", ""))
         target_name = path.get("target_name", path.get("target_node", ""))
+        path_domain = path.get("domain", domain)
+        domain_role = path.get("domain_role")
+        task_id_prefix = f"{domain_role}-{tid}" if domain_role else tid
+        path_metadata = path.get("metadata", {})
 
         for i, (q_tmpl, category, grade_mode, tags, ref_cypher_tmpl) in enumerate(
             _TEMPLATE_QUESTIONS.get(tid, []), start=1
@@ -256,7 +271,7 @@ def generate_tasks(manifest: dict) -> list[Task]:
             question = q_tmpl.format(
                 source_name=source_name,
                 target_name=target_name,
-                domain=domain,
+                domain=path_domain,
             )
             # Use per-task reference Cypher if defined, otherwise fall back to the
             # planted path's verification_cypher (correct for path_finding tasks).
@@ -264,13 +279,13 @@ def generate_tasks(manifest: dict) -> list[Task]:
                 reference_cypher = ref_cypher_tmpl.format(
                     source_name=source_name,
                     target_name=target_name,
-                    domain=domain,
+                    domain=path_domain,
                 )
             else:
                 reference_cypher = path["verification_cypher"]
             tasks.append(
                 Task(
-                    id=f"{tid}-{i:02d}",
+                    id=f"{task_id_prefix}-{i:02d}",
                     template_id=tid,
                     tier=path["tier"],
                     category=category,
@@ -281,10 +296,14 @@ def generate_tasks(manifest: dict) -> list[Task]:
                     metadata={
                         "source_name": source_name,
                         "target_name": target_name,
-                        "domain": domain,
+                        "domain": path_domain,
+                        "domain_role": domain_role,
                         "description": path["description"],
                         "mitre": path.get("mitre", []),
-                        "scenario_family": path.get("scenario_family", ""),
+                        "scenario_family": path.get(
+                            "scenario_family",
+                            path_metadata.get("scenario_family", ""),
+                        ),
                         "critical_nodes": path.get("critical_nodes", []),
                         "required_capabilities": path.get("required_capabilities", []),
                         "template_version": path.get("template_version", ""),
@@ -353,7 +372,7 @@ def _global_reference_cypher_map(domain: str) -> dict[str, str]:
 
 
 def _generate_mcp_native_tasks(manifest: dict) -> list[Task]:
-    domain = manifest.get("domain", "CORP.LOCAL")
+    domain = _manifest_domain(manifest)
     reference_globals = _global_reference_cypher_map(domain)
     planted_by_template = {path["template_id"]: path for path in manifest.get("planted_paths", [])}
     tasks: list[Task] = []

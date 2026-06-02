@@ -288,7 +288,17 @@ class BHCEClient:
         or CDAVIS@CORP.LOCAL, which should never be scored as hallucinations.
         """
         names: set[str] = set()
-        for label in ("User", "Computer", "Group", "Domain", "OU"):
+        for label in (
+            "User",
+            "Computer",
+            "Group",
+            "Domain",
+            "OU",
+            "CertTemplate",
+            "EnterpriseCA",
+            "RootCA",
+            "NTAuthStore",
+        ):
             result = await self.run_cypher(f"MATCH (n:{label}) RETURN n LIMIT 10000")
             if not result.success:
                 # Fail closed — partial allowlist is worse than no allowlist

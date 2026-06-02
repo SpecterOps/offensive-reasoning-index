@@ -13,6 +13,7 @@ from ori.eval.phase4_v2 import (
     generate_phase4_v2_official_tasks,
     validate_phase4_v2_matrix,
 )
+from ori.eval.tasks import generate_tasks
 from ori.generator.phase4_v2 import build_phase4_v2_forest
 
 
@@ -197,6 +198,22 @@ def test_phase4_v2_manifest_preflight_fields_cannot_be_empty_zero_of_zero() -> N
     assert corpus["stats"]["domains"] == 2
     assert len(corpus["planted_paths"]) == len(forest.template_instances)
     assert all(path["path_edges"] for path in corpus["planted_paths"])
+
+
+def test_phase4_v2_generated_smoke_tasks_have_unique_parent_child_ids_and_domains() -> None:
+    forest = build_phase4_v2_forest(profile="medium", seed=4402)
+    corpus = generate_phase4_v2_official_tasks(forest)
+
+    tasks = generate_tasks(corpus)
+    task_ids = [task.id for task in tasks]
+
+    assert len(task_ids) == len(set(task_ids))
+    planted_tasks = [task for task in tasks if task.template_id != "global"]
+    assert {task.metadata["domain_role"] for task in planted_tasks} == {"parent", "child"}
+    assert any(task.id.startswith("parent-t1_admin_to") for task in tasks)
+    assert any(task.id.startswith("child-t1_admin_to") for task in tasks)
+    assert any("@CHILD.FOREST.EXAMPLE" in task.question for task in tasks)
+    assert all("CORP.LOCAL" not in task.question for task in tasks)
 
 
 def test_phase4_v2_score_answers_cli_uses_official_projection(tmp_path: Path) -> None:
