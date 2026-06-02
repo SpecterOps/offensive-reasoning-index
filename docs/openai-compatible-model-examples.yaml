@@ -1,7 +1,7 @@
 # Example model/profile entries for ORI MCP resources runs.
 #
 # These examples are intentionally disabled. Copy one into run-config-phase4-v1.yaml
-# or a Hermes-generated run config, then update model names, URLs, and env vars.
+# or a generated run config, then update model names, URLs, and env vars.
 #
 # Secret handling:
 # - Native OpenAI-compatible MCP calls use OPENAI_COMPAT_API_KEY first, then OPENAI_API_KEY.
