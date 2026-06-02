@@ -199,20 +199,16 @@ def plant_adcs_esc1_path(graph: ADGraph) -> PlantedPath:
         f"MATCH p=(u:User {{name: '{_node_name(graph, enrollee.object_id)}'}})"
         "-[:MemberOf*1..]->(g:Group)"
         "-[:Enroll]->(t:CertTemplate)"
-        "-[:PublishedTo]->(ca:EnterpriseCA)"
-        "-[:IssuedSignedBy]->(root:RootCA)"
-        "-[:TrustedForNTAuth]->(nt:NTAuthStore) "
+        "-[:PublishedTo]->(ca:EnterpriseCA) "
         "WHERE t.enrolleesuppliessubject = true "
         "AND t.authenticationenabled = true "
-        "RETURN p, t, ca, root, nt, g, u, da"
+        "RETURN p, t, ca, g, u, da"
     )
     critical_nodes = [
         enrollee.object_id,
         enroll_group.object_id,
         template.object_id,
         enterprise.object_id,
-        root.object_id,
-        ntauth.object_id,
         domain_admins.object_id,
     ]
     planted = PlantedPath(
@@ -231,15 +227,14 @@ def plant_adcs_esc1_path(graph: ADGraph) -> PlantedPath:
             (enrollee.object_id, "MemberOf", enroll_group.object_id),
             (enroll_group.object_id, "Enroll", template.object_id),
             (template.object_id, "PublishedTo", enterprise.object_id),
-            (enterprise.object_id, "IssuedSignedBy", root.object_id),
-            (root.object_id, "TrustedForNTAuth", ntauth.object_id),
         ],
         verification_cypher=cypher,
         mitre=["T1649", "T1550.003"],
         metadata={
             "scenario_family": "adcs_esc1",
             "critical_nodes": critical_nodes,
-            "required_capabilities": ["adcs_enumeration", "template_abuse", "ntauth_trust"],
+            "required_capabilities": ["adcs_enumeration", "template_abuse"],
+            "diagnostic_nodes": [root.object_id, ntauth.object_id],
             "template_version": PHASE4_TEMPLATE_VERSION,
         },
     )
@@ -341,6 +336,13 @@ def plant_adcs_to_delegation_composite(
         },
     )
     graph.add_node(bridge)
+    bridge.aces.append(
+        ACE(
+            principal_sid=source,
+            principal_type="User",
+            right_name="GenericWrite",
+        )
+    )
     graph.add_edge(bridge.object_id, "AllowedToDelegate", delegation_target)
     graph.add_edge(source, "GenericWrite", bridge.object_id, planted=True)
 

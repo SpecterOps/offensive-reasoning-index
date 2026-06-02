@@ -154,6 +154,36 @@ profiles:
     assert manifest["stats"]["domains"] == 2
     assert manifest["planted_paths"]
     assert {path["domain_role"] for path in manifest["planted_paths"]} == {"parent", "child"}
+    adcs_paths = [
+        path
+        for path in manifest["planted_paths"]
+        if path["template_id"] in {"t4_adcs_esc1", "t5_adcs_to_delegation_composite"}
+    ]
+    assert adcs_paths
+    for path in adcs_paths:
+        edges = [edge["edge"] for edge in path["path_edges"]]
+        assert "PublishedTo" in edges
+        assert "IssuedSignedBy" not in edges
+        assert "TrustedForNTAuth" not in edges
+    composite_edges = [
+        edge["edge"]
+        for path in adcs_paths
+        if path["template_id"] == "t5_adcs_to_delegation_composite"
+        for edge in path["path_edges"]
+    ]
+    assert "GenericWrite" in composite_edges
+
+    with zipfile.ZipFile(out / "forest.zip") as zf:
+        bridge_users = [
+            user
+            for user in json.loads(zf.read("users.json"))["data"]
+            if user["Properties"]["samaccountname"] == "svc_phase4_bridge"
+        ]
+    assert bridge_users
+    assert all(
+        any(ace["RightName"] == "GenericWrite" for ace in bridge["Aces"])
+        for bridge in bridge_users
+    )
 
 
 def test_phase4_v2_manifest_preflight_fields_cannot_be_empty_zero_of_zero() -> None:
