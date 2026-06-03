@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -40,6 +41,33 @@ class EvalResult:
     partial_result: bool = False
     attempt_number: int = 1
     result_source: str = "first_pass"
+
+
+def _validate_result_accounting(tasks: list[Task], results: list[EvalResult]) -> None:
+    """Ensure every requested task produced exactly one terminal outcome row."""
+    expected_ids = [task.id for task in tasks]
+    result_ids = [result.task.id for result in results]
+    missing = sorted(set(expected_ids) - set(result_ids))
+    duplicate_counts = Counter(result_ids)
+    duplicates = sorted(task_id for task_id, count in duplicate_counts.items() if count > 1)
+    unexpected = sorted(set(result_ids) - set(expected_ids))
+    outcome_counts = Counter(result.grade.outcome for result in results)
+    outcome_total = sum(outcome_counts.values())
+    expected_total = len(expected_ids)
+
+    if missing or duplicates or unexpected or outcome_total != expected_total:
+        raise RuntimeError(
+            "Result accounting failed: "
+            f"expected={expected_total}, outcome_total={outcome_total}, "
+            f"missing={missing}, duplicates={duplicates}, unexpected={unexpected}, "
+            f"outcomes={dict(sorted(outcome_counts.items()))}"
+        )
+
+    print(
+        "Result accounting: "
+        f"{outcome_total}/{expected_total} tasks accounted for by outcome "
+        f"{dict(sorted(outcome_counts.items()))}"
+    )
 
 
 def _infra_task_ids(results: list[EvalResult]) -> set[str]:
@@ -259,6 +287,7 @@ async def run_eval_cli_bare(
         )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    _validate_result_accounting(tasks, results)
     record_eval_telemetry(
         results,
         output_path=output_path,
@@ -343,6 +372,7 @@ async def run_eval_cli(
         )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    _validate_result_accounting(tasks, results)
     record_eval_telemetry(
         results,
         output_path=output_path,
@@ -450,6 +480,7 @@ async def run_eval_mcp_cli_bare(
         )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    _validate_result_accounting(tasks, results)
     record_eval_telemetry(
         results,
         output_path=output_path,
@@ -560,6 +591,7 @@ async def run_eval_mcp_cli(
         )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    _validate_result_accounting(tasks, results)
     record_eval_telemetry(
         results,
         output_path=output_path,

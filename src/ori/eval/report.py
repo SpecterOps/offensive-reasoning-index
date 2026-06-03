@@ -175,7 +175,13 @@ def _row_for_result(r: EvalResult) -> dict[str, object]:
         "error_detail": (
             r.grade.details
             if r.grade.outcome
-            in ("CYPHER_ERROR", "QUERY_TOO_EXPENSIVE", "MODEL_ERROR", "LOOP_EXHAUSTED", "INFRA_ERROR")
+            in (
+                "CYPHER_ERROR",
+                "QUERY_TOO_EXPENSIVE",
+                "MODEL_ERROR",
+                "LOOP_EXHAUSTED",
+                "INFRA_ERROR",
+            )
             else ""
         ),
         "parse_stage": r.model_response.parse_stage,
@@ -218,7 +224,9 @@ def _row_for_result(r: EvalResult) -> dict[str, object]:
         "infra_error_subtype": mcp_meta.infra_error_subtype if mcp_meta else "",
         "successful_tool_results": mcp_meta.successful_tool_results if mcp_meta else 0,
         "finalization_guard_used": mcp_meta.finalization_guard_used if mcp_meta else False,
-        "loop_exhaustion_with_evidence": mcp_meta.loop_exhaustion_with_evidence if mcp_meta else False,
+        "loop_exhaustion_with_evidence": (
+            mcp_meta.loop_exhaustion_with_evidence if mcp_meta else False
+        ),
         "minimum_evidence_satisfied": mcp_meta.minimum_evidence_satisfied if mcp_meta else False,
         "attempt_number": getattr(r, "attempt_number", 1),
         "result_source": getattr(r, "result_source", "first_pass"),
@@ -247,15 +255,25 @@ def write_combined_csv(all_results: dict[str, list[EvalResult]], output_path: Pa
 def _stats(results: list[EvalResult]) -> dict:
     total = len(results)
     correct = sum(1 for r in results if r.grade.score == 1.0)
+    outcome_counts = {
+        outcome: sum(1 for r in results if r.grade.outcome == outcome)
+        for outcome in sorted({r.grade.outcome for r in results})
+    }
+    accounted_outcomes = sum(outcome_counts.values())
+    incorrect = sum(1 for r in results if r.grade.outcome == "INCORRECT")
     hallucs = sum(1 for r in results if r.grade.hallucination)
     cypher_errors = sum(1 for r in results if r.grade.outcome == "CYPHER_ERROR")
     query_too_expensive = sum(1 for r in results if r.grade.outcome == "QUERY_TOO_EXPENSIVE")
     parse_fails = sum(1 for r in results if r.grade.outcome == "PARSE_FAIL")
     model_errors = sum(1 for r in results if r.grade.outcome == "MODEL_ERROR")
     loop_exhaustions = sum(1 for r in results if r.grade.outcome == "LOOP_EXHAUSTED")
-    no_path_reported = sum(1 for r in results if r.mcp and r.mcp.failure_subtype == "NO_PATH_REPORTED")
+    no_path_reported = sum(
+        1 for r in results if r.mcp and r.mcp.failure_subtype == "NO_PATH_REPORTED"
+    )
     wrong_path = sum(1 for r in results if r.mcp and r.mcp.failure_subtype == "WRONG_PATH")
-    incomplete_answers = sum(1 for r in results if r.mcp and r.mcp.failure_subtype == "INCOMPLETE_ANSWER")
+    incomplete_answers = sum(
+        1 for r in results if r.mcp and r.mcp.failure_subtype == "INCOMPLETE_ANSWER"
+    )
     infra_errors = sum(1 for r in results if r.grade.outcome == "INFRA_ERROR")
     partial_results = sum(1 for r in results if getattr(r, "partial_result", False))
     completed_tasks = total - partial_results
@@ -291,6 +309,10 @@ def _stats(results: list[EvalResult]) -> dict:
     return {
         "total": total,
         "correct": correct,
+        "incorrect": incorrect,
+        "outcome_counts": outcome_counts,
+        "accounted_outcomes": accounted_outcomes,
+        "outcome_accounting_ok": accounted_outcomes == total,
         "completed_samples": completed_tasks,
         "correct_completed": correct_completed,
         "reasoning_accuracy": correct_completed / completed_tasks if completed_tasks else 0.0,
@@ -343,6 +365,10 @@ def write_summary_csv(all_results: dict[str, list[EvalResult]], output_path: Pat
         "partial_result",
         "total_tasks",
         "correct",
+        "incorrect",
+        "outcome_accounted_tasks",
+        "outcome_accounting_ok",
+        "outcome_counts_json",
         "score_pct",
         "tier1_correct",
         "tier1_total",
@@ -427,6 +453,10 @@ def write_summary_csv(all_results: dict[str, list[EvalResult]], output_path: Pat
                 "partial_result": s["partial_results"] > 0,
                 "total_tasks": s["total"],
                 "correct": s["correct"],
+                "incorrect": s["incorrect"],
+                "outcome_accounted_tasks": s["accounted_outcomes"],
+                "outcome_accounting_ok": s["outcome_accounting_ok"],
+                "outcome_counts_json": json.dumps(s["outcome_counts"], sort_keys=True),
                 "score_pct": (100 * s["correct"] // s["total"]) if s["total"] else 0,
                 "tier1_correct": t1c,
                 "tier1_total": t1t,
@@ -544,9 +574,13 @@ def print_summary(results: list[EvalResult], model: str) -> None:
     query_too_expensive = sum(1 for r in results if r.grade.outcome == "QUERY_TOO_EXPENSIVE")
     model_errors = sum(1 for r in results if r.grade.outcome == "MODEL_ERROR")
     loop_exhaustions = sum(1 for r in results if r.grade.outcome == "LOOP_EXHAUSTED")
-    no_path_reported = sum(1 for r in results if r.mcp and r.mcp.failure_subtype == "NO_PATH_REPORTED")
+    no_path_reported = sum(
+        1 for r in results if r.mcp and r.mcp.failure_subtype == "NO_PATH_REPORTED"
+    )
     wrong_path = sum(1 for r in results if r.mcp and r.mcp.failure_subtype == "WRONG_PATH")
-    incomplete_answers = sum(1 for r in results if r.mcp and r.mcp.failure_subtype == "INCOMPLETE_ANSWER")
+    incomplete_answers = sum(
+        1 for r in results if r.mcp and r.mcp.failure_subtype == "INCOMPLETE_ANSWER"
+    )
     infra_errors = sum(1 for r in results if r.grade.outcome == "INFRA_ERROR")
 
     def tier_score(tier: int) -> str:
@@ -570,6 +604,11 @@ def print_summary(results: list[EvalResult], model: str) -> None:
         f"Model errors: {model_errors}  |  Loop exhausted: {loop_exhaustions}  |  "
         f"Infra errors: {infra_errors}"
     )
+    if no_path_reported or wrong_path or incomplete_answers:
+        print(
+            f"MCP incorrect subtypes: no_path={no_path_reported}  |  "
+            f"wrong_path={wrong_path}  |  incomplete={incomplete_answers}"
+        )
     status, detail = classify_summary_health(
         {
             "completed_tasks": sum(1 for r in results if not getattr(r, "partial_result", False)),

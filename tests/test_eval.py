@@ -17,7 +17,7 @@ from ori.eval.mcp_runtime import (
     _load_last_eval_log_from_runtime_dir,
     _safe_print,
 )
-from ori.eval.tasks import Task, generate_tasks
+from ori.eval.tasks import Task, generate_mcp_tasks, generate_tasks
 
 # ---------------------------------------------------------------------------
 # extract_cypher
@@ -294,7 +294,9 @@ def test_inspect_eval_artifact_loader_rejects_stale_pointer(monkeypatch, tmp_pat
     os.utime(pointer, (old, old))
     monkeypatch.setattr(
         "ori.eval.mcp_runtime.read_eval_log",
-        lambda path: SimpleNamespace(status="success", error=None, samples=[object()], results=None),
+        lambda path: SimpleNamespace(
+            status="success", error=None, samples=[object()], results=None
+        ),
     )
 
     result = _load_last_eval_log_from_runtime_dir(
@@ -317,7 +319,9 @@ def test_inspect_eval_artifact_loader_rejects_wrong_sample_count(monkeypatch, tm
     os.utime(pointer, (now, now))
     monkeypatch.setattr(
         "ori.eval.mcp_runtime.read_eval_log",
-        lambda path: SimpleNamespace(status="success", error=None, samples=[object()], results=None),
+        lambda path: SimpleNamespace(
+            status="success", error=None, samples=[object()], results=None
+        ),
     )
 
     result = _load_last_eval_log_from_runtime_dir(
@@ -572,7 +576,10 @@ def _make_manifest() -> dict:
                 "target_node": "S-1-5-21-1-2-3-1150",
                 "target_name": "SRV-FILE-01.TEST.LOCAL",
                 "path_edges": [],
-                "verification_cypher": "MATCH p=shortestPath((u:User {name: 'DWOLFE@TEST.LOCAL'})-[*1..]->(c:Computer {name: 'SRV-FILE-01.TEST.LOCAL'})) RETURN p",
+                "verification_cypher": (
+                    "MATCH p=shortestPath((u:User {name: 'DWOLFE@TEST.LOCAL'})-[*1..]->"
+                    "(c:Computer {name: 'SRV-FILE-01.TEST.LOCAL'})) RETURN p"
+                ),
                 "mitre": ["T1222.001"],
             },
             {
@@ -720,3 +727,59 @@ def test_mock_unknown_variant_returns_error():
     resp = asyncio.run(call_model(task, "mock/nonexistent"))
     assert resp.error is not None
     assert "nonexistent" in resp.error
+
+
+def _make_phase4b_official_manifest():
+    tasks = [
+        {
+            "id": "p4v2-smoke-01-startup-domain-count",
+            "phase": "startup_smoke",
+            "question": "Confirm domains.",
+            "category": "startup_smoke",
+            "grade_mode": "mechanical_binary",
+            "smoke_task": True,
+            "track": "startup",
+            "scenario_family": "startup_smoke",
+            "technical_difficulty": 1,
+            "reasoning_difficulty": 1,
+            "template_id": "startup_smoke",
+            "reference": {"domains": ["forest.example", "CHILD.forest.example"]},
+        }
+    ]
+    for index in range(2, 101):
+        track = "cypher" if index <= 50 else "mcp"
+        tasks.append(
+            {
+                "id": f"p4v2-matrix-{index - 1:03d}",
+                "phase": "benchmark_matrix",
+                "question": f"Solve official task {index - 1}.",
+                "category": "path_finding",
+                "grade_mode": "mechanical_binary",
+                "smoke_task": False,
+                "track": track,
+                "scenario_family": "adcs_esc1",
+                "technical_difficulty": 3,
+                "reasoning_difficulty": 3,
+                "template_id": "t1_admin_to",
+                "reference_cypher": "MATCH p=(u:User)-[:AdminTo]->(c:Computer) RETURN p",
+            }
+        )
+    return {"official_count": 100, "raw_score_denominator": 100, "tasks_official": tasks}
+
+
+def test_phase4b_official_tasks_use_explicit_100_question_corpus():
+    tasks = generate_tasks(_make_phase4b_official_manifest())
+    assert len(tasks) == 100
+    assert tasks[0].id == "p4v2-smoke-01-startup-domain-count"
+    assert tasks[-1].id == "p4v2-matrix-099"
+    assert sum(1 for task in tasks if task.metadata["track"] == "startup") == 1
+    assert sum(1 for task in tasks if task.metadata["track"] == "cypher") == 49
+    assert sum(1 for task in tasks if task.metadata["track"] == "mcp") == 50
+    assert all(task.metadata["official_grade_mode"] == "mechanical_binary" for task in tasks)
+
+
+def test_phase4b_mcp_tasks_do_not_fall_back_to_legacy_generated_subset():
+    tasks = generate_mcp_tasks(_make_phase4b_official_manifest())
+    assert len(tasks) == 100
+    assert tasks[0].metadata["official_count"] == 100
+    assert all("mcp_track" in task.metadata for task in tasks)
