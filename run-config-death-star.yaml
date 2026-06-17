@@ -1,0 +1,77 @@
+version: 1
+
+# Local/private ORI config for using death-star as an OpenAI-compatible
+# inference provider. Keep real benchmark runs concurrency=1 and reserve
+# death-star first so Hermes crons do not contend with the model under test.
+#
+# Reserve/release pattern:
+#   deathstar-reserve --owner dogwalker --reason 'ORI run using death-star inference' --model qwen-fast --artifact-root results/death-star/phase4b-v2-medium/qwen-fast-mcp
+#   ori run run-config-death-star.yaml --profile death_star_qwen_fast_mcp
+#   deathstar-release
+
+defaults:
+  bhce_url: null
+  concurrency: 1
+  model_base_url: http://death-star:8080/v1
+  max_model_reruns_on_infra: 1
+  health:
+    timeout_seconds: 60
+    poll_interval: 5
+  mcp:
+    mcp_dir: ../bloodhound-mcp
+    max_steps: 16
+    resource_mode: on-demand
+    tool_loop: native-openai-compatible
+    openai_compat_telemetry_adapter: llama-cpp
+    ollama_read_timeout_seconds: 1800
+  telemetry:
+    enabled: true
+
+profiles:
+  death_star_qwen_fast_direct:
+    enabled: false
+    kind: baseline
+    manifest: /Users/anton/projects/ori-run-artifacts/phase4b-v2-medium-corp-20260603/medium/manifest.json
+    output_dir: results/death-star/phase4b-v2-medium/qwen-fast-direct
+    models:
+      - name: death-star-qwen-fast-64k
+        model: openai-compat/qwen-fast
+        concurrency: 1
+        options:
+          temperature: 0
+
+  death_star_qwen_fast_mcp:
+    enabled: false
+    kind: baseline-mcp
+    manifest: /Users/anton/projects/ori-run-artifacts/phase4b-v2-medium-corp-20260603/medium/manifest.json
+    output_dir: results/death-star/phase4b-v2-medium/qwen-fast-mcp
+    mcp:
+      max_steps: 20
+      resource_mode: on-demand
+      tool_loop: native-openai-compatible
+      openai_compat_telemetry_adapter: llama-cpp
+      ollama_read_timeout_seconds: 1800
+    models:
+      - name: death-star-qwen-fast-64k-mcp
+        model: openai-compat/qwen-fast
+        concurrency: 1
+        options:
+          temperature: 0
+
+  death_star_qwen_large_mcp:
+    enabled: false
+    kind: baseline-mcp
+    manifest: /Users/anton/projects/ori-run-artifacts/phase4b-v2-medium-corp-20260603/medium/manifest.json
+    output_dir: results/death-star/phase4b-v2-medium/qwen-large-mcp
+    mcp:
+      max_steps: 20
+      resource_mode: on-demand
+      tool_loop: native-openai-compatible
+      openai_compat_telemetry_adapter: llama-cpp
+      ollama_read_timeout_seconds: 2400
+    models:
+      - name: death-star-qwen-large-262k-mcp
+        model: openai-compat/qwen3.6-27b
+        concurrency: 1
+        options:
+          temperature: 0

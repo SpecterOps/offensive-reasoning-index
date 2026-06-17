@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+from typing import Any
 
 
 @dataclass
@@ -240,8 +241,112 @@ _GLOBAL_TASKS: list[tuple[str, str, str, str, list[str]]] = [
 ]
 
 
+def _official_internal_grade_mode(task: dict[str, Any]) -> str:
+    """Map explicit Phase 4B/v2 official tasks onto existing grader modes."""
+    grade_mode = str(task.get("grade_mode", "")).strip()
+    if grade_mode and grade_mode != "mechanical_binary":
+        return grade_mode
+    category = str(task.get("category", "")).strip()
+    if category in {"enumeration", "startup_smoke"}:
+        return "node_set"
+    return "path_exists"
+
+
+def _phase4b_smoke_reference_cypher(task: dict[str, Any]) -> str:
+    task_id = str(task.get("id", ""))
+    reference_raw = task.get("reference")
+    reference: dict[str, Any] = reference_raw if isinstance(reference_raw, dict) else {}
+    domains = [str(domain).upper() for domain in reference.get("domains", [])]
+    parent_domain = domains[0] if domains else "FOREST.EXAMPLE"
+    child_domain = domains[1] if len(domains) > 1 else f"CHILD.{parent_domain}"
+
+    if task_id.endswith("startup-domain-count"):
+        return "MATCH (d:Domain) RETURN d"
+    if task_id.endswith("startup-parent-da"):
+        return f"MATCH (g:Group {{name: 'DOMAIN ADMINS@{parent_domain}'}}) RETURN g"
+    if task_id.endswith("startup-child-da"):
+        return f"MATCH (g:Group {{name: 'DOMAIN ADMINS@{child_domain}'}}) RETURN g"
+    if task_id.endswith("startup-ca-presence"):
+        return (
+            "MATCH (n) WHERE any(label IN labels(n) "
+            "WHERE toLower(label) CONTAINS 'cert' OR toLower(label) CONTAINS 'ca') RETURN n"
+        )
+    return "MATCH (n) RETURN n LIMIT 1"
+
+
+def _official_reference_cypher(task: dict[str, Any]) -> str:
+    reference_cypher = str(task.get("reference_cypher") or "").strip()
+    if reference_cypher:
+        return reference_cypher
+    if bool(task.get("smoke_task")) or str(task.get("phase")) == "startup_smoke":
+        return _phase4b_smoke_reference_cypher(task)
+    return ""
+
+
+def _generate_official_tasks(manifest: dict[str, Any]) -> list[Task]:
+    """Load explicit official Phase 4B/v2 tasks when the manifest provides them."""
+    raw_tasks = manifest.get("tasks_official")
+    if not isinstance(raw_tasks, list) or not raw_tasks:
+        return []
+
+    expected = manifest.get("official_count") or manifest.get("raw_score_denominator")
+    if expected is not None and len(raw_tasks) != int(expected):
+        raise ValueError(
+            f"tasks_official contains {len(raw_tasks)} task(s), expected {int(expected)}"
+        )
+
+    tasks: list[Task] = []
+    seen_ids: set[str] = set()
+    for index, raw in enumerate(raw_tasks, start=1):
+        if not isinstance(raw, dict):
+            raise ValueError(f"tasks_official[{index}] is not an object")
+        task_id = str(raw.get("id") or f"official-{index:03d}").strip()
+        if task_id in seen_ids:
+            raise ValueError(f"Duplicate official task id: {task_id}")
+        seen_ids.add(task_id)
+        reference_cypher = _official_reference_cypher(raw)
+        if not reference_cypher:
+            raise ValueError(f"Official task {task_id} has no reference_cypher")
+
+        raw_mitre = raw.get("mitre", [])
+        tasks.append(
+            Task(
+                id=task_id,
+                template_id=str(raw.get("template_id") or raw.get("scenario_family") or "official"),
+                tier=int(raw.get("technical_difficulty") or 1),
+                category=str(raw.get("category") or "official"),
+                question=str(raw.get("question") or ""),
+                reference_cypher=reference_cypher,
+                grade_mode=_official_internal_grade_mode(raw),
+                tags=[str(value) for value in raw_mitre] if isinstance(raw_mitre, list) else [],
+                metadata={
+                    "phase": raw.get("phase", ""),
+                    "track": raw.get("track", ""),
+                    "scenario_family": raw.get("scenario_family", ""),
+                    "smoke_task": bool(raw.get("smoke_task", False)),
+                    "official_grade_mode": raw.get("grade_mode", ""),
+                    "benchmark_weight": raw.get("benchmark_weight", ""),
+                    "scoring": raw.get("scoring", {}),
+                    "template_instance_id": raw.get("template_instance_id", ""),
+                    "template_version": raw.get("template_version", ""),
+                    "technical_difficulty": raw.get("technical_difficulty", ""),
+                    "reasoning_difficulty": raw.get("reasoning_difficulty", ""),
+                    "mitre": raw_mitre,
+                    "graph_diagnostics": raw.get("graph_diagnostics", {}),
+                    "official_index": index,
+                    "official_count": len(raw_tasks),
+                },
+            )
+        )
+    return tasks
+
+
 def generate_tasks(manifest: dict) -> list[Task]:
     """Generate evaluation tasks from a manifest dict."""
+    official_tasks = _generate_official_tasks(manifest)
+    if official_tasks:
+        return official_tasks
+
     domain = manifest.get("domain", "CORP.LOCAL")
     tasks: list[Task] = []
 
@@ -327,6 +432,22 @@ def generate_mcp_tasks(manifest: dict) -> list[Task]:
     - the existing direct-Cypher benchmark tasks, relabeled as MCP-assisted tasks
     - a small MCP-native starter corpus that emphasizes higher-level BloodHound tools
     """
+    official_tasks = _generate_official_tasks(manifest)
+    if official_tasks:
+        return [
+            replace(
+                task,
+                metadata={
+                    **task.metadata,
+                    "mcp_track": task.metadata.get("track", "official"),
+                    "preferred_tool_family": (
+                        "non_cypher" if task.metadata.get("track") == "mcp" else "cypher_or_mixed"
+                    ),
+                },
+            )
+            for task in official_tasks
+        ]
+
     tasks: list[Task] = []
     for task in generate_tasks(manifest):
         metadata = dict(task.metadata)
