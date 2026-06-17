@@ -1,0 +1,33 @@
+# OpenRouter ORI inference template.
+#
+# Set OPENAI_COMPAT_API_KEY to an OpenRouter API key before running. Keep the key
+# out of this file. Replace the model with any OpenRouter model that supports the
+# context length and tool behavior your ORI run needs.
+
+version: 1
+
+defaults:
+  bhce_url: ${ORI_BHCE_URL:-https://bloodhound.example.invalid}
+  concurrency: 1
+  max_model_reruns_on_infra: 1
+  mcp:
+    mcp_dir: ${ORI_BLOODHOUND_MCP_DIR:-../bloodhound-mcp}
+    max_steps: 16
+    resource_mode: off
+    tool_loop: native-openai-compatible
+    openai_compat_telemetry_adapter: generic
+
+profiles:
+  eval_mcp_openrouter:
+    enabled: false
+    kind: eval-mcp
+    manifest: ${ORI_MANIFEST:-datasets/phase4-v1_manifest.json}
+    output: ${ORI_OUTPUT:-results/openrouter/example-model-mcp.csv}
+    model:
+      name: example-openrouter-model
+      model: openai-compat/provider/example-model
+      model_base_url: https://openrouter.ai/api/v1
+      mcp_tool_loop: native-openai-compatible
+      openai_compat_telemetry_adapter: generic
+      options:
+        temperature: 0

@@ -1,0 +1,34 @@
+# llama.cpp OpenAI-compatible ORI inference template.
+#
+# Start llama.cpp server with an OpenAI-compatible endpoint, then copy this file
+# to a local run config and set ORI_LLAMA_CPP_BASE_URL if your server is not on
+# the default localhost port.
+
+version: 1
+
+defaults:
+  bhce_url: ${ORI_BHCE_URL:-https://bloodhound.example.invalid}
+  concurrency: 1
+  max_model_reruns_on_infra: 1
+  mcp:
+    mcp_dir: ${ORI_BLOODHOUND_MCP_DIR:-../bloodhound-mcp}
+    max_steps: 16
+    resource_mode: off
+    tool_loop: native-openai-compatible
+    openai_compat_telemetry_adapter: llama-cpp
+    ollama_read_timeout_seconds: 900
+
+profiles:
+  eval_mcp_llama_cpp:
+    enabled: false
+    kind: eval-mcp
+    manifest: ${ORI_MANIFEST:-datasets/phase4-v1_manifest.json}
+    output: ${ORI_OUTPUT:-results/llama-cpp/example-model-mcp.csv}
+    model:
+      name: example-llama-cpp-model
+      model: openai-compat/example-model
+      model_base_url: ${ORI_LLAMA_CPP_BASE_URL:-http://127.0.0.1:8080/v1}
+      mcp_tool_loop: native-openai-compatible
+      openai_compat_telemetry_adapter: llama-cpp
+      options:
+        temperature: 0
