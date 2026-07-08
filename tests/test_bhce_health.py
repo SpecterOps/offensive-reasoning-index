@@ -44,3 +44,23 @@ def test_run_cypher_resilient_returns_query_error_without_retry() -> None:
     result = asyncio.run(client.run_cypher_resilient("MATCH (n) RETURN n"))
     assert result.success is False
     assert result.error == "HTTP 400: bad query"
+
+
+def test_get_all_node_names_includes_adcs_labels() -> None:
+    seen_queries: list[str] = []
+
+    class FakeInventoryClient(BHCEClient):
+        def __init__(self):
+            pass
+
+        async def run_cypher(self, query: str) -> CypherResult:
+            seen_queries.append(query)
+            label = query.split("MATCH (n:", 1)[1].split(")", 1)[0]
+            return CypherResult(success=True, node_names={f"{label.upper()}-NODE@CORP.LOCAL"})
+
+    names = asyncio.run(FakeInventoryClient().get_all_node_names())
+
+    assert "ENTERPRISECA-NODE@CORP.LOCAL" in names
+    assert "CERTTEMPLATE-NODE@CORP.LOCAL" in names
+    assert any("MATCH (n:EnterpriseCA)" in query for query in seen_queries)
+    assert any("MATCH (n:CertTemplate)" in query for query in seen_queries)

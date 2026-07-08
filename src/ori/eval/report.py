@@ -73,10 +73,21 @@ CSV_FIELDNAMES = [
     "telemetry_sample_ref",
     "partial_result",
     "infra_error_subtype",
-    "successful_tool_results",
+    "failure_stage",
+    "evidence_found",
+    "evidence_depth_score",
+    "reference_entities_seen_count",
+    "reference_path_nodes_seen_count",
+    "final_answer_contract_valid",
+    "invalid_entities",
+    "missing_required_entities",
     "finalization_guard_used",
-    "loop_exhaustion_with_evidence",
+    "repair_turn_used",
     "minimum_evidence_satisfied",
+    "successful_tool_results",
+    "reasoning_capture_mode",
+    "reasoning_token_count",
+    "loop_exhaustion_with_evidence",
     "attempt_number",
     "result_source",
 ]
@@ -136,6 +147,7 @@ def _row_for_result(r: EvalResult) -> dict[str, object]:
     run_config = getattr(r, "run_config", None)
     telemetry = getattr(r, "telemetry", None) or {}
     config_identity_json = json.dumps(run_config, sort_keys=True) if run_config else ""
+    diag = mcp_meta.final_answer_diagnostics if mcp_meta else {}
     options_json = ""
     if run_config and isinstance(run_config.get("options"), dict):
         options_json = json.dumps(run_config["options"], sort_keys=True)
@@ -222,12 +234,35 @@ def _row_for_result(r: EvalResult) -> dict[str, object]:
         "telemetry_sample_ref": telemetry.get("sample_ref", ""),
         "partial_result": getattr(r, "partial_result", False),
         "infra_error_subtype": mcp_meta.infra_error_subtype if mcp_meta else "",
-        "successful_tool_results": mcp_meta.successful_tool_results if mcp_meta else 0,
-        "finalization_guard_used": mcp_meta.finalization_guard_used if mcp_meta else False,
+        "failure_stage": diag.get("failure_stage", ""),
+        "evidence_found": diag.get("evidence_found", False),
+        "evidence_depth_score": diag.get("evidence_depth_score", 0),
+        "reference_entities_seen_count": diag.get("reference_entities_seen_count", 0),
+        "reference_path_nodes_seen_count": diag.get("reference_path_nodes_seen_count", 0),
+        "final_answer_contract_valid": diag.get("final_answer_contract_valid", False),
+        "invalid_entities": ",".join(diag.get("invalid_entities", [])),
+        "missing_required_entities": ",".join(diag.get("missing_required_entities", [])),
+        "finalization_guard_used": diag.get(
+            "finalization_guard_used", mcp_meta.finalization_guard_used if mcp_meta else False
+        ),
+        "repair_turn_used": diag.get(
+            "repair_turn_used", mcp_meta.repair_turn_used if mcp_meta else False
+        ),
+        "minimum_evidence_satisfied": diag.get(
+            "minimum_evidence_satisfied", mcp_meta.minimum_evidence_satisfied if mcp_meta else False
+        ),
+        "successful_tool_results": diag.get(
+            "successful_tool_results", mcp_meta.successful_tool_results if mcp_meta else 0
+        ),
+        "reasoning_capture_mode": diag.get(
+            "reasoning_capture_mode", "model_thinking" if r.model_response.thinking else "none"
+        ),
+        "reasoning_token_count": diag.get(
+            "reasoning_token_count", len((r.model_response.thinking or "").split())
+        ),
         "loop_exhaustion_with_evidence": (
             mcp_meta.loop_exhaustion_with_evidence if mcp_meta else False
         ),
-        "minimum_evidence_satisfied": mcp_meta.minimum_evidence_satisfied if mcp_meta else False,
         "attempt_number": getattr(r, "attempt_number", 1),
         "result_source": getattr(r, "result_source", "first_pass"),
     }

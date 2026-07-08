@@ -12,6 +12,7 @@ from typing import Any
 import click
 import yaml
 
+from .benchmarks import describe_benchmark, get_benchmark, list_benchmarks
 from .generator.attack_paths import plant_all_paths
 from .generator.graph import ADGraph
 from .generator.org import build_org
@@ -443,6 +444,81 @@ def main() -> None:
     from dotenv import load_dotenv
 
     load_dotenv(override=False)
+
+
+@main.group(name="benchmark")
+def benchmark_group() -> None:
+    """Explore named ORI benchmark products."""
+
+
+@benchmark_group.command(name="list")
+def benchmark_list() -> None:
+    """List public benchmark products."""
+
+    for benchmark in list_benchmarks():
+        click.echo(
+            f"{benchmark.name:8} {benchmark.status:8} "
+            f"tasks={benchmark.default_task_count:<3} "
+            f"modes={','.join(benchmark.supported_modes)}"
+        )
+        click.echo(f"         {benchmark.summary}")
+
+
+@benchmark_group.command(name="describe")
+@click.argument("name")
+def benchmark_describe(name: str) -> None:
+    """Describe one public benchmark product."""
+
+    try:
+        click.echo(describe_benchmark(name))
+    except ValueError as exc:
+        raise click.UsageError(str(exc)) from exc
+
+
+@benchmark_group.command(name="run")
+@click.argument("name")
+@click.option(
+    "--mode",
+    type=click.Choice(["direct", "mcp", "mock", "diagnostic"]),
+    default="mcp",
+    show_default=True,
+    help="Benchmark mode to run once benchmark launch plumbing is enabled.",
+)
+def benchmark_run(name: str, mode: str) -> None:
+    """Show the planned stable run surface for a benchmark.
+
+    This command is intentionally a dry-run placeholder while ORI migrates from
+    phase-specific run-config files to simple/complex benchmark products.
+    """
+
+    try:
+        benchmark = get_benchmark(name)
+    except ValueError as exc:
+        raise click.UsageError(str(exc)) from exc
+    if mode not in benchmark.supported_modes:
+        raise click.UsageError(
+            f"Benchmark {benchmark.name!r} does not support mode {mode!r}. "
+            f"Supported modes: {', '.join(benchmark.supported_modes)}"
+        )
+    task_set = (
+        benchmark.diagnostic_task_set
+        if mode == "diagnostic" and benchmark.diagnostic_task_set
+        else benchmark.official_task_set
+    )
+    task_count = (
+        benchmark.diagnostic_task_count
+        if mode == "diagnostic" and benchmark.diagnostic_task_count is not None
+        else benchmark.default_task_count
+    )
+    click.echo(f"Benchmark: {benchmark.name}")
+    click.echo(f"Mode: {mode}")
+    click.echo(f"Graph profile: {benchmark.graph_profile}")
+    click.echo(f"Task set: {task_set}")
+    click.echo(f"Task count: {task_count}")
+    click.echo(f"Scoring profile: {benchmark.scoring_profile}")
+    click.echo(
+        "Status: planned — use phase/run-config commands until benchmark launch plumbing lands."
+    )
 
 
 @main.command()
@@ -917,6 +993,20 @@ def smoke_mcp(
 @click.option(
     "--output-dir", type=click.Path(), default=None, help="Override multi-run output directory"
 )
+@click.option("--seed", type=int, default=None, help="Override generate-profile seed")
+@click.option("--domain", default=None, help="Override generate-profile AD domain")
+@click.option(
+    "--output-zip",
+    type=click.Path(),
+    default=None,
+    help="Override generated dataset zip path",
+)
+@click.option(
+    "--output-manifest",
+    type=click.Path(),
+    default=None,
+    help="Override generated manifest path",
+)
 @click.option("--bhce-url", default=None, help="Override BH CE base URL")
 @click.option("--concurrency", type=int, default=None, help="Override run concurrency")
 @click.option(
@@ -980,6 +1070,10 @@ def run_from_config(
     manifest: str | None,
     output: str | None,
     output_dir: str | None,
+    seed: int | None,
+    domain: str | None,
+    output_zip: str | None,
+    output_manifest: str | None,
     bhce_url: str | None,
     concurrency: int | None,
     mcp_dir: str | None,
@@ -1016,6 +1110,10 @@ def run_from_config(
         manifest=manifest,
         output=output,
         output_dir=output_dir,
+        seed=seed,
+        domain=domain,
+        output_zip=output_zip,
+        output_manifest=output_manifest,
         bhce_url=bhce_url,
         concurrency=concurrency,
         mcp_dir=mcp_dir,

@@ -131,7 +131,10 @@ def _load_last_eval_log_from_runtime_dir(
         # `st_mtime` is wall-clock seconds; derive the invocation wall-clock start
         # from the monotonic start so clock changes during a long eval do not matter.
         invocation_started_at = time.time() - (time.monotonic() - started_at_monotonic)
-        if path.stat().st_mtime < invocation_started_at or pointer.stat().st_mtime < invocation_started_at:
+        if (
+            path.stat().st_mtime < invocation_started_at
+            or pointer.stat().st_mtime < invocation_started_at
+        ):
             return None
         log = read_eval_log(str(path))
     except Exception:
@@ -267,6 +270,8 @@ class MCPRunMetadata:
     finalization_guard_used: bool = False
     loop_exhaustion_with_evidence: bool = False
     minimum_evidence_satisfied: bool = False
+    final_answer_diagnostics: dict[str, Any] = field(default_factory=dict)
+    repair_turn_used: bool = False
 
     @property
     def final_answer_normalized_json(self) -> str:
@@ -813,9 +818,7 @@ def _trajectory_from_messages(messages: list[Any], final_answer_raw: str = "") -
         unique_resources_used=sorted(unique_resources),
         resource_characters_total=resource_characters_total,
         successful_tool_results=successful_tool_results,
-        minimum_evidence_satisfied=(
-            tool_calls_total >= 3 and cypher_query_calls >= 2
-        ),
+        minimum_evidence_satisfied=(tool_calls_total >= 3 and cypher_query_calls >= 2),
     )
 
 
@@ -855,6 +858,8 @@ def _mcp_metadata_from_dict(data: dict[str, Any]) -> MCPRunMetadata:
         finalization_guard_used=bool(data.get("finalization_guard_used", False)),
         loop_exhaustion_with_evidence=bool(data.get("loop_exhaustion_with_evidence", False)),
         minimum_evidence_satisfied=bool(data.get("minimum_evidence_satisfied", False)),
+        final_answer_diagnostics=dict(data.get("final_answer_diagnostics") or {}),
+        repair_turn_used=bool(data.get("repair_turn_used", False)),
     )
 
 
@@ -863,7 +868,7 @@ def _is_ollama_model(model_name: str) -> bool:
 
 
 def _is_openai_compat_model(model_name: str) -> bool:
-    return model_name.startswith("openai-compat/")
+    return model_name.startswith("openai-compat/") or model_name.startswith("codex/")
 
 
 def _resolve_mcp_tool_loop(model_name: str, requested: str) -> str:
@@ -900,6 +905,10 @@ def _openai_compat_model_name(model_name: str) -> str:
 
 
 def _openai_compat_chat_url(base_url: str | None, model_name: str) -> str:
+    if model_name.startswith("codex/"):
+        from .codex_oauth import codex_request_base_url
+
+        return codex_request_base_url(model_name, base_url)
     resolved = base_url
     if not resolved and "@" in model_name:
         resolved = model_name.rsplit("@", 1)[1]
@@ -1174,11 +1183,38 @@ async def _openai_compat_chat_turn(
         payload.update(dict(extra_body))
 
     timeout = httpx.Timeout(connect=10.0, read=read_timeout_seconds, write=30.0, pool=30.0)
-    headers = {"Authorization": f"Bearer {_openai_compat_api_key()}"}
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        resp = await client.post(url, json=payload, headers=headers)
-        resp.raise_for_status()
-        data = resp.json()
+    if model_name.startswith("codex/"):
+        import openai
+
+        from .codex_oauth import (
+            chat_request_to_codex_responses_params,
+            codex_headers,
+            codex_model_name,
+            codex_responses_events_to_chat_completion,
+        )
+
+        payload["model"] = codex_model_name(model_name)
+        params = chat_request_to_codex_responses_params(payload)
+        thread_id = str(params.get("prompt_cache_key") or "")
+        headers = codex_headers(thread_id=thread_id)
+        client = openai.AsyncOpenAI(
+            api_key=headers["Authorization"].removeprefix("Bearer "),
+            base_url=url,
+            timeout=timeout,
+        )
+        try:
+            events = await client.responses.create(**params, stream=True, extra_headers=headers)
+            data = codex_responses_events_to_chat_completion(
+                [event async for event in events], str(payload["model"])
+            )
+        finally:
+            await client.close()
+    else:
+        headers = {"Authorization": f"Bearer {_openai_compat_api_key()}"}
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.post(url, json=payload, headers=headers)
+            resp.raise_for_status()
+            data = resp.json()
 
     choices = list(data.get("choices") or [])
     choice = choices[0] if choices else {}
@@ -1228,6 +1264,13 @@ def _tool_call_arguments(raw_arguments: Any) -> dict[str, Any]:
     return {}
 
 
+def _env_flag(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 FINALIZATION_GUARD_PROMPT = (
     "You are at the MCP tool-call limit. Do not call another tool. Using the "
     "evidence already gathered, return ONLY the required compact JSON object. "
@@ -1236,11 +1279,17 @@ FINALIZATION_GUARD_PROMPT = (
 )
 
 
-def _tool_result_has_successful_evidence(result_text: str, tool_error: ToolCallError | None) -> bool:
+def _tool_result_has_successful_evidence(
+    result_text: str, tool_error: ToolCallError | None
+) -> bool:
     if tool_error is not None:
         return False
     normalized = (result_text or "").lower()
-    if '"success": false' in normalized or "error_type" in normalized and '"success": true' not in normalized:
+    if (
+        '"success": false' in normalized
+        or "error_type" in normalized
+        and '"success": true' not in normalized
+    ):
         return False
     return bool(result_text.strip())
 
@@ -1296,7 +1345,10 @@ async def _run_ollama_mcp_loop(
 
     for step in range(max_steps):
         use_finalization_guard = (
-            step >= max_steps - 1 and successful_tool_results > 0 and not finalization_guard_used
+            _env_flag("ORI_MCP_FINALIZATION_GUARD", True)
+            and step >= max_steps - 1
+            and successful_tool_results > 0
+            and not finalization_guard_used
         )
         if use_finalization_guard:
             messages_payload.append({"role": "user", "content": FINALIZATION_GUARD_PROMPT})
@@ -1402,8 +1454,12 @@ async def _run_ollama_mcp_loop(
     )
     trajectory = _trajectory_from_messages(inspect_messages, final_answer_raw=final_content)
     trajectory.finalization_guard_used = finalization_guard_used
-    trajectory.successful_tool_results = max(trajectory.successful_tool_results, successful_tool_results)
-    trajectory.loop_exhaustion_with_evidence = bool(not final_content and successful_tool_results > 0)
+    trajectory.successful_tool_results = max(
+        trajectory.successful_tool_results, successful_tool_results
+    )
+    trajectory.loop_exhaustion_with_evidence = bool(
+        not final_content and successful_tool_results > 0
+    )
     trajectory.server_prompt_used = bool(server_prompt_text.strip())
     trajectory.server_prompt_name = server_prompt_name if server_prompt_text.strip() else ""
     trajectory.available_prompt_names = sorted(available_prompt_names or [])
@@ -1466,7 +1522,10 @@ async def _run_openai_compat_mcp_loop(
 
     for step in range(max_steps):
         use_finalization_guard = (
-            step >= max_steps - 1 and successful_tool_results > 0 and not finalization_guard_used
+            _env_flag("ORI_MCP_FINALIZATION_GUARD", True)
+            and step >= max_steps - 1
+            and successful_tool_results > 0
+            and not finalization_guard_used
         )
         if use_finalization_guard:
             messages_payload.append({"role": "user", "content": FINALIZATION_GUARD_PROMPT})
@@ -1584,8 +1643,12 @@ async def _run_openai_compat_mcp_loop(
     )
     trajectory = _trajectory_from_messages(inspect_messages, final_answer_raw=final_content)
     trajectory.finalization_guard_used = finalization_guard_used
-    trajectory.successful_tool_results = max(trajectory.successful_tool_results, successful_tool_results)
-    trajectory.loop_exhaustion_with_evidence = bool(not final_content and successful_tool_results > 0)
+    trajectory.successful_tool_results = max(
+        trajectory.successful_tool_results, successful_tool_results
+    )
+    trajectory.loop_exhaustion_with_evidence = bool(
+        not final_content and successful_tool_results > 0
+    )
     trajectory.server_prompt_used = bool(server_prompt_text.strip())
     trajectory.server_prompt_name = server_prompt_name if server_prompt_text.strip() else ""
     trajectory.available_prompt_names = sorted(available_prompt_names or [])
@@ -2026,13 +2089,35 @@ def ori_mcp_scorer():
             infra_tool_errors=mcp_meta.infra_tool_errors,
         )
         result = diagnostic.grade
+        if diagnostic.final_answer_diagnostics:
+            fad = diagnostic.final_answer_diagnostics
+            fad.successful_tool_results = mcp_meta.successful_tool_results
+            fad.finalization_guard_used = mcp_meta.finalization_guard_used
+            fad.repair_turn_used = mcp_meta.repair_turn_used
+            fad.evidence_depth_score = (
+                max(
+                    fad.evidence_depth_score,
+                    1
+                    + (2 if mcp_meta.cypher_query_calls else 0)
+                    + (1 if mcp_meta.resource_reads_total else 0),
+                )
+                if mcp_meta.successful_tool_results
+                else fad.evidence_depth_score
+            )
+            fad.evidence_found = fad.evidence_found or mcp_meta.successful_tool_results > 0
+            fad.minimum_evidence_satisfied = (
+                fad.minimum_evidence_satisfied or mcp_meta.minimum_evidence_satisfied
+            )
+            mcp_meta.final_answer_diagnostics = fad.to_jsonable()
         mcp_meta.failure_subtype = diagnostic.failure_subtype
         mcp_meta.loop_exhaustion_with_evidence = (
             result.outcome == "LOOP_EXHAUSTED" and mcp_meta.successful_tool_results > 0
         )
         sample_index = metadata.get("sample_index", "?")
         sample_total = metadata.get("sample_total", "?")
-        _safe_print(f"  [{sample_index}/{sample_total}] {task.id} ({task.tier=}, {task.grade_mode})")
+        _safe_print(
+            f"  [{sample_index}/{sample_total}] {task.id} ({task.tier=}, {task.grade_mode})"
+        )
         _safe_print(
             f"           → {result.outcome} (score={result.score}, tools={mcp_meta.tool_calls_total}, "  # noqa: E501
             f"cypher={mcp_meta.cypher_query_calls}, noncypher={mcp_meta.non_cypher_tool_calls}, "

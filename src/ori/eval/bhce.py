@@ -288,12 +288,29 @@ class BHCEClient:
         or CDAVIS@CORP.LOCAL, which should never be scored as hallucinations.
         """
         names: set[str] = set()
-        for label in ("User", "Computer", "Group", "Domain", "OU"):
+        # Include every graph node label that benchmark answers may legitimately
+        # cite. ADCS tasks return EnterpriseCA/RootCA/CertTemplate names and
+        # sometimes object IDs/SIDs through BloodHound's ADCS node shapes; if
+        # the smoke/mock-perfect allowlist omits those labels, the scorer turns
+        # valid reference answers into false HALLUCINATION failures.
+        labels = (
+            "User",
+            "Computer",
+            "Group",
+            "Domain",
+            "OU",
+            "RootCA",
+            "EnterpriseCA",
+            "CertTemplate",
+            "AIACA",
+        )
+        for label in labels:
             result = await self.run_cypher(f"MATCH (n:{label}) RETURN n LIMIT 10000")
             if not result.success:
                 # Fail closed — partial allowlist is worse than no allowlist
                 return set()
             names |= result.node_names
+            names |= _extract_node_identifiers(result.nodes)
         return names
 
     async def close(self) -> None:
@@ -322,6 +339,28 @@ def _extract_nodes(data: dict) -> list[dict]:
             # Some queries return a list directly
             nodes = inner
     return nodes
+
+
+def _extract_node_identifiers(nodes: list[dict]) -> set[str]:
+    """Extract non-name object identifiers for hallucination allowlists only.
+
+    These identifiers are useful for deciding whether a model mentioned a real
+    graph object, but they must not be mixed into CypherResult.node_names. Strict
+    answer grading compares final answer node_names to reference node_names; if
+    object IDs are added there, MCP final answers that correctly cite labels only
+    are incorrectly marked incomplete.
+    """
+    identifiers: set[str] = set()
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        raw_props = node.get("properties")
+        props = raw_props if isinstance(raw_props, dict) else {}
+        for key in ("objectId", "objectid", "ObjectIdentifier", "objectidentifier"):
+            value = node.get(key) or props.get(key)
+            if value:
+                identifiers.add(str(value))
+    return identifiers
 
 
 def _extract_node_names(nodes: list[dict]) -> set[str]:

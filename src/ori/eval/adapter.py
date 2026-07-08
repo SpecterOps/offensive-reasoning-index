@@ -334,8 +334,52 @@ async def _call_provider(
         usage = resp.usage
         return m.content, usage.prompt_tokens, usage.completion_tokens, "", {}
 
+    elif provider == "codex":
+        import openai
+
+        from .codex_oauth import (
+            chat_request_to_codex_responses_params,
+            codex_headers,
+            codex_model_name,
+            codex_request_base_url,
+            codex_responses_events_to_chat_completion,
+        )
+
+        resolved_base = codex_request_base_url(model, base_url)
+        resolved_model = codex_model_name(model)
+        full_messages = [{"role": "system", "content": system}] + messages
+        body: dict[str, object] = {
+            "model": resolved_model,
+            "messages": full_messages,
+            "max_tokens": max_tokens,
+        }
+        params = chat_request_to_codex_responses_params(body)
+        thread_id = str(params.get("prompt_cache_key") or "")
+        headers = codex_headers(thread_id=thread_id)
+        client = openai.AsyncOpenAI(
+            api_key=headers["Authorization"].removeprefix("Bearer "),
+            base_url=resolved_base,
+        )
+        try:
+            events = await client.responses.create(**params, stream=True, extra_headers=headers)
+            data = codex_responses_events_to_chat_completion(
+                [event async for event in events], resolved_model
+            )
+        finally:
+            await client.close()
+        choice = (data.get("choices") or [{}])[0]
+        message = choice.get("message") or {}
+        usage = data.get("usage") or {}
+        return (
+            message.get("content") or "",
+            int(usage.get("prompt_tokens") or 0),
+            int(usage.get("completion_tokens") or 0),
+            "",
+            {"provider": "codex_oauth", "response_id": data.get("id", "")},
+        )
+
     else:
         raise ValueError(
             f"Unknown provider: {provider!r}. "
-            "Supported: anthropic, openai, ollama, openai-compat, gemini"
+            "Supported: anthropic, openai, ollama, openai-compat, gemini, codex"
         )

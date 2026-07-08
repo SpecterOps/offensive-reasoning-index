@@ -9,7 +9,7 @@ import time
 from types import SimpleNamespace
 
 from ori.eval.adapter import call_model, extract_cypher
-from ori.eval.bhce import _extract_node_names, _extract_nodes
+from ori.eval.bhce import _extract_node_identifiers, _extract_node_names, _extract_nodes
 from ori.eval.grader import _check_hallucination, grade, grade_mcp_diagnostic
 from ori.eval.mcp_runtime import (
     _inspect_eval_async_safe_print,
@@ -126,6 +126,32 @@ def test_extract_node_names_new_format():
     ]
     names = _extract_node_names(nodes)
     assert names == {"DJOHNSON@CORP.LOCAL", "DC01.CORP.LOCAL"}
+
+
+def test_extract_node_identifiers_kept_separate_from_strict_node_names():
+    nodes = [
+        {
+            "label": "ORI-ESC1-USER@CORP.LOCAL",
+            "kind": "CertTemplate",
+            "properties": {"ObjectIdentifier": "S-1-5-21-1-2-3-555"},
+        },
+        {
+            "properties": {
+                "name": "ORI-ENTERPRISE-CA@CORP.LOCAL",
+                "objectid": "S-1-5-21-1-2-3-544",
+            }
+        },
+    ]
+    names = _extract_node_names(nodes)
+    identifiers = _extract_node_identifiers(nodes)
+    assert names == {
+        "ORI-ESC1-USER@CORP.LOCAL",
+        "ORI-ENTERPRISE-CA@CORP.LOCAL",
+    }
+    assert identifiers == {
+        "S-1-5-21-1-2-3-555",
+        "S-1-5-21-1-2-3-544",
+    }
 
 
 def test_extract_node_names_mixed_format():
@@ -294,7 +320,9 @@ def test_inspect_eval_artifact_loader_rejects_stale_pointer(monkeypatch, tmp_pat
     os.utime(pointer, (old, old))
     monkeypatch.setattr(
         "ori.eval.mcp_runtime.read_eval_log",
-        lambda path: SimpleNamespace(status="success", error=None, samples=[object()], results=None),
+        lambda path: SimpleNamespace(
+            status="success", error=None, samples=[object()], results=None
+        ),
     )
 
     result = _load_last_eval_log_from_runtime_dir(
@@ -317,7 +345,9 @@ def test_inspect_eval_artifact_loader_rejects_wrong_sample_count(monkeypatch, tm
     os.utime(pointer, (now, now))
     monkeypatch.setattr(
         "ori.eval.mcp_runtime.read_eval_log",
-        lambda path: SimpleNamespace(status="success", error=None, samples=[object()], results=None),
+        lambda path: SimpleNamespace(
+            status="success", error=None, samples=[object()], results=None
+        ),
     )
 
     result = _load_last_eval_log_from_runtime_dir(
@@ -572,7 +602,10 @@ def _make_manifest() -> dict:
                 "target_node": "S-1-5-21-1-2-3-1150",
                 "target_name": "SRV-FILE-01.TEST.LOCAL",
                 "path_edges": [],
-                "verification_cypher": "MATCH p=shortestPath((u:User {name: 'DWOLFE@TEST.LOCAL'})-[*1..]->(c:Computer {name: 'SRV-FILE-01.TEST.LOCAL'})) RETURN p",
+                "verification_cypher": (
+                    "MATCH p=shortestPath((u:User {name: 'DWOLFE@TEST.LOCAL'})-[*1..]->"
+                    "(c:Computer {name: 'SRV-FILE-01.TEST.LOCAL'})) RETURN p"
+                ),
                 "mitre": ["T1222.001"],
             },
             {

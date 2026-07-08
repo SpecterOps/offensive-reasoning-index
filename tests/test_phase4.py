@@ -82,8 +82,7 @@ def test_phase4_adcs_objects_serialize_to_sharphound_files(tmp_path: Path) -> No
     } <= names
     assert template_data["meta"]["type"] == "certtemplates"
     assert any(
-        item["Properties"]["enrolleesuppliessubject"] is True
-        for item in template_data["data"]
+        item["Properties"]["enrolleesuppliessubject"] is True for item in template_data["data"]
     )
 
 
@@ -139,3 +138,51 @@ profiles:
     manifest = json.loads((tmp_path / "out/phase4_manifest.json").read_text())
     assert manifest["metadata"]["generator_profile"] == "phase4_v1"
     assert any(path["tier"] == 5 for path in manifest["planted_paths"])
+
+
+def test_run_config_generate_profile_accepts_seed_and_output_overrides(tmp_path: Path) -> None:
+    config = tmp_path / "run.yaml"
+    config.write_text(
+        """
+version: 1
+profiles:
+  phase4_v1:
+    kind: generate
+    domain: phase4.test
+    seed: 4401
+    generator:
+      profile: phase4_v1
+    sizing:
+      users: 18
+      workstations: 7
+      servers: 4
+    output_zip: out/phase4.zip
+    output_manifest: out/phase4_manifest.json
+"""
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "run",
+            "--config",
+            str(config),
+            "--profile",
+            "phase4_v1",
+            "--seed",
+            "1234",
+            "--domain",
+            "override.test",
+            "--output-zip",
+            str(tmp_path / "custom" / "seed-1234.zip"),
+            "--output-manifest",
+            str(tmp_path / "custom" / "seed-1234_manifest.json"),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert (tmp_path / "custom" / "seed-1234.zip").exists()
+    manifest = json.loads((tmp_path / "custom" / "seed-1234_manifest.json").read_text())
+    assert manifest["seed"] == 1234
+    assert manifest["domain"] == "OVERRIDE.TEST"
+    assert manifest["metadata"]["generator_profile"] == "phase4_v1"

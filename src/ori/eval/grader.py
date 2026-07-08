@@ -9,8 +9,8 @@ from typing import Any
 from .adapter import ModelResponse
 from .bhce import BHCEClient, CypherResult
 from .contracts import AnswerContract, task_contract_for
+from .diagnostics import FinalAnswerDiagnostics, build_final_answer_diagnostics
 from .tasks import Task
-
 
 OUTCOME_CORRECT = "CORRECT"
 OUTCOME_INCORRECT = "INCORRECT"
@@ -52,6 +52,7 @@ class GradeDiagnostic:
     ref_error: str | None = None
     contract: dict[str, Any] | None = None
     failure_subtype: str = ""
+    final_answer_diagnostics: FinalAnswerDiagnostics | None = None
 
     def to_jsonable(self) -> dict[str, Any]:
         return {
@@ -73,6 +74,11 @@ class GradeDiagnostic:
             "ref_error": self.ref_error,
             "contract": self.contract,
             "failure_subtype": self.failure_subtype,
+            "final_answer_diagnostics": (
+                self.final_answer_diagnostics.to_jsonable()
+                if self.final_answer_diagnostics
+                else None
+            ),
         }
 
 
@@ -233,6 +239,71 @@ def _row_count_from_ref(ref_result: CypherResult) -> int:
     return len(ref_result.nodes) if ref_result.nodes else len(ref_result.node_names)
 
 
+def _node_alias_groups(ref_result: CypherResult) -> dict[str, set[str]]:
+    """Return canonical reference node -> accepted aliases for final-answer matching.
+
+    BloodHound exposes the same object through display labels/names plus object
+    identifiers/SIDs. Strict scoring should require the same graph objects, not
+    every textual representation of those objects. A model answer may therefore
+    use a display name, label, SID, or object ID and still cover the reference
+    node.
+    """
+    groups: dict[str, set[str]] = {}
+    for node in ref_result.nodes:
+        if not isinstance(node, dict):
+            continue
+        raw_props = node.get("properties")
+        props = raw_props if isinstance(raw_props, dict) else {}
+        aliases = {
+            str(value).strip()
+            for key in (
+                "label",
+                "name",
+                "Name",
+                "objectId",
+                "objectid",
+                "ObjectIdentifier",
+                "objectidentifier",
+            )
+            for value in (node.get(key), props.get(key))
+            if value and str(value).strip()
+        }
+        if not aliases:
+            continue
+        canonical = (
+            node.get("label") or props.get("name") or props.get("Name") or sorted(aliases)[0]
+        )
+        groups[str(canonical)] = aliases
+    return groups
+
+
+def _casefold_set(values: set[str]) -> set[str]:
+    return {v.upper() for v in values}
+
+
+def _covered_reference_nodes(
+    reference_nodes: set[str], answer_nodes: set[str], ref_result: CypherResult
+) -> tuple[set[str], set[str], set[str]]:
+    alias_groups = _node_alias_groups(ref_result)
+    answer_upper = _casefold_set(answer_nodes)
+    covered: set[str] = set()
+    for ref in reference_nodes:
+        aliases = set(alias_groups.get(ref, set())) | {ref}
+        if _casefold_set(aliases) & answer_upper:
+            covered.add(ref)
+    missing = reference_nodes - covered
+    extra = {
+        answer
+        for answer in answer_nodes
+        if not any(
+            answer.upper() in _casefold_set(set(aliases) | {ref})
+            for ref, aliases in alias_groups.items()
+        )
+        and answer.upper() not in _casefold_set(reference_nodes)
+    }
+    return covered, missing, extra
+
+
 def _metrics(reference_nodes: set[str], answer_nodes: set[str]) -> dict[str, Any]:
     overlap = reference_nodes & answer_nodes
     missing = reference_nodes - answer_nodes
@@ -273,16 +344,20 @@ def _classify_mcp_incorrect(
     final_answer: dict,
     reference_nodes: set[str],
     answer_nodes: set[str],
+    covered_reference_nodes: set[str],
     metrics: dict[str, Any],
 ) -> str:
     """Classify structured MCP wrong answers for post-run analysis."""
-    if task.grade_mode == "path_exists" and final_answer.get("path_found") is False and reference_nodes:
+    if (
+        task.grade_mode == "path_exists"
+        and final_answer.get("path_found") is False
+        and reference_nodes
+    ):
         return FAILURE_NO_PATH_REPORTED
     if answer_nodes and reference_nodes:
-        overlap = reference_nodes & answer_nodes
-        if not overlap:
+        if not covered_reference_nodes:
             return FAILURE_WRONG_PATH
-        if overlap and not reference_nodes.issubset(answer_nodes):
+        if covered_reference_nodes and covered_reference_nodes != reference_nodes:
             return FAILURE_INCOMPLETE_ANSWER
     return ""
 
@@ -305,12 +380,33 @@ def grade_mcp_diagnostic(
         else set(ref_result.node_names)
     )
     answer_nodes = _answer_node_names(final_answer)
-    valid_upper = {node.upper(): node for node in valid_node_names}
+    # The allowlist comes from graph inventory, but reference Cypher can return
+    # legitimate answer identifiers that are not standalone User/Group/Computer
+    # labels (notably ADCS object identifiers/SIDs). If the benchmark reference
+    # produced the value, mock/perfect and real exact-reference answers must not
+    # be classified as hallucinations merely because the inventory projection
+    # did not include that property value.
+    effective_valid_node_names = set(valid_node_names) | set(reference_nodes)
+    if contract:
+        effective_valid_node_names |= set(contract.required_nodes) | set(contract.optional_nodes)
+    valid_upper = {node.upper(): node for node in effective_valid_node_names}
     hallucinated = sorted(node for node in answer_nodes if node.upper() not in valid_upper)
     optional = set(contract.optional_nodes) if contract else set()
     forbidden = set(contract.forbidden_nodes) if contract else set()
-    extra_valid = sorted((answer_nodes - reference_nodes - optional) - set(hallucinated))
+    covered_reference_nodes, missing_reference_nodes, extra_answer_nodes = _covered_reference_nodes(
+        reference_nodes, answer_nodes, ref_result
+    )
     metrics = _metrics(reference_nodes, answer_nodes)
+    extra_valid = sorted((extra_answer_nodes - optional) - set(hallucinated))
+    metrics.update(
+        {
+            "alias_overlap_count": len(covered_reference_nodes),
+            "alias_missing_count": len(missing_reference_nodes),
+            "alias_recall": (
+                len(covered_reference_nodes) / len(reference_nodes) if reference_nodes else 1.0
+            ),
+        }
+    )
     failure_subtype = ""
 
     if model_error:
@@ -347,8 +443,12 @@ def grade_mcp_diagnostic(
         )
     elif task.grade_mode == "path_exists":
         found = bool(final_answer.get("path_found"))
-        correct = bool(reference_nodes) and found and reference_nodes.issubset(answer_nodes)
-        detail_suffix = f"precision={metrics['precision']:.3f}, recall={metrics['recall']:.3f}"
+        correct = bool(reference_nodes) and found and not missing_reference_nodes
+        detail_suffix = (
+            f"precision={metrics['precision']:.3f}, "
+            f"recall={metrics['recall']:.3f}, "
+            f"alias_recall={metrics['alias_recall']:.3f}"
+        )
         if not reference_nodes:
             details = "path_exists: reference/contract node set is empty — verify BH CE ingest"
         elif not found:
@@ -356,32 +456,38 @@ def grade_mcp_diagnostic(
         else:
             details = (
                 f"path_exists (mcp): answer={len(answer_nodes)} nodes, "
-                f"ref={len(reference_nodes)} nodes, overlap={len(reference_nodes & answer_nodes)}, "
+                f"ref={len(reference_nodes)} nodes, alias_overlap={len(covered_reference_nodes)}, "
                 f"{detail_suffix}"
             )
         if not correct and final_answer is not None:
             failure_subtype = _classify_mcp_incorrect(
-                task, final_answer, reference_nodes, answer_nodes, metrics
+                task, final_answer, reference_nodes, answer_nodes, covered_reference_nodes, metrics
             )
         grade_result = GradeResult(
-            1.0 if correct else 0.0, OUTCOME_CORRECT if correct else OUTCOME_INCORRECT, False, details
+            1.0 if correct else 0.0,
+            OUTCOME_CORRECT if correct else OUTCOME_INCORRECT,
+            False,
+            details,
         )
     elif task.grade_mode == "node_set":
-        correct = (
-            answer_nodes == set() if not reference_nodes else reference_nodes.issubset(answer_nodes)
-        )
+        correct = answer_nodes == set() if not reference_nodes else not missing_reference_nodes
         details = (
             f"node_set (mcp): ref has {len(reference_nodes)} names, "
             f"answer has {len(answer_nodes)} names, "
-            f"overlap: {len(reference_nodes & answer_nodes)}, "
-            f"precision={metrics['precision']:.3f}, recall={metrics['recall']:.3f}"
+            f"alias_overlap: {len(covered_reference_nodes)}, "
+            f"precision={metrics['precision']:.3f}, "
+            f"recall={metrics['recall']:.3f}, "
+            f"alias_recall={metrics['alias_recall']:.3f}"
         )
         if not correct and final_answer is not None:
             failure_subtype = _classify_mcp_incorrect(
-                task, final_answer, reference_nodes, answer_nodes, metrics
+                task, final_answer, reference_nodes, answer_nodes, covered_reference_nodes, metrics
             )
         grade_result = GradeResult(
-            1.0 if correct else 0.0, OUTCOME_CORRECT if correct else OUTCOME_INCORRECT, False, details
+            1.0 if correct else 0.0,
+            OUTCOME_CORRECT if correct else OUTCOME_INCORRECT,
+            False,
+            details,
         )
     elif task.grade_mode == "row_count":
         ref_count = _row_count_from_ref(ref_result)
@@ -403,7 +509,7 @@ def grade_mcp_diagnostic(
             0.0, "INCORRECT", False, f"Unknown grade_mode: {task.grade_mode!r}"
         )
 
-    missing_reference = sorted(reference_nodes - answer_nodes)
+    missing_reference = sorted(missing_reference_nodes)
     return GradeDiagnostic(
         task_id=task.id,
         grade_mode=task.grade_mode,
@@ -420,6 +526,16 @@ def grade_mcp_diagnostic(
         ref_error=ref_result.error,
         contract=contract.to_jsonable() if contract else None,
         failure_subtype=failure_subtype,
+        final_answer_diagnostics=build_final_answer_diagnostics(
+            task=task,
+            final_answer=final_answer,
+            ref_result=ref_result,
+            valid_node_names=effective_valid_node_names,
+            contract=contract,
+            successful_tool_results=0,
+            grade_outcome=grade_result.outcome,
+            failure_subtype=failure_subtype,
+        ),
     )
 
 
