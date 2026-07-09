@@ -395,6 +395,87 @@ models:
     }
 
 
+def test_build_run_specs_supports_provider_model_shorthand(tmp_path: Path) -> None:
+    models_file = tmp_path / "models.yaml"
+    models_file.write_text(
+        """
+models:
+  - name: codex-gpt-5-5
+    provider: codex
+    model: gpt-5.5
+    mcp_tool_loop: native-openai-compatible
+"""
+    )
+
+    spec = _build_run_specs(models=(), models_file=str(models_file))[0]
+
+    assert spec.run_name == "codex-gpt-5-5"
+    assert spec.requested_model == "codex/gpt-5.5"
+    assert spec.mcp_tool_loop == "native-openai-compatible"
+
+
+def test_run_with_model_matrix_config_runs_direct_and_mcp(tmp_path: Path, monkeypatch) -> None:
+    manifest = _manifest(tmp_path)
+    config = tmp_path / "models.yaml"
+    config.write_text(
+        """
+modes: [direct, mcp]
+output_dir: out
+
+defaults:
+  concurrency: 1
+  mcp:
+    mcp_dir: bloodhound-mcp
+    max_steps: 9
+    tool_loop: auto
+
+models:
+  - name: local-qwen
+    provider: openai-compat
+    model: qwen-fast
+    model_base_url: http://127.0.0.1:8080/v1
+    mcp_tool_loop: native-openai-compatible
+  - name: anthropic-sonnet
+    provider: anthropic
+    model: claude-sonnet-4-5
+"""
+    )
+    (tmp_path / "bloodhound-mcp").mkdir()
+    captured: dict[str, dict] = {}
+
+    async def fake_direct(**kwargs):
+        captured["direct"] = kwargs
+        return []
+
+    async def fake_mcp(**kwargs):
+        captured["mcp"] = kwargs
+        return []
+
+    monkeypatch.setattr("ori.cli._run_baseline_with_specs", fake_direct)
+    monkeypatch.setattr("ori.cli._run_baseline_mcp_with_specs", fake_mcp)
+    monkeypatch.setattr("ori.eval.report.write_combined_csv", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("ori.eval.report.write_summary_csv", lambda *_args, **_kwargs: None)
+
+    result = CliRunner().invoke(
+        main,
+        ["run", "--config", str(config), "--manifest", str(manifest)],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert [spec.run_name for spec in captured["direct"]["run_specs"]] == [
+        "local-qwen",
+        "anthropic-sonnet",
+    ]
+    assert [spec.requested_model for spec in captured["mcp"]["run_specs"]] == [
+        "openai-compat/qwen-fast",
+        "anthropic/claude-sonnet-4-5",
+    ]
+    assert captured["direct"]["output_dir"] == tmp_path / "out" / "direct"
+    assert captured["mcp"]["output_dir"] == tmp_path / "out" / "mcp"
+    assert captured["mcp"]["mcp_dir"] == tmp_path / "bloodhound-mcp"
+    assert captured["mcp"]["max_steps"] == 9
+
+
 def test_build_run_specs_preserves_model_base_url_and_max_steps(tmp_path: Path) -> None:
     models_file = tmp_path / "models.yaml"
     models_file.write_text(

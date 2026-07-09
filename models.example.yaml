@@ -1,0 +1,55 @@
+# Model matrix for `ori run --config models.yaml --manifest <manifest.json>`.
+# The same list is run in direct and MCP modes by default.
+
+modes: [direct, mcp]
+output_dir: results/benchmark-runs/example
+
+defaults:
+  concurrency: 1
+  bhce_url: null
+  model_base_url: null
+  max_model_reruns_on_infra: 1
+  health:
+    timeout_seconds: 60
+    poll_interval: 5
+  mcp:
+    mcp_dir: ../bloodhound-mcp
+    max_steps: 16
+    resource_mode: off
+    tool_loop: auto
+    openai_compat_telemetry_adapter: auto
+    ollama_read_timeout_seconds: 900
+  telemetry:
+    enabled: true
+
+models:
+  - name: local-qwen-fast
+    provider: openai-compat
+    model: qwen-fast
+    model_base_url: http://death-star:8080/v1
+    mcp_tool_loop: native-openai-compatible
+    openai_compat_telemetry_adapter: llama-cpp
+    mcp_ollama_read_timeout_seconds: 1800
+    options:
+      temperature: 0
+
+  - name: codex-gpt-5-5
+    provider: codex
+    model: gpt-5.5
+    mcp_tool_loop: native-openai-compatible
+    options:
+      temperature: 0
+
+  - name: anthropic-sonnet
+    provider: anthropic
+    model: claude-sonnet-4-5
+    options:
+      temperature: 0
+
+  - name: ollama-qwen
+    provider: ollama
+    model: qwen3:14b
+    mcp_tool_loop: native-ollama
+    options:
+      num_ctx: 65536
+      temperature: 0

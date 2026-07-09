@@ -14,6 +14,7 @@ import yaml
 
 from .benchmarks import describe_benchmark, get_benchmark, list_benchmarks
 from .generator.attack_paths import plant_all_paths
+from .generator.benchmark_profiles import build_benchmark_generation_profile
 from .generator.graph import ADGraph
 from .generator.org import build_org
 from .generator.phase4 import build_phase4_v1_graph
@@ -96,12 +97,17 @@ def _run_spec_from_entry(
         concurrency = default_concurrency
         identity: dict[str, Any] = {"model": entry}
     elif isinstance(entry, dict):
-        if "model" not in entry:
+        provider = entry.get("provider")
+        raw_model = entry.get("model")
+        if raw_model is None:
             raise click.UsageError("Model config objects must include a model field.")
+        if provider and "/" not in str(raw_model):
+            model = f"{provider}/{raw_model}"
+        else:
+            model = str(raw_model)
         explicit_name = entry.get("name")
-        model = entry["model"]
         concurrency = entry.get("concurrency", default_concurrency)
-        identity = _normalize_identity_config(entry)
+        identity = _normalize_identity_config({**entry, "model": model})
     else:
         raise click.UsageError("Model config entries must be strings or objects.")
 
@@ -212,6 +218,7 @@ def _write_generated_dataset(
     output_zip: Path,
     output_manifest: Path,
     generator_profile: str,
+    metadata: dict[str, Any] | None = None,
 ) -> dict:
     serialize_to_zip(graph, output_zip)
     manifest = _build_manifest(graph, seed)
@@ -222,6 +229,8 @@ def _write_generated_dataset(
             "profile_kind": "generate",
         }
     )
+    if metadata:
+        manifest["metadata"].update(metadata)
     output_manifest.parent.mkdir(parents=True, exist_ok=True)
     output_manifest.write_text(json.dumps(manifest, indent=2))
     return manifest
@@ -475,6 +484,93 @@ def benchmark_describe(name: str) -> None:
         raise click.UsageError(str(exc)) from exc
 
 
+@benchmark_group.command(name="generate")
+@click.argument("name")
+@click.option("--seed", type=int, required=True, help="Seed for reproducible benchmark generation.")
+@click.option(
+    "--output-dir",
+    type=click.Path(),
+    default="datasets/benchmarks",
+    show_default=True,
+    help="Directory for generated benchmark zip and manifest artifacts.",
+)
+@click.option(
+    "--output-prefix",
+    default=None,
+    help="Optional artifact filename prefix. Defaults to <benchmark>-<version>-seed-<seed>.",
+)
+def benchmark_generate(name: str, seed: int, output_dir: str, output_prefix: str | None) -> None:
+    """Generate a seeded simple/complex benchmark dataset and manifest."""
+
+    try:
+        benchmark = get_benchmark(name)
+        profile = build_benchmark_generation_profile(benchmark.name, seed=seed)
+    except ValueError as exc:
+        raise click.UsageError(str(exc)) from exc
+
+    if benchmark.name == "simple":
+        graph = ADGraph(domain=profile.domain, seed=seed)
+        build_org(
+            graph,
+            num_users=profile.users,
+            num_workstations=profile.workstations,
+            num_servers=profile.servers,
+        )
+        apply_baseline_security(graph)
+        plant_all_paths(graph)
+        generator_profile = benchmark.graph_profile
+    elif benchmark.name == "complex":
+        graph = build_phase4_v1_graph(
+            domain=profile.domain,
+            seed=seed,
+            users=profile.users,
+            workstations=profile.workstations,
+            servers=profile.servers,
+        )
+        generator_profile = benchmark.graph_profile
+    else:  # defensive; get_benchmark already validates today.
+        raise click.UsageError(f"Unsupported benchmark {benchmark.name!r}")
+
+    artifact_prefix = output_prefix or f"{benchmark.name}-{profile.benchmark_version}-seed-{seed}"
+    artifact_dir = Path(output_dir)
+    zip_path = artifact_dir / f"{artifact_prefix}.zip"
+    manifest_path = artifact_dir / f"{artifact_prefix}_manifest.json"
+    manifest = _write_generated_dataset(
+        graph=graph,
+        seed=seed,
+        output_zip=zip_path,
+        output_manifest=manifest_path,
+        generator_profile=generator_profile,
+        metadata={
+            **profile.to_metadata(),
+            "graph_profile": benchmark.graph_profile,
+            "official_task_set": benchmark.official_task_set,
+            "diagnostic_task_set": benchmark.diagnostic_task_set,
+            "default_task_count": benchmark.default_task_count,
+            "diagnostic_task_count": benchmark.diagnostic_task_count,
+            "scoring_profile": benchmark.scoring_profile,
+        },
+    )
+
+    click.echo(f"Generated benchmark: {benchmark.name}")
+    click.echo(f"  Version: {profile.benchmark_version}")
+    click.echo(f"  Generator: {profile.generator_version}")
+    click.echo(f"  Seed: {seed}")
+    click.echo(f"  Company: {profile.company_name}")
+    click.echo(f"  Domain: {profile.domain}")
+    click.echo(
+        f"  Scale: users={profile.users}, "
+        f"workstations={profile.workstations}, servers={profile.servers}"
+    )
+    click.echo(f"  Zip: {zip_path}")
+    click.echo(f"  Manifest: {manifest_path}")
+    click.echo(
+        f"  Nodes: {manifest['stats']['total_nodes']} | "
+        f"Edges: {manifest['stats']['total_edges']} | "
+        f"Paths: {len(manifest['planted_paths'])}"
+    )
+
+
 @benchmark_group.command(name="run")
 @click.argument("name")
 @click.option(
@@ -522,6 +618,7 @@ def benchmark_run(name: str, mode: str) -> None:
 
 
 @main.command()
+@click.argument("benchmark", required=False)
 @click.option("--domain", default="CORP.LOCAL", help="AD domain name")
 @click.option("--seed", type=int, default=42, help="Random seed for reproducibility")
 @click.option("--users", type=int, default=20, help="Number of regular users to generate")
@@ -530,6 +627,7 @@ def benchmark_run(name: str, mode: str) -> None:
 @click.option("--output", "-o", type=click.Path(), default="datasets/output", help="Output path")
 @click.option("--zip/--no-zip", "as_zip", default=True, help="Output as zip (BH CE ingest format)")
 def generate(
+    benchmark: str | None,
     domain: str,
     seed: int,
     users: int,
@@ -538,7 +636,18 @@ def generate(
     output: str,
     as_zip: bool,
 ) -> None:
-    """Generate a synthetic AD graph with planted attack paths."""
+    """Generate a synthetic AD graph or named simple/complex benchmark."""
+    if benchmark is not None:
+        ctx = click.get_current_context()
+        ctx.invoke(
+            benchmark_generate,
+            name=benchmark,
+            seed=seed,
+            output_dir=output,
+            output_prefix=None,
+        )
+        return
+
     click.echo(f"Generating graph: domain={domain}, seed={seed}")
 
     graph = ADGraph(domain=domain, seed=seed)
@@ -1129,6 +1238,138 @@ def run_from_config(
         telemetry_enabled=telemetry_enabled,
     )
 
+    def _run_model_matrix_config(config_file: Path) -> bool:
+        data = yaml.safe_load(config_file.read_text()) or {}
+        if not isinstance(data, dict) or "profiles" in data:
+            return False
+        model_entries = data.get("models")
+        if not isinstance(model_entries, list) or not model_entries:
+            return False
+        if profile is not None or run_all_profiles:
+            raise click.UsageError("--profile/--run-all-profiles require a profile-based config.")
+        if manifest is None:
+            raise click.UsageError("Model-list configs require --manifest.")
+
+        defaults = data.get("defaults") or {}
+        if not isinstance(defaults, dict):
+            raise click.UsageError("defaults must be a mapping when present.")
+        config_dir = config_file.parent
+        default_concurrency = concurrency or defaults.get("concurrency", 1)
+        run_specs = _dedupe_run_specs(
+            [
+                _run_spec_from_entry(entry, default_concurrency=default_concurrency)
+                for entry in model_entries
+            ]
+        )
+        modes = data.get("modes", ["direct", "mcp"])
+        if not isinstance(modes, list) or not modes:
+            raise click.UsageError("modes must be a non-empty list when present.")
+        unsupported = sorted(set(modes) - {"direct", "mcp"})
+        if unsupported:
+            raise click.UsageError(f"Unsupported run mode(s): {', '.join(unsupported)}")
+
+        root_output_dir = Path(
+            output_dir
+            or data.get("output_dir")
+            or f"results/benchmark-runs/{Path(manifest).stem}"
+        )
+        if not root_output_dir.is_absolute():
+            root_output_dir = (config_dir / root_output_dir).resolve()
+
+        mcp_defaults = defaults.get("mcp") or {}
+        health_defaults = defaults.get("health") or {}
+        telemetry_defaults = defaults.get("telemetry") or {}
+        effective_bhce_url = bhce_url if bhce_url is not None else defaults.get("bhce_url")
+        effective_model_base_url = (
+            model_base_url if model_base_url is not None else defaults.get("model_base_url")
+        )
+        effective_max_reruns = int(
+            max_model_reruns_on_infra
+            if max_model_reruns_on_infra is not None
+            else defaults.get("max_model_reruns_on_infra", 1)
+        )
+        effective_health_timeout = float(
+            health_timeout
+            if health_timeout is not None
+            else health_defaults.get("timeout_seconds", 60)
+        )
+        effective_health_poll = float(
+            health_poll_interval
+            if health_poll_interval is not None
+            else health_defaults.get("poll_interval", 5)
+        )
+        effective_telemetry = (
+            telemetry_enabled
+            if telemetry_enabled is not None
+            else bool(telemetry_defaults.get("enabled", True))
+        )
+
+        if "direct" in modes:
+            direct_dir = root_output_dir / "direct"
+            direct_dir.mkdir(parents=True, exist_ok=True)
+            all_results = asyncio.run(
+                _run_baseline_with_specs(
+                    manifest_path=Path(manifest),
+                    run_specs=run_specs,
+                    output_dir=direct_dir,
+                    concurrency_override=concurrency,
+                    bhce_url=effective_bhce_url,
+                    default_model_base_url=effective_model_base_url,
+                    model_base_url_override=model_base_url,
+                    max_model_reruns_on_infra=effective_max_reruns,
+                    health_timeout_seconds=effective_health_timeout,
+                    health_poll_interval=effective_health_poll,
+                    telemetry_enabled=effective_telemetry,
+                )
+            )
+            write_combined_csv(all_results, direct_dir / "baseline_combined.csv")
+            write_summary_csv(all_results, direct_dir / "baseline_summary.csv")
+            click.echo(f"Direct benchmark results written to {direct_dir}")
+
+        if "mcp" in modes:
+            raw_mcp_dir = mcp_dir or mcp_defaults.get("mcp_dir", "../bloodhound-mcp")
+            effective_mcp_dir = Path(raw_mcp_dir)
+            if not effective_mcp_dir.is_absolute():
+                effective_mcp_dir = (config_dir / effective_mcp_dir).resolve()
+            mcp_dir_out = root_output_dir / "mcp"
+            mcp_dir_out.mkdir(parents=True, exist_ok=True)
+            effective_max_steps = int(
+                max_steps if max_steps is not None else mcp_defaults.get("max_steps", 12)
+            )
+            all_results = asyncio.run(
+                _run_baseline_mcp_with_specs(
+                    manifest_path=Path(manifest),
+                    run_specs=run_specs,
+                    output_dir=mcp_dir_out,
+                    concurrency_override=concurrency,
+                    bhce_url=effective_bhce_url,
+                    mcp_dir=effective_mcp_dir,
+                    max_steps=effective_max_steps,
+                    resource_mode=resource_mode or mcp_defaults.get("resource_mode", "off"),
+                    mcp_tool_loop=mcp_tool_loop or mcp_defaults.get("tool_loop", "auto"),
+                    openai_compat_telemetry_adapter=(
+                        openai_compat_telemetry_adapter
+                        or mcp_defaults.get("openai_compat_telemetry_adapter", "auto")
+                    ),
+                    mcp_ollama_read_timeout_seconds=float(
+                        mcp_ollama_read_timeout
+                        if mcp_ollama_read_timeout is not None
+                        else mcp_defaults.get("ollama_read_timeout_seconds", 900)
+                    ),
+                    default_model_base_url=effective_model_base_url,
+                    max_steps_override=max_steps,
+                    model_base_url_override=model_base_url,
+                    max_model_reruns_on_infra=effective_max_reruns,
+                    health_timeout_seconds=effective_health_timeout,
+                    health_poll_interval=effective_health_poll,
+                    telemetry_enabled=effective_telemetry,
+                )
+            )
+            write_combined_csv(all_results, mcp_dir_out / "baseline_combined.csv")
+            write_summary_csv(all_results, mcp_dir_out / "baseline_summary.csv")
+            click.echo(f"MCP benchmark results written to {mcp_dir_out}")
+        return True
+
     def _run_one_profile(resolved) -> None:
         click.echo(f"Using config profile: {resolved.profile_name} ({resolved.kind})")
 
@@ -1352,6 +1593,9 @@ def run_from_config(
         raise click.UsageError(f"Unsupported profile kind: {resolved.kind}")
 
     config_file = Path(config_path)
+    if _run_model_matrix_config(config_file):
+        return
+
     if run_all_profiles:
         enabled_profiles = [info for info in list_run_profiles(config_file) if info.enabled]
         if not enabled_profiles:

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from click.testing import CliRunner
 
 from ori.cli import main
@@ -38,3 +40,39 @@ def test_benchmark_run_cli_rejects_unsupported_mode() -> None:
 
     assert result.exit_code != 0
     assert "does not support mode 'diagnostic'" in result.output
+
+
+def test_benchmark_generate_simple_writes_seeded_artifacts(tmp_path) -> None:
+    result = CliRunner().invoke(
+        main,
+        [
+            "benchmark",
+            "generate",
+            "simple",
+            "--seed",
+            "1234",
+            "--output-dir",
+            str(tmp_path),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    manifest_path = tmp_path / "simple-v1-seed-1234_manifest.json"
+    assert (tmp_path / "simple-v1-seed-1234.zip").exists()
+    manifest = json.loads(manifest_path.read_text())
+    assert manifest["seed"] == 1234
+    assert manifest["domain"] == manifest["metadata"]["identity"]["domain"]
+    assert manifest["metadata"]["benchmark"] == "simple"
+    assert manifest["metadata"]["generator_version"] == "seeded-benchmark-v1"
+    assert 80 <= manifest["metadata"]["scale"]["users"] <= 120
+
+
+def test_generate_simple_alias_writes_seeded_artifacts(tmp_path) -> None:
+    result = CliRunner().invoke(
+        main,
+        ["generate", "simple", "--seed", "1234", "--output", str(tmp_path)],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert (tmp_path / "simple-v1-seed-1234.zip").exists()
+    assert (tmp_path / "simple-v1-seed-1234_manifest.json").exists()
