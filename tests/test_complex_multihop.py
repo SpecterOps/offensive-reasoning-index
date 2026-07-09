@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from ori.cli import _build_manifest
+from ori.eval.tasks import generate_mcp_tasks, generate_tasks
 from ori.generator.phase4 import build_phase4_complex_graph
 from ori.generator.templates.complex_multihop import complex_path_templates
 
@@ -18,16 +20,24 @@ def _complex_paths():
 def test_complex_path_registry_starts_with_non_adcs_families() -> None:
     templates = complex_path_templates()
 
-    assert len(templates) == 11
+    assert len(templates) == 19
     assert {template.family for template in templates} == {
         "host_session_pivot",
         "constrained_delegation",
         "rbcd",
         "unconstrained_delegation",
         "acl_group_nesting",
+        "gpo_ou_control",
+        "laps_session_pivot",
+        "trust_hopping",
+        "kerberoast_privilege_chain",
+        "adcs_identity_transition",
+        "path_selection_decoy",
+        "negative_control",
+        "stale_session_contingency",
     }
     assert all(template.template_id.startswith("t6_") for template in templates)
-    assert all(template.positive for template in templates)
+    assert any(not template.positive for template in templates)
 
 
 def test_phase4_complex_plants_initial_tier6_paths() -> None:
@@ -55,6 +65,8 @@ def test_complex_paths_have_tool_effort_and_mechanism_contracts() -> None:
 
     assert tier6_paths
     for path in tier6_paths:
+        if path.metadata["negative_control"]:
+            continue
         assert len(path.path_edges) >= 4
         assert len(path.metadata["critical_nodes"]) >= 4
         assert path.metadata["required_mechanisms"]
@@ -84,15 +96,21 @@ def test_initial_complex_pack_is_non_adcs_heavy() -> None:
     _graph, paths = _complex_paths()
     tier6 = [path for path in paths.values() if path.template_id.startswith("t6_")]
 
-    assert len(tier6) == 11
-    assert not any("adcs" in path.metadata["family"] for path in tier6)
+    assert len(tier6) == 19
+    assert any("adcs" in path.metadata["family"] for path in tier6)
+    assert any(path.metadata["negative_control"] for path in tier6)
 
 
 def test_phase2_pack_has_multiple_variants_per_initial_family() -> None:
     templates = complex_path_templates()
-    families = {template.family for template in templates}
 
-    for family in families:
+    for family in {
+        "host_session_pivot",
+        "constrained_delegation",
+        "rbcd",
+        "unconstrained_delegation",
+        "acl_group_nesting",
+    }:
         assert sum(1 for template in templates if template.family == family) >= 2
 
 
@@ -104,3 +122,27 @@ def test_host_session_phase2_variants_cover_long_chain_and_terminal_rbcd() -> No
     assert rbcd.metadata["terminal_escalation_type"] == "rbcd"
     assert "AllowedToAct" in [edge[1] for edge in rbcd.path_edges]
     assert [edge[1] for edge in three_host.path_edges].count("HasSession") >= 3
+
+
+def test_tier6_tasks_are_generated_with_operator_questions() -> None:
+    graph, _paths = _complex_paths()
+    manifest = _build_manifest(graph, seed=4401)
+    tasks = [task for task in generate_tasks(manifest) if task.tier == 6]
+
+    assert len(tasks) == 19
+    assert all(
+        "multiple graph lookups" in task.question or "actually viable" in task.question
+        for task in tasks
+    )
+    assert all(task.metadata["required_mechanisms"] for task in tasks)
+    assert all(task.metadata["tool_effort"] for task in tasks)
+    assert any(task.metadata["negative_control"] for task in tasks)
+
+
+def test_tier6_mcp_tasks_include_complex_direct_tasks() -> None:
+    graph, _paths = _complex_paths()
+    manifest = _build_manifest(graph, seed=4401)
+    mcp_tasks = [task for task in generate_mcp_tasks(manifest) if task.tier == 6]
+
+    assert len(mcp_tasks) >= 19
+    assert all(task.metadata["mcp_track"] for task in mcp_tasks)

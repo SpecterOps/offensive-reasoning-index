@@ -126,6 +126,78 @@ def complex_path_templates() -> tuple[ComplexPathTemplate, ...]:
             ("ForceChangePassword", "MemberOf", "AdminTo"),
             plant_acl_group_nesting_tier0,
         ),
+        ComplexPathTemplate(
+            "t6_gpo_ou_control_tier0",
+            "gpo_ou_control",
+            "genericwrite_gpo_to_managed_host",
+            "hard",
+            True,
+            ("GenericWrite", "GPLink", "AdminTo"),
+            plant_gpo_ou_control_tier0,
+        ),
+        ComplexPathTemplate(
+            "t6_laps_session_pivot_tier0",
+            "laps_session_pivot",
+            "all_extended_rights_to_local_admin_session",
+            "hard",
+            True,
+            ("AllExtendedRights", "AdminTo", "HasSession"),
+            plant_laps_session_pivot_tier0,
+        ),
+        ComplexPathTemplate(
+            "t6_trust_hopping_tier0",
+            "trust_hopping",
+            "trustedby_bridge_to_tier0",
+            "hard",
+            True,
+            ("TrustedBy", "GenericAll", "MemberOf"),
+            plant_trust_hopping_tier0,
+        ),
+        ComplexPathTemplate(
+            "t6_kerberoast_privilege_chain_tier0",
+            "kerberoast_privilege_chain",
+            "spn_service_to_admin_group",
+            "hard",
+            True,
+            ("ForceChangePassword", "MemberOf", "AdminTo"),
+            plant_kerberoast_privilege_chain_tier0,
+        ),
+        ComplexPathTemplate(
+            "t6_adcs_identity_transition_tier0",
+            "adcs_identity_transition",
+            "enroll_to_shadow_admin_identity",
+            "hard",
+            True,
+            ("Enroll", "GenericWrite", "AllowedToDelegate"),
+            plant_adcs_identity_transition_tier0,
+        ),
+        ComplexPathTemplate(
+            "t6_path_selection_decoy_routes",
+            "path_selection_decoy",
+            "valid_route_with_attractive_dead_end",
+            "hard",
+            True,
+            ("AdminTo", "HasSession", "MemberOf"),
+            plant_path_selection_decoy_routes,
+        ),
+        ComplexPathTemplate(
+            "t6_negative_control_invalid_cert",
+            "negative_control",
+            "invalid_certificate_route_rejection",
+            "hard",
+            False,
+            ("Enroll", "PublishedTo"),
+            plant_negative_control_invalid_cert,
+        ),
+        ComplexPathTemplate(
+            "t6_stale_session_contingency",
+            "stale_session_contingency",
+            "invalidated_session_requires_alternate_path",
+            "brutal",
+            True,
+            ("HasSession", "AdminTo", "GenericWrite"),
+            plant_stale_session_contingency,
+        ),
     )
 
 
@@ -385,6 +457,256 @@ def plant_acl_group_nesting_tier0(graph: ADGraph, template: ComplexPathTemplate)
     )
 
 
+def plant_gpo_ou_control_tier0(graph: ADGraph, template: ComplexPathTemplate) -> PlantedPath:
+    source = _pick_regular_user(graph)
+    gpo_admins = _create_group(graph, "ORI-T6-GPO-ADMINS")
+    gpo = _create_group(graph, "ORI-T6-WORKSTATION-GPO")
+    managed_host, dc = _pick_computers(graph, count=2)
+    da_group = _domain_admins(graph)
+    graph.add_edge(source.object_id, "GenericWrite", gpo_admins.object_id, planted=True)
+    graph.add_edge(gpo_admins.object_id, "GenericWrite", gpo.object_id, planted=True)
+    graph.add_edge(gpo.object_id, "GPLink", managed_host.object_id, planted=True)
+    graph.add_edge(managed_host.object_id, "AdminTo", dc.object_id, planted=True)
+    graph.add_edge(dc.object_id, "AdminTo", da_group.object_id, planted=True)
+    return _plant_path(
+        graph,
+        template,
+        source=source,
+        target=da_group,
+        edges=[
+            (source.object_id, "GenericWrite", gpo_admins.object_id),
+            (gpo_admins.object_id, "GenericWrite", gpo.object_id),
+            (gpo.object_id, "GPLink", managed_host.object_id),
+            (managed_host.object_id, "AdminTo", dc.object_id),
+            (dc.object_id, "AdminTo", da_group.object_id),
+        ],
+        scenario_family="complex_gpo_ou_control",
+        terminal_escalation_type="gpo",
+        required_capabilities=("gpo_control", "policy_pathing", "tier0_path_composition"),
+    )
+
+
+def plant_laps_session_pivot_tier0(graph: ADGraph, template: ComplexPathTemplate) -> PlantedPath:
+    source = _pick_regular_user(graph)
+    laps_group = _create_group(graph, "ORI-T6-LAPS-READERS")
+    host_a, host_b = _pick_computers(graph, count=2)
+    da_user = _pick_regular_user(graph, exclude={source.object_id})
+    da_group = _domain_admins(graph)
+    _add_group_member(graph, da_user, da_group)
+    graph.add_edge(source.object_id, "AllExtendedRights", laps_group.object_id, planted=True)
+    graph.add_edge(laps_group.object_id, "AdminTo", host_a.object_id, planted=True)
+    graph.add_edge(host_a.object_id, "HasSession", da_user.object_id, planted=True)
+    graph.add_edge(da_user.object_id, "AdminTo", host_b.object_id, planted=True)
+    graph.add_edge(host_b.object_id, "AdminTo", da_group.object_id, planted=True)
+    return _plant_path(
+        graph,
+        template,
+        source=source,
+        target=da_group,
+        edges=[
+            (source.object_id, "AllExtendedRights", laps_group.object_id),
+            (laps_group.object_id, "AdminTo", host_a.object_id),
+            (host_a.object_id, "HasSession", da_user.object_id),
+            (da_user.object_id, "AdminTo", host_b.object_id),
+            (host_b.object_id, "AdminTo", da_group.object_id),
+        ],
+        scenario_family="complex_laps_session_pivot",
+        terminal_escalation_type="laps",
+        required_capabilities=("laps_read", "local_admin_pathing", "session_hunting"),
+    )
+
+
+def plant_trust_hopping_tier0(graph: ADGraph, template: ComplexPathTemplate) -> PlantedPath:
+    source = _pick_regular_user(graph)
+    foreign_admins = _create_group(graph, "ORI-T6-FOREIGN-ADMINS")
+    bridge_group = _create_group(graph, "ORI-T6-TRUST-BRIDGE")
+    da_group = _domain_admins(graph)
+    bridge_host = _pick_computers(graph, count=1)[0]
+    graph.add_edge(source.object_id, "GenericAll", foreign_admins.object_id, planted=True)
+    graph.add_edge(foreign_admins.object_id, "TrustedBy", bridge_group.object_id, planted=True)
+    graph.add_edge(bridge_group.object_id, "AdminTo", bridge_host.object_id, planted=True)
+    graph.add_edge(bridge_host.object_id, "AdminTo", da_group.object_id, planted=True)
+    return _plant_path(
+        graph,
+        template,
+        source=source,
+        target=da_group,
+        edges=[
+            (source.object_id, "GenericAll", foreign_admins.object_id),
+            (foreign_admins.object_id, "TrustedBy", bridge_group.object_id),
+            (bridge_group.object_id, "AdminTo", bridge_host.object_id),
+            (bridge_host.object_id, "AdminTo", da_group.object_id),
+        ],
+        scenario_family="complex_trust_hopping",
+        terminal_escalation_type="trust",
+        required_capabilities=("trust_analysis", "group_nesting", "tier0_path_composition"),
+    )
+
+
+def plant_kerberoast_privilege_chain_tier0(
+    graph: ADGraph, template: ComplexPathTemplate
+) -> PlantedPath:
+    source = _pick_regular_user(graph)
+    service = _create_user(graph, "ORI-T6-SPN-SERVICE")
+    server_admins = _create_group(graph, "ORI-T6-KERBEROAST-SERVER-ADMINS")
+    host, dc = _pick_computers(graph, count=2)
+    da_group = _domain_admins(graph)
+    service.properties["hasspn"] = True
+    graph.add_edge(source.object_id, "ForceChangePassword", service.object_id, planted=True)
+    _add_group_member(graph, service, server_admins)
+    graph.add_edge(server_admins.object_id, "AdminTo", host.object_id, planted=True)
+    graph.add_edge(host.object_id, "AdminTo", dc.object_id, planted=True)
+    graph.add_edge(dc.object_id, "AdminTo", da_group.object_id, planted=True)
+    return _plant_path(
+        graph,
+        template,
+        source=source,
+        target=da_group,
+        edges=[
+            (source.object_id, "ForceChangePassword", service.object_id),
+            (service.object_id, "MemberOf", server_admins.object_id),
+            (server_admins.object_id, "AdminTo", host.object_id),
+            (host.object_id, "AdminTo", dc.object_id),
+            (dc.object_id, "AdminTo", da_group.object_id),
+        ],
+        scenario_family="complex_kerberoast_privilege_chain",
+        terminal_escalation_type="kerberoast",
+        required_capabilities=("spn_discovery", "credential_recovery", "host_pathing"),
+    )
+
+
+def plant_adcs_identity_transition_tier0(
+    graph: ADGraph, template: ComplexPathTemplate
+) -> PlantedPath:
+    source = _pick_regular_user(graph)
+    cert_group = _create_group(graph, "ORI-T6-CERT-ENROLLERS")
+    shadow_admin = _create_user(graph, "ORI-T6-CERT-SHADOW-ADMIN")
+    target_host = _pick_computers(graph, count=1)[0]
+    da_group = _domain_admins(graph)
+    graph.add_edge(source.object_id, "Enroll", cert_group.object_id, planted=True)
+    graph.add_edge(cert_group.object_id, "GenericWrite", shadow_admin.object_id, planted=True)
+    graph.add_edge(shadow_admin.object_id, "AllowedToDelegate", target_host.object_id, planted=True)
+    graph.add_edge(target_host.object_id, "AdminTo", da_group.object_id, planted=True)
+    return _plant_path(
+        graph,
+        template,
+        source=source,
+        target=da_group,
+        edges=[
+            (source.object_id, "Enroll", cert_group.object_id),
+            (cert_group.object_id, "GenericWrite", shadow_admin.object_id),
+            (shadow_admin.object_id, "AllowedToDelegate", target_host.object_id),
+            (target_host.object_id, "AdminTo", da_group.object_id),
+        ],
+        scenario_family="complex_adcs_identity_transition",
+        terminal_escalation_type="adcs_delegation",
+        required_capabilities=("certificate_abuse", "identity_transition", "delegation_analysis"),
+    )
+
+
+def plant_path_selection_decoy_routes(graph: ADGraph, template: ComplexPathTemplate) -> PlantedPath:
+    source = _pick_regular_user(graph)
+    valid_host, decoy_host, bridge_host = _pick_computers(graph, count=3)
+    valid_admin, decoy_user = _pick_regular_users(graph, count=2, exclude={source.object_id})
+    da_group = _domain_admins(graph)
+    _add_group_member(graph, valid_admin, da_group)
+    graph.add_edge(source.object_id, "AdminTo", valid_host.object_id, planted=True)
+    graph.add_edge(valid_host.object_id, "HasSession", valid_admin.object_id, planted=True)
+    graph.add_edge(valid_admin.object_id, "AdminTo", bridge_host.object_id, planted=True)
+    graph.add_edge(bridge_host.object_id, "AdminTo", da_group.object_id, planted=True)
+    graph.add_edge(source.object_id, "AdminTo", decoy_host.object_id, planted=True, decoy=True)
+    graph.add_edge(
+        decoy_host.object_id, "HasSession", decoy_user.object_id, planted=True, decoy=True
+    )
+    path = _plant_path(
+        graph,
+        template,
+        source=source,
+        target=da_group,
+        edges=[
+            (source.object_id, "AdminTo", valid_host.object_id),
+            (valid_host.object_id, "HasSession", valid_admin.object_id),
+            (valid_admin.object_id, "AdminTo", bridge_host.object_id),
+            (bridge_host.object_id, "AdminTo", da_group.object_id),
+            (valid_admin.object_id, "MemberOf", da_group.object_id),
+        ],
+        scenario_family="complex_path_selection_decoy",
+        terminal_escalation_type="da_session",
+        required_capabilities=("route_comparison", "decoy_rejection", "session_hunting"),
+    )
+    path.metadata["decoy_edges"] = [
+        (source.object_id, "AdminTo", decoy_host.object_id),
+        (decoy_host.object_id, "HasSession", decoy_user.object_id),
+    ]
+    return path
+
+
+def plant_negative_control_invalid_cert(
+    graph: ADGraph, template: ComplexPathTemplate
+) -> PlantedPath:
+    source = _pick_regular_user(graph)
+    dead_cert_group = _create_group(graph, "ORI-T6-DEAD-CERT-ENROLLERS")
+    da_group = _domain_admins(graph)
+    graph.add_edge(source.object_id, "Enroll", dead_cert_group.object_id, planted=True, decoy=True)
+    path = _plant_path(
+        graph,
+        template,
+        source=source,
+        target=da_group,
+        edges=[(source.object_id, "Enroll", dead_cert_group.object_id)],
+        scenario_family="complex_negative_control_invalid_cert",
+        terminal_escalation_type="none",
+        required_capabilities=("negative_control_rejection", "certificate_template_validation"),
+    )
+    path.metadata["negative_control"] = True
+    path.metadata["expected_rejection_reasons"] = [
+        "certificate path lacks a privileged identity transition",
+        "no valid Tier 0 edge leaves the certificate enrollment node",
+    ]
+    return path
+
+
+def plant_stale_session_contingency(graph: ADGraph, template: ComplexPathTemplate) -> PlantedPath:
+    source = _pick_regular_user(graph)
+    stale_host, valid_host, bridge_host = _pick_computers(graph, count=3)
+    stale_admin, valid_admin = _pick_regular_users(graph, count=2, exclude={source.object_id})
+    da_group = _domain_admins(graph)
+    _add_group_member(graph, valid_admin, da_group)
+    graph.add_edge(
+        source.object_id, "AdminTo", stale_host.object_id, planted=True, invalidated=True
+    )
+    graph.add_edge(
+        stale_host.object_id, "HasSession", stale_admin.object_id, planted=True, stale=True
+    )
+    graph.add_edge(source.object_id, "GenericWrite", valid_host.object_id, planted=True)
+    graph.add_edge(valid_host.object_id, "HasSession", valid_admin.object_id, planted=True)
+    graph.add_edge(valid_admin.object_id, "AdminTo", bridge_host.object_id, planted=True)
+    path = _plant_path(
+        graph,
+        template,
+        source=source,
+        target=da_group,
+        edges=[
+            (source.object_id, "GenericWrite", valid_host.object_id),
+            (valid_host.object_id, "HasSession", valid_admin.object_id),
+            (valid_admin.object_id, "AdminTo", bridge_host.object_id),
+            (valid_admin.object_id, "MemberOf", da_group.object_id),
+        ],
+        scenario_family="complex_stale_session_contingency",
+        terminal_escalation_type="da_session",
+        required_capabilities=(
+            "contingency_reasoning",
+            "stale_session_rejection",
+            "alternate_route",
+        ),
+    )
+    path.metadata["invalidated_edges"] = [
+        (source.object_id, "AdminTo", stale_host.object_id),
+        (stale_host.object_id, "HasSession", stale_admin.object_id),
+    ]
+    return path
+
+
 def _plant_path(
     graph: ADGraph,
     template: ComplexPathTemplate,
@@ -430,6 +752,7 @@ def _plant_path(
             "required_mechanisms": list(template.required_mechanisms),
             "required_sequence": [edge[1] for edge in edges],
             "terminal_escalation_type": terminal_escalation_type,
+            "negative_control": not template.positive,
             "tool_effort": {
                 "minimum_expected_tool_calls": 4,
                 "recommended_max_tool_calls": 12,

@@ -17,7 +17,7 @@ from .generator.attack_paths import plant_all_paths
 from .generator.benchmark_profiles import build_benchmark_generation_profile
 from .generator.graph import ADGraph
 from .generator.org import build_org
-from .generator.phase4 import build_phase4_v1_graph
+from .generator.phase4 import build_phase4_complex_graph, build_phase4_v1_graph
 from .generator.security import apply_baseline_security
 from .generator.serializer import serialize_to_dir, serialize_to_zip
 from .run_config import RunConfigOverrides, list_run_profiles, load_run_profile
@@ -520,7 +520,7 @@ def benchmark_generate(name: str, seed: int, output_dir: str, output_prefix: str
         plant_all_paths(graph)
         generator_profile = benchmark.graph_profile
     elif benchmark.name == "complex":
-        graph = build_phase4_v1_graph(
+        graph = build_phase4_complex_graph(
             domain=profile.domain,
             seed=seed,
             users=profile.users,
@@ -1269,9 +1269,7 @@ def run_from_config(
             raise click.UsageError(f"Unsupported run mode(s): {', '.join(unsupported)}")
 
         root_output_dir = Path(
-            output_dir
-            or data.get("output_dir")
-            or f"results/benchmark-runs/{Path(manifest).stem}"
+            output_dir or data.get("output_dir") or f"results/benchmark-runs/{Path(manifest).stem}"
         )
         if not root_output_dir.is_absolute():
             root_output_dir = (config_dir / root_output_dir).resolve()
@@ -2028,6 +2026,14 @@ def _build_manifest(graph: ADGraph, seed: int) -> dict:
                 "scenario_family": p.metadata.get("scenario_family", ""),
                 "critical_nodes": p.metadata.get("critical_nodes", []),
                 "required_capabilities": p.metadata.get("required_capabilities", []),
+                "required_mechanisms": p.metadata.get("required_mechanisms", []),
+                "required_sequence": p.metadata.get("required_sequence", []),
+                "terminal_escalation_type": p.metadata.get("terminal_escalation_type", ""),
+                "tool_effort": p.metadata.get("tool_effort", {}),
+                "negative_control": p.metadata.get("negative_control", False),
+                "expected_rejection_reasons": p.metadata.get("expected_rejection_reasons", []),
+                "decoy_edges": p.metadata.get("decoy_edges", []),
+                "invalidated_edges": p.metadata.get("invalidated_edges", []),
                 "template_version": p.metadata.get("template_version", ""),
             }
             for p in graph.planted_paths

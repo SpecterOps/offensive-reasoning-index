@@ -199,7 +199,41 @@ _TEMPLATE_QUESTIONS: dict[str, list[tuple[str, str, str, list[str], str | None]]
     ],
 }
 
-# Global enumeration tasks that don't depend on specific planted paths
+_TIER6_COMPLEX_QUESTIONS: list[tuple[str, str, str, list[str], str | None]] = [
+    (
+        "Starting from {source_name}, determine the viable multi-hop route to {target_name}. "
+        "Use multiple graph lookups: identify the host/user/group sequence, the mechanism at "
+        "each hop, and the terminal Tier 0 condition. Reject any attractive dead ends.",
+        "decision_complexity",
+        "path_exists",
+        ["tier6", "complex", "multi_hop", "operator_reasoning"],
+        None,
+    ),
+]
+
+_TIER6_NEGATIVE_CONTROL_QUESTIONS: list[tuple[str, str, str, list[str], str | None]] = [
+    (
+        "Starting from {source_name}, evaluate whether the apparent certificate route to "
+        "{target_name} is actually viable. If it is not viable, explain the missing mechanism "
+        "or invalid edge instead of forcing a path.",
+        "negative_control",
+        "path_exists",
+        ["tier6", "complex", "negative_control", "decoy_rejection"],
+        None,
+    ),
+]
+
+
+def _questions_for_template(
+    template_id: str,
+) -> list[tuple[str, str, str, list[str], str | None]]:
+    if template_id == "t6_negative_control_invalid_cert":
+        return _TIER6_NEGATIVE_CONTROL_QUESTIONS
+    if template_id.startswith("t6_"):
+        return _TIER6_COMPLEX_QUESTIONS
+    return _TEMPLATE_QUESTIONS.get(template_id, [])
+
+
 _GLOBAL_TASKS: list[tuple[str, str, str, str, list[str]]] = [
     # (id_suffix, question, category, grade_mode, tags)
     (
@@ -356,7 +390,7 @@ def generate_tasks(manifest: dict) -> list[Task]:
         target_name = path.get("target_name", path.get("target_node", ""))
 
         for i, (q_tmpl, category, grade_mode, tags, ref_cypher_tmpl) in enumerate(
-            _TEMPLATE_QUESTIONS.get(tid, []), start=1
+            _questions_for_template(tid), start=1
         ):
             question = q_tmpl.format(
                 source_name=source_name,
@@ -392,6 +426,14 @@ def generate_tasks(manifest: dict) -> list[Task]:
                         "scenario_family": path.get("scenario_family", ""),
                         "critical_nodes": path.get("critical_nodes", []),
                         "required_capabilities": path.get("required_capabilities", []),
+                        "required_mechanisms": path.get("required_mechanisms", []),
+                        "required_sequence": path.get("required_sequence", []),
+                        "terminal_escalation_type": path.get("terminal_escalation_type", ""),
+                        "tool_effort": path.get("tool_effort", {}),
+                        "negative_control": path.get("negative_control", False),
+                        "expected_rejection_reasons": path.get("expected_rejection_reasons", []),
+                        "decoy_edges": path.get("decoy_edges", []),
+                        "invalidated_edges": path.get("invalidated_edges", []),
                         "template_version": path.get("template_version", ""),
                     },
                 )
