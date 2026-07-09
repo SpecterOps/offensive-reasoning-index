@@ -24,57 +24,107 @@ class ComplexPathTemplate:
 
 
 def complex_path_templates() -> tuple[ComplexPathTemplate, ...]:
-    """Return the initial non-ADCS complex path pack.
-
-    This is deliberately small: it establishes the registry/foundation before the
-    later 70–150 variant pool is expanded.
-    """
+    """Return the Phase 2 non-ADCS complex path pack."""
 
     return (
         ComplexPathTemplate(
-            template_id="t6_host_session_pivot_tier0",
-            family="host_session_pivot",
-            variant="two_host_admin_chain_da_session",
-            difficulty="hard",
-            positive=True,
-            required_mechanisms=("CanPSRemote", "HasSession", "AdminTo"),
-            planter=plant_host_session_pivot_tier0,
+            "t6_host_session_pivot_tier0",
+            "host_session_pivot",
+            "two_host_admin_chain_da_session",
+            "hard",
+            True,
+            ("CanPSRemote", "HasSession", "AdminTo"),
+            plant_host_session_pivot_tier0,
         ),
         ComplexPathTemplate(
-            template_id="t6_constrained_delegation_bridge_tier0",
-            family="constrained_delegation",
-            variant="delegated_service_to_management_host",
-            difficulty="hard",
-            positive=True,
-            required_mechanisms=("AllowedToDelegate", "AdminTo", "HasSession"),
-            planter=plant_constrained_delegation_bridge_tier0,
+            "t6_host_session_pivot_rbcd_tier0",
+            "host_session_pivot",
+            "two_host_admin_chain_final_host_rbcd",
+            "hard",
+            True,
+            ("CanPSRemote", "HasSession", "AdminTo", "AllowedToAct"),
+            plant_host_session_pivot_tier0,
         ),
         ComplexPathTemplate(
-            template_id="t6_rbcd_computer_takeover_tier0",
-            family="rbcd",
-            variant="genericwrite_to_allowed_to_act_bridge",
-            difficulty="hard",
-            positive=True,
-            required_mechanisms=("GenericWrite", "AllowedToAct", "AdminTo"),
-            planter=plant_rbcd_computer_takeover_tier0,
+            "t6_host_session_pivot_three_host_tier0",
+            "host_session_pivot",
+            "three_host_admin_chain_da_session",
+            "brutal",
+            True,
+            ("CanPSRemote", "HasSession", "AdminTo"),
+            plant_host_session_pivot_tier0,
         ),
         ComplexPathTemplate(
-            template_id="t6_unconstrained_delegation_tgt_capture_tier0",
-            family="unconstrained_delegation",
-            variant="reachable_delegation_host_with_da_session",
-            difficulty="hard",
-            positive=True,
-            required_mechanisms=("AdminTo", "HasSession", "AbuseTGTDelegation"),
-            planter=plant_unconstrained_delegation_tgt_capture_tier0,
+            "t6_constrained_delegation_bridge_tier0",
+            "constrained_delegation",
+            "delegated_service_to_management_host",
+            "hard",
+            True,
+            ("AllowedToDelegate", "AdminTo", "HasSession"),
+            plant_constrained_delegation_bridge_tier0,
         ),
         ComplexPathTemplate(
-            template_id="t6_acl_group_nesting_tier0",
-            family="acl_group_nesting",
-            variant="writedacl_addmember_nested_admin_chain",
-            difficulty="hard",
-            positive=True,
-            required_mechanisms=("WriteDACL", "AddMember", "MemberOf", "AdminTo"),
-            planter=plant_acl_group_nesting_tier0,
+            "t6_constrained_delegation_session_bridge_tier0",
+            "constrained_delegation",
+            "delegated_host_to_privileged_session",
+            "hard",
+            True,
+            ("AllowedToDelegate", "HasSession", "AdminTo"),
+            plant_constrained_delegation_bridge_tier0,
+        ),
+        ComplexPathTemplate(
+            "t6_rbcd_computer_takeover_tier0",
+            "rbcd",
+            "genericwrite_to_allowed_to_act_bridge",
+            "hard",
+            True,
+            ("GenericWrite", "AllowedToAct", "AdminTo"),
+            plant_rbcd_computer_takeover_tier0,
+        ),
+        ComplexPathTemplate(
+            "t6_rbcd_session_pivot_tier0",
+            "rbcd",
+            "allowed_to_act_to_session_pivot",
+            "hard",
+            True,
+            ("GenericWrite", "AllowedToAct", "HasSession", "AdminTo"),
+            plant_rbcd_computer_takeover_tier0,
+        ),
+        ComplexPathTemplate(
+            "t6_unconstrained_delegation_tgt_capture_tier0",
+            "unconstrained_delegation",
+            "reachable_delegation_host_with_da_session",
+            "hard",
+            True,
+            ("AdminTo", "HasSession", "AbuseTGTDelegation"),
+            plant_unconstrained_delegation_tgt_capture_tier0,
+        ),
+        ComplexPathTemplate(
+            "t6_unconstrained_delegation_bridge_admin_tier0",
+            "unconstrained_delegation",
+            "delegation_host_to_bridge_admin",
+            "hard",
+            True,
+            ("AdminTo", "HasSession", "AbuseTGTDelegation", "MemberOf"),
+            plant_unconstrained_delegation_tgt_capture_tier0,
+        ),
+        ComplexPathTemplate(
+            "t6_acl_group_nesting_tier0",
+            "acl_group_nesting",
+            "writedacl_addmember_nested_admin_chain",
+            "hard",
+            True,
+            ("WriteDACL", "AddMember", "MemberOf", "AdminTo"),
+            plant_acl_group_nesting_tier0,
+        ),
+        ComplexPathTemplate(
+            "t6_acl_forcechange_group_pivot_tier0",
+            "acl_group_nesting",
+            "forcechange_password_to_group_admin_chain",
+            "hard",
+            True,
+            ("ForceChangePassword", "MemberOf", "AdminTo"),
+            plant_acl_group_nesting_tier0,
         ),
     )
 
@@ -90,24 +140,49 @@ def plant_complex_multihop_paths(graph: ADGraph) -> list[PlantedPath]:
 
 def plant_host_session_pivot_tier0(graph: ADGraph, template: ComplexPathTemplate) -> PlantedPath:
     source = _pick_regular_user(graph)
-    host_a, host_b, host_c = _pick_computers(graph, count=3)
-    admin_b, admin_c, domain_admin = _pick_regular_users(graph, count=3, exclude={source.object_id})
     da_group = _domain_admins(graph)
+    terminal_escalation_type = "da_session"
 
-    _add_group_member(graph, domain_admin, da_group)
-    graph.add_edge(source.object_id, "CanPSRemote", host_a.object_id, planted=True)
-    graph.add_edge(host_a.object_id, "HasSession", admin_b.object_id, planted=True)
-    graph.add_edge(admin_b.object_id, "AdminTo", host_b.object_id, planted=True)
-    graph.add_edge(host_b.object_id, "HasSession", admin_c.object_id, planted=True)
-    graph.add_edge(admin_c.object_id, "AdminTo", host_c.object_id, planted=True)
-    graph.add_edge(host_c.object_id, "HasSession", domain_admin.object_id, planted=True)
-
-    return _plant_path(
-        graph,
-        template,
-        source=source,
-        target=da_group,
-        edges=[
+    if "three_host" in template.variant:
+        host_a, host_b, host_c, host_d = _pick_computers(graph, count=4)
+        admin_b, admin_c, admin_d, domain_admin = _pick_regular_users(
+            graph, count=4, exclude={source.object_id}
+        )
+        _add_group_member(graph, domain_admin, da_group)
+        edges = [
+            (source.object_id, "CanPSRemote", host_a.object_id),
+            (host_a.object_id, "HasSession", admin_b.object_id),
+            (admin_b.object_id, "AdminTo", host_b.object_id),
+            (host_b.object_id, "HasSession", admin_c.object_id),
+            (admin_c.object_id, "AdminTo", host_c.object_id),
+            (host_c.object_id, "HasSession", admin_d.object_id),
+            (admin_d.object_id, "AdminTo", host_d.object_id),
+            (host_d.object_id, "HasSession", domain_admin.object_id),
+            (domain_admin.object_id, "MemberOf", da_group.object_id),
+        ]
+    elif "rbcd" in template.variant:
+        host_a, host_b, host_c, tier0_host = _pick_computers(graph, count=4)
+        admin_b, admin_c = _pick_regular_users(graph, count=2, exclude={source.object_id})
+        tier0_host.extra.setdefault("AllowedToAct", []).append(
+            {"ObjectIdentifier": admin_c.object_id, "ObjectType": "User"}
+        )
+        terminal_escalation_type = "rbcd"
+        edges = [
+            (source.object_id, "CanPSRemote", host_a.object_id),
+            (host_a.object_id, "HasSession", admin_b.object_id),
+            (admin_b.object_id, "AdminTo", host_b.object_id),
+            (host_b.object_id, "HasSession", admin_c.object_id),
+            (admin_c.object_id, "AdminTo", host_c.object_id),
+            (admin_c.object_id, "AllowedToAct", tier0_host.object_id),
+            (tier0_host.object_id, "AdminTo", da_group.object_id),
+        ]
+    else:
+        host_a, host_b, host_c = _pick_computers(graph, count=3)
+        admin_b, admin_c, domain_admin = _pick_regular_users(
+            graph, count=3, exclude={source.object_id}
+        )
+        _add_group_member(graph, domain_admin, da_group)
+        edges = [
             (source.object_id, "CanPSRemote", host_a.object_id),
             (host_a.object_id, "HasSession", admin_b.object_id),
             (admin_b.object_id, "AdminTo", host_b.object_id),
@@ -115,9 +190,20 @@ def plant_host_session_pivot_tier0(graph: ADGraph, template: ComplexPathTemplate
             (admin_c.object_id, "AdminTo", host_c.object_id),
             (host_c.object_id, "HasSession", domain_admin.object_id),
             (domain_admin.object_id, "MemberOf", da_group.object_id),
-        ],
+        ]
+
+    for source_id, edge_kind, target_id in edges:
+        if edge_kind != "MemberOf":
+            graph.add_edge(source_id, edge_kind, target_id, planted=True)
+
+    return _plant_path(
+        graph,
+        template,
+        source=source,
+        target=da_group,
+        edges=edges,
         scenario_family="complex_host_session_pivot",
-        terminal_escalation_type="da_session",
+        terminal_escalation_type=terminal_escalation_type,
         required_capabilities=(
             "host_compromise",
             "session_hunting",
@@ -140,7 +226,25 @@ def plant_constrained_delegation_bridge_tier0(
         {"ObjectIdentifier": delegated_host.object_id}
     )
     graph.add_edge(service.object_id, "AllowedToDelegate", delegated_host.object_id, planted=True)
-    graph.add_edge(delegated_host.object_id, "AdminTo", mgmt_host.object_id, planted=True)
+    if "session" in template.variant:
+        bridge_admin = _pick_regular_user(graph, exclude={source.object_id})
+        graph.add_edge(delegated_host.object_id, "HasSession", bridge_admin.object_id, planted=True)
+        graph.add_edge(bridge_admin.object_id, "AdminTo", mgmt_host.object_id, planted=True)
+        edges = [
+            (source.object_id, "GenericWrite", service.object_id),
+            (service.object_id, "AllowedToDelegate", delegated_host.object_id),
+            (delegated_host.object_id, "HasSession", bridge_admin.object_id),
+            (bridge_admin.object_id, "AdminTo", mgmt_host.object_id),
+            (mgmt_host.object_id, "AdminTo", da_group.object_id),
+        ]
+    else:
+        graph.add_edge(delegated_host.object_id, "AdminTo", mgmt_host.object_id, planted=True)
+        edges = [
+            (source.object_id, "GenericWrite", service.object_id),
+            (service.object_id, "AllowedToDelegate", delegated_host.object_id),
+            (delegated_host.object_id, "AdminTo", mgmt_host.object_id),
+            (mgmt_host.object_id, "AdminTo", da_group.object_id),
+        ]
     graph.add_edge(mgmt_host.object_id, "AdminTo", da_group.object_id, planted=True)
 
     return _plant_path(
@@ -148,12 +252,7 @@ def plant_constrained_delegation_bridge_tier0(
         template,
         source=source,
         target=da_group,
-        edges=[
-            (source.object_id, "GenericWrite", service.object_id),
-            (service.object_id, "AllowedToDelegate", delegated_host.object_id),
-            (delegated_host.object_id, "AdminTo", mgmt_host.object_id),
-            (mgmt_host.object_id, "AdminTo", da_group.object_id),
-        ],
+        edges=edges,
         scenario_family="complex_constrained_delegation",
         terminal_escalation_type="delegation",
         required_capabilities=("acl_analysis", "delegation_analysis", "host_pathing"),
@@ -173,7 +272,27 @@ def plant_rbcd_computer_takeover_tier0(
     graph.add_edge(
         controlled_computer.object_id, "AllowedToAct", target_computer.object_id, planted=True
     )
-    graph.add_edge(target_computer.object_id, "AdminTo", dc.object_id, planted=True)
+    if "session" in template.variant:
+        bridge_admin = _pick_regular_user(graph, exclude={source.object_id})
+        graph.add_edge(
+            target_computer.object_id, "HasSession", bridge_admin.object_id, planted=True
+        )
+        graph.add_edge(bridge_admin.object_id, "AdminTo", dc.object_id, planted=True)
+        edges = [
+            (source.object_id, "GenericWrite", controlled_computer.object_id),
+            (controlled_computer.object_id, "AllowedToAct", target_computer.object_id),
+            (target_computer.object_id, "HasSession", bridge_admin.object_id),
+            (bridge_admin.object_id, "AdminTo", dc.object_id),
+            (dc.object_id, "AdminTo", da_group.object_id),
+        ]
+    else:
+        graph.add_edge(target_computer.object_id, "AdminTo", dc.object_id, planted=True)
+        edges = [
+            (source.object_id, "GenericWrite", controlled_computer.object_id),
+            (controlled_computer.object_id, "AllowedToAct", target_computer.object_id),
+            (target_computer.object_id, "AdminTo", dc.object_id),
+            (dc.object_id, "AdminTo", da_group.object_id),
+        ]
     graph.add_edge(dc.object_id, "AdminTo", da_group.object_id, planted=True)
 
     return _plant_path(
@@ -181,12 +300,7 @@ def plant_rbcd_computer_takeover_tier0(
         template,
         source=source,
         target=da_group,
-        edges=[
-            (source.object_id, "GenericWrite", controlled_computer.object_id),
-            (controlled_computer.object_id, "AllowedToAct", target_computer.object_id),
-            (target_computer.object_id, "AdminTo", dc.object_id),
-            (dc.object_id, "AdminTo", da_group.object_id),
-        ],
+        edges=edges,
         scenario_family="complex_rbcd",
         terminal_escalation_type="rbcd",
         required_capabilities=("computer_object_control", "rbcd", "tier0_path_composition"),
@@ -231,8 +345,29 @@ def plant_acl_group_nesting_tier0(graph: ADGraph, template: ComplexPathTemplate)
     mgmt_host, dc = _pick_computers(graph, count=2)
     da_group = _domain_admins(graph)
     bridge_group.aces.append(ACE(source.object_id, "User", "WriteDACL"))
-    graph.add_edge(source.object_id, "WriteDACL", bridge_group.object_id, planted=True)
-    graph.add_edge(source.object_id, "AddMember", bridge_group.object_id, planted=True)
+    if "forcechange" in template.variant:
+        bridge_user = _create_user(graph, "ORI-T6-BRIDGE-OPERATOR")
+        _add_group_member(graph, bridge_user, bridge_group)
+        graph.add_edge(source.object_id, "ForceChangePassword", bridge_user.object_id, planted=True)
+        edges = [
+            (source.object_id, "ForceChangePassword", bridge_user.object_id),
+            (bridge_user.object_id, "MemberOf", bridge_group.object_id),
+            (bridge_group.object_id, "MemberOf", server_admins.object_id),
+            (server_admins.object_id, "AdminTo", mgmt_host.object_id),
+            (mgmt_host.object_id, "AdminTo", dc.object_id),
+            (dc.object_id, "AdminTo", da_group.object_id),
+        ]
+    else:
+        graph.add_edge(source.object_id, "WriteDACL", bridge_group.object_id, planted=True)
+        graph.add_edge(source.object_id, "AddMember", bridge_group.object_id, planted=True)
+        edges = [
+            (source.object_id, "WriteDACL", bridge_group.object_id),
+            (source.object_id, "AddMember", bridge_group.object_id),
+            (bridge_group.object_id, "MemberOf", server_admins.object_id),
+            (server_admins.object_id, "AdminTo", mgmt_host.object_id),
+            (mgmt_host.object_id, "AdminTo", dc.object_id),
+            (dc.object_id, "AdminTo", da_group.object_id),
+        ]
     _add_group_member(graph, bridge_group, server_admins)
     graph.add_edge(server_admins.object_id, "AdminTo", mgmt_host.object_id, planted=True)
     graph.add_edge(mgmt_host.object_id, "AdminTo", dc.object_id, planted=True)
@@ -243,14 +378,7 @@ def plant_acl_group_nesting_tier0(graph: ADGraph, template: ComplexPathTemplate)
         template,
         source=source,
         target=da_group,
-        edges=[
-            (source.object_id, "WriteDACL", bridge_group.object_id),
-            (source.object_id, "AddMember", bridge_group.object_id),
-            (bridge_group.object_id, "MemberOf", server_admins.object_id),
-            (server_admins.object_id, "AdminTo", mgmt_host.object_id),
-            (mgmt_host.object_id, "AdminTo", dc.object_id),
-            (dc.object_id, "AdminTo", da_group.object_id),
-        ],
+        edges=edges,
         scenario_family="complex_acl_group_nesting",
         terminal_escalation_type="acl_group_chain",
         required_capabilities=("acl_analysis", "group_nesting", "local_admin_pathing"),

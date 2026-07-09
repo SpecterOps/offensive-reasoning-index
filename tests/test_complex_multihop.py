@@ -18,7 +18,7 @@ def _complex_paths():
 def test_complex_path_registry_starts_with_non_adcs_families() -> None:
     templates = complex_path_templates()
 
-    assert len(templates) == 5
+    assert len(templates) == 11
     assert {template.family for template in templates} == {
         "host_session_pivot",
         "constrained_delegation",
@@ -35,10 +35,16 @@ def test_phase4_complex_plants_initial_tier6_paths() -> None:
 
     assert {
         "t6_host_session_pivot_tier0",
+        "t6_host_session_pivot_rbcd_tier0",
+        "t6_host_session_pivot_three_host_tier0",
         "t6_constrained_delegation_bridge_tier0",
+        "t6_constrained_delegation_session_bridge_tier0",
         "t6_rbcd_computer_takeover_tier0",
+        "t6_rbcd_session_pivot_tier0",
         "t6_unconstrained_delegation_tgt_capture_tier0",
+        "t6_unconstrained_delegation_bridge_admin_tier0",
         "t6_acl_group_nesting_tier0",
+        "t6_acl_forcechange_group_pivot_tier0",
     } <= set(paths)
     assert all(path.tier == 6 for tid, path in paths.items() if tid.startswith("t6_"))
 
@@ -78,5 +84,23 @@ def test_initial_complex_pack_is_non_adcs_heavy() -> None:
     _graph, paths = _complex_paths()
     tier6 = [path for path in paths.values() if path.template_id.startswith("t6_")]
 
-    assert len(tier6) == 5
+    assert len(tier6) == 11
     assert not any("adcs" in path.metadata["family"] for path in tier6)
+
+
+def test_phase2_pack_has_multiple_variants_per_initial_family() -> None:
+    templates = complex_path_templates()
+    families = {template.family for template in templates}
+
+    for family in families:
+        assert sum(1 for template in templates if template.family == family) >= 2
+
+
+def test_host_session_phase2_variants_cover_long_chain_and_terminal_rbcd() -> None:
+    _graph, paths = _complex_paths()
+    rbcd = paths["t6_host_session_pivot_rbcd_tier0"]
+    three_host = paths["t6_host_session_pivot_three_host_tier0"]
+
+    assert rbcd.metadata["terminal_escalation_type"] == "rbcd"
+    assert "AllowedToAct" in [edge[1] for edge in rbcd.path_edges]
+    assert [edge[1] for edge in three_host.path_edges].count("HasSession") >= 3
