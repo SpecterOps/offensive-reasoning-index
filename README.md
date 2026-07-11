@@ -232,25 +232,35 @@ nesting, GPO/OU control, LAPS/session pivots, trust hopping, Kerberoast chains,
 ADCS identity transition, decoy rejection, stale-session contingency, and negative
 controls.
 
-The product metadata still declares the intended official complex benchmark size:
+The product metadata declares two official tracks over the same generated dataset:
 
 ```text
-complex official: 100 grading tasks
-complex diagnostic: 24 grading tasks
+complex-direct official: 100 grading tasks
+complex-mcp official:    100 grading tasks
+
+complex-direct diagnostic: 24 grading tasks
+complex-mcp diagnostic:    24 grading tasks
 ```
 
+The tracks should not be mixed into one 50/50 score. Direct Cypher and MCP measure
+different capabilities, so they get separate scores and can optionally be combined
+later as a derived composite. Both tracks use the same generated zip and manifest
+so model comparisons stay tied to one graph, seed, domain, and path corpus.
+
 The current generated complex corpus does not yet enforce the final 100-task
-selector. It currently exposes the generated tasks from the planted path corpus.
-At the time of this README update, a current complex seed produces roughly:
+selector per track. It currently exposes the generated tasks from the planted path
+corpus. At the time of this README update, a current complex seed produces roughly:
 
 ```text
 planted paths: 30
+Direct/Cypher grading tasks: 42
 MCP grading tasks: 62
 Tier 6 paths/tasks: 19
 ```
 
 The next hardening step is to add an official suite selector that chooses exactly
-100 tasks with intentional tier distribution.
+100 direct tasks and 100 MCP tasks with intentional tier distribution from the same
+dataset.
 
 ## Current Runbooks
 

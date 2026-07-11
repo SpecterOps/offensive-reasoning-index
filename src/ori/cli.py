@@ -467,7 +467,8 @@ def benchmark_list() -> None:
     for benchmark in list_benchmarks():
         click.echo(
             f"{benchmark.name:8} {benchmark.status:8} "
-            f"tasks={benchmark.default_task_count:<3} "
+            f"tasks/track={benchmark.default_task_count:<3} "
+            f"tracks={','.join(track.name for track in benchmark.tracks)} "
             f"modes={','.join(benchmark.supported_modes)}"
         )
         click.echo(f"         {benchmark.summary}")
@@ -548,6 +549,18 @@ def benchmark_generate(name: str, seed: int, output_dir: str, output_prefix: str
             "diagnostic_task_set": benchmark.diagnostic_task_set,
             "default_task_count": benchmark.default_task_count,
             "diagnostic_task_count": benchmark.diagnostic_task_count,
+            "benchmark_tracks": {
+                track.name: {
+                    "task_set": track.task_set,
+                    "diagnostic_task_set": track.diagnostic_task_set,
+                    "task_count": track.task_count,
+                    "diagnostic_task_count": track.diagnostic_task_count,
+                    "scoring_profile": track.scoring_profile,
+                    "description": track.description,
+                }
+                for track in benchmark.tracks
+            },
+            "shared_dataset_across_tracks": True,
             "scoring_profile": benchmark.scoring_profile,
         },
     )
@@ -596,21 +609,38 @@ def benchmark_run(name: str, mode: str) -> None:
             f"Benchmark {benchmark.name!r} does not support mode {mode!r}. "
             f"Supported modes: {', '.join(benchmark.supported_modes)}"
         )
-    task_set = (
-        benchmark.diagnostic_task_set
-        if mode == "diagnostic" and benchmark.diagnostic_task_set
-        else benchmark.official_task_set
-    )
-    task_count = (
-        benchmark.diagnostic_task_count
-        if mode == "diagnostic" and benchmark.diagnostic_task_count is not None
-        else benchmark.default_task_count
-    )
+    if mode == "diagnostic":
+        task_set = benchmark.diagnostic_task_set or benchmark.official_task_set
+        task_count = benchmark.diagnostic_task_count or benchmark.default_task_count
+        track_lines = [
+            f"  {track.name}: {track.diagnostic_task_set or track.task_set} "
+            f"({track.diagnostic_task_count or track.task_count} tasks)"
+            for track in benchmark.tracks
+        ]
+    elif mode in ("direct", "mcp"):
+        track = benchmark.track(mode)
+        task_set = track.task_set
+        task_count = track.task_count
+        track_lines = [
+            f"  {track.name}: {track.task_set} ({track.task_count} tasks)",
+            "  dataset: shared generated benchmark manifest/zip",
+        ]
+    else:
+        task_set = benchmark.official_task_set
+        task_count = benchmark.default_task_count
+        track_lines = [
+            f"  {track.name}: {track.task_set} ({track.task_count} tasks)"
+            for track in benchmark.tracks
+        ]
     click.echo(f"Benchmark: {benchmark.name}")
     click.echo(f"Mode: {mode}")
     click.echo(f"Graph profile: {benchmark.graph_profile}")
     click.echo(f"Task set: {task_set}")
     click.echo(f"Task count: {task_count}")
+    click.echo("Tracks:")
+    for line in track_lines:
+        click.echo(line)
+    click.echo("Dataset: same generated manifest/zip can be used for direct and MCP tracks")
     click.echo(f"Scoring profile: {benchmark.scoring_profile}")
     click.echo(
         "Status: planned — use phase/run-config commands until benchmark launch plumbing lands."

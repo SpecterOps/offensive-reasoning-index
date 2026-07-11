@@ -14,6 +14,7 @@ def test_benchmark_list_cli_shows_simple_and_complex() -> None:
     assert "simple" in result.output
     assert "complex" in result.output
     assert "Fast Phase 3-derived benchmark" in result.output
+    assert "tracks=direct,mcp" in result.output
 
 
 def test_benchmark_describe_cli_shows_complex_contract() -> None:
@@ -23,6 +24,9 @@ def test_benchmark_describe_cli_shows_complex_contract() -> None:
     assert "Complex benchmark (complex)" in result.output
     assert "Graph profile: phase4_complex" in result.output
     assert "Diagnostic task set: phase4_complex_diagnostic" in result.output
+    assert "Tracks: direct, mcp" in result.output
+    assert "direct: 100 tasks (phase4_complex_direct_official)" in result.output
+    assert "mcp: 100 tasks (phase4_complex_mcp_official)" in result.output
 
 
 def test_benchmark_run_cli_is_dry_run_placeholder() -> None:
@@ -64,6 +68,9 @@ def test_benchmark_generate_simple_writes_seeded_artifacts(tmp_path) -> None:
     assert manifest["domain"] == manifest["metadata"]["identity"]["domain"]
     assert manifest["metadata"]["benchmark"] == "simple"
     assert manifest["metadata"]["generator_version"] == "seeded-benchmark-v1"
+    assert manifest["metadata"]["shared_dataset_across_tracks"] is True
+    assert set(manifest["metadata"]["benchmark_tracks"]) == {"direct", "mcp"}
+    assert manifest["metadata"]["benchmark_tracks"]["direct"]["task_count"] == 40
     assert 80 <= manifest["metadata"]["scale"]["users"] <= 120
 
 

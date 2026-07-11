@@ -209,13 +209,24 @@ Never print or commit the auth file. A safe readiness check is to report only wh
 
 ## Run a Benchmark Campaign
 
-After generation, preflight, upload, and ingest verification, run the model matrix:
+Run the direct track:
 
 ```bash
 uv run ori run \
   --config models.local.yaml \
   --manifest datasets/benchmarks/complex-v1-seed-4401_manifest.json
 ```
+
+Run the MCP track from the same manifest by setting `modes: [mcp]` in the model
+config, or run both tracks together with:
+
+```yaml
+modes: [direct, mcp]
+```
+
+The direct and MCP tracks should be reported separately. They use the same
+dataset, seed, generated domain, domain SID, and planted path corpus, but they
+measure different skills.
 
 If you want to keep artifacts isolated, set `output_dir` in the model config to a seed-specific folder:
 
@@ -235,22 +246,32 @@ Preserve these outputs:
 
 ## Current Task Counts
 
-The product metadata still declares the intended official complex benchmark size:
+The product metadata now declares two official tracks over the same generated dataset:
 
 ```text
-complex official: 100 grading tasks
-complex diagnostic: 24 grading tasks
+complex-direct official: 100 grading tasks
+complex-mcp official:    100 grading tasks
+
+complex-direct diagnostic: 24 grading tasks
+complex-mcp diagnostic:    24 grading tasks
 ```
 
-The current generated complex corpus is not yet enforcing the official 100-task selector. It currently exposes the generated task corpus from the planted paths. At the time of this runbook, a complex seed with the current Tier 6 implementation produces roughly:
+Do not split one 100-task score into 50 direct and 50 MCP tasks. Direct and MCP
+are separate scoring surfaces: direct tests query synthesis and schema knowledge;
+MCP tests tool use, lookup planning, evidence gathering, and synthesis. They can
+share the same graph and manifest, but they should have separate scores and, if
+needed, an optional derived composite.
+
+The current generated complex corpus is not yet enforcing the official 100-task selector per track. It currently exposes the generated task corpus from the planted paths. At the time of this runbook, a complex seed with the current Tier 6 implementation produces roughly:
 
 ```text
 planted paths: 30
+Direct/Cypher grading tasks: 42
 MCP grading tasks: 62
 Tier 6 planted paths/tasks: 19
 ```
 
-That is good enough for development sweeps, but not the final published official distribution. The next product-hardening step is to add a suite selector that chooses exactly 100 official tasks with an intentional tier distribution.
+That is good enough for development sweeps, but not the final published official distribution. The next product-hardening step is to add a suite selector that chooses exactly 100 direct tasks and 100 MCP tasks with intentional tier distribution from the same dataset.
 
 ## Recommended Operator Sequence
 
