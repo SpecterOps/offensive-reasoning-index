@@ -266,6 +266,63 @@ def score_answers_projection(
     }
 
 
+def score_official_answers_projection(*, manifest_path: Path, answers_path: Path) -> dict[str, Any]:
+    """Score Phase 4B/v2 official answer files mechanically with no partial credit."""
+
+    manifest = json.loads(manifest_path.read_text())
+    tasks = {str(task["id"]): task for task in manifest.get("tasks_official", [])}
+    answer_data = _load_answers(answers_path)
+    answers = answer_data.get("answers") or []
+    if not isinstance(answers, list):
+        raise ValueError("answers JSON object must contain an answers list")
+
+    rows: list[dict[str, Any]] = []
+    for answer in answers:
+        if not isinstance(answer, dict):
+            continue
+        task_id = _answer_task_id(answer)
+        task = tasks.get(task_id)
+        if task is None:
+            rows.append({"task_id": task_id, "outcome": "UNKNOWN_TASK", "score": 0})
+            continue
+        correct = bool(answer.get("correct", False))
+        rows.append(
+            {
+                "task_id": task_id,
+                "phase": task.get("phase"),
+                "smoke_task": bool(task.get("smoke_task", False)),
+                "benchmark_weight": task.get("benchmark_weight"),
+                "outcome": "CORRECT" if correct else "INCORRECT",
+                "score": 1 if correct else 0,
+            }
+        )
+
+    official_rows = [row for row in rows if row.get("benchmark_weight") == "official_score"]
+    smoke_rows = [row for row in official_rows if row.get("phase") == "startup_smoke"]
+    matrix_rows = [row for row in official_rows if row.get("phase") == "benchmark_matrix"]
+    raw_score = sum(int(row["score"]) for row in official_rows)
+    official_count = int(manifest.get("official_count") or len(tasks))
+    return {
+        "manifest": str(manifest_path),
+        "answers": str(answers_path),
+        "summary": {
+            "raw_score": raw_score,
+            "official_count": official_count,
+            "official_accuracy": raw_score / official_count if official_count else 0.0,
+            "startup_smoke": {
+                "count": len(smoke_rows),
+                "correct": sum(int(row["score"]) for row in smoke_rows),
+            },
+            "benchmark_matrix": {
+                "count": len(matrix_rows),
+                "correct": sum(int(row["score"]) for row in matrix_rows),
+            },
+            "scoring": "mechanical_binary_no_partial_credit",
+        },
+        "tasks": rows,
+    }
+
+
 def write_score_answers_projection(
     *, manifest_path: Path, answers_path: Path, track: str, output_path: Path
 ) -> dict[str, Any]:

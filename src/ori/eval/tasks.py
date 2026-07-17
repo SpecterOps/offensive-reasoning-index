@@ -357,6 +357,7 @@ def _generate_official_tasks(manifest: dict[str, Any]) -> list[Task]:
                     "phase": raw.get("phase", ""),
                     "track": raw.get("track", ""),
                     "scenario_family": raw.get("scenario_family", ""),
+                    "domain_role": raw.get("domain_role", ""),
                     "smoke_task": bool(raw.get("smoke_task", False)),
                     "official_grade_mode": raw.get("grade_mode", ""),
                     "benchmark_weight": raw.get("benchmark_weight", ""),

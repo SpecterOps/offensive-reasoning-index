@@ -303,6 +303,7 @@ class BHCEClient:
             "EnterpriseCA",
             "CertTemplate",
             "AIACA",
+            "NTAuthStore",
         )
         for label in labels:
             result = await self.run_cypher(f"MATCH (n:{label}) RETURN n LIMIT 10000")
