@@ -1,0 +1,11 @@
+Phase 4B/v2 forest benchmark integration.
+
+Integrated origin/repair/phase4b-v2-review-findings-t_38c7fa14 (5cfb8df through 2d31ebe) into master. The merge brings the parent/child forest generator, Phase 4B/v2 official-corpus generation and scoring support, forest serialization, CLI integration, answer-scoring support, and the Phase 4B/v2 test suite.
+
+The official Phase 4B/v2 corpus contains 100 scoring tasks: four startup-smoke tasks plus a 96-task benchmark matrix. The incoming branch's task-accounting and forest-artifact repairs are included.
+
+Conflict resolution preserved both product lines: CLI imports retain the complex simple/direct/MCP benchmark APIs and add Phase 4B/v2 APIs; the BloodHound entity allowlist is the union of existing ADCS labels and NTAuthStore; report output retains the current diagnostics-rich field set.
+
+Post-merge compatibility repairs: preserve domain_role from forest template instances into official task metadata; assign parent/child roles to smoke tasks; use deterministic domain-qualified matrix task IDs; include concrete source and target node names plus the generated domain in matrix-task questions. These repairs make parent/child tasks unambiguous and satisfy the Phase 4B/v2 contract.
+
+Validation: uv run pytest completed successfully after resolution: 252 passed.
