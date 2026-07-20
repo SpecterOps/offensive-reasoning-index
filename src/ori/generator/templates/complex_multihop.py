@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from ..graph import ACE, ADGraph, ADNode, PlantedPath
+from ..graph import ACE, ADGraph, ADNode, PlantedPath, TypedPrincipal
 
 COMPLEX_TEMPLATE_VERSION = "phase4c_tier6.0"
 
@@ -239,6 +239,7 @@ def plant_host_session_pivot_tier0(graph: ADGraph, template: ComplexPathTemplate
             {"ObjectIdentifier": admin_c.object_id, "ObjectType": "User"}
         )
         terminal_escalation_type = "rbcd"
+        terminal_edges = _finish_at_domain_admin(graph, tier0_host, da_group, "HOST-RBCD-TIER0")
         edges = [
             (source.object_id, "CanPSRemote", host_a.object_id),
             (host_a.object_id, "HasSession", admin_b.object_id),
@@ -246,7 +247,7 @@ def plant_host_session_pivot_tier0(graph: ADGraph, template: ComplexPathTemplate
             (host_b.object_id, "HasSession", admin_c.object_id),
             (admin_c.object_id, "AdminTo", host_c.object_id),
             (admin_c.object_id, "AllowedToAct", tier0_host.object_id),
-            (tier0_host.object_id, "AdminTo", da_group.object_id),
+            *terminal_edges,
         ]
     else:
         host_a, host_b, host_c = _pick_computers(graph, count=3)
@@ -302,22 +303,23 @@ def plant_constrained_delegation_bridge_tier0(
         bridge_admin = _pick_regular_user(graph, exclude={source.object_id})
         graph.add_edge(delegated_host.object_id, "HasSession", bridge_admin.object_id, planted=True)
         graph.add_edge(bridge_admin.object_id, "AdminTo", mgmt_host.object_id, planted=True)
+        terminal_edges = _finish_at_domain_admin(graph, mgmt_host, da_group, "KCD-SESSION-TIER0")
         edges = [
             (source.object_id, "GenericWrite", service.object_id),
             (service.object_id, "AllowedToDelegate", delegated_host.object_id),
             (delegated_host.object_id, "HasSession", bridge_admin.object_id),
             (bridge_admin.object_id, "AdminTo", mgmt_host.object_id),
-            (mgmt_host.object_id, "AdminTo", da_group.object_id),
+            *terminal_edges,
         ]
     else:
-        graph.add_edge(delegated_host.object_id, "AdminTo", mgmt_host.object_id, planted=True)
+        bridge_edges = _bridge_hosts(graph, delegated_host, mgmt_host, "KCD-HOST-BRIDGE")
+        terminal_edges = _finish_at_domain_admin(graph, mgmt_host, da_group, "KCD-TIER0")
         edges = [
             (source.object_id, "GenericWrite", service.object_id),
             (service.object_id, "AllowedToDelegate", delegated_host.object_id),
-            (delegated_host.object_id, "AdminTo", mgmt_host.object_id),
-            (mgmt_host.object_id, "AdminTo", da_group.object_id),
+            *bridge_edges,
+            *terminal_edges,
         ]
-    graph.add_edge(mgmt_host.object_id, "AdminTo", da_group.object_id, planted=True)
 
     return _plant_path(
         graph,
@@ -350,22 +352,23 @@ def plant_rbcd_computer_takeover_tier0(
             target_computer.object_id, "HasSession", bridge_admin.object_id, planted=True
         )
         graph.add_edge(bridge_admin.object_id, "AdminTo", dc.object_id, planted=True)
+        terminal_edges = _finish_at_domain_admin(graph, dc, da_group, "RBCD-SESSION-TIER0")
         edges = [
             (source.object_id, "GenericWrite", controlled_computer.object_id),
             (controlled_computer.object_id, "AllowedToAct", target_computer.object_id),
             (target_computer.object_id, "HasSession", bridge_admin.object_id),
             (bridge_admin.object_id, "AdminTo", dc.object_id),
-            (dc.object_id, "AdminTo", da_group.object_id),
+            *terminal_edges,
         ]
     else:
-        graph.add_edge(target_computer.object_id, "AdminTo", dc.object_id, planted=True)
+        bridge_edges = _bridge_hosts(graph, target_computer, dc, "RBCD-HOST-BRIDGE")
+        terminal_edges = _finish_at_domain_admin(graph, dc, da_group, "RBCD-TIER0")
         edges = [
             (source.object_id, "GenericWrite", controlled_computer.object_id),
             (controlled_computer.object_id, "AllowedToAct", target_computer.object_id),
-            (target_computer.object_id, "AdminTo", dc.object_id),
-            (dc.object_id, "AdminTo", da_group.object_id),
+            *bridge_edges,
+            *terminal_edges,
         ]
-    graph.add_edge(dc.object_id, "AdminTo", da_group.object_id, planted=True)
 
     return _plant_path(
         graph,
@@ -391,7 +394,7 @@ def plant_unconstrained_delegation_tgt_capture_tier0(
     graph.add_edge(source.object_id, "AdminTo", delegation_host.object_id, planted=True)
     graph.add_edge(delegation_host.object_id, "HasSession", da_user.object_id, planted=True)
     graph.add_edge(da_user.object_id, "AdminTo", dc.object_id, planted=True)
-    graph.add_edge(dc.object_id, "AdminTo", da_group.object_id, planted=True)
+    terminal_edges = _finish_at_domain_admin(graph, dc, da_group, "UNCONSTRAINED-TIER0")
 
     return _plant_path(
         graph,
@@ -402,7 +405,7 @@ def plant_unconstrained_delegation_tgt_capture_tier0(
             (source.object_id, "AdminTo", delegation_host.object_id),
             (delegation_host.object_id, "HasSession", da_user.object_id),
             (da_user.object_id, "AdminTo", dc.object_id),
-            (dc.object_id, "AdminTo", da_group.object_id),
+            *terminal_edges,
         ],
         scenario_family="complex_unconstrained_delegation",
         terminal_escalation_type="da_session",
@@ -417,6 +420,8 @@ def plant_acl_group_nesting_tier0(graph: ADGraph, template: ComplexPathTemplate)
     mgmt_host, dc = _pick_computers(graph, count=2)
     da_group = _domain_admins(graph)
     bridge_group.aces.append(ACE(source.object_id, "User", "WriteDACL"))
+    host_bridge_edges = _bridge_hosts(graph, mgmt_host, dc, "ACL-HOST-BRIDGE")
+    terminal_edges = _finish_at_domain_admin(graph, dc, da_group, "ACL-TIER0")
     if "forcechange" in template.variant:
         bridge_user = _create_user(graph, "ORI-T6-BRIDGE-OPERATOR")
         _add_group_member(graph, bridge_user, bridge_group)
@@ -426,8 +431,8 @@ def plant_acl_group_nesting_tier0(graph: ADGraph, template: ComplexPathTemplate)
             (bridge_user.object_id, "MemberOf", bridge_group.object_id),
             (bridge_group.object_id, "MemberOf", server_admins.object_id),
             (server_admins.object_id, "AdminTo", mgmt_host.object_id),
-            (mgmt_host.object_id, "AdminTo", dc.object_id),
-            (dc.object_id, "AdminTo", da_group.object_id),
+            *host_bridge_edges,
+            *terminal_edges,
         ]
     else:
         graph.add_edge(source.object_id, "WriteDACL", bridge_group.object_id, planted=True)
@@ -437,13 +442,11 @@ def plant_acl_group_nesting_tier0(graph: ADGraph, template: ComplexPathTemplate)
             (source.object_id, "AddMember", bridge_group.object_id),
             (bridge_group.object_id, "MemberOf", server_admins.object_id),
             (server_admins.object_id, "AdminTo", mgmt_host.object_id),
-            (mgmt_host.object_id, "AdminTo", dc.object_id),
-            (dc.object_id, "AdminTo", da_group.object_id),
+            *host_bridge_edges,
+            *terminal_edges,
         ]
     _add_group_member(graph, bridge_group, server_admins)
     graph.add_edge(server_admins.object_id, "AdminTo", mgmt_host.object_id, planted=True)
-    graph.add_edge(mgmt_host.object_id, "AdminTo", dc.object_id, planted=True)
-    graph.add_edge(dc.object_id, "AdminTo", da_group.object_id, planted=True)
 
     return _plant_path(
         graph,
@@ -460,14 +463,16 @@ def plant_acl_group_nesting_tier0(graph: ADGraph, template: ComplexPathTemplate)
 def plant_gpo_ou_control_tier0(graph: ADGraph, template: ComplexPathTemplate) -> PlantedPath:
     source = _pick_regular_user(graph)
     gpo_admins = _create_group(graph, "ORI-T6-GPO-ADMINS")
-    gpo = _create_group(graph, "ORI-T6-WORKSTATION-GPO")
+    gpo = _create_gpo(graph, "ORI-T6-WORKSTATION-GPO")
+    managed_ou = _create_ou(graph, "ORI-T6-MANAGED-WORKSTATIONS")
     managed_host, dc = _pick_computers(graph, count=2)
     da_group = _domain_admins(graph)
     graph.add_edge(source.object_id, "GenericWrite", gpo_admins.object_id, planted=True)
     graph.add_edge(gpo_admins.object_id, "GenericWrite", gpo.object_id, planted=True)
-    graph.add_edge(gpo.object_id, "GPLink", managed_host.object_id, planted=True)
-    graph.add_edge(managed_host.object_id, "AdminTo", dc.object_id, planted=True)
-    graph.add_edge(dc.object_id, "AdminTo", da_group.object_id, planted=True)
+    graph.add_edge(gpo.object_id, "GPLink", managed_ou.object_id, planted=True)
+    graph.add_edge(managed_ou.object_id, "Contains", managed_host.object_id, planted=True)
+    host_bridge_edges = _bridge_hosts(graph, managed_host, dc, "GPO-HOST-BRIDGE")
+    terminal_edges = _finish_at_domain_admin(graph, dc, da_group, "GPO-TIER0")
     return _plant_path(
         graph,
         template,
@@ -476,9 +481,10 @@ def plant_gpo_ou_control_tier0(graph: ADGraph, template: ComplexPathTemplate) ->
         edges=[
             (source.object_id, "GenericWrite", gpo_admins.object_id),
             (gpo_admins.object_id, "GenericWrite", gpo.object_id),
-            (gpo.object_id, "GPLink", managed_host.object_id),
-            (managed_host.object_id, "AdminTo", dc.object_id),
-            (dc.object_id, "AdminTo", da_group.object_id),
+            (gpo.object_id, "GPLink", managed_ou.object_id),
+            (managed_ou.object_id, "Contains", managed_host.object_id),
+            *host_bridge_edges,
+            *terminal_edges,
         ],
         scenario_family="complex_gpo_ou_control",
         terminal_escalation_type="gpo",
@@ -497,7 +503,7 @@ def plant_laps_session_pivot_tier0(graph: ADGraph, template: ComplexPathTemplate
     graph.add_edge(laps_group.object_id, "AdminTo", host_a.object_id, planted=True)
     graph.add_edge(host_a.object_id, "HasSession", da_user.object_id, planted=True)
     graph.add_edge(da_user.object_id, "AdminTo", host_b.object_id, planted=True)
-    graph.add_edge(host_b.object_id, "AdminTo", da_group.object_id, planted=True)
+    terminal_edges = _finish_at_domain_admin(graph, host_b, da_group, "LAPS-TIER0")
     return _plant_path(
         graph,
         template,
@@ -508,7 +514,7 @@ def plant_laps_session_pivot_tier0(graph: ADGraph, template: ComplexPathTemplate
             (laps_group.object_id, "AdminTo", host_a.object_id),
             (host_a.object_id, "HasSession", da_user.object_id),
             (da_user.object_id, "AdminTo", host_b.object_id),
-            (host_b.object_id, "AdminTo", da_group.object_id),
+            *terminal_edges,
         ],
         scenario_family="complex_laps_session_pivot",
         terminal_escalation_type="laps",
@@ -518,14 +524,15 @@ def plant_laps_session_pivot_tier0(graph: ADGraph, template: ComplexPathTemplate
 
 def plant_trust_hopping_tier0(graph: ADGraph, template: ComplexPathTemplate) -> PlantedPath:
     source = _pick_regular_user(graph)
-    foreign_admins = _create_group(graph, "ORI-T6-FOREIGN-ADMINS")
+    foreign_domain = _add_trust_context(graph)
+    foreign_admins = _create_foreign_group(graph, foreign_domain, "ORI-T6-FOREIGN-ADMINS")
     bridge_group = _create_group(graph, "ORI-T6-TRUST-BRIDGE")
     da_group = _domain_admins(graph)
     bridge_host = _pick_computers(graph, count=1)[0]
     graph.add_edge(source.object_id, "GenericAll", foreign_admins.object_id, planted=True)
-    graph.add_edge(foreign_admins.object_id, "TrustedBy", bridge_group.object_id, planted=True)
+    _add_group_member(graph, foreign_admins, bridge_group)
     graph.add_edge(bridge_group.object_id, "AdminTo", bridge_host.object_id, planted=True)
-    graph.add_edge(bridge_host.object_id, "AdminTo", da_group.object_id, planted=True)
+    terminal_edges = _finish_at_domain_admin(graph, bridge_host, da_group, "TRUST-TIER0")
     return _plant_path(
         graph,
         template,
@@ -533,13 +540,17 @@ def plant_trust_hopping_tier0(graph: ADGraph, template: ComplexPathTemplate) -> 
         target=da_group,
         edges=[
             (source.object_id, "GenericAll", foreign_admins.object_id),
-            (foreign_admins.object_id, "TrustedBy", bridge_group.object_id),
+            (foreign_admins.object_id, "MemberOf", bridge_group.object_id),
             (bridge_group.object_id, "AdminTo", bridge_host.object_id),
-            (bridge_host.object_id, "AdminTo", da_group.object_id),
+            *terminal_edges,
         ],
         scenario_family="complex_trust_hopping",
         terminal_escalation_type="trust",
         required_capabilities=("trust_analysis", "group_nesting", "tier0_path_composition"),
+        supporting_edges=[
+            (graph.domain_sid, "TrustedBy", foreign_domain.object_id),
+            (foreign_domain.object_id, "TrustedBy", graph.domain_sid),
+        ],
     )
 
 
@@ -555,8 +566,8 @@ def plant_kerberoast_privilege_chain_tier0(
     graph.add_edge(source.object_id, "ForceChangePassword", service.object_id, planted=True)
     _add_group_member(graph, service, server_admins)
     graph.add_edge(server_admins.object_id, "AdminTo", host.object_id, planted=True)
-    graph.add_edge(host.object_id, "AdminTo", dc.object_id, planted=True)
-    graph.add_edge(dc.object_id, "AdminTo", da_group.object_id, planted=True)
+    host_bridge_edges = _bridge_hosts(graph, host, dc, "KERBEROAST-HOST-BRIDGE")
+    terminal_edges = _finish_at_domain_admin(graph, dc, da_group, "KERBEROAST-TIER0")
     return _plant_path(
         graph,
         template,
@@ -566,8 +577,8 @@ def plant_kerberoast_privilege_chain_tier0(
             (source.object_id, "ForceChangePassword", service.object_id),
             (service.object_id, "MemberOf", server_admins.object_id),
             (server_admins.object_id, "AdminTo", host.object_id),
-            (host.object_id, "AdminTo", dc.object_id),
-            (dc.object_id, "AdminTo", da_group.object_id),
+            *host_bridge_edges,
+            *terminal_edges,
         ],
         scenario_family="complex_kerberoast_privilege_chain",
         terminal_escalation_type="kerberoast",
@@ -580,27 +591,32 @@ def plant_adcs_identity_transition_tier0(
 ) -> PlantedPath:
     source = _pick_regular_user(graph)
     cert_group = _create_group(graph, "ORI-T6-CERT-ENROLLERS")
+    cert_template = _published_cert_template(graph)
     shadow_admin = _create_user(graph, "ORI-T6-CERT-SHADOW-ADMIN")
     target_host = _pick_computers(graph, count=1)[0]
     da_group = _domain_admins(graph)
-    graph.add_edge(source.object_id, "Enroll", cert_group.object_id, planted=True)
+    _add_group_member(graph, source, cert_group)
+    graph.add_edge(cert_group.object_id, "Enroll", cert_template.object_id, planted=True)
     graph.add_edge(cert_group.object_id, "GenericWrite", shadow_admin.object_id, planted=True)
     graph.add_edge(shadow_admin.object_id, "AllowedToDelegate", target_host.object_id, planted=True)
-    graph.add_edge(target_host.object_id, "AdminTo", da_group.object_id, planted=True)
+    terminal_edges = _finish_at_domain_admin(graph, target_host, da_group, "ADCS-TIER0")
     return _plant_path(
         graph,
         template,
         source=source,
         target=da_group,
         edges=[
-            (source.object_id, "Enroll", cert_group.object_id),
+            (source.object_id, "MemberOf", cert_group.object_id),
             (cert_group.object_id, "GenericWrite", shadow_admin.object_id),
             (shadow_admin.object_id, "AllowedToDelegate", target_host.object_id),
-            (target_host.object_id, "AdminTo", da_group.object_id),
+            *terminal_edges,
         ],
         scenario_family="complex_adcs_identity_transition",
         terminal_escalation_type="adcs_delegation",
         required_capabilities=("certificate_abuse", "identity_transition", "delegation_analysis"),
+        supporting_edges=[
+            (cert_group.object_id, "Enroll", cert_template.object_id),
+        ],
     )
 
 
@@ -609,15 +625,14 @@ def plant_path_selection_decoy_routes(graph: ADGraph, template: ComplexPathTempl
     valid_host, decoy_host, bridge_host = _pick_computers(graph, count=3)
     valid_admin, decoy_user = _pick_regular_users(graph, count=2, exclude={source.object_id})
     da_group = _domain_admins(graph)
-    _add_group_member(graph, valid_admin, da_group)
     graph.add_edge(source.object_id, "AdminTo", valid_host.object_id, planted=True)
     graph.add_edge(valid_host.object_id, "HasSession", valid_admin.object_id, planted=True)
     graph.add_edge(valid_admin.object_id, "AdminTo", bridge_host.object_id, planted=True)
-    graph.add_edge(bridge_host.object_id, "AdminTo", da_group.object_id, planted=True)
     graph.add_edge(source.object_id, "AdminTo", decoy_host.object_id, planted=True, decoy=True)
     graph.add_edge(
         decoy_host.object_id, "HasSession", decoy_user.object_id, planted=True, decoy=True
     )
+    terminal_edges = _finish_at_domain_admin(graph, bridge_host, da_group, "DECOY-VALID-TIER0")
     path = _plant_path(
         graph,
         template,
@@ -627,8 +642,7 @@ def plant_path_selection_decoy_routes(graph: ADGraph, template: ComplexPathTempl
             (source.object_id, "AdminTo", valid_host.object_id),
             (valid_host.object_id, "HasSession", valid_admin.object_id),
             (valid_admin.object_id, "AdminTo", bridge_host.object_id),
-            (bridge_host.object_id, "AdminTo", da_group.object_id),
-            (valid_admin.object_id, "MemberOf", da_group.object_id),
+            *terminal_edges,
         ],
         scenario_family="complex_path_selection_decoy",
         terminal_escalation_type="da_session",
@@ -646,17 +660,37 @@ def plant_negative_control_invalid_cert(
 ) -> PlantedPath:
     source = _pick_regular_user(graph)
     dead_cert_group = _create_group(graph, "ORI-T6-DEAD-CERT-ENROLLERS")
+    dead_template = _create_cert_template(
+        graph, "ORI-T6-DEAD-CERT-TEMPLATE", authentication_enabled=False
+    )
     da_group = _domain_admins(graph)
-    graph.add_edge(source.object_id, "Enroll", dead_cert_group.object_id, planted=True, decoy=True)
+    _add_group_member(graph, source, dead_cert_group)
+    graph.add_edge(
+        dead_cert_group.object_id,
+        "Enroll",
+        dead_template.object_id,
+        planted=True,
+        decoy=True,
+    )
     path = _plant_path(
         graph,
         template,
         source=source,
         target=da_group,
-        edges=[(source.object_id, "Enroll", dead_cert_group.object_id)],
+        edges=[
+            (source.object_id, "MemberOf", dead_cert_group.object_id),
+            (dead_cert_group.object_id, "Enroll", dead_template.object_id),
+        ],
         scenario_family="complex_negative_control_invalid_cert",
         terminal_escalation_type="none",
         required_capabilities=("negative_control_rejection", "certificate_template_validation"),
+    )
+    path.verification_cypher = (
+        f"MATCH (u:User {{name: '{_node_name(graph, source.object_id)}'}})"
+        f"-[:MemberOf]->(g:Group {{name: '{_node_name(graph, dead_cert_group.object_id)}'}})"
+        f"-[:Enroll]->(t:CertTemplate {{name: '{_node_name(graph, dead_template.object_id)}'}}), "
+        f"q=shortestPath((t)-[*1..12]->(da:Group "
+        f"{{name: '{_node_name(graph, da_group.object_id)}'}})) RETURN u, g, t, q"
     )
     path.metadata["negative_control"] = True
     path.metadata["expected_rejection_reasons"] = [
@@ -671,7 +705,6 @@ def plant_stale_session_contingency(graph: ADGraph, template: ComplexPathTemplat
     stale_host, valid_host, bridge_host = _pick_computers(graph, count=3)
     stale_admin, valid_admin = _pick_regular_users(graph, count=2, exclude={source.object_id})
     da_group = _domain_admins(graph)
-    _add_group_member(graph, valid_admin, da_group)
     graph.add_edge(
         source.object_id, "AdminTo", stale_host.object_id, planted=True, invalidated=True
     )
@@ -681,6 +714,7 @@ def plant_stale_session_contingency(graph: ADGraph, template: ComplexPathTemplat
     graph.add_edge(source.object_id, "GenericWrite", valid_host.object_id, planted=True)
     graph.add_edge(valid_host.object_id, "HasSession", valid_admin.object_id, planted=True)
     graph.add_edge(valid_admin.object_id, "AdminTo", bridge_host.object_id, planted=True)
+    terminal_edges = _finish_at_domain_admin(graph, bridge_host, da_group, "STALE-VALID-TIER0")
     path = _plant_path(
         graph,
         template,
@@ -690,7 +724,7 @@ def plant_stale_session_contingency(graph: ADGraph, template: ComplexPathTemplat
             (source.object_id, "GenericWrite", valid_host.object_id),
             (valid_host.object_id, "HasSession", valid_admin.object_id),
             (valid_admin.object_id, "AdminTo", bridge_host.object_id),
-            (valid_admin.object_id, "MemberOf", da_group.object_id),
+            *terminal_edges,
         ],
         scenario_family="complex_stale_session_contingency",
         terminal_escalation_type="da_session",
@@ -717,11 +751,14 @@ def _plant_path(
     scenario_family: str,
     terminal_escalation_type: str,
     required_capabilities: tuple[str, ...],
+    supporting_edges: list[tuple[str, str, str]] | None = None,
 ) -> PlantedPath:
+    supporting_edges = supporting_edges or []
     critical_nodes = _unique(
         [
             source.object_id,
             *(node for edge in edges for node in (edge[0], edge[2])),
+            *(node for edge in supporting_edges for node in (edge[0], edge[2])),
             target.object_id,
         ]
     )
@@ -751,6 +788,7 @@ def _plant_path(
             "required_capabilities": list(required_capabilities),
             "required_mechanisms": list(template.required_mechanisms),
             "required_sequence": [edge[1] for edge in edges],
+            "supporting_edges": supporting_edges,
             "terminal_escalation_type": terminal_escalation_type,
             "negative_control": not template.positive,
             "tool_effort": {
@@ -845,6 +883,172 @@ def _create_user(graph: ADGraph, sam: str) -> ADNode:
         },
     )
     return graph.add_node(node)
+
+
+def _create_gpo(graph: ADGraph, name: str) -> ADNode:
+    object_id = f"{graph.domain_sid}-GPO-{name}"
+    existing = graph.get_node(object_id)
+    if existing:
+        return existing
+    return graph.add_node(
+        ADNode(
+            object_id=object_id,
+            node_type="GPO",
+            properties={
+                "name": f"{name}@{graph.domain}",
+                "distinguishedname": f"CN={name},CN=Policies,CN=System,{graph.dn.domain_root()}",
+                "domain": graph.domain,
+                "domainsid": graph.domain_sid,
+                "highvalue": False,
+                "isaclprotected": False,
+            },
+        )
+    )
+
+
+def _create_ou(graph: ADGraph, name: str) -> ADNode:
+    object_id = graph.sid_alloc.get_or_alloc(f"OU-{name}")
+    existing = graph.get_node(object_id)
+    if existing:
+        return existing
+    node = ADNode(
+        object_id=object_id,
+        node_type="OU",
+        properties={
+            "name": f"{name}@{graph.domain}",
+            "distinguishedname": f"OU={name},{graph.dn.domain_root()}",
+            "domain": graph.domain,
+            "domainsid": graph.domain_sid,
+            "blocksinheritance": False,
+            "highvalue": False,
+            "isaclprotected": False,
+        },
+        contained_by=TypedPrincipal(graph.domain_sid, "Domain"),
+        extra={"ChildObjects": [], "Links": []},
+    )
+    graph.add_node(node)
+    graph.add_edge(graph.domain_sid, "Contains", node.object_id)
+    return node
+
+
+def _published_cert_template(graph: ADGraph) -> ADNode:
+    templates = graph.nodes_by_type("CertTemplate")
+    if not templates:
+        raise RuntimeError("Complex ADCS path requires a published certificate template")
+    return sorted(templates, key=lambda node: node.object_id)[0]
+
+
+def _create_cert_template(graph: ADGraph, name: str, *, authentication_enabled: bool) -> ADNode:
+    object_id = f"{graph.domain_sid}-CERTTEMPLATE-{name}"
+    existing = graph.get_node(object_id)
+    if existing:
+        return existing
+    return graph.add_node(
+        ADNode(
+            object_id=object_id,
+            node_type="CertTemplate",
+            properties={
+                "domain": graph.domain,
+                "name": f"{name}@{graph.domain}",
+                "domainsid": graph.domain_sid,
+                "displayname": name,
+                "requiresmanagerapproval": False,
+                "authenticationenabled": authentication_enabled,
+                "nosecurityextension": False,
+                "enrolleesuppliessubject": authentication_enabled,
+                "ekus": ["Client Authentication"] if authentication_enabled else [],
+                "certificateapplicationpolicy": (
+                    ["Client Authentication"] if authentication_enabled else []
+                ),
+                "highvalue": authentication_enabled,
+            },
+        )
+    )
+
+
+def _bridge_hosts(
+    graph: ADGraph, source_host: ADNode, target_host: ADNode, name: str
+) -> list[tuple[str, str, str]]:
+    bridge_user = _create_user(graph, f"ORI-T6-{name}")
+    graph.add_edge(source_host.object_id, "HasSession", bridge_user.object_id, planted=True)
+    graph.add_edge(bridge_user.object_id, "AdminTo", target_host.object_id, planted=True)
+    return [
+        (source_host.object_id, "HasSession", bridge_user.object_id),
+        (bridge_user.object_id, "AdminTo", target_host.object_id),
+    ]
+
+
+def _finish_at_domain_admin(
+    graph: ADGraph, host: ADNode, da_group: ADNode, name: str
+) -> list[tuple[str, str, str]]:
+    domain_admin = _create_user(graph, f"ORI-T6-{name}")
+    _add_group_member(graph, domain_admin, da_group)
+    graph.add_edge(host.object_id, "HasSession", domain_admin.object_id, planted=True)
+    return [
+        (host.object_id, "HasSession", domain_admin.object_id),
+        (domain_admin.object_id, "MemberOf", da_group.object_id),
+    ]
+
+
+def _add_trust_context(graph: ADGraph) -> ADNode:
+    sid_parts = graph.domain_sid.split("-")
+    foreign_sid = "-".join(
+        [
+            *sid_parts[:-3],
+            *(
+                str(int(value) + offset)
+                for value, offset in zip(sid_parts[-3:], (101, 103, 107), strict=True)
+            ),
+        ]
+    )
+    existing = graph.get_node(foreign_sid)
+    if existing:
+        return existing
+    foreign_domain = graph.add_node(
+        ADNode(
+            object_id=foreign_sid,
+            node_type="Domain",
+            properties={
+                "domain": f"PARTNER.{graph.domain}",
+                "name": f"PARTNER.{graph.domain}",
+                "distinguishedname": f"DC=PARTNER,{graph.dn.domain_root()}",
+                "domainsid": foreign_sid,
+                "functionallevel": "Windows Server 2016",
+                "highvalue": True,
+                "isaclprotected": False,
+            },
+            extra={"Trusts": [], "ChildObjects": [], "Links": []},
+        )
+    )
+    graph.add_edge(graph.domain_sid, "TrustedBy", foreign_domain.object_id)
+    graph.add_edge(foreign_domain.object_id, "TrustedBy", graph.domain_sid)
+    return foreign_domain
+
+
+def _create_foreign_group(graph: ADGraph, domain: ADNode, name: str) -> ADNode:
+    object_id = f"{domain.object_id}-512"
+    existing = graph.get_node(object_id)
+    if existing:
+        return existing
+    domain_name = str(domain.properties["domain"])
+    distinguished_name = str(domain.properties["distinguishedname"])
+    return graph.add_node(
+        ADNode(
+            object_id=object_id,
+            node_type="Group",
+            properties={
+                "name": f"{name}@{domain_name}",
+                "samaccountname": name,
+                "distinguishedname": f"CN={name},CN=Users,{distinguished_name}",
+                "domain": domain_name,
+                "domainsid": domain.object_id,
+                "highvalue": True,
+                "admincount": True,
+                "isaclprotected": True,
+            },
+            extra={"Members": []},
+        )
+    )
 
 
 def _add_group_member(graph: ADGraph, member: ADNode, group: ADNode) -> None:

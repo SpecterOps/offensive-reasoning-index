@@ -40,10 +40,16 @@ class PathCheck:
     target_name: str
     edge_checks: list[EdgeCheck] = field(default_factory=list)
     error: str | None = None
+    expected_found: bool = True
+    query_succeeded: bool = True
 
     @property
     def ok(self) -> bool:
-        return self.found and all(edge.found for edge in self.edge_checks)
+        return (
+            self.query_succeeded
+            and self.found is self.expected_found
+            and all(edge.found for edge in self.edge_checks)
+        )
 
 
 @dataclass
@@ -107,8 +113,15 @@ async def verify_ingest(manifest_path: Path, bhce_url: str | None = None) -> Ver
         for planted in manifest.get("planted_paths", []):
             verification = await bhce.run_cypher_resilient(planted["verification_cypher"])
             found = verification.success and len(verification.nodes) > 0
+            expected_found = not bool(
+                planted.get("negative_control")
+                or (planted.get("metadata") or {}).get("negative_control")
+            )
             edge_checks: list[EdgeCheck] = []
-            for edge in planted.get("path_edges", []):
+            for edge in [
+                *planted.get("path_edges", []),
+                *planted.get("supporting_edges", []),
+            ]:
                 edge_result = await bhce.run_cypher_resilient(
                     _edge_query(edge["source"], edge["edge"], edge["target"])
                 )
@@ -129,6 +142,8 @@ async def verify_ingest(manifest_path: Path, bhce_url: str | None = None) -> Ver
                     target_name=planted.get("target_name", ""),
                     edge_checks=edge_checks,
                     error=None if verification.success else verification.error,
+                    expected_found=expected_found,
+                    query_succeeded=verification.success,
                 )
             )
 
@@ -172,9 +187,15 @@ def print_verify_ingest(result: VerifyIngestResult) -> None:
 
     print("\n== Planted path verification ==")
     for path in result.path_checks:
-        status = "OK" if path.found else "MISSING"
+        if not path.query_succeeded:
+            status = "ERROR"
+        else:
+            status = "OK" if path.found is path.expected_found else "UNEXPECTED"
+        expectation = "present" if path.expected_found else "absent"
         desc = f"{path.template_id}: {path.source_name} -> {path.target_name}".strip()
-        print(f"{desc:50} {status}")
+        print(f"{desc:50} {status} (expected {expectation})")
+        if path.error:
+            print(f"  verification query failed: {path.error}")
         for edge in path.edge_checks:
             edge_status = "OK" if edge.found else "MISSING"
             print(f"  - {edge.edge_type:24} {edge.source[-6:]} -> {edge.target[-6:]} {edge_status}")

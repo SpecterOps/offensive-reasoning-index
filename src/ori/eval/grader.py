@@ -147,6 +147,18 @@ def grade(
             details="Response references node names not present in the graph",
         )
 
+    missing_relationships = _missing_direct_contextual_relationships(task, model_response)
+    if missing_relationships:
+        return GradeResult(
+            score=0.0,
+            outcome=OUTCOME_INCORRECT,
+            hallucination=False,
+            details=(
+                "Response omitted required contextual relationship evidence: "
+                + ", ".join(missing_relationships)
+            ),
+        )
+
     # Grade by mode
     mode = task.grade_mode
     if mode == "path_exists":
@@ -171,6 +183,25 @@ def grade(
         return GradeResult(
             score=1.0 if correct else 0.0,
             outcome="CORRECT" if correct else "INCORRECT",
+            hallucination=False,
+            details=details,
+        )
+
+    elif mode == "no_path":
+        reference_empty = ref_result.success and not ref_result.nodes and not ref_result.node_names
+        model_empty = not model_result.nodes and not model_result.node_names
+        correct = reference_empty and model_empty
+        if not ref_result.success:
+            details = f"no_path: reference query failed: {ref_result.error}"
+        elif not reference_empty:
+            details = "no_path: reference unexpectedly found a path"
+        elif not model_empty:
+            details = "no_path: model query returned a path or nodes"
+        else:
+            details = "no_path: model correctly rejected the route"
+        return GradeResult(
+            score=1.0 if correct else 0.0,
+            outcome=OUTCOME_CORRECT if correct else OUTCOME_INCORRECT,
             hallucination=False,
             details=details,
         )
@@ -221,6 +252,115 @@ def _answer_node_names(final_answer: dict | None) -> set[str]:
     if not isinstance(final_answer, dict):
         return set()
     return {str(name).strip() for name in final_answer.get("node_names", []) if str(name).strip()}
+
+
+def _required_contextual_relationships(
+    task: Task, contract: AnswerContract | None = None
+) -> list[dict[str, Any]]:
+    relationships = [
+        edge for edge in task.metadata.get("supporting_edges", []) if isinstance(edge, dict)
+    ]
+    if contract:
+        relationships.extend(contract.required_edges)
+    deduped: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for edge in relationships:
+        key = (
+            str(edge.get("source_name") or edge.get("source", "")).upper(),
+            str(edge.get("edge") or edge.get("relationship") or edge.get("type", "")).upper(),
+            str(edge.get("target_name") or edge.get("target", "")).upper(),
+        )
+        if all(key):
+            deduped[key] = dict(edge)
+    return list(deduped.values())
+
+
+def _relationship_label(edge: dict[str, Any]) -> str:
+    source = edge.get("source_name") or edge.get("source", "")
+    kind = edge.get("edge") or edge.get("relationship") or edge.get("type", "")
+    target = edge.get("target_name") or edge.get("target", "")
+    return f"{source} -[{kind}]-> {target}"
+
+
+def _reported_relationships(final_answer: dict | None) -> list[dict[str, Any]]:
+    if not isinstance(final_answer, dict):
+        return []
+    relationships: list[dict[str, Any]] = []
+    for relationship in final_answer.get("relationships", []):
+        if isinstance(relationship, dict):
+            relationships.append(relationship)
+    return relationships
+
+
+def _edge_endpoint_values(edge: dict[str, Any], side: str) -> set[str]:
+    return {
+        str(value).strip()
+        for value in (edge.get(side), edge.get(f"{side}_name"))
+        if value and str(value).strip()
+    }
+
+
+def _endpoint_aliases(values: set[str], ref_result: CypherResult) -> set[str]:
+    expanded = {value.upper() for value in values}
+    for canonical, aliases in _node_alias_groups(ref_result).items():
+        group = {canonical.upper(), *(alias.upper() for alias in aliases)}
+        if expanded & group:
+            expanded |= group
+    return expanded
+
+
+def _relationship_matches(
+    required: dict[str, Any], reported: dict[str, Any], ref_result: CypherResult
+) -> bool:
+    required_kind = str(
+        required.get("edge") or required.get("relationship") or required.get("type", "")
+    ).upper()
+    reported_kind = str(
+        reported.get("edge") or reported.get("relationship") or reported.get("type", "")
+    ).upper()
+    return (
+        bool(required_kind)
+        and required_kind == reported_kind
+        and bool(
+            _endpoint_aliases(_edge_endpoint_values(required, "source"), ref_result)
+            & _endpoint_aliases(_edge_endpoint_values(reported, "source"), ref_result)
+        )
+        and bool(
+            _endpoint_aliases(_edge_endpoint_values(required, "target"), ref_result)
+            & _endpoint_aliases(_edge_endpoint_values(reported, "target"), ref_result)
+        )
+    )
+
+
+def _missing_direct_contextual_relationships(
+    task: Task, model_response: ModelResponse
+) -> list[str]:
+    text = f"{model_response.cypher or ''}\n{model_response.raw_text}".upper()
+    missing = []
+    for edge in _required_contextual_relationships(task):
+        kind = str(edge.get("edge") or edge.get("relationship") or edge.get("type", ""))
+        source_values = _edge_endpoint_values(edge, "source")
+        target_values = _edge_endpoint_values(edge, "target")
+        if (
+            kind.upper() not in text
+            or not any(value.upper() in text for value in source_values)
+            or not any(value.upper() in text for value in target_values)
+        ):
+            missing.append(_relationship_label(edge))
+    return sorted(missing)
+
+
+def _missing_contextual_relationships(
+    task: Task,
+    final_answer: dict | None,
+    ref_result: CypherResult,
+    contract: AnswerContract | None = None,
+) -> list[str]:
+    reported = _reported_relationships(final_answer)
+    return sorted(
+        _relationship_label(required)
+        for required in _required_contextual_relationships(task, contract)
+        if not any(_relationship_matches(required, candidate, ref_result) for candidate in reported)
+    )
 
 
 def _row_count_from_ref(ref_result: CypherResult) -> int:
@@ -441,6 +581,16 @@ def grade_mcp_diagnostic(
             True,
             "Response references node names not present in the graph: " + ", ".join(hallucinated),
         )
+    elif missing_relationships := _missing_contextual_relationships(
+        task, final_answer, ref_result, contract
+    ):
+        grade_result = GradeResult(
+            0.0,
+            OUTCOME_INCORRECT,
+            False,
+            "Final answer omitted required contextual relationship evidence: "
+            + ", ".join(missing_relationships),
+        )
     elif task.grade_mode == "path_exists":
         found = bool(final_answer.get("path_found"))
         correct = bool(reference_nodes) and found and not missing_reference_nodes
@@ -463,6 +613,27 @@ def grade_mcp_diagnostic(
             failure_subtype = _classify_mcp_incorrect(
                 task, final_answer, reference_nodes, answer_nodes, covered_reference_nodes, metrics
             )
+        grade_result = GradeResult(
+            1.0 if correct else 0.0,
+            OUTCOME_CORRECT if correct else OUTCOME_INCORRECT,
+            False,
+            details,
+        )
+    elif task.grade_mode == "no_path":
+        reference_empty = ref_result.success and not ref_result.nodes and not reference_nodes
+        rejected = final_answer.get("path_found") is False
+        answer_empty = not answer_nodes
+        correct = reference_empty and rejected and answer_empty
+        if not ref_result.success:
+            details = f"no_path (mcp): reference query failed: {ref_result.error}"
+        elif not reference_empty:
+            details = "no_path (mcp): reference unexpectedly found a path"
+        elif not rejected:
+            details = "no_path (mcp): model did not explicitly reject the route"
+        elif not answer_empty:
+            details = "no_path (mcp): rejected route included path nodes"
+        else:
+            details = "no_path (mcp): model correctly rejected the route"
         grade_result = GradeResult(
             1.0 if correct else 0.0,
             OUTCOME_CORRECT if correct else OUTCOME_INCORRECT,

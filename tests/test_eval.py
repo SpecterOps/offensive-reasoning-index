@@ -472,6 +472,122 @@ def test_grade_path_exists_rejects_unrelated_result():
     assert result.outcome == "INCORRECT"
 
 
+def test_grade_no_path_scores_explicit_empty_rejection() -> None:
+    task = _make_task("no_path")
+    result = grade(
+        task,
+        _make_model_response("MATCH p=(a)-[*1..]->(b) RETURN p"),
+        _make_cypher_result([]),
+        _make_cypher_result([]),
+        set(),
+    )
+
+    assert result.score == 1.0
+    assert result.outcome == "CORRECT"
+    assert "correctly rejected" in result.details
+
+
+def test_grade_no_path_does_not_accept_failed_reference_query() -> None:
+    task = _make_task("no_path")
+    reference = _make_cypher_result([], success=False)
+    reference.error = "Syntax error"
+    result = grade(
+        task,
+        _make_model_response("MATCH p=(a)-[*1..]->(b) RETURN p"),
+        _make_cypher_result([]),
+        reference,
+        set(),
+    )
+
+    assert result.score == 0.0
+    assert "reference query failed" in result.details
+
+
+def test_direct_grade_requires_declared_contextual_mechanism() -> None:
+    task = _make_task("path_exists")
+    task.metadata["supporting_edges"] = [
+        {
+            "source": "GROUP-ID",
+            "source_name": "GROUP@CORP.LOCAL",
+            "edge": "Enroll",
+            "target": "TEMPLATE-ID",
+            "target_name": "TEMPLATE@CORP.LOCAL",
+        }
+    ]
+    reference = _make_cypher_result(["A@CORP.LOCAL"])
+    model = _make_cypher_result(["A@CORP.LOCAL"])
+
+    missing = grade(task, _make_model_response(), model, reference, set())
+    present = grade(
+        task,
+        _make_model_response(
+            "MATCH (g {name: 'GROUP@CORP.LOCAL'})-[:Enroll]->"
+            "(t {name: 'TEMPLATE@CORP.LOCAL'}) RETURN g, t"
+        ),
+        model,
+        reference,
+        set(),
+    )
+    wrong_endpoints = grade(
+        task,
+        _make_model_response(
+            "MATCH (g {name: 'WRONG@CORP.LOCAL'})-[:Enroll]->"
+            "(t {name: 'OTHER@CORP.LOCAL'}) RETURN g, t"
+        ),
+        model,
+        reference,
+        set(),
+    )
+
+    assert missing.score == 0.0
+    assert "Enroll" in missing.details
+    assert present.score == 1.0
+    assert wrong_endpoints.score == 0.0
+    assert "GROUP@CORP.LOCAL -[Enroll]-> TEMPLATE@CORP.LOCAL" in wrong_endpoints.details
+
+
+def test_mcp_no_path_scores_explicit_rejection() -> None:
+    diagnostic = grade_mcp_diagnostic(
+        _make_task("no_path"),
+        {"answer_type": "no_path", "path_found": False, "node_names": []},
+        _make_cypher_result([]),
+        set(),
+    )
+
+    assert diagnostic.grade.score == 1.0
+    assert diagnostic.grade.outcome == "CORRECT"
+
+
+def test_mcp_grade_requires_declared_contextual_relationship() -> None:
+    task = _make_task("path_exists")
+    task.metadata["supporting_edges"] = [
+        {
+            "source": "DOMAIN-A-ID",
+            "source_name": "DOMAIN-A",
+            "edge": "TrustedBy",
+            "target": "DOMAIN-B-ID",
+            "target_name": "DOMAIN-B",
+        }
+    ]
+    reference = _make_cypher_result(["DOMAIN-A", "DOMAIN-B"])
+    answer = {
+        "answer_type": "path_exists",
+        "path_found": True,
+        "node_names": ["DOMAIN-A", "DOMAIN-B"],
+    }
+
+    missing = grade_mcp_diagnostic(task, answer, reference, {"DOMAIN-A", "DOMAIN-B"})
+    answer["relationships"] = [{"source": "DOMAIN-B", "edge": "TrustedBy", "target": "DOMAIN-A"}]
+    wrong_endpoints = grade_mcp_diagnostic(task, answer, reference, {"DOMAIN-A", "DOMAIN-B"})
+    answer["relationships"] = [{"source": "domain-a", "edge": "trustedby", "target": "domain-b"}]
+    present = grade_mcp_diagnostic(task, answer, reference, {"DOMAIN-A", "DOMAIN-B"})
+
+    assert missing.grade.score == 0.0
+    assert "TrustedBy" in missing.grade.details
+    assert wrong_endpoints.grade.score == 0.0
+    assert present.grade.score == 1.0
+
+
 def test_grade_node_set_superset_ok():
     task = _make_task("node_set")
     resp = _make_model_response()

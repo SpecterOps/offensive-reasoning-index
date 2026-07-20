@@ -263,7 +263,12 @@ def test_write_summary_csv_includes_run_metadata(tmp_path) -> None:
     result = _result("CORRECT", score=1.0)
     result.run_name = "gemma4-26b-32k"
     result.requested_model = "ollama/gemma4:26b"
-    result.run_config = {"model": "ollama/gemma4:26b", "options": {"num_ctx": 32768}}
+    result.run_config = {
+        "model": "ollama/gemma4:26b",
+        "options": {"num_ctx": 32768},
+        "run_index": 2,
+        "runs_per_model": 5,
+    }
     write_summary_csv({"gemma4-26b-32k": [result]}, output)
     with output.open() as f:
         rows = list(csv.DictReader(f))
@@ -273,6 +278,22 @@ def test_write_summary_csv_includes_run_metadata(tmp_path) -> None:
     assert row["requested_model"] == "ollama/gemma4:26b"
     assert row["resolved_model"] == "ollama/test:latest"
     assert row["options_json"] == '{"num_ctx": 32768}'
+    assert row["run_index"] == "2"
+    assert row["runs_per_model"] == "5"
+
+
+def test_write_summary_csv_reports_tier6_results(tmp_path) -> None:
+    output = tmp_path / "baseline_summary.csv"
+    result = _result("CORRECT", score=1.0)
+    result.task.tier = 6
+
+    write_summary_csv({"tier6-model": [result]}, output)
+
+    with output.open() as f:
+        row = next(csv.DictReader(f))
+    assert row["tier6_correct"] == "1"
+    assert row["tier6_total"] == "1"
+    assert row["tier6_pct"] == "100"
 
 
 def test_write_combined_csv_preserves_model_thinking(tmp_path) -> None:

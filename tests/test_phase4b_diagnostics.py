@@ -41,6 +41,23 @@ def test_contract_validation_path_requires_path_found_and_nodes_when_true():
     )
 
 
+def test_contract_validation_no_path_requires_explicit_empty_rejection() -> None:
+    task = _task("no_path")
+
+    assert validate_final_answer_contract(
+        task, {"answer_type": "no_path", "path_found": False, "node_names": []}
+    )
+    assert validate_final_answer_contract(
+        task, {"answer_type": "path_exists", "path_found": False, "node_names": []}
+    )
+    assert not validate_final_answer_contract(
+        task, {"answer_type": "no_path", "path_found": True, "node_names": []}
+    )
+    assert not validate_final_answer_contract(
+        task, {"answer_type": "no_path", "path_found": False, "node_names": ["A"]}
+    )
+
+
 def test_mcp_diagnostic_records_invalid_and_missing_entities_without_changing_strict_score():
     task = _task()
     final_answer = {

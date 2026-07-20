@@ -13,10 +13,11 @@ from __future__ import annotations
 
 import json
 import zipfile
+from copy import deepcopy
 from io import BytesIO
 from pathlib import Path
 
-from .graph import ADEdge, ADGraph, ADNode
+from .graph import ACE, ADEdge, ADGraph, ADNode, TypedPrincipal
 from .phase4_v2 import Phase4V2Forest
 
 # SharpHound ingest version numbers per object type
@@ -53,8 +54,11 @@ _NODE_TYPE_TO_FILE: dict[str, str] = {
 
 def serialize_to_zip(graph: ADGraph, output_path: Path) -> Path:
     """Serialize the graph to a SharpHound-compatible zip file."""
+    from .archive_validation import validate_sharphound_zip
+
     output_path.parent.mkdir(parents=True, exist_ok=True)
     zip_data = _build_zip(graph)
+    validate_sharphound_zip(graph, zip_data).require_valid()
     output_path.write_bytes(zip_data)
     return output_path
 
@@ -121,7 +125,7 @@ def serialize_to_dir(graph: ADGraph, output_dir: Path) -> list[Path]:
     """Serialize the graph to individual JSON files in a directory."""
     output_dir.mkdir(parents=True, exist_ok=True)
     files: list[Path] = []
-    for file_type, nodes in _group_nodes(graph).items():
+    for file_type, nodes in _group_nodes(project_nodes_for_sharphound(graph)).items():
         data = _build_file_data(nodes, file_type)
         path = output_dir / f"{file_type}.json"
         path.write_text(json.dumps(data, indent=2))
@@ -130,9 +134,10 @@ def serialize_to_dir(graph: ADGraph, output_dir: Path) -> list[Path]:
 
 
 def _build_zip(graph: ADGraph) -> bytes:
+    projected_nodes = project_nodes_for_sharphound(graph)
     buf = BytesIO()
     with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        for file_type, nodes in _group_nodes(graph).items():
+        for file_type, nodes in _group_nodes(projected_nodes).items():
             data = _build_file_data(nodes, file_type)
             info = zipfile.ZipInfo(f"{file_type}.json", date_time=(2024, 1, 1, 0, 0, 0))
             info.compress_type = zipfile.ZIP_DEFLATED
@@ -140,14 +145,241 @@ def _build_zip(graph: ADGraph) -> bytes:
     return buf.getvalue()
 
 
-def _group_nodes(graph: ADGraph) -> dict[str, list[ADNode]]:
+def _group_nodes(nodes: dict[str, ADNode]) -> dict[str, list[ADNode]]:
     """Group nodes by their output file type."""
     groups: dict[str, list[ADNode]] = {ft: [] for ft in _VERSIONS}
-    for node in graph._nodes.values():
+    for node in nodes.values():
         file_type = _NODE_TYPE_TO_FILE.get(node.node_type)
         if file_type:
             groups[file_type].append(node)
     return {k: v for k, v in groups.items() if v}
+
+
+_ACL_EDGE_KINDS = {
+    "GenericAll",
+    "GenericWrite",
+    "WriteOwner",
+    "WriteDACL",
+    "AllExtendedRights",
+    "ForceChangePassword",
+    "AddMember",
+    "AddSelf",
+    "Owns",
+    "DCSync",
+    "GetChanges",
+    "GetChangesAll",
+}
+
+_GPO_CHANGE_FIELDS = {
+    "AdminTo": "LocalAdmins",
+    "CanRDP": "RemoteDesktopUsers",
+    "CanPSRemote": "PSRemoteUsers",
+    "ExecuteDCOM": "DcomUsers",
+}
+
+
+def project_nodes_for_sharphound(graph: ADGraph) -> dict[str, ADNode]:
+    """Materialize ADEdges into SharpHound records without mutating the graph."""
+    nodes = deepcopy(graph._nodes)
+    gpo_relationships = _existing_gpo_change_relationships(nodes)
+    carrier_index = 0
+
+    for edge in graph.get_edges():
+        source = nodes.get(edge.source)
+        target = nodes.get(edge.target)
+        if source is None or target is None:
+            continue
+
+        handled = False
+        if edge.edge_kind == "MemberOf" and target.node_type == "Group":
+            handled = True
+            _append_unique(
+                target.extra.setdefault("Members", []),
+                {"ObjectIdentifier": source.object_id, "ObjectType": source.node_type},
+            )
+        elif edge.edge_kind in _ACL_EDGE_KINDS:
+            handled = True
+            ace = ACE(source.object_id, source.node_type, edge.edge_kind)
+            if ace not in target.aces:
+                target.aces.append(ace)
+        elif edge.edge_kind in {"Enroll", "AutoEnroll"} and target.node_type == "CertTemplate":
+            handled = True
+            ace = ACE(source.object_id, source.node_type, edge.edge_kind)
+            if ace not in target.aces:
+                target.aces.append(ace)
+        elif edge.edge_kind == "AllowedToDelegate" and target.node_type == "Computer":
+            handled = True
+            _append_unique(
+                source.extra.setdefault("AllowedToDelegate", []),
+                {"ObjectIdentifier": target.object_id, "ObjectType": "Computer"},
+            )
+        elif edge.edge_kind == "AllowedToAct" and target.node_type == "Computer":
+            handled = True
+            _append_unique(
+                target.extra.setdefault("AllowedToAct", []),
+                {"ObjectIdentifier": source.object_id, "ObjectType": source.node_type},
+            )
+        elif (
+            edge.edge_kind == "HasSession"
+            and source.node_type == "Computer"
+            and target.node_type == "User"
+        ):
+            handled = True
+            sessions = source.extra.setdefault("Sessions", {"Results": [], "Collected": True})
+            _append_unique(
+                sessions["Results"],
+                {"UserSID": target.object_id, "ComputerSID": source.object_id},
+            )
+        elif edge.edge_kind in _GPO_CHANGE_FIELDS:
+            handled = True
+            if source.node_type not in {"User", "Group"} or target.node_type != "Computer":
+                _raise_invalid_planted_edge(edge, source, target)
+                continue
+            _project_computer_result(source, target, edge.edge_kind)
+            relationship = (source.object_id, edge.edge_kind, target.object_id)
+            if relationship not in gpo_relationships:
+                carrier_index += 1
+                carrier = _gpo_change_carrier(graph, source, target, edge.edge_kind, carrier_index)
+                nodes[carrier.object_id] = carrier
+                _register_domain_child(nodes, graph.domain_sid, carrier)
+                gpo_relationships.add(relationship)
+        elif edge.edge_kind == "GPLink":
+            handled = True
+            if source.node_type != "GPO" or target.node_type not in {"Domain", "OU"}:
+                _raise_invalid_planted_edge(edge, source, target)
+                continue
+            _append_unique(
+                target.extra.setdefault("Links", []),
+                {"GUID": source.object_id, "IsEnforced": bool(edge.properties.get("enforced"))},
+            )
+        elif edge.edge_kind == "Contains" and source.node_type in {"Domain", "OU"}:
+            handled = True
+            target.contained_by = TypedPrincipal(source.object_id, source.node_type)
+            _append_unique(
+                source.extra.setdefault("ChildObjects", []),
+                {"ObjectIdentifier": target.object_id, "ObjectType": target.node_type},
+            )
+        elif edge.edge_kind == "TrustedBy":
+            handled = True
+            if source.node_type != "Domain" or target.node_type != "Domain":
+                _raise_invalid_planted_edge(edge, source, target)
+                continue
+            _append_unique(source.extra.setdefault("Trusts", []), _trust_entry(target))
+        elif edge.edge_kind == "PublishedTo" and target.node_type == "EnterpriseCA":
+            handled = True
+            template_ref = {"ObjectIdentifier": source.object_id}
+            _append_unique(target.extra.setdefault("CertTemplates", []), template_ref)
+            _append_unique(target.extra.setdefault("EnabledCertTemplates", []), template_ref)
+
+        if not handled and edge.properties.get("planted"):
+            raise ValueError(
+                "Planted edge has no SharpHound projection: "
+                f"{source.node_type}({source.object_id}) -[{edge.edge_kind}]-> "
+                f"{target.node_type}({target.object_id})"
+            )
+
+    return nodes
+
+
+def _raise_invalid_planted_edge(edge: ADEdge, source: ADNode, target: ADNode) -> None:
+    if edge.properties.get("planted"):
+        raise ValueError(
+            "Planted edge cannot be represented by SharpHound: "
+            f"{source.node_type}({source.object_id}) -[{edge.edge_kind}]-> "
+            f"{target.node_type}({target.object_id})"
+        )
+
+
+def _append_unique(items: list[dict], item: dict) -> None:
+    if item not in items:
+        items.append(item)
+
+
+def _project_computer_result(source: ADNode, target: ADNode, edge_kind: str) -> None:
+    field = _GPO_CHANGE_FIELDS[edge_kind]
+    result = {"ObjectIdentifier": source.object_id, "ObjectType": source.node_type}
+    collection = target.extra.setdefault(field, {"Results": [], "Collected": True})
+    _append_unique(collection["Results"], result)
+    if edge_kind != "CanRDP":
+        return
+    user_rights = target.extra.setdefault("UserRights", [])
+    right = next(
+        (
+            entry
+            for entry in user_rights
+            if entry.get("Privilege") == "SeRemoteInteractiveLogonRight"
+        ),
+        None,
+    )
+    if right is None:
+        right = {
+            "Privilege": "SeRemoteInteractiveLogonRight",
+            "Results": [],
+            "Collected": True,
+            "FailureReason": None,
+            "LocalNames": [],
+        }
+        user_rights.append(right)
+    _append_unique(right["Results"], result)
+
+
+def _existing_gpo_change_relationships(
+    nodes: dict[str, ADNode],
+) -> set[tuple[str, str, str]]:
+    relationships: set[tuple[str, str, str]] = set()
+    for node in nodes.values():
+        if node.node_type not in {"Domain", "OU"}:
+            continue
+        changes = node.extra.get("GPOChanges") or {}
+        affected = [item.get("ObjectIdentifier") for item in changes.get("AffectedComputers", [])]
+        for edge_kind, field in _GPO_CHANGE_FIELDS.items():
+            for principal in changes.get(field, []):
+                for target_id in affected:
+                    relationships.add((principal.get("ObjectIdentifier"), edge_kind, target_id))
+    return relationships
+
+
+def _gpo_change_carrier(
+    graph: ADGraph,
+    source: ADNode,
+    target: ADNode,
+    edge_kind: str,
+    index: int,
+) -> ADNode:
+    object_id = f"{graph.domain_sid}-9100{index:04d}"
+    name = f"ORI-EDGE-{edge_kind.upper()}-{index:04d}"
+    changes = {field: [] for field in _GPO_CHANGE_FIELDS.values()}
+    changes[_GPO_CHANGE_FIELDS[edge_kind]] = [
+        {"ObjectIdentifier": source.object_id, "ObjectType": source.node_type}
+    ]
+    changes["AffectedComputers"] = [
+        {"ObjectIdentifier": target.object_id, "ObjectType": "Computer"}
+    ]
+    return ADNode(
+        object_id=object_id,
+        node_type="OU",
+        properties={
+            "name": f"{name}@{graph.domain}",
+            "distinguishedname": f"OU={name},{graph.dn.domain_root()}",
+            "domain": graph.domain,
+            "domainsid": graph.domain_sid,
+            "blocksinheritance": False,
+            "highvalue": False,
+            "isaclprotected": False,
+        },
+        contained_by=TypedPrincipal(graph.domain_sid, "Domain"),
+        extra={"ChildObjects": [], "Links": [], "GPOChanges": changes},
+    )
+
+
+def _register_domain_child(nodes: dict[str, ADNode], domain_id: str, child: ADNode) -> None:
+    domain = nodes.get(domain_id)
+    if domain is None:
+        return
+    _append_unique(
+        domain.extra.setdefault("ChildObjects", []),
+        {"ObjectIdentifier": child.object_id, "ObjectType": child.node_type},
+    )
 
 
 def _build_file_data(nodes: list[ADNode], file_type: str) -> dict:

@@ -6,6 +6,8 @@ output_dir: results/benchmark-runs/example
 
 defaults:
   concurrency: 1
+  # Independent full passes per model against the same manifest.
+  runs_per_model: 1
   bhce_url: null
   model_base_url: null
   max_model_reruns_on_infra: 1
@@ -36,6 +38,8 @@ models:
   - name: codex-gpt-5-5
     provider: codex
     model: gpt-5.5
+    # Per-model override of defaults.runs_per_model.
+    runs_per_model: 3
     mcp_tool_loop: native-openai-compatible
     options:
       temperature: 0

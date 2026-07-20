@@ -153,6 +153,7 @@ output_dir: results/benchmark-runs/complex-v1-seed-4401
 
 defaults:
   concurrency: 1
+  runs_per_model: 3
   mcp:
     mcp_dir: ../bloodhound-mcp
     max_steps: 16
@@ -169,8 +170,16 @@ models:
   - name: codex-gpt
     provider: codex
     model: gpt-5.5-codex
+    runs_per_model: 5
     mcp_tool_loop: native-openai-compatible
 ```
+
+`runs_per_model` performs independent complete passes against the same manifest.
+The default applies to every model and a model entry can override it. Repeated
+outputs are isolated under `direct/<model>/run-001.csv` and
+`mcp/<model>/run-001.csv`, with `run_index` and `runs_per_model` retained in the
+CSV metadata. This is separate from `max_model_reruns_on_infra`, which only
+retries infrastructure failures.
 
 For Codex OAuth, log in with the Codex CLI:
 
@@ -257,6 +266,12 @@ Direct/Cypher grading tasks: 42
 MCP grading tasks: 62
 Tier 6 paths/tasks: 19
 ```
+
+Complex generation now validates the completed SharpHound ZIP against every
+declared planted relationship before writing it. The current corpus must pass all
+30 planted paths at this archive boundary. This proves that the relationships are
+encoded in CE-ingestable SharpHound structures; operators must still upload the
+ZIP and require `ori verify-ingest` to report 30/30 before running models.
 
 The next hardening step is to add an official suite selector that chooses exactly
 100 direct tasks and 100 MCP tasks with intentional tier distribution from the same

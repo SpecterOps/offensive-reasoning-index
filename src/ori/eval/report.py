@@ -17,6 +17,8 @@ CSV_FIELDNAMES = [
     "resolved_model",
     "config_identity_json",
     "options_json",
+    "run_index",
+    "runs_per_model",
     "task_id",
     "template_id",
     "tier",
@@ -157,6 +159,8 @@ def _row_for_result(r: EvalResult) -> dict[str, object]:
         "resolved_model": r.model_response.model,
         "config_identity_json": config_identity_json,
         "options_json": options_json,
+        "run_index": run_config.get("run_index", 1) if run_config else 1,
+        "runs_per_model": run_config.get("runs_per_model", 1) if run_config else 1,
         "task_id": r.task.id,
         "template_id": r.task.template_id,
         "tier": r.task.tier,
@@ -338,7 +342,7 @@ def _stats(results: list[EvalResult]) -> dict:
     ]
     mcp_samples = sum(1 for r in results if r.mcp)
     tiers = {}
-    for tier in (1, 2, 3, 4, 5):
+    for tier in (1, 2, 3, 4, 5, 6):
         t = [r for r in results if r.task.tier == tier]
         tiers[tier] = (sum(1 for r in t if r.grade.score == 1.0), len(t)) if t else (0, 0)
     return {
@@ -393,6 +397,8 @@ def write_summary_csv(all_results: dict[str, list[EvalResult]], output_path: Pat
         "resolved_model",
         "config_identity_json",
         "options_json",
+        "run_index",
+        "runs_per_model",
         "model",
         "completed_tasks",
         "expected_tasks",
@@ -420,6 +426,9 @@ def write_summary_csv(all_results: dict[str, list[EvalResult]], output_path: Pat
         "tier5_correct",
         "tier5_total",
         "tier5_pct",
+        "tier6_correct",
+        "tier6_total",
+        "tier6_pct",
         "hallucinations",
         "cypher_errors",
         "query_too_expensive",
@@ -475,12 +484,17 @@ def write_summary_csv(all_results: dict[str, list[EvalResult]], output_path: Pat
             t3c, t3t, t3p = tier_fields(3)
             t4c, t4t, t4p = tier_fields(4)
             t5c, t5t, t5p = tier_fields(5)
+            t6c, t6t, t6p = tier_fields(6)
             row = {
                 "run_name": run_name,
                 "requested_model": requested_model,
                 "resolved_model": resolved_model,
                 "config_identity_json": config_identity_json,
                 "options_json": options_json,
+                "run_index": first_run_config.get("run_index", 1) if first_run_config else 1,
+                "runs_per_model": first_run_config.get("runs_per_model", 1)
+                if first_run_config
+                else 1,
                 "model": model,
                 "completed_tasks": s["completed_tasks"],
                 "expected_tasks": s["expected_tasks"],
@@ -508,6 +522,9 @@ def write_summary_csv(all_results: dict[str, list[EvalResult]], output_path: Pat
                 "tier5_correct": t5c,
                 "tier5_total": t5t,
                 "tier5_pct": t5p,
+                "tier6_correct": t6c,
+                "tier6_total": t6t,
+                "tier6_pct": t6p,
                 "hallucinations": s["hallucs"],
                 "cypher_errors": s["cypher_errors"],
                 "query_too_expensive": s["query_too_expensive"],
@@ -549,17 +566,17 @@ def write_summary_csv(all_results: dict[str, list[EvalResult]], output_path: Pat
 def print_comparison(all_results: dict[str, list[EvalResult]]) -> None:
     """Print a multi-model comparison table."""
     col_w = 36
-    print("\n" + "=" * 129)
+    print("\n" + "=" * 138)
     print("BASELINE COMPARISON")
-    print("=" * 129)
+    print("=" * 138)
     header = (
         f"{'Model':<{col_w}} {'Overall':>8} {'Tier1':>7} {'Tier2':>7} "
-        f"{'Tier3':>7} {'Tier4':>7} {'Tier5':>7} "
+        f"{'Tier3':>7} {'Tier4':>7} {'Tier5':>7} {'Tier6':>7} "
         f"{'Hallucs':>8} {'CyErr':>7} {'QExp':>6} {'Fails':>6} "
         f"{'ModelErr':>9} {'LoopExh':>8} {'InfraErr':>9}"
     )
     print(header)
-    print("-" * 129)
+    print("-" * 138)
 
     for model, results in all_results.items():
         s = _stats(results)
@@ -572,7 +589,7 @@ def print_comparison(all_results: dict[str, list[EvalResult]]) -> None:
         short_model = model.split("/", 1)[-1][:col_w]
         print(
             f"{short_model:<{col_w}} {s['correct']:>4}/{s['total']:<3} "
-            f"{tp(1):>7} {tp(2):>7} {tp(3):>7} {tp(4):>7} {tp(5):>7} "
+            f"{tp(1):>7} {tp(2):>7} {tp(3):>7} {tp(4):>7} {tp(5):>7} {tp(6):>7} "
             f"{s['hallucs']:>8} {s['cypher_errors']:>7} {s['query_too_expensive']:>6} "
             f"{s['parse_fails']:>6} "
             f"{s['model_errors']:>9} {s['loop_exhaustions']:>8} {s['infra_errors']:>9}"
@@ -596,7 +613,7 @@ def print_comparison(all_results: dict[str, list[EvalResult]]) -> None:
         if status != "complete":
             print(f"{'':<{col_w}} {'status':>8} {status}: {detail}")
 
-    print("=" * 129)
+    print("=" * 138)
 
 
 def print_summary(results: list[EvalResult], model: str) -> None:

@@ -151,6 +151,29 @@ def test_parse_and_normalize_final_answer_handles_fenced_json() -> None:
     assert normalized == {"answer_type": "node_set", "node_names": ["A", "B"]}
 
 
+def test_normalize_final_answer_preserves_declared_relationship_evidence() -> None:
+    task = _task()
+    task.grade_mode = "path_exists"
+    task.metadata["supporting_edges"] = [{"source": "A", "edge": "TrustedBy", "target": "B"}]
+    normalized = _normalize_final_answer(
+        {
+            "answer_type": "path_exists",
+            "path_found": True,
+            "node_names": ["A", "B"],
+            "relationships": [{"source": "A", "edge": "TrustedBy", "target": "B"}],
+        },
+        task,
+    )
+
+    assert normalized == {
+        "answer_type": "path_exists",
+        "path_found": True,
+        "node_names": ["A", "B"],
+        "relationships": [{"source": "A", "edge": "TrustedBy", "target": "B"}],
+        "mechanisms": [],
+    }
+
+
 def test_run_mcp_eval_with_inspect_mock_perfect_exercises_solver(tmp_path: Path) -> None:
     import asyncio
 
@@ -312,7 +335,7 @@ def test_openai_compat_chat_turn_posts_tool_payload(monkeypatch) -> None:
                                     },
                                 }
                             ],
-                        }
+                        },
                     }
                 ],
                 "usage": {"prompt_tokens": 13, "completion_tokens": 5, "total_tokens": 18},
@@ -493,9 +516,7 @@ def test_prompt_discovery_selects_best_bloodhound_prompt() -> None:
         def _task_session(self):
             return FakeHandle()
 
-    text, selected, available, status = asyncio.run(
-        _discover_bloodhound_mcp_prompt(FakeServer())
-    )
+    text, selected, available, status = asyncio.run(_discover_bloodhound_mcp_prompt(FakeServer()))
     assert selected == "bloodhound_assistant"
     assert available == ["bloodhound_assistant", "generic_helper"]
     assert status == "selected"
@@ -524,9 +545,7 @@ def test_prompt_discovery_warns_and_continues_without_prompts(capsys) -> None:
         def _task_session(self):
             return FakeHandle()
 
-    text, selected, available, status = asyncio.run(
-        _discover_bloodhound_mcp_prompt(FakeServer())
-    )
+    text, selected, available, status = asyncio.run(_discover_bloodhound_mcp_prompt(FakeServer()))
     assert (text, selected, available, status) == ("", "", [], "no_prompts")
     assert "exposed no prompts" in capsys.readouterr().out
 

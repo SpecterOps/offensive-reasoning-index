@@ -87,6 +87,14 @@ def contract_nodes(contract: AnswerContract | None) -> set[str]:
         *contract.required_nodes,
         *contract.optional_nodes,
         *contract.forbidden_nodes,
-        *(str(edge.get("source")) for edge in contract.required_edges if edge.get("source")),
-        *(str(edge.get("target")) for edge in contract.required_edges if edge.get("target")),
+        *(
+            str(edge.get("source_name") or edge.get("source"))
+            for edge in contract.required_edges
+            if edge.get("source_name") or edge.get("source")
+        ),
+        *(
+            str(edge.get("target_name") or edge.get("target"))
+            for edge in contract.required_edges
+            if edge.get("target_name") or edge.get("target")
+        ),
     }

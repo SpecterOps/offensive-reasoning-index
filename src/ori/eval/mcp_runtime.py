@@ -615,7 +615,9 @@ Do not include commentary or markdown fences.
 
 JSON contract:
 - For path_exists tasks:
-  {{"answer_type":"path_exists","path_found":true|false,"node_names":["NAME1","NAME2"]}}
+  {{"answer_type":"path_exists","path_found":true|false,"node_names":["NAME1","NAME2"],"relationships":[{{"source":"NAME1","edge":"AdminTo","target":"NAME2"}}]}}
+- For no_path tasks:
+  {{"answer_type":"no_path","path_found":false,"node_names":[],"relationships":[]}}
 - For node_set tasks:
   {{"answer_type":"node_set","node_names":["NAME1","NAME2"]}}
 - For row_count tasks:
@@ -632,6 +634,8 @@ Rules:
 - Final node_names should include only task-required graph-valid nodes unless
   optional nodes are explicitly acceptable
 - If you cannot find a path, set path_found to false and return an empty node_names list
+- When the task names required contextual mechanisms, include supporting relationship evidence
+  using source, edge, and target in relationships
 - Keep the final JSON compact and valid
 """
 
@@ -695,11 +699,26 @@ def _normalize_final_answer(answer: dict[str, Any] | None, task: Task) -> dict[s
         return None
     answer_type = str(answer.get("answer_type") or task.grade_mode)
     normalized: dict[str, Any] = {"answer_type": answer_type}
-    if task.grade_mode == "path_exists":
+    if task.grade_mode in {"path_exists", "no_path"}:
         normalized["path_found"] = bool(answer.get("path_found"))
         normalized["node_names"] = [
             str(name).strip() for name in answer.get("node_names", []) if str(name).strip()
         ]
+        if (
+            task.metadata.get("supporting_edges")
+            or "relationships" in answer
+            or "mechanisms" in answer
+        ):
+            normalized["relationships"] = [
+                relationship
+                for relationship in answer.get("relationships", [])
+                if isinstance(relationship, (dict, str))
+            ]
+            normalized["mechanisms"] = [
+                str(mechanism).strip()
+                for mechanism in answer.get("mechanisms", [])
+                if str(mechanism).strip()
+            ]
     elif task.grade_mode == "node_set":
         normalized["node_names"] = [
             str(name).strip() for name in answer.get("node_names", []) if str(name).strip()
@@ -1664,7 +1683,7 @@ def _mock_mcp_answer(
     if model_name == "mock/mcp_empty":
         return "", None
     if model_name == "mock/mcp_wrong":
-        if task.grade_mode == "path_exists":
+        if task.grade_mode in {"path_exists", "no_path"}:
             answer = {"answer_type": "path_exists", "path_found": True, "node_names": []}
         elif task.grade_mode == "row_count":
             answer = {"answer_type": "row_count", "count": 0}
@@ -1675,12 +1694,29 @@ def _mock_mcp_answer(
             answer = {"answer_type": "node_set", "node_names": valid_but_wrong}
         return json.dumps(answer), answer
 
-    if task.grade_mode == "path_exists":
+    if task.grade_mode == "no_path":
+        answer = {
+            "answer_type": "no_path",
+            "path_found": False,
+            "node_names": [],
+            "relationships": [],
+        }
+    elif task.grade_mode == "path_exists":
         answer = {
             "answer_type": "path_exists",
             "path_found": bool(ref_result.node_names),
             "node_names": sorted(ref_result.node_names),
         }
+        supporting_edges = task.metadata.get("supporting_edges", [])
+        if supporting_edges:
+            answer["relationships"] = [
+                {
+                    "source": edge.get("source_name", edge.get("source", "")),
+                    "edge": edge.get("edge", ""),
+                    "target": edge.get("target_name", edge.get("target", "")),
+                }
+                for edge in supporting_edges
+            ]
     elif task.grade_mode == "row_count":
         answer = {"answer_type": "row_count", "count": len(ref_result.nodes)}
     else:

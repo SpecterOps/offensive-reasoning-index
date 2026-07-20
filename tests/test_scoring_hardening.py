@@ -5,7 +5,7 @@ import json
 from click.testing import CliRunner
 
 from ori.cli import main
-from ori.eval.answer_scoring import score_answers_projection
+from ori.eval.answer_scoring import _answer_final, score_answers_projection
 from ori.eval.bhce import CypherResult
 from ori.eval.contracts import AnswerContract, task_contract_for
 from ori.eval.grader import grade_mcp_diagnostic
@@ -25,6 +25,22 @@ def _task(task_id: str = "sample", mode: str = "node_set") -> Task:
         tags=["phase4", "adcs"],
         metadata={"domain": "CORP.LOCAL"},
     )
+
+
+def test_offline_answer_extraction_preserves_mechanism_evidence() -> None:
+    assert _answer_final(
+        {
+            "answer_type": "path_exists",
+            "path_found": True,
+            "node_names": ["A", "B"],
+            "mechanisms": ["Enroll"],
+        }
+    ) == {
+        "answer_type": "path_exists",
+        "path_found": True,
+        "node_names": ["A", "B"],
+        "mechanisms": ["Enroll"],
+    }
 
 
 def test_extra_valid_nodes_are_not_hallucinations() -> None:

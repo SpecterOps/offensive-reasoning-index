@@ -16,6 +16,7 @@ class RunConfigOverrides:
     output_dir: str | None = None
     bhce_url: str | None = None
     concurrency: int | None = None
+    runs_per_model: int | None = None
     mcp_dir: str | None = None
     max_steps: int | None = None
     model_base_url: str | None = None
@@ -43,6 +44,7 @@ class ResolvedRunProfile:
     bhce_url: str | None
     model_base_url: str | None
     concurrency: int | None
+    runs_per_model: int
     max_model_reruns_on_infra: int
     health_timeout_seconds: float
     health_poll_interval: float
@@ -262,6 +264,18 @@ def load_run_profile(
         "model_base_url",
     )
     concurrency = _merged_value(overrides.concurrency, profile, defaults, "concurrency")
+    runs_per_model = _merged_value(
+        overrides.runs_per_model,
+        profile,
+        defaults,
+        "runs_per_model",
+    )
+    if runs_per_model is None:
+        runs_per_model = 1
+    if isinstance(runs_per_model, bool) or not isinstance(runs_per_model, int):
+        raise ValueError("runs_per_model must be an integer.")
+    if runs_per_model < 1:
+        raise ValueError("runs_per_model must be at least 1.")
     max_model_reruns_on_infra = _merged_value(
         overrides.max_model_reruns_on_infra,
         profile,
@@ -385,15 +399,11 @@ def load_run_profile(
         if seed is None:
             raise ValueError(f"Profile {chosen_name!r} must define seed for generate.")
         if not isinstance(generator_profile, str) or not generator_profile:
-            raise ValueError(
-                f"Profile {chosen_name!r} must define generator.profile for generate."
-            )
+            raise ValueError(f"Profile {chosen_name!r} must define generator.profile for generate.")
         if output_zip is None:
             raise ValueError(f"Profile {chosen_name!r} must define output_zip for generate.")
         if output_manifest is None:
-            raise ValueError(
-                f"Profile {chosen_name!r} must define output_manifest for generate."
-            )
+            raise ValueError(f"Profile {chosen_name!r} must define output_manifest for generate.")
     elif kind in {"eval", "eval_mcp"}:
         if model_entry is None and model_entries is not None:
             if not isinstance(model_entries, list) or len(model_entries) != 1:
@@ -435,6 +445,7 @@ def load_run_profile(
         bhce_url=bhce_url,
         model_base_url=model_base_url,
         concurrency=concurrency,
+        runs_per_model=runs_per_model,
         max_model_reruns_on_infra=int(max_model_reruns_on_infra),
         health_timeout_seconds=float(health_timeout_seconds),
         health_poll_interval=float(health_poll_interval),

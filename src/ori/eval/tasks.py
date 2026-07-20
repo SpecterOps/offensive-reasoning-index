@@ -14,7 +14,7 @@ class Task:
     category: str  # path_finding | enumeration | cypher_generation
     question: str
     reference_cypher: str
-    grade_mode: str  # path_exists | node_set | row_count
+    grade_mode: str  # path_exists | no_path | node_set | row_count
     tags: list[str] = field(default_factory=list)
     metadata: dict = field(default_factory=dict)
 
@@ -217,11 +217,40 @@ _TIER6_NEGATIVE_CONTROL_QUESTIONS: list[tuple[str, str, str, list[str], str | No
         "{target_name} is actually viable. If it is not viable, explain the missing mechanism "
         "or invalid edge instead of forcing a path.",
         "negative_control",
-        "path_exists",
+        "no_path",
         ["tier6", "complex", "negative_control", "decoy_rejection"],
         None,
     ),
 ]
+
+
+def _reference_cypher_with_supporting_edges(path: dict[str, Any]) -> str:
+    """Return reference Cypher that also proves declared contextual relationships."""
+    reference = str(path["verification_cypher"])
+    supporting_edges = [edge for edge in path.get("supporting_edges", []) if isinstance(edge, dict)]
+    if not supporting_edges:
+        return reference
+
+    body, separator, returns = reference.rpartition(" RETURN ")
+    if not separator:
+        raise ValueError(
+            f"Supporting-edge reference for {path.get('template_id', 'unknown')} has no RETURN"
+        )
+    clauses: list[str] = []
+    return_items = [returns]
+    for index, edge in enumerate(supporting_edges, start=1):
+        source = str(edge["source"]).replace("'", "\\'")
+        target = str(edge["target"]).replace("'", "\\'")
+        edge_kind = str(edge["edge"])
+        source_alias = f"ctx{index}s"
+        target_alias = f"ctx{index}t"
+        clauses.append(
+            f"MATCH ({source_alias})-[:{edge_kind}]->({target_alias}) "
+            f"WHERE coalesce({source_alias}.objectid, {source_alias}.objectId) = '{source}' "
+            f"AND coalesce({target_alias}.objectid, {target_alias}.objectId) = '{target}'"
+        )
+        return_items.extend((source_alias, target_alias))
+    return f"{body} {' '.join(clauses)} RETURN {', '.join(return_items)}"
 
 
 def _questions_for_template(
@@ -407,7 +436,21 @@ def generate_tasks(manifest: dict) -> list[Task]:
                     domain=domain,
                 )
             else:
-                reference_cypher = path["verification_cypher"]
+                reference_cypher = _reference_cypher_with_supporting_edges(path)
+            supporting_edges = [
+                edge for edge in path.get("supporting_edges", []) if isinstance(edge, dict)
+            ]
+            if supporting_edges:
+                contextual_relationships = sorted(
+                    f"{edge.get('source_name', edge['source'])} "
+                    f"-[{edge['edge']}]-> {edge.get('target_name', edge['target'])}"
+                    for edge in supporting_edges
+                )
+                question += (
+                    " Explicitly include these contextual relationships: "
+                    + ", ".join(contextual_relationships)
+                    + "."
+                )
             tasks.append(
                 Task(
                     id=f"{tid}-{i:02d}",
@@ -429,6 +472,16 @@ def generate_tasks(manifest: dict) -> list[Task]:
                         "required_capabilities": path.get("required_capabilities", []),
                         "required_mechanisms": path.get("required_mechanisms", []),
                         "required_sequence": path.get("required_sequence", []),
+                        "supporting_edges": supporting_edges,
+                        "answer_contract": (
+                            {
+                                "required_edges": supporting_edges,
+                                "grade_mode": grade_mode,
+                                "notes": "Tier 6 contextual relationships must be reported.",
+                            }
+                            if supporting_edges
+                            else None
+                        ),
                         "terminal_escalation_type": path.get("terminal_escalation_type", ""),
                         "tool_effort": path.get("tool_effort", {}),
                         "negative_control": path.get("negative_control", False),

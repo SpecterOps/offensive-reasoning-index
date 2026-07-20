@@ -156,6 +156,12 @@ Common failure modes:
 
 When debugging, trust the manifest and verify the live BH domain list before grading.
 
+Complex ZIP generation includes a relationship projection gate over all 30
+planted paths. Generation fails if a declared path edge is absent from the
+serialized SharpHound structures. After upload, `verify-ingest` remains mandatory:
+it confirms those structures produced the expected live CE relationships and
+requires negative-control paths to remain unresolved.
+
 ## Model Configs
 
 Use `models.example.yaml` as the public-safe template:
@@ -174,6 +180,7 @@ output_dir: results/benchmark-runs/complex-v1-seed-4401
 
 defaults:
   concurrency: 1
+  runs_per_model: 3
   mcp:
     mcp_dir: ../bloodhound-mcp
     max_steps: 16
@@ -190,8 +197,14 @@ models:
   - name: codex-gpt
     provider: codex
     model: gpt-5.5-codex
+    runs_per_model: 5
     mcp_tool_loop: native-openai-compatible
 ```
+
+`runs_per_model` controls independent full benchmark passes against the same
+dataset and manifest. A model entry overrides the default. Each repetition has
+its own CSV and run metadata. `max_model_reruns_on_infra` remains reserved for
+recovery retries and does not increase the requested sample count.
 
 For Codex OAuth, log in with Codex CLI first:
 

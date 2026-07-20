@@ -85,6 +85,12 @@ def validate_final_answer_contract(task: Task, final_answer: dict[str, Any] | No
         if final_answer.get("path_found") is True:
             return bool(answer_node_names(final_answer))
         return final_answer.get("path_found") is False
+    if task.grade_mode == "no_path":
+        return (
+            answer_type in {"no_path", "path_exists", None}
+            and final_answer.get("path_found") is False
+            and not answer_node_names(final_answer)
+        )
     if task.grade_mode == "node_set":
         return answer_type in {"node_set", None} and isinstance(
             final_answer.get("node_names"), list

@@ -116,6 +116,86 @@ def test_verify_ingest_happy_path(tmp_path: Path, monkeypatch) -> None:
     assert result.path_checks[0].ok is True
 
 
+def test_verify_ingest_checks_supporting_edges(tmp_path: Path, monkeypatch) -> None:
+    import asyncio
+    import json
+
+    manifest_path = _manifest(tmp_path)
+    manifest = json.loads(manifest_path.read_text())
+    manifest["planted_paths"][0]["supporting_edges"] = [
+        {"source": "DOMAIN-A", "edge": "TrustedBy", "target": "DOMAIN-B"}
+    ]
+    manifest_path.write_text(json.dumps(manifest))
+    monkeypatch.setattr("ori.eval.ops.BHCEClient", lambda domain=None: FakeBHCEClient())
+
+    result = asyncio.run(verify_ingest(manifest_path))
+
+    assert result.ok is True
+    assert [edge.edge_type for edge in result.path_checks[0].edge_checks] == [
+        "MemberOf",
+        "TrustedBy",
+    ]
+
+
+def test_verify_ingest_requires_negative_control_path_to_be_absent(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import asyncio
+    import json
+
+    class NegativeControlBHCEClient(FakeBHCEClient):
+        async def run_cypher(self, query: str) -> CypherResult:
+            if "RETURN p" in query and "coalesce(a.objectid" not in query:
+                return CypherResult(success=True, nodes=[], node_names=set(), raw={})
+            return await super().run_cypher(query)
+
+    manifest_path = _manifest(tmp_path)
+    manifest = json.loads(manifest_path.read_text())
+    manifest["planted_paths"][0]["negative_control"] = True
+    manifest_path.write_text(json.dumps(manifest))
+    monkeypatch.setattr("ori.eval.ops.BHCEClient", lambda domain=None: NegativeControlBHCEClient())
+
+    result = asyncio.run(verify_ingest(manifest_path))
+
+    assert result.ok is True
+    assert result.path_checks[0].found is False
+    assert result.path_checks[0].expected_found is False
+
+
+def test_verify_ingest_rejects_negative_control_when_verification_query_fails(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import asyncio
+    import json
+
+    class FailedNegativeControlBHCEClient(FakeBHCEClient):
+        async def run_cypher(self, query: str) -> CypherResult:
+            if "RETURN p" in query and "coalesce(a.objectid" not in query:
+                return CypherResult(
+                    success=False,
+                    nodes=[],
+                    node_names=set(),
+                    raw={},
+                    error="verification query failed",
+                )
+            return await super().run_cypher(query)
+
+    manifest_path = _manifest(tmp_path)
+    manifest = json.loads(manifest_path.read_text())
+    manifest["planted_paths"][0]["negative_control"] = True
+    manifest_path.write_text(json.dumps(manifest))
+    monkeypatch.setattr(
+        "ori.eval.ops.BHCEClient", lambda domain=None: FailedNegativeControlBHCEClient()
+    )
+
+    result = asyncio.run(verify_ingest(manifest_path))
+
+    assert result.ok is False
+    assert result.path_checks[0].found is False
+    assert result.path_checks[0].query_succeeded is False
+    assert result.path_checks[0].error == "verification query failed"
+
+
 def test_cli_verify_ingest(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr("ori.eval.ops.BHCEClient", lambda domain=None: FakeBHCEClient())
     runner = CliRunner()
@@ -569,6 +649,138 @@ models:
         assert "Duplicate model run identity" in str(exc)
     else:
         raise AssertionError("Expected duplicate run names to fail")
+
+
+def test_build_run_specs_supports_default_and_per_model_run_counts(tmp_path: Path) -> None:
+    models_file = tmp_path / "models.yaml"
+    models_file.write_text(
+        """
+defaults:
+  runs_per_model: 3
+models:
+  - name: default-sample
+    model: mock/perfect
+  - name: larger-sample
+    model: mock/perfect
+    runs_per_model: 5
+"""
+    )
+
+    specs = _build_run_specs(models=(), models_file=str(models_file))
+
+    assert [spec.runs_per_model for spec in specs] == [3, 5]
+    assert "runs_per_model" not in specs[1].config_identity
+
+
+def test_build_run_specs_rejects_non_positive_run_count(tmp_path: Path) -> None:
+    models_file = tmp_path / "models.yaml"
+    models_file.write_text(
+        """
+defaults:
+  runs_per_model: 0
+models:
+  - model: mock/perfect
+"""
+    )
+
+    try:
+        _build_run_specs(models=(), models_file=str(models_file))
+    except Exception as exc:
+        assert "runs_per_model must be at least 1" in str(exc)
+    else:
+        raise AssertionError("Expected non-positive runs_per_model to fail")
+
+
+def test_cli_baseline_runs_each_model_repetition_to_an_isolated_csv(
+    tmp_path: Path, monkeypatch
+) -> None:
+    manifest = _manifest(tmp_path)
+    models_file = tmp_path / "models.yaml"
+    models_file.write_text(
+        """
+defaults:
+  runs_per_model: 3
+models:
+  - name: repeated-model
+    model: mock/perfect
+"""
+    )
+    calls: list[dict] = []
+
+    async def fake_run_eval_cli_bare(**kwargs):
+        calls.append(kwargs)
+        return []
+
+    monkeypatch.setattr("ori.eval.runner.run_eval_cli_bare", fake_run_eval_cli_bare)
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "baseline",
+            "-m",
+            str(manifest),
+            "--models-file",
+            str(models_file),
+            "-o",
+            str(tmp_path / "out"),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert len(calls) == 3
+    assert [call["run_config"]["run_index"] for call in calls] == [1, 2, 3]
+    assert {call["run_config"]["runs_per_model"] for call in calls} == {3}
+    assert [call["output_path"].name for call in calls] == [
+        "run-001.csv",
+        "run-002.csv",
+        "run-003.csv",
+    ]
+    assert len({call["output_path"] for call in calls}) == 3
+
+
+def test_cli_baseline_mcp_runs_each_model_repetition_to_an_isolated_csv(
+    tmp_path: Path, monkeypatch
+) -> None:
+    manifest = _manifest(tmp_path)
+    mcp_dir = tmp_path / "bloodhound-mcp"
+    mcp_dir.mkdir()
+    models_file = tmp_path / "models.yaml"
+    models_file.write_text(
+        """
+defaults:
+  runs_per_model: 2
+models:
+  - name: repeated-mcp-model
+    model: mock/mcp_perfect
+"""
+    )
+    calls: list[dict] = []
+
+    async def fake_run_eval_mcp_cli_bare(**kwargs):
+        calls.append(kwargs)
+        return []
+
+    monkeypatch.setattr("ori.eval.runner.run_eval_mcp_cli_bare", fake_run_eval_mcp_cli_bare)
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "baseline-mcp",
+            "-m",
+            str(manifest),
+            "--models-file",
+            str(models_file),
+            "-o",
+            str(tmp_path / "out"),
+            "--mcp-dir",
+            str(mcp_dir),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert len(calls) == 2
+    assert [call["run_config"]["run_index"] for call in calls] == [1, 2]
+    assert [call["output_path"].name for call in calls] == ["run-001.csv", "run-002.csv"]
 
 
 def test_cli_baseline_separates_same_model_different_contexts(tmp_path: Path, monkeypatch) -> None:

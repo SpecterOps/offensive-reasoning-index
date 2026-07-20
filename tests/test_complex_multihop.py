@@ -1,8 +1,14 @@
 from __future__ import annotations
 
+import json
+import zipfile
+from io import BytesIO
+
 from ori.cli import _build_manifest
 from ori.eval.tasks import generate_mcp_tasks, generate_tasks
+from ori.generator.archive_validation import validate_sharphound_zip
 from ori.generator.phase4 import build_phase4_complex_graph
+from ori.generator.serializer import _build_zip
 from ori.generator.templates.complex_multihop import complex_path_templates
 
 
@@ -99,6 +105,9 @@ def test_initial_complex_pack_is_non_adcs_heavy() -> None:
     assert len(tier6) == 19
     assert any("adcs" in path.metadata["family"] for path in tier6)
     assert any(path.metadata["negative_control"] for path in tier6)
+    negative = paths["t6_negative_control_invalid_cert"]
+    assert "(t:CertTemplate" in negative.verification_cypher
+    assert "shortestPath((t)" in negative.verification_cypher
 
 
 def test_phase2_pack_has_multiple_variants_per_initial_family() -> None:
@@ -124,6 +133,49 @@ def test_host_session_phase2_variants_cover_long_chain_and_terminal_rbcd() -> No
     assert [edge[1] for edge in three_host.path_edges].count("HasSession") >= 3
 
 
+def test_trust_hop_uses_foreign_domain_principal_and_domain_trust() -> None:
+    graph, paths = _complex_paths()
+    trust_path = paths["t6_trust_hopping_tier0"]
+    foreign_group = graph.require_node(trust_path.path_edges[0][2])
+    domains = graph.nodes_by_type("Domain")
+
+    assert foreign_group.properties["domainsid"] != graph.domain_sid
+    assert len(domains) == 2
+    assert any(
+        edge.edge_kind == "TrustedBy" and edge.source == graph.domain_sid
+        for edge in graph.get_edges()
+    )
+    assert (
+        graph.domain_sid,
+        "TrustedBy",
+        foreign_group.properties["domainsid"],
+    ) in trust_path.metadata["supporting_edges"]
+
+
+def test_contextual_edges_are_separate_from_continuous_attack_paths() -> None:
+    _graph, paths = _complex_paths()
+
+    for template_id in {
+        "t6_trust_hopping_tier0",
+        "t6_adcs_identity_transition_tier0",
+        "t6_path_selection_decoy_routes",
+        "t6_stale_session_contingency",
+    }:
+        path = paths[template_id]
+        assert all(
+            left[2] == right[0]
+            for left, right in zip(path.path_edges, path.path_edges[1:], strict=False)
+        )
+
+    adcs = paths["t6_adcs_identity_transition_tier0"]
+    assert "Enroll" not in [edge[1] for edge in adcs.path_edges]
+    assert "Enroll" in [edge[1] for edge in adcs.metadata["supporting_edges"]]
+
+    trust = paths["t6_trust_hopping_tier0"]
+    assert "TrustedBy" not in [edge[1] for edge in trust.path_edges]
+    assert "TrustedBy" in [edge[1] for edge in trust.metadata["supporting_edges"]]
+
+
 def test_tier6_tasks_are_generated_with_operator_questions() -> None:
     graph, _paths = _complex_paths()
     manifest = _build_manifest(graph, seed=4401)
@@ -137,6 +189,26 @@ def test_tier6_tasks_are_generated_with_operator_questions() -> None:
     assert all(task.metadata["required_mechanisms"] for task in tasks)
     assert all(task.metadata["tool_effort"] for task in tasks)
     assert any(task.metadata["negative_control"] for task in tasks)
+    negative = next(task for task in tasks if task.metadata["negative_control"])
+    assert negative.grade_mode == "no_path"
+
+    for template_id, mechanism in {
+        "t6_adcs_identity_transition_tier0": "Enroll",
+        "t6_trust_hopping_tier0": "TrustedBy",
+    }.items():
+        task = next(task for task in tasks if task.template_id == template_id)
+        assert mechanism in task.question
+        assert f"[:{mechanism}]" in task.reference_cypher
+        assert all(
+            edge["source_name"] in task.question for edge in task.metadata["supporting_edges"]
+        )
+        assert all(
+            edge["target_name"] in task.question for edge in task.metadata["supporting_edges"]
+        )
+        assert {edge["edge"] for edge in task.metadata["supporting_edges"]} == {mechanism}
+        assert {edge["edge"] for edge in task.metadata["answer_contract"]["required_edges"]} == {
+            mechanism
+        }
 
 
 def test_tier6_mcp_tasks_include_complex_direct_tasks() -> None:
@@ -146,3 +218,74 @@ def test_tier6_mcp_tasks_include_complex_direct_tasks() -> None:
 
     assert len(mcp_tasks) >= 19
     assert all(task.metadata["mcp_track"] for task in mcp_tasks)
+
+
+def test_complex_archive_contains_all_30_planted_paths() -> None:
+    graph, _paths = _complex_paths()
+    archive = _build_zip(graph)
+
+    report = validate_sharphound_zip(graph, archive)
+    manifest = _build_manifest(graph, seed=4401)
+    trust_manifest = next(
+        path
+        for path in manifest["planted_paths"]
+        if path["template_id"] == "t6_trust_hopping_tier0"
+    )
+
+    assert report.ok
+    assert len(report.path_checks) == 30
+    assert report.edge_references == sum(
+        len(path.path_edges) + len(path.metadata.get("supporting_edges", []))
+        for path in graph.planted_paths
+    )
+    assert all(check.ok for check in report.path_checks)
+    assert {edge["edge"] for edge in trust_manifest["supporting_edges"]} == {"TrustedBy"}
+    assert all(edge["source_name"] for edge in trust_manifest["supporting_edges"])
+    assert all(edge["target_name"] for edge in trust_manifest["supporting_edges"])
+    with zipfile.ZipFile(BytesIO(archive)) as zf:
+        for file_type in ("users", "computers", "groups", "ous"):
+            assert (
+                manifest["stats"][file_type]
+                == json.loads(zf.read(f"{file_type}.json"))["meta"]["count"]
+            )
+
+
+def test_complex_archive_validation_detects_missing_psremote_edge() -> None:
+    graph, paths = _complex_paths()
+    expected = next(
+        edge for edge in paths["t6_host_session_pivot_tier0"].path_edges if edge[1] == "CanPSRemote"
+    )
+    corrupted = _remove_gpo_relationship(_build_zip(graph), expected)
+
+    report = validate_sharphound_zip(graph, corrupted)
+    path_check = next(
+        check for check in report.path_checks if check.template_id == "t6_host_session_pivot_tier0"
+    )
+
+    assert report.ok is False
+    assert expected in path_check.missing_edges
+
+
+def _remove_gpo_relationship(archive: bytes, relationship: tuple[str, str, str]) -> bytes:
+    source, edge_kind, target = relationship
+    field = {"CanPSRemote": "PSRemoteUsers"}[edge_kind]
+    output = BytesIO()
+    with (
+        zipfile.ZipFile(BytesIO(archive)) as source_zip,
+        zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as target_zip,
+    ):
+        for name in source_zip.namelist():
+            payload = json.loads(source_zip.read(name))
+            for record in payload.get("data", []):
+                changes = record.get("GPOChanges") or {}
+                affected = {
+                    item["ObjectIdentifier"] for item in changes.get("AffectedComputers", [])
+                }
+                if target in affected:
+                    changes[field] = [
+                        item
+                        for item in changes.get(field, [])
+                        if item["ObjectIdentifier"] != source
+                    ]
+            target_zip.writestr(name, json.dumps(payload))
+    return output.getvalue()

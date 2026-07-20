@@ -41,7 +41,15 @@ def _answer_final(answer: dict[str, Any]) -> dict[str, Any] | None:
     if not isinstance(answer.get("answer_type"), str):
         return None
     normalized: dict[str, Any] = {"answer_type": str(answer["answer_type"])}
-    for key in ("node_names", "path", "paths", "count", "path_found", "relationships"):
+    for key in (
+        "node_names",
+        "path",
+        "paths",
+        "count",
+        "path_found",
+        "relationships",
+        "mechanisms",
+    ):
         if key in answer:
             normalized[key] = answer[key]
     if normalized["answer_type"] == "path":

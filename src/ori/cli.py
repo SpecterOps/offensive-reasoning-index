@@ -21,7 +21,12 @@ from .generator.org import build_org
 from .generator.phase4 import build_phase4_complex_graph, build_phase4_v1_graph
 from .generator.phase4_v2 import build_phase4_v2_forest
 from .generator.security import apply_baseline_security
-from .generator.serializer import serialize_forest_to_zip, serialize_to_dir, serialize_to_zip
+from .generator.serializer import (
+    project_nodes_for_sharphound,
+    serialize_forest_to_zip,
+    serialize_to_dir,
+    serialize_to_zip,
+)
 from .run_config import RunConfigOverrides, list_run_profiles, load_run_profile
 
 
@@ -30,6 +35,7 @@ class RunSpec:
     run_name: str
     requested_model: str
     concurrency: int
+    runs_per_model: int
     ollama_options: dict | None
     model_base_url: str | None
     max_steps: int | None
@@ -55,7 +61,7 @@ def _parse_ollama_options(options: tuple[str, ...]) -> dict:
 
 
 def _normalize_identity_config(entry: dict[str, Any]) -> dict[str, Any]:
-    identity = {k: v for k, v in entry.items() if k != "name"}
+    identity = {k: v for k, v in entry.items() if k not in {"name", "runs_per_model"}}
     options = dict(identity.get("options") or {})
     if "num_ctx" in identity:
         options["num_ctx"] = identity.pop("num_ctx")
@@ -92,11 +98,13 @@ def _run_spec_from_entry(
     entry: str | dict[str, Any],
     *,
     default_concurrency: int,
+    default_runs_per_model: int = 1,
 ) -> RunSpec:
     if isinstance(entry, str):
         explicit_name = None
         model = entry
         concurrency = default_concurrency
+        runs_per_model = default_runs_per_model
         identity: dict[str, Any] = {"model": entry}
     elif isinstance(entry, dict):
         provider = entry.get("provider")
@@ -109,9 +117,15 @@ def _run_spec_from_entry(
             model = str(raw_model)
         explicit_name = entry.get("name")
         concurrency = entry.get("concurrency", default_concurrency)
+        runs_per_model = entry.get("runs_per_model", default_runs_per_model)
         identity = _normalize_identity_config({**entry, "model": model})
     else:
         raise click.UsageError("Model config entries must be strings or objects.")
+
+    if isinstance(runs_per_model, bool) or not isinstance(runs_per_model, int):
+        raise click.UsageError("runs_per_model must be an integer.")
+    if runs_per_model < 1:
+        raise click.UsageError("runs_per_model must be at least 1.")
 
     config_identity_json = json.dumps(identity, sort_keys=True, separators=(",", ":"))
     run_name = explicit_name or _fallback_run_name(model, identity)
@@ -119,6 +133,7 @@ def _run_spec_from_entry(
         run_name=run_name,
         requested_model=model,
         concurrency=concurrency,
+        runs_per_model=runs_per_model,
         ollama_options=identity.get("options") or None,
         model_base_url=identity.get("model_base_url"),
         max_steps=identity.get("max_steps"),
@@ -157,6 +172,7 @@ def _dedupe_run_specs(run_specs: list[RunSpec]) -> list[RunSpec]:
                 run_name=run_spec.run_name,
                 requested_model=run_spec.requested_model,
                 concurrency=run_spec.concurrency,
+                runs_per_model=run_spec.runs_per_model,
                 ollama_options=run_spec.ollama_options,
                 model_base_url=run_spec.model_base_url,
                 max_steps=run_spec.max_steps,
@@ -179,8 +195,15 @@ def _build_run_specs(models: tuple[str, ...], models_file: str | None) -> list[R
         with open(models_file) as f:
             cfg = yaml.safe_load(f)
         default_concurrency = cfg.get("defaults", {}).get("concurrency", 1)
+        default_runs_per_model = cfg.get("defaults", {}).get("runs_per_model", 1)
         for entry in cfg.get("models", []):
-            run_specs.append(_run_spec_from_entry(entry, default_concurrency=default_concurrency))
+            run_specs.append(
+                _run_spec_from_entry(
+                    entry,
+                    default_concurrency=default_concurrency,
+                    default_runs_per_model=default_runs_per_model,
+                )
+            )
 
     for model in models:
         run_specs.append(_run_spec_from_entry(model, default_concurrency=1))
@@ -201,6 +224,7 @@ def _build_inline_run_spec(model: str, ollama_options: dict | None = None) -> Ru
         run_name=run_name,
         requested_model=model,
         concurrency=1,
+        runs_per_model=1,
         ollama_options=ollama_options,
         model_base_url=None,
         max_steps=None,
@@ -314,6 +338,8 @@ def _effective_run_config(
     openai_compat_telemetry_adapter: str | None = None,
     mcp_ollama_read_timeout_seconds: float | None = None,
     telemetry_enabled: bool | None = None,
+    run_index: int | None = None,
+    runs_per_model: int | None = None,
 ) -> dict[str, Any]:
     config = dict(run_spec.config_identity)
     if model_base_url is not None and "model_base_url" not in config:
@@ -335,6 +361,10 @@ def _effective_run_config(
         and "mcp_ollama_read_timeout_seconds" not in config
     ):
         config["mcp_ollama_read_timeout_seconds"] = mcp_ollama_read_timeout_seconds
+    if run_index is not None:
+        config["run_index"] = run_index
+    if runs_per_model is not None:
+        config["runs_per_model"] = runs_per_model
     return config
 
 
@@ -356,7 +386,9 @@ async def _run_baseline_with_specs(
 
     output_dir.mkdir(parents=True, exist_ok=True)
     results = {}
-    for i, run_spec in enumerate(run_specs, 1):
+    total_runs = sum(run_spec.runs_per_model for run_spec in run_specs)
+    run_number = 0
+    for run_spec in run_specs:
         effective_concurrency = (
             concurrency_override if concurrency_override is not None else run_spec.concurrency
         )
@@ -365,32 +397,42 @@ async def _run_baseline_with_specs(
             if model_base_url_override is not None
             else run_spec.model_base_url or default_model_base_url
         )
-        csv_path = output_dir / f"{run_spec.file_slug}.csv"
         opts_str = f", options={run_spec.ollama_options}" if run_spec.ollama_options else ""
         base_url_str = f", base_url={effective_model_base_url}" if effective_model_base_url else ""
-        click.echo(
-            f"\n[{i}/{len(run_specs)}] {run_spec.run_name} -> {run_spec.requested_model}  "
-            f"(concurrency={effective_concurrency}{opts_str}{base_url_str})"
-        )
-        results[run_spec.run_name] = await run_eval_cli_bare(
-            manifest_path=manifest_path,
-            model=run_spec.requested_model,
-            output_path=csv_path,
-            concurrency=effective_concurrency,
-            bhce_url=bhce_url,
-            ollama_options=run_spec.ollama_options,
-            max_model_reruns_on_infra=max_model_reruns_on_infra,
-            run_name=run_spec.run_name,
-            run_config=_effective_run_config(
-                run_spec,
+        for run_index in range(1, run_spec.runs_per_model + 1):
+            run_number += 1
+            if run_spec.runs_per_model == 1:
+                csv_path = output_dir / f"{run_spec.file_slug}.csv"
+                result_key = run_spec.run_name
+            else:
+                csv_path = output_dir / run_spec.file_slug / f"run-{run_index:03d}.csv"
+                csv_path.parent.mkdir(parents=True, exist_ok=True)
+                result_key = f"{run_spec.run_name} [run-{run_index:03d}]"
+            click.echo(
+                f"\n[{run_number}/{total_runs}] {result_key} -> {run_spec.requested_model}  "
+                f"(concurrency={effective_concurrency}{opts_str}{base_url_str})"
+            )
+            results[result_key] = await run_eval_cli_bare(
+                manifest_path=manifest_path,
+                model=run_spec.requested_model,
+                output_path=csv_path,
+                concurrency=effective_concurrency,
+                bhce_url=bhce_url,
+                ollama_options=run_spec.ollama_options,
+                max_model_reruns_on_infra=max_model_reruns_on_infra,
+                run_name=run_spec.run_name,
+                run_config=_effective_run_config(
+                    run_spec,
+                    model_base_url=effective_model_base_url,
+                    telemetry_enabled=telemetry_enabled,
+                    run_index=run_index,
+                    runs_per_model=run_spec.runs_per_model,
+                ),
                 model_base_url=effective_model_base_url,
+                health_timeout_seconds=health_timeout_seconds,
+                health_poll_interval=health_poll_interval,
                 telemetry_enabled=telemetry_enabled,
-            ),
-            model_base_url=effective_model_base_url,
-            health_timeout_seconds=health_timeout_seconds,
-            health_poll_interval=health_poll_interval,
-            telemetry_enabled=telemetry_enabled,
-        )
+            )
     return results
 
 
@@ -419,7 +461,9 @@ async def _run_baseline_mcp_with_specs(
 
     output_dir.mkdir(parents=True, exist_ok=True)
     results = {}
-    for i, run_spec in enumerate(run_specs, 1):
+    total_runs = sum(run_spec.runs_per_model for run_spec in run_specs)
+    run_number = 0
+    for run_spec in run_specs:
         effective_concurrency = (
             concurrency_override if concurrency_override is not None else run_spec.concurrency
         )
@@ -444,43 +488,54 @@ async def _run_baseline_mcp_with_specs(
         effective_openai_compat_telemetry_adapter = (
             run_spec.openai_compat_telemetry_adapter or openai_compat_telemetry_adapter
         )
-        csv_path = output_dir / f"{run_spec.file_slug}.csv"
         opts_str = f", options={run_spec.ollama_options}" if run_spec.ollama_options else ""
         base_url_str = f", base_url={effective_model_base_url}" if effective_model_base_url else ""
-        click.echo(
-            f"\n[{i}/{len(run_specs)}] {run_spec.run_name} -> {run_spec.requested_model}  "
-            f"(concurrency={effective_concurrency}{opts_str}{base_url_str}, max_steps={effective_max_steps})"  # noqa: E501
-        )
-        results[run_spec.run_name] = await run_eval_mcp_cli_bare(
-            manifest_path=manifest_path,
-            model=run_spec.requested_model,
-            output_path=csv_path,
-            concurrency=effective_concurrency,
-            bhce_url=bhce_url,
-            ollama_options=run_spec.ollama_options,
-            max_model_reruns_on_infra=max_model_reruns_on_infra,
-            mcp_dir=mcp_dir,
-            max_steps=effective_max_steps,
-            resource_mode=resource_mode,
-            mcp_tool_loop=effective_mcp_tool_loop,
-            openai_compat_telemetry_adapter=effective_openai_compat_telemetry_adapter,
-            mcp_ollama_read_timeout_seconds=effective_mcp_ollama_read_timeout_seconds,
-            run_name=run_spec.run_name,
-            run_config=_effective_run_config(
-                run_spec,
-                model_base_url=effective_model_base_url,
+        for run_index in range(1, run_spec.runs_per_model + 1):
+            run_number += 1
+            if run_spec.runs_per_model == 1:
+                csv_path = output_dir / f"{run_spec.file_slug}.csv"
+                result_key = run_spec.run_name
+            else:
+                csv_path = output_dir / run_spec.file_slug / f"run-{run_index:03d}.csv"
+                csv_path.parent.mkdir(parents=True, exist_ok=True)
+                result_key = f"{run_spec.run_name} [run-{run_index:03d}]"
+            click.echo(
+                f"\n[{run_number}/{total_runs}] {result_key} -> {run_spec.requested_model}  "
+                f"(concurrency={effective_concurrency}{opts_str}{base_url_str}, "
+                f"max_steps={effective_max_steps})"
+            )
+            results[result_key] = await run_eval_mcp_cli_bare(
+                manifest_path=manifest_path,
+                model=run_spec.requested_model,
+                output_path=csv_path,
+                concurrency=effective_concurrency,
+                bhce_url=bhce_url,
+                ollama_options=run_spec.ollama_options,
+                max_model_reruns_on_infra=max_model_reruns_on_infra,
+                mcp_dir=mcp_dir,
                 max_steps=effective_max_steps,
                 resource_mode=resource_mode,
                 mcp_tool_loop=effective_mcp_tool_loop,
                 openai_compat_telemetry_adapter=effective_openai_compat_telemetry_adapter,
                 mcp_ollama_read_timeout_seconds=effective_mcp_ollama_read_timeout_seconds,
+                run_name=run_spec.run_name,
+                run_config=_effective_run_config(
+                    run_spec,
+                    model_base_url=effective_model_base_url,
+                    max_steps=effective_max_steps,
+                    resource_mode=resource_mode,
+                    mcp_tool_loop=effective_mcp_tool_loop,
+                    openai_compat_telemetry_adapter=effective_openai_compat_telemetry_adapter,
+                    mcp_ollama_read_timeout_seconds=effective_mcp_ollama_read_timeout_seconds,
+                    telemetry_enabled=telemetry_enabled,
+                    run_index=run_index,
+                    runs_per_model=run_spec.runs_per_model,
+                ),
+                model_base_url=effective_model_base_url,
+                health_timeout_seconds=health_timeout_seconds,
+                health_poll_interval=health_poll_interval,
                 telemetry_enabled=telemetry_enabled,
-            ),
-            model_base_url=effective_model_base_url,
-            health_timeout_seconds=health_timeout_seconds,
-            health_poll_interval=health_poll_interval,
-            telemetry_enabled=telemetry_enabled,
-        )
+            )
     return results
 
 
@@ -1342,9 +1397,14 @@ def run_from_config(
             raise click.UsageError("defaults must be a mapping when present.")
         config_dir = config_file.parent
         default_concurrency = concurrency or defaults.get("concurrency", 1)
+        default_runs_per_model = defaults.get("runs_per_model", 1)
         run_specs = _dedupe_run_specs(
             [
-                _run_spec_from_entry(entry, default_concurrency=default_concurrency)
+                _run_spec_from_entry(
+                    entry,
+                    default_concurrency=default_concurrency,
+                    default_runs_per_model=default_runs_per_model,
+                )
                 for entry in model_entries
             ]
         )
@@ -1468,6 +1528,7 @@ def run_from_config(
                     _run_spec_from_entry(
                         resolved.model_entry,
                         default_concurrency=resolved.concurrency or 1,
+                        default_runs_per_model=resolved.runs_per_model,
                     )
                 ]
             )[0]
@@ -1476,6 +1537,26 @@ def run_from_config(
                 if model_base_url is not None
                 else run_spec.model_base_url or resolved.model_base_url
             )
+            if run_spec.runs_per_model > 1:
+                repeated_output_dir = Path(resolved.output).with_suffix("")
+                all_results = asyncio.run(
+                    _run_baseline_with_specs(
+                        manifest_path=Path(resolved.manifest),
+                        run_specs=[run_spec],
+                        output_dir=repeated_output_dir,
+                        concurrency_override=concurrency,
+                        bhce_url=resolved.bhce_url,
+                        default_model_base_url=resolved.model_base_url,
+                        model_base_url_override=model_base_url,
+                        max_model_reruns_on_infra=resolved.max_model_reruns_on_infra,
+                        health_timeout_seconds=resolved.health_timeout_seconds,
+                        health_poll_interval=resolved.health_poll_interval,
+                        telemetry_enabled=resolved.telemetry_enabled,
+                    )
+                )
+                write_combined_csv(all_results, repeated_output_dir / "combined.csv")
+                write_summary_csv(all_results, repeated_output_dir / "summary.csv")
+                return
             asyncio.run(
                 run_eval_cli(
                     manifest_path=Path(resolved.manifest),
@@ -1505,6 +1586,7 @@ def run_from_config(
                     _run_spec_from_entry(
                         resolved.model_entry,
                         default_concurrency=resolved.concurrency or 1,
+                        default_runs_per_model=resolved.runs_per_model,
                     )
                 ]
             )[0]
@@ -1520,6 +1602,33 @@ def run_from_config(
                 if run_spec.max_steps is not None
                 else resolved.max_steps
             )
+            if run_spec.runs_per_model > 1:
+                repeated_output_dir = Path(resolved.output).with_suffix("")
+                all_results = asyncio.run(
+                    _run_baseline_mcp_with_specs(
+                        manifest_path=Path(resolved.manifest),
+                        run_specs=[run_spec],
+                        output_dir=repeated_output_dir,
+                        concurrency_override=concurrency,
+                        bhce_url=resolved.bhce_url,
+                        mcp_dir=Path(resolved.mcp_dir),
+                        max_steps=effective_max_steps,
+                        resource_mode=resolved.resource_mode,
+                        mcp_tool_loop=resolved.mcp_tool_loop,
+                        openai_compat_telemetry_adapter=(resolved.openai_compat_telemetry_adapter),
+                        mcp_ollama_read_timeout_seconds=(resolved.mcp_ollama_read_timeout_seconds),
+                        default_model_base_url=resolved.model_base_url,
+                        max_steps_override=max_steps,
+                        model_base_url_override=model_base_url,
+                        max_model_reruns_on_infra=resolved.max_model_reruns_on_infra,
+                        health_timeout_seconds=resolved.health_timeout_seconds,
+                        health_poll_interval=resolved.health_poll_interval,
+                        telemetry_enabled=resolved.telemetry_enabled,
+                    )
+                )
+                write_combined_csv(all_results, repeated_output_dir / "combined.csv")
+                write_summary_csv(all_results, repeated_output_dir / "summary.csv")
+                return
             asyncio.run(
                 run_eval_mcp_cli(
                     manifest_path=Path(resolved.manifest),
@@ -1563,7 +1672,11 @@ def run_from_config(
         if resolved.kind == "baseline":
             run_specs = _dedupe_run_specs(
                 [
-                    _run_spec_from_entry(entry, default_concurrency=resolved.concurrency or 1)
+                    _run_spec_from_entry(
+                        entry,
+                        default_concurrency=resolved.concurrency or 1,
+                        default_runs_per_model=resolved.runs_per_model,
+                    )
                     for entry in resolved.model_entries or []
                 ]
             )
@@ -1595,7 +1708,11 @@ def run_from_config(
         if resolved.kind == "baseline_mcp":
             run_specs = _dedupe_run_specs(
                 [
-                    _run_spec_from_entry(entry, default_concurrency=resolved.concurrency or 1)
+                    _run_spec_from_entry(
+                        entry,
+                        default_concurrency=resolved.concurrency or 1,
+                        default_runs_per_model=resolved.runs_per_model,
+                    )
                     for entry in resolved.model_entries or []
                 ]
             )
@@ -2069,10 +2186,11 @@ def baseline_mcp_resources(
 
 def _build_manifest(graph: ADGraph, seed: int) -> dict:
     """Build the ground-truth manifest for the generated dataset."""
-    users = graph.nodes_by_type("User")
-    computers = graph.nodes_by_type("Computer")
-    groups = graph.nodes_by_type("Group")
-    ous = graph.nodes_by_type("OU")
+    projected_nodes = list(project_nodes_for_sharphound(graph).values())
+    users = [node for node in projected_nodes if node.node_type == "User"]
+    computers = [node for node in projected_nodes if node.node_type == "Computer"]
+    groups = [node for node in projected_nodes if node.node_type == "Group"]
+    ous = [node for node in projected_nodes if node.node_type == "OU"]
 
     return {
         "domain": graph.domain,
@@ -2083,7 +2201,7 @@ def _build_manifest(graph: ADGraph, seed: int) -> dict:
             "computers": len(computers),
             "groups": len(groups),
             "ous": len(ous),
-            "total_nodes": graph.node_count(),
+            "total_nodes": len(projected_nodes),
             "total_edges": graph.edge_count(),
         },
         "planted_paths": [
@@ -2106,6 +2224,16 @@ def _build_manifest(graph: ADGraph, seed: int) -> dict:
                 ),
                 "path_edges": [
                     {"source": src, "edge": edge, "target": tgt} for src, edge, tgt in p.path_edges
+                ],
+                "supporting_edges": [
+                    {
+                        "source": src,
+                        "source_name": str(graph.require_node(src).properties.get("name", src)),
+                        "edge": edge,
+                        "target": tgt,
+                        "target_name": str(graph.require_node(tgt).properties.get("name", tgt)),
+                    }
+                    for src, edge, tgt in p.metadata.get("supporting_edges", [])
                 ],
                 "verification_cypher": p.verification_cypher,
                 "mitre": p.mitre,
