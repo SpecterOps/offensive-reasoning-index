@@ -1,0 +1,30 @@
+Complex benchmark ingest and repeat-run hardening.
+
+Tier 6 SharpHound projection:
+- Added a centralized, non-mutating ADEdge-to-SharpHound projection used by ZIP and directory serialization.
+- Projects membership, ACL, Enroll/AutoEnroll, sessions, delegation/RBCD, GPO/OU, containment, trust, publication, and lateral-access relationships into CE-ingestable structures.
+- Uses exact-scope synthetic OU GPOChanges carriers for AdminTo, CanRDP, CanPSRemote, and ExecuteDCOM relationships that otherwise disappear from SharpHound output.
+- Added archive reconstruction/validation that refuses to write a ZIP when any planted path edge or contextual supporting edge is missing.
+
+Tier 6 graph and scoring repairs:
+- Repaired invalid edge shapes and discontinuous decoy/stale/ADCS/trust path declarations.
+- Keeps attack path_edges continuous while recording contextual TrustedBy and Enroll evidence as supporting_edges.
+- Adds named source-edge-target triples to manifests, task prompts, answer contracts, live ingest checks, direct grading, MCP grading, diagnostics, and offline scoring.
+- Adds explicit no_path grading for negative controls; a successful empty reference and explicit model rejection can score, while failed queries, nonempty paths, wrong endpoints, and reversed endpoints fail.
+
+Repeated model runs:
+- Adds defaults.runs_per_model with per-model overrides and positive-integer validation.
+- Runs independent direct and MCP passes against the same manifest, writes isolated run-NNN CSV artifacts, and records run_index/runs_per_model in task and summary output.
+- Preserves max_model_reruns_on_infra as a distinct retry mechanism rather than counting recovery attempts as stochastic samples.
+- Extends report output through Tier 6 without combining direct and MCP scores.
+
+Documentation and validation:
+- Updated README, benchmark runbook, and public model config example.
+- Full suite: 272 passed.
+- Ruff: all checks passed; all changed Python files formatted.
+- Generated complex-v1 seed 4401: 7828 serialized nodes, 22034 internal edges, 30 planted paths, 19 Tier 6 paths, 3 supporting relationships.
+- Archive validation covered all 30 planted paths.
+- Direct/Cypher preflight: 42 tasks, 0 errors, 25 warnings.
+- MCP preflight: 62 tasks, 0 errors, 29 warnings.
+
+Operational gate still required after merge: upload the regenerated ZIP into the controlled BloodHound CE instance and require ori verify-ingest to pass 30/30 before any live model campaign.
