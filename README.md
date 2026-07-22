@@ -273,6 +273,13 @@ declared planted relationship before writing it. The current corpus must pass al
 encoded in CE-ingestable SharpHound structures; operators must still upload the
 ZIP and require `ori verify-ingest` to report 30/30 before running models.
 
+Generated manifest v2 records the relationship-contract version, SharpHound file
+versions, tested BloodHound CE baseline, complete projected node counts, and an
+archive-derived relationship summary. Relationship names are canonical end to end:
+for example, `WriteDacl` is the SharpHound ACE right and `SameForestTrust` is the
+live CE relationship. Legacy `WriteDACL` and `TrustedBy` inputs are normalized only
+at compatibility boundaries and are never emitted by new datasets.
+
 The next hardening step is to add an official suite selector that chooses exactly
 100 direct tasks and 100 MCP tasks with intentional tier distribution from the same
 dataset.

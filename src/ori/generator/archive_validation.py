@@ -7,6 +7,8 @@ import zipfile
 from dataclasses import dataclass, field
 from io import BytesIO
 
+from ori.relationships import canonical_ace_kind, canonical_relationship_kind
+
 from .graph import ADGraph
 
 Relationship = tuple[str, str, str]
@@ -52,9 +54,13 @@ def validate_sharphound_zip(graph: ADGraph, archive: bytes) -> ArchiveValidation
     relationships = _relationships_from_archive(archive)
     checks = []
     for planted in graph.planted_paths:
-        expected = [
+        edge_references = (
             *planted.path_edges,
             *planted.metadata.get("supporting_edges", []),
+        )
+        expected = [
+            (source, canonical_relationship_kind(kind), target)
+            for source, kind, target in edge_references
         ]
         missing = tuple(edge for edge in expected if edge not in relationships)
         checks.append(
@@ -85,7 +91,12 @@ def _relationships_from_archive(archive: bytes) -> set[Relationship]:
         for member in record.get("Members", []):
             relationships.add((member["ObjectIdentifier"], "MemberOf", target_id))
         for ace in record.get("Aces", []):
-            relationships.add((ace["PrincipalSID"], ace["RightName"], target_id))
+            right_name = ace.get("RightName")
+            try:
+                canonical_right = canonical_ace_kind(right_name)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"Invalid ACE right on {target_id}: {right_name!r}") from exc
+            relationships.add((ace["PrincipalSID"], canonical_right, target_id))
         for session in (record.get("Sessions") or {}).get("Results", []):
             relationships.add((target_id, "HasSession", session["UserSID"]))
         for delegated in record.get("AllowedToDelegate", []):
@@ -102,7 +113,9 @@ def _relationships_from_archive(archive: bytes) -> set[Relationship]:
         for trust in record.get("Trusts", []):
             trusted_id = trust.get("TargetDomainSid")
             if trusted_id in object_ids:
-                relationships.add((target_id, "TrustedBy", trusted_id))
+                relationships.update(_trust_relationships(target_id, trusted_id, trust))
+        for principal in record.get("HasSIDHistory", []):
+            relationships.add((target_id, "HasSIDHistory", principal["ObjectIdentifier"]))
 
         changes = record.get("GPOChanges") or {}
         affected = [item["ObjectIdentifier"] for item in changes.get("AffectedComputers", [])]
@@ -117,3 +130,22 @@ def _relationships_from_archive(archive: bytes) -> set[Relationship]:
                     relationships.add((principal["ObjectIdentifier"], edge_kind, computer_id))
 
     return relationships
+
+
+def _trust_relationships(
+    source_domain_id: str, target_domain_id: str, trust: dict
+) -> set[Relationship]:
+    trust_type = str(trust.get("TrustType", "")).casefold()
+    if trust_type != "parentchild":
+        raise ValueError(f"Unsupported SharpHound trust type: {trust.get('TrustType')!r}")
+
+    direction = str(trust.get("TrustDirection", "")).casefold()
+    outbound = (source_domain_id, "SameForestTrust", target_domain_id)
+    inbound = (target_domain_id, "SameForestTrust", source_domain_id)
+    if direction == "bidirectional":
+        return {outbound, inbound}
+    if direction == "outbound":
+        return {outbound}
+    if direction == "inbound":
+        return {inbound}
+    raise ValueError(f"Unsupported SharpHound trust direction: {trust.get('TrustDirection')!r}")

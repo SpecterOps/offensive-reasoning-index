@@ -546,6 +546,27 @@ def test_direct_grade_requires_declared_contextual_mechanism() -> None:
     assert "GROUP@CORP.LOCAL -[Enroll]-> TEMPLATE@CORP.LOCAL" in wrong_endpoints.details
 
 
+def test_direct_grade_rejects_missing_positive_reference_edge_evidence() -> None:
+    task = _make_task("path_exists")
+    task.metadata["reference_evidence"] = {
+        "required_edges": [{"source": "A", "edge": "AdminTo", "target": "B"}],
+        "expected_cardinality": 1,
+        "endpoint_anchored": True,
+    }
+
+    result = grade(
+        task,
+        _make_model_response("MATCH (a)-[:AdminTo]->(b) RETURN a, b"),
+        _make_cypher_result(["A", "B"]),
+        _make_cypher_result([]),
+        {"A", "B"},
+    )
+
+    assert result.score == 0.0
+    assert result.outcome == "INFRA_ERROR"
+    assert "no exact anchored relationship evidence" in result.details
+
+
 def test_mcp_no_path_scores_explicit_rejection() -> None:
     diagnostic = grade_mcp_diagnostic(
         _make_task("no_path"),
@@ -583,7 +604,7 @@ def test_mcp_grade_requires_declared_contextual_relationship() -> None:
     present = grade_mcp_diagnostic(task, answer, reference, {"DOMAIN-A", "DOMAIN-B"})
 
     assert missing.grade.score == 0.0
-    assert "TrustedBy" in missing.grade.details
+    assert "SameForestTrust" in missing.grade.details
     assert wrong_endpoints.grade.score == 0.0
     assert present.grade.score == 1.0
 
@@ -769,6 +790,49 @@ def test_path_finding_task_uses_verification_cypher():
     tasks = generate_tasks(_make_manifest())
     path_task = next(t for t in tasks if t.id == "t1_admin_to-01")
     assert "JDOE@TEST.LOCAL" in path_task.reference_cypher
+
+
+def test_supporting_edge_task_uses_canonical_live_kind_and_exact_evidence_guard() -> None:
+    manifest = _make_manifest()
+    manifest["planted_paths"][0]["supporting_edges"] = [
+        {
+            "source": "DOMAIN-A-ID",
+            "source_name": "DOMAIN-A",
+            "edge": "TrustedBy",
+            "target": "DOMAIN-B-ID",
+            "target_name": "DOMAIN-B",
+        }
+    ]
+
+    task = next(task for task in generate_tasks(manifest) if task.id == "t1_admin_to-01")
+
+    assert "[:TrustedBy]" not in task.reference_cypher
+    assert ":SameForestTrust" in task.reference_cypher
+    assert "ori_evidence_count = 1" in task.reference_cypher
+    assert "-[SameForestTrust]->" in task.question
+    assert task.metadata["supporting_edges"][0]["edge"] == "SameForestTrust"
+    assert task.metadata["supporting_edges"][0]["artifact_edge"] == "TrustedBy"
+
+
+def test_supporting_edge_reference_returns_computed_projection_alias_after_with() -> None:
+    manifest = _make_manifest()
+    manifest["planted_paths"][0]["verification_cypher"] = (
+        "MATCH p=(a)-[:AdminTo]->(b) RETURN nodes(p) AS nodes"
+    )
+    manifest["planted_paths"][0]["supporting_edges"] = [
+        {
+            "source": "DOMAIN-A-ID",
+            "source_name": "DOMAIN-A",
+            "edge": "SameForestTrust",
+            "target": "DOMAIN-B-ID",
+            "target_name": "DOMAIN-B",
+        }
+    ]
+
+    task = next(task for task in generate_tasks(manifest) if task.id == "t1_admin_to-01")
+
+    assert "WITH nodes(p) AS nodes, ctx1s, ctx1t" in task.reference_cypher
+    assert task.reference_cypher.endswith("RETURN nodes, ctx1s, ctx1t")
 
 
 def test_global_tasks_present():

@@ -6,6 +6,8 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ori.relationships import canonical_relationship_kind, live_relationship_kinds
+
 from .bhce import BHCEClient, parse_bhce_url
 from .mcp_runtime import RESOURCE_MODE_OFF
 from .report import print_comparison
@@ -30,6 +32,9 @@ class EdgeCheck:
     target: str
     found: bool
     error: str | None = None
+    canonical_edge_type: str = ""
+    queried_edge_types: tuple[str, ...] = ()
+    detail: str | None = None
 
 
 @dataclass
@@ -83,12 +88,21 @@ def _count_queries() -> dict[str, str]:
         "groups": "MATCH (n:Group) RETURN n",
         "ous": "MATCH (n:OU) RETURN n",
         "domains": "MATCH (n:Domain) RETURN n",
+        "gpos": "MATCH (n:GPO) RETURN n",
+        "containers": "MATCH (n:Container) RETURN n",
+        "enterprisecas": "MATCH (n:EnterpriseCA) RETURN n",
+        "rootcas": "MATCH (n:RootCA) RETURN n",
+        "aiacas": "MATCH (n:AIACA) RETURN n",
+        "ntauthstores": "MATCH (n:NTAuthStore) RETURN n",
+        "certtemplates": "MATCH (n:CertTemplate) RETURN n",
     }
 
 
 def _edge_query(source_sid: str, edge_type: str, target_sid: str) -> str:
+    live_kinds = live_relationship_kinds(edge_type)
+    relationship_pattern = "|".join(live_kinds)
     return (
-        f"MATCH (a)-[:{edge_type}]->(b) "
+        f"MATCH (a)-[:{relationship_pattern}]->(b) "
         f"WHERE coalesce(a.objectid, a.objectId) = '{source_sid}' "
         f"AND coalesce(b.objectid, b.objectId) = '{target_sid}' "
         "RETURN a, b"
@@ -122,16 +136,35 @@ async def verify_ingest(manifest_path: Path, bhce_url: str | None = None) -> Ver
                 *planted.get("path_edges", []),
                 *planted.get("supporting_edges", []),
             ]:
+                requested_kind = str(edge["edge"])
+                canonical_kind = canonical_relationship_kind(requested_kind)
+                queried_kinds = tuple(live_relationship_kinds(requested_kind))
                 edge_result = await bhce.run_cypher_resilient(
-                    _edge_query(edge["source"], edge["edge"], edge["target"])
+                    _edge_query(edge["source"], requested_kind, edge["target"])
                 )
+                found_edge = edge_result.success and len(edge_result.nodes) > 0
+                detail = None
+                if edge_result.success and not found_edge:
+                    normalization = (
+                        f"manifest kind {requested_kind!r} canonicalizes to {canonical_kind!r}; "
+                        if requested_kind != canonical_kind
+                        else ""
+                    )
+                    detail = (
+                        f"{normalization}queried live kind(s): {', '.join(queried_kinds)}; "
+                        "no exact source/kind/target edge was returned (relationship may have "
+                        "been dropped or encoded with a mismatched kind)"
+                    )
                 edge_checks.append(
                     EdgeCheck(
-                        edge_type=edge["edge"],
+                        edge_type=requested_kind,
                         source=edge["source"],
                         target=edge["target"],
-                        found=edge_result.success and len(edge_result.nodes) > 0,
+                        found=found_edge,
                         error=None if edge_result.success else edge_result.error,
+                        canonical_edge_type=canonical_kind,
+                        queried_edge_types=queried_kinds,
+                        detail=detail,
                     )
                 )
             path_checks.append(
@@ -198,7 +231,15 @@ def print_verify_ingest(result: VerifyIngestResult) -> None:
             print(f"  verification query failed: {path.error}")
         for edge in path.edge_checks:
             edge_status = "OK" if edge.found else "MISSING"
-            print(f"  - {edge.edge_type:24} {edge.source[-6:]} -> {edge.target[-6:]} {edge_status}")
+            queried = ", ".join(edge.queried_edge_types) or edge.edge_type
+            print(
+                f"  - {edge.edge_type:24} {edge.source[-6:]} -> {edge.target[-6:]} "
+                f"{edge_status} (live: {queried})"
+            )
+            if edge.detail:
+                print(f"    {edge.detail}")
+            if edge.error:
+                print(f"    edge query failed: {edge.error}")
 
     ok_paths = sum(1 for path in result.path_checks if path.ok)
     print(f"\nSummary: {ok_paths}/{len(result.path_checks)} planted paths verified")

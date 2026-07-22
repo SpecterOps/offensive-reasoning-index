@@ -114,7 +114,7 @@ def complex_path_templates() -> tuple[ComplexPathTemplate, ...]:
             "writedacl_addmember_nested_admin_chain",
             "hard",
             True,
-            ("WriteDACL", "AddMember", "MemberOf", "AdminTo"),
+            ("WriteDacl", "AddMember", "MemberOf", "AdminTo"),
             plant_acl_group_nesting_tier0,
         ),
         ComplexPathTemplate(
@@ -150,7 +150,7 @@ def complex_path_templates() -> tuple[ComplexPathTemplate, ...]:
             "trustedby_bridge_to_tier0",
             "hard",
             True,
-            ("TrustedBy", "GenericAll", "MemberOf"),
+            ("SameForestTrust", "GenericAll", "MemberOf"),
             plant_trust_hopping_tier0,
         ),
         ComplexPathTemplate(
@@ -419,7 +419,7 @@ def plant_acl_group_nesting_tier0(graph: ADGraph, template: ComplexPathTemplate)
     server_admins = _create_group(graph, "ORI-T6-SERVER-ADMINS")
     mgmt_host, dc = _pick_computers(graph, count=2)
     da_group = _domain_admins(graph)
-    bridge_group.aces.append(ACE(source.object_id, "User", "WriteDACL"))
+    bridge_group.aces.append(ACE(source.object_id, "User", "WriteDacl"))
     host_bridge_edges = _bridge_hosts(graph, mgmt_host, dc, "ACL-HOST-BRIDGE")
     terminal_edges = _finish_at_domain_admin(graph, dc, da_group, "ACL-TIER0")
     if "forcechange" in template.variant:
@@ -435,10 +435,10 @@ def plant_acl_group_nesting_tier0(graph: ADGraph, template: ComplexPathTemplate)
             *terminal_edges,
         ]
     else:
-        graph.add_edge(source.object_id, "WriteDACL", bridge_group.object_id, planted=True)
+        graph.add_edge(source.object_id, "WriteDacl", bridge_group.object_id, planted=True)
         graph.add_edge(source.object_id, "AddMember", bridge_group.object_id, planted=True)
         edges = [
-            (source.object_id, "WriteDACL", bridge_group.object_id),
+            (source.object_id, "WriteDacl", bridge_group.object_id),
             (source.object_id, "AddMember", bridge_group.object_id),
             (bridge_group.object_id, "MemberOf", server_admins.object_id),
             (server_admins.object_id, "AdminTo", mgmt_host.object_id),
@@ -548,8 +548,8 @@ def plant_trust_hopping_tier0(graph: ADGraph, template: ComplexPathTemplate) -> 
         terminal_escalation_type="trust",
         required_capabilities=("trust_analysis", "group_nesting", "tier0_path_composition"),
         supporting_edges=[
-            (graph.domain_sid, "TrustedBy", foreign_domain.object_id),
-            (foreign_domain.object_id, "TrustedBy", graph.domain_sid),
+            (graph.domain_sid, "SameForestTrust", foreign_domain.object_id),
+            (foreign_domain.object_id, "SameForestTrust", graph.domain_sid),
         ],
     )
 
@@ -1020,8 +1020,8 @@ def _add_trust_context(graph: ADGraph) -> ADNode:
             extra={"Trusts": [], "ChildObjects": [], "Links": []},
         )
     )
-    graph.add_edge(graph.domain_sid, "TrustedBy", foreign_domain.object_id)
-    graph.add_edge(foreign_domain.object_id, "TrustedBy", graph.domain_sid)
+    graph.add_edge(graph.domain_sid, "SameForestTrust", foreign_domain.object_id)
+    graph.add_edge(foreign_domain.object_id, "SameForestTrust", graph.domain_sid)
     return foreign_domain
 
 

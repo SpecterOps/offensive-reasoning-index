@@ -6,10 +6,13 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from ori.relationships import canonical_relationship_kind, live_relationship_kinds
+
 from .adapter import ModelResponse
 from .bhce import BHCEClient, CypherResult
 from .contracts import AnswerContract, task_contract_for
 from .diagnostics import FinalAnswerDiagnostics, build_final_answer_diagnostics
+from .preflight import check_reference_result
 from .tasks import Task
 
 OUTCOME_CORRECT = "CORRECT"
@@ -135,6 +138,15 @@ def grade(
             outcome="CYPHER_ERROR",
             hallucination=False,
             details=f"Cypher execution failed: {model_result.error}",
+        )
+
+    reference_check = check_reference_result(task, ref_result)
+    if not reference_check["ok"]:
+        return GradeResult(
+            score=0.0,
+            outcome=OUTCOME_INFRA_ERROR,
+            hallucination=False,
+            details=f"Reference evidence preflight failed: {reference_check['detail']}",
         )
 
     # Hallucination check — must run before scoring
@@ -264,13 +276,24 @@ def _required_contextual_relationships(
         relationships.extend(contract.required_edges)
     deduped: dict[tuple[str, str, str], dict[str, Any]] = {}
     for edge in relationships:
+        kind = canonical_relationship_kind(
+            str(edge.get("edge") or edge.get("relationship") or edge.get("type", ""))
+        )
         key = (
             str(edge.get("source_name") or edge.get("source", "")).upper(),
-            str(edge.get("edge") or edge.get("relationship") or edge.get("type", "")).upper(),
+            kind.upper(),
             str(edge.get("target_name") or edge.get("target", "")).upper(),
         )
         if all(key):
-            deduped[key] = dict(edge)
+            normalized = dict(edge)
+            normalized["_artifact_edge"] = str(
+                edge.get("artifact_edge")
+                or edge.get("edge")
+                or edge.get("relationship")
+                or edge.get("type", "")
+            )
+            normalized["edge"] = kind
+            deduped[key] = normalized
     return list(deduped.values())
 
 
@@ -311,15 +334,20 @@ def _endpoint_aliases(values: set[str], ref_result: CypherResult) -> set[str]:
 def _relationship_matches(
     required: dict[str, Any], reported: dict[str, Any], ref_result: CypherResult
 ) -> bool:
-    required_kind = str(
-        required.get("edge") or required.get("relationship") or required.get("type", "")
-    ).upper()
+    required_kind = canonical_relationship_kind(
+        str(required.get("edge") or required.get("relationship") or required.get("type", ""))
+    )
+    accepted_kinds = {
+        required_kind,
+        str(required.get("_artifact_edge", "")),
+        *live_relationship_kinds(required_kind),
+    }
     reported_kind = str(
         reported.get("edge") or reported.get("relationship") or reported.get("type", "")
-    ).upper()
+    )
     return (
-        bool(required_kind)
-        and required_kind == reported_kind
+        bool(reported_kind)
+        and reported_kind.casefold() in {kind.casefold() for kind in accepted_kinds if kind}
         and bool(
             _endpoint_aliases(_edge_endpoint_values(required, "source"), ref_result)
             & _endpoint_aliases(_edge_endpoint_values(reported, "source"), ref_result)
@@ -337,11 +365,18 @@ def _missing_direct_contextual_relationships(
     text = f"{model_response.cypher or ''}\n{model_response.raw_text}".upper()
     missing = []
     for edge in _required_contextual_relationships(task):
-        kind = str(edge.get("edge") or edge.get("relationship") or edge.get("type", ""))
+        kind = canonical_relationship_kind(
+            str(edge.get("edge") or edge.get("relationship") or edge.get("type", ""))
+        )
+        accepted_kinds = {
+            kind,
+            str(edge.get("_artifact_edge", "")),
+            *live_relationship_kinds(kind),
+        }
         source_values = _edge_endpoint_values(edge, "source")
         target_values = _edge_endpoint_values(edge, "target")
         if (
-            kind.upper() not in text
+            not any(candidate.upper() in text for candidate in accepted_kinds)
             or not any(value.upper() in text for value in source_values)
             or not any(value.upper() in text for value in target_values)
         ):
@@ -558,6 +593,13 @@ def grade_mcp_diagnostic(
             "INFRA_ERROR",
             False,
             f"Reference Cypher could not be graded due to BHCE availability: {ref_result.error}",
+        )
+    elif not (reference_check := check_reference_result(task, ref_result))["ok"]:
+        grade_result = GradeResult(
+            0.0,
+            OUTCOME_INFRA_ERROR,
+            False,
+            f"Reference evidence preflight failed: {reference_check['detail']}",
         )
     elif final_answer is None:
         if infra_tool_errors > 0:

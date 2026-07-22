@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import random
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Literal, cast
+
+from ori.relationships import RelationshipKind, canonical_relationship_kind
 
 NodeType = Literal[
     "User",
@@ -21,52 +23,7 @@ NodeType = Literal[
     "CertTemplate",
 ]
 
-EdgeKind = Literal[
-    # Group/membership
-    "MemberOf",
-    "HasMember",
-    # Admin / lateral movement
-    "AdminTo",
-    "CanRDP",
-    "CanPSRemote",
-    "ExecuteDCOM",
-    # Sessions
-    "HasSession",
-    # ACL edges
-    "GenericAll",
-    "GenericWrite",
-    "WriteOwner",
-    "WriteDACL",
-    "AllExtendedRights",
-    "ForceChangePassword",
-    "AddMember",
-    "AddSelf",
-    "Owns",
-    "DCSync",
-    "GetChanges",
-    "GetChangesAll",
-    # Delegation
-    "AllowedToDelegate",
-    "AllowedToAct",
-    # Container / hierarchy
-    "Contains",
-    # Trust
-    "TrustedBy",
-    # ADCS
-    "Enroll",
-    "AutoEnroll",
-    "PublishedTo",
-    "IssuedSignedBy",
-    "EnterpriseCAFor",
-    "RootCAFor",
-    "TrustedForNTAuth",
-    "NTAuthStoreFor",
-    # GPO
-    "GPLink",
-    "GPOAffectedByContainer",
-    # SID History
-    "HasSIDHistory",
-]
+EdgeKind = RelationshipKind
 
 
 @dataclass
@@ -246,13 +203,14 @@ class ADGraph:
 
     # --- Edge management ---
 
-    def add_edge(self, source: str, edge_kind: EdgeKind, target: str, **props) -> ADEdge:
+    def add_edge(self, source: str, edge_kind: EdgeKind | str, target: str, **props) -> ADEdge:
         # Validate source and target exist
         if source not in self._nodes:
             raise KeyError(f"Edge source not found: {source}")
         if target not in self._nodes:
             raise KeyError(f"Edge target not found: {target}")
-        edge = ADEdge(source=source, target=target, edge_kind=edge_kind, properties=props)
+        canonical_kind = cast(EdgeKind, canonical_relationship_kind(edge_kind))
+        edge = ADEdge(source=source, target=target, edge_kind=canonical_kind, properties=props)
         self._edges.append(edge)
         return edge
 
