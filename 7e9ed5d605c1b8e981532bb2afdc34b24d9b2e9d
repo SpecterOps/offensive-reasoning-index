@@ -1,0 +1,19 @@
+Purpose
+
+Resolve the MCP grading mismatch discovered during live validation of the hardened SharpHound contract. The manifest stores required nodes as object IDs while BloodHound reference results may expose display labels; both identifiers must resolve to the same node contract.
+
+Implementation
+
+Updated grader and diagnostic alias indexes so every known alias, including objectId, label, name, and Name, maps to the complete alias group. Updated ESC1 task generation to omit Root CA and NTAuth wording only when generated manifest metadata marks those nodes diagnostic-only, while retaining the wording for legacy manifests that classify them as critical. Added regression tests for ID-to-label grading and both current and legacy ADCS prompt contracts.
+
+Validation
+
+Local: uv run pytest completed with 294 passed. uv run ruff check src scripts tests passed. Focused scoring tests completed with 85 passed, and the final ADCS file suite completed with 18 passed.
+
+Live dataset: complex-v1-seed-4401.zip, SHA256 a00e60e0f7ba8a02bcfee74e0ef1b99d7e46107d25b5172ffb1231e51f8f5edb. Upload completed as BloodHound job 6. ori verify-ingest matched all expected node counts and all 30/30 planted paths. Targeted MCP queries confirmed WriteDacl, SameForestTrust, and the Enroll-to-PublishedTo ADCS chain.
+
+Smoke gates: direct smoke passed with perfect 42/42 plus expected hallucination, incorrect, Cypher-error, and parse-failure controls. The first MCP smoke exposed two false negatives at t4_adcs_esc1-01 and t5_adcs_to_delegation_composite-01. After this fix, final MCP smoke passed with perfect 62/62 CORRECT, wrong 62/62 INCORRECT, and empty 62/62 PARSE_FAIL.
+
+Operational scope
+
+The upload was non-destructive. Existing BloodHound data was not cleared; same-seed deterministic object IDs were upserted. This proves re-upload behavior, not a clean-room ingest after graph reset. The unfinished official 100 direct / 100 MCP selector remains separate from this fix.
