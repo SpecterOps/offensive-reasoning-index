@@ -493,6 +493,20 @@ def generate_tasks(manifest: dict) -> list[Task]:
                 target_name=target_name,
                 domain=domain,
             )
+            diagnostic_nodes = path.get("diagnostic_nodes") or path.get("metadata", {}).get(
+                "diagnostic_nodes", []
+            )
+            if (
+                tid == "t4_adcs_esc1"
+                and diagnostic_nodes
+                and set(map(str, path.get("critical_nodes", []))).isdisjoint(
+                    map(str, diagnostic_nodes)
+                )
+            ):
+                question = question.replace(
+                    ", root CA, NTAuth trust object, and ",
+                    " and ",
+                )
             # Use per-task reference Cypher if defined, otherwise fall back to the
             # planted path's verification_cypher (correct for path_finding tasks).
             if ref_cypher_tmpl is not None:

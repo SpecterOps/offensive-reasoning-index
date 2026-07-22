@@ -409,6 +409,40 @@ def test_mcp_incomplete_answer_subtype():
     assert diagnostic.failure_subtype == "INCOMPLETE_ANSWER"
 
 
+def test_mcp_contract_object_id_matches_reference_display_label() -> None:
+    from ori.eval.bhce import CypherResult
+
+    object_id = "S-1-5-21-1-ENTERPRISECA-PHASE4"
+    label = "ORI-ENTERPRISE-CA@CORP.LOCAL"
+    task = Task(
+        id="t4_adcs_esc1-01",
+        template_id="t4_adcs_esc1",
+        tier=4,
+        category="path_finding",
+        question="Find the ESC1 path.",
+        reference_cypher="MATCH (ca:EnterpriseCA) RETURN ca",
+        grade_mode="path_exists",
+        metadata={"critical_nodes": [object_id]},
+    )
+    reference = CypherResult(
+        success=True,
+        nodes=[{"label": label, "objectId": object_id}],
+        node_names={label},
+    )
+
+    diagnostic = grade_mcp_diagnostic(
+        task,
+        {"answer_type": "path_exists", "path_found": True, "node_names": [label]},
+        reference,
+        {label},
+    )
+
+    assert diagnostic.grade.outcome == "CORRECT"
+    assert diagnostic.missing_required_nodes == []
+    assert diagnostic.final_answer_diagnostics is not None
+    assert diagnostic.final_answer_diagnostics.reference_path_nodes_seen_count == 1
+
+
 def test_grade_cypher_error():
     task = _make_task()
     resp = _make_model_response()
