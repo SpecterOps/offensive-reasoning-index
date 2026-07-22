@@ -1,0 +1,53 @@
+ORI SharpHound relationship-contract hardening
+
+Purpose
+- Prevent planted and supporting relationships from existing only in ORI's internal graph or manifest while disappearing from serialized SharpHound data or the live BloodHound CE graph.
+- Establish one canonical relationship vocabulary across generation, serialization, manifests, ingest verification, direct grading, and MCP grading.
+
+Relationship contract
+- Adds src/ori/relationships.py as the centralized registry for canonical relationship names, endpoint types, SharpHound carriers, wire values, live CE kinds, and support classification.
+- Canonicalizes WriteDACL to WriteDacl and legacy TrustedBy to SameForestTrust at explicit compatibility boundaries.
+- Rejects unknown relationship kinds and noncanonical SharpHound ACE rights instead of silently dropping them.
+- Preserves trust direction when reconstructing ParentChild trust relationships.
+
+Generation and archive validation
+- Centralizes graph-edge projection into SharpHound structures.
+- Validates every planted path edge and supporting edge against the completed ZIP before writing it.
+- Keeps contextual Enroll and SameForestTrust evidence separate from continuous path edges.
+- Confirms the complex seed-4401 corpus contains all 30 planted paths at the archive boundary.
+
+Manifest and CLI contract
+- Emits ori-generated-manifest-v2.
+- Records relationship-contract version, SharpHound encoding profile and per-file versions, and the tested/supported BloodHound CE 9.1.0 baseline.
+- Records projected counts for all 12 SharpHound file/object categories and reconciles them with total projected nodes.
+- Labels total_edges as internal graph edges and adds an archive-derived canonical relationship-count ledger.
+- Accepts direct as the public track name while retaining cypher as a legacy CLI alias.
+
+Evaluation and ingest verification
+- Queries canonical live relationship kinds and reports requested, canonical, and queried kinds for missing exact edges.
+- Verifies all projected node types, including domain, GPO, container, and ADCS objects.
+- Requires endpoint-anchored supporting-edge evidence and exact cardinality guards before direct or MCP grading.
+- Classifies missing positive reference evidence as infrastructure failure rather than model failure.
+- Preserves computed Cypher projections across WITH aggregation boundaries; regression coverage includes nodes(p) AS nodes.
+
+Documentation and tests
+- Updates the README and benchmark-products runbook with manifest v2 and relationship compatibility behavior.
+- Adds relationship-registry, preflight, manifest, archive, grading, ingest-diagnostic, direct-alias, and computed-projection regression coverage.
+
+Verification completed before commit
+- git diff --check: passed.
+- Secret-pattern scan of staged files: no matches.
+- uv run ruff check src scripts tests: passed.
+- uv run pytest: 292 passed.
+- uv run ori generate complex --seed 4401: passed; 7,828 nodes, 22,034 internal edges, 30 planted paths.
+- Direct task preflight: 42 tasks, 0 errors, 25 PROMPT_ENTITY_WITHOUT_CONTRACT warnings.
+- MCP task preflight: 62 tasks, 0 errors, 29 PROMPT_ENTITY_WITHOUT_CONTRACT warnings.
+- Independent read-only review: no remaining ORI commit blocker.
+
+Remaining gates before merging to master or claiming campaign readiness
+- Upload the exact regenerated ZIP to the dedicated BloodHound CE 9.1 instance and wait for the ingest job to complete.
+- Require ori verify-ingest to pass exact node counts and all 30/30 planted paths.
+- Execute representative SameForestTrust, WriteDacl, and ADCS supporting-edge reference queries against the live Cypher parser.
+- Run direct smoke validation.
+- Run MCP smoke using bloodhound-mcp commit 0edcee0 or a master branch containing that trust-edge fix; the current sibling MCP master still uses legacy TrustedBy queries.
+- The official 100 direct / 100 MCP suite selector remains separate future work.
