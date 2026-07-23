@@ -592,6 +592,9 @@ dataset.
 
 ## Current Runbooks
 
+- [Complex v1 Development Campaign Freeze](docs/complex-v1-development-freeze.md):
+  immutable provenance, validity limits, and regression characterization for
+  the first GPT-5.6 Sol versus GPT-5.5 campaign.
 - [Benchmark Products Runbook](docs/benchmark-products-runbook.md): current
   simple/complex generation, setup, BloodHound handoff, preflight, ingest, model
   config, and run workflow.
