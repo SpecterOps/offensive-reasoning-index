@@ -6,11 +6,37 @@ import json
 from pathlib import Path
 from typing import Any
 
+from .bhce import CypherResult
 from .contracts import contract_nodes, task_contract_for
 from .tasks import Task, generate_mcp_tasks, generate_tasks
 
 _ROW_COUNT_HINTS = ("count", "how many", "number of")
 _NODE_WORDS = ("root ca", "ntauth", "certificate template", "domain admins", "privileged")
+
+
+def check_reference_result(task: Task, result: CypherResult) -> dict[str, Any]:
+    """Validate live positive-reference evidence before a model answer is graded."""
+    if not result.success:
+        return {"ok": False, "detail": f"reference query failed: {result.error}"}
+    evidence = task.metadata.get("reference_evidence")
+    if task.grade_mode == "no_path" or not isinstance(evidence, dict):
+        return {"ok": True, "detail": "no positive edge-evidence contract"}
+    expected = int(evidence.get("expected_cardinality", 1))
+    if not result.nodes and not result.node_names:
+        return {
+            "ok": False,
+            "detail": (
+                "reference query returned no exact anchored relationship evidence "
+                f"(expected cardinality {expected})"
+            ),
+        }
+    actual = (result.raw or {}).get("reference_evidence_count")
+    if actual is not None and actual != expected:
+        return {
+            "ok": False,
+            "detail": f"reference evidence cardinality mismatch: expected {expected}, got {actual}",
+        }
+    return {"ok": True, "detail": f"exact anchored relationship evidence present ({expected})"}
 
 
 def preflight_tasks(
@@ -53,6 +79,32 @@ def preflight_tasks(
                         "severity": "error",
                         "code": "CONTRACT_NODE_NOT_IN_VALID_INVENTORY",
                         "detail": ", ".join(missing_from_valid),
+                    }
+                )
+        evidence = task.metadata.get("reference_evidence")
+        if isinstance(evidence, dict):
+            required_edges = evidence.get("required_edges", [])
+            if not evidence.get("endpoint_anchored") or not required_edges:
+                findings.append(
+                    {
+                        "task_id": task.id,
+                        "severity": "error",
+                        "code": "INVALID_REFERENCE_EVIDENCE_CONTRACT",
+                        "detail": (
+                            "positive reference evidence must declare anchored required edges"
+                        ),
+                    }
+                )
+            elif "ori_evidence_count = 1" not in task.reference_cypher:
+                findings.append(
+                    {
+                        "task_id": task.id,
+                        "severity": "error",
+                        "code": "REFERENCE_CARDINALITY_NOT_ENFORCED",
+                        "detail": (
+                            "reference Cypher does not enforce exact evidence cardinality; "
+                            "offline preflight does not execute the live query"
+                        ),
                     }
                 )
         q = task.question.lower()

@@ -73,6 +73,40 @@ def test_benchmark_generate_simple_writes_seeded_artifacts(tmp_path) -> None:
     assert manifest["metadata"]["benchmark_tracks"]["direct"]["task_count"] == 40
     assert 80 <= manifest["metadata"]["scale"]["users"] <= 120
 
+    assert manifest["schema_version"] == "ori-generated-manifest-v2"
+    assert manifest["metadata"]["relationship_contract_version"] == "1.0"
+    sharphound = manifest["metadata"]["sharphound"]
+    assert sharphound["encoding_profile"] == "bloodhound-ce-9.1.0-sharphound-v5-v6"
+    assert set(sharphound["file_versions"].values()) == {5, 6}
+    compatibility = manifest["metadata"]["compatibility"]["bloodhound_ce"]
+    assert compatibility == {
+        "tested_version": "9.1.0",
+        "supported_baseline": "9.1.0",
+    }
+
+    projected_counts = manifest["stats"]["projected_nodes_by_file"]
+    assert set(projected_counts) == set(sharphound["file_versions"])
+    assert manifest["stats"]["domains"] == 1
+    assert all(
+        key in projected_counts
+        for key in ("enterprisecas", "rootcas", "aiacas", "ntauthstores", "certtemplates")
+    )
+    assert sum(projected_counts.values()) == manifest["stats"]["total_nodes"]
+    assert all(manifest["stats"][key] == count for key, count in projected_counts.items())
+    assert manifest["stats"]["total_edges_scope"] == "internal_graph"
+    assert manifest["stats"]["total_edges"] == manifest["stats"]["internal_graph_edges"]
+
+    relationship_summary = manifest["relationship_summary"]
+    assert relationship_summary["total_relationships"] == sum(
+        relationship_summary["counts_by_kind"].values()
+    )
+    emitted_kinds = {
+        edge["edge"]
+        for path in manifest["planted_paths"]
+        for edge in [*path["path_edges"], *path["supporting_edges"]]
+    }
+    assert emitted_kinds.isdisjoint({"WriteDACL", "TrustedBy"})
+
 
 def test_generate_simple_alias_writes_seeded_artifacts(tmp_path) -> None:
     result = CliRunner().invoke(
@@ -83,3 +117,27 @@ def test_generate_simple_alias_writes_seeded_artifacts(tmp_path) -> None:
     assert result.exit_code == 0, result.output
     assert (tmp_path / "simple-v1-seed-1234.zip").exists()
     assert (tmp_path / "simple-v1-seed-1234_manifest.json").exists()
+
+
+def test_preflight_tasks_accepts_public_direct_track_name(tmp_path) -> None:
+    manifest_path = tmp_path / "manifest.json"
+    report_path = tmp_path / "preflight.json"
+    manifest_path.write_text(json.dumps({"planted_paths": []}))
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "preflight-tasks",
+            "--manifest",
+            str(manifest_path),
+            "--track",
+            "direct",
+            "--output",
+            str(report_path),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    report = json.loads(report_path.read_text())
+    assert report["track"] == "direct"
+    assert report["ok"] is True

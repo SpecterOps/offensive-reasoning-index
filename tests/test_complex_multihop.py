@@ -142,12 +142,12 @@ def test_trust_hop_uses_foreign_domain_principal_and_domain_trust() -> None:
     assert foreign_group.properties["domainsid"] != graph.domain_sid
     assert len(domains) == 2
     assert any(
-        edge.edge_kind == "TrustedBy" and edge.source == graph.domain_sid
+        edge.edge_kind == "SameForestTrust" and edge.source == graph.domain_sid
         for edge in graph.get_edges()
     )
     assert (
         graph.domain_sid,
-        "TrustedBy",
+        "SameForestTrust",
         foreign_group.properties["domainsid"],
     ) in trust_path.metadata["supporting_edges"]
 
@@ -172,8 +172,8 @@ def test_contextual_edges_are_separate_from_continuous_attack_paths() -> None:
     assert "Enroll" in [edge[1] for edge in adcs.metadata["supporting_edges"]]
 
     trust = paths["t6_trust_hopping_tier0"]
-    assert "TrustedBy" not in [edge[1] for edge in trust.path_edges]
-    assert "TrustedBy" in [edge[1] for edge in trust.metadata["supporting_edges"]]
+    assert "SameForestTrust" not in [edge[1] for edge in trust.path_edges]
+    assert "SameForestTrust" in [edge[1] for edge in trust.metadata["supporting_edges"]]
 
 
 def test_tier6_tasks_are_generated_with_operator_questions() -> None:
@@ -194,11 +194,11 @@ def test_tier6_tasks_are_generated_with_operator_questions() -> None:
 
     for template_id, mechanism in {
         "t6_adcs_identity_transition_tier0": "Enroll",
-        "t6_trust_hopping_tier0": "TrustedBy",
+        "t6_trust_hopping_tier0": "SameForestTrust",
     }.items():
         task = next(task for task in tasks if task.template_id == template_id)
         assert mechanism in task.question
-        assert f"[:{mechanism}]" in task.reference_cypher
+        assert f":{mechanism}]" in task.reference_cypher
         assert all(
             edge["source_name"] in task.question for edge in task.metadata["supporting_edges"]
         )
@@ -239,7 +239,7 @@ def test_complex_archive_contains_all_30_planted_paths() -> None:
         for path in graph.planted_paths
     )
     assert all(check.ok for check in report.path_checks)
-    assert {edge["edge"] for edge in trust_manifest["supporting_edges"]} == {"TrustedBy"}
+    assert {edge["edge"] for edge in trust_manifest["supporting_edges"]} == {"SameForestTrust"}
     assert all(edge["source_name"] for edge in trust_manifest["supporting_edges"])
     assert all(edge["target_name"] for edge in trust_manifest["supporting_edges"])
     with zipfile.ZipFile(BytesIO(archive)) as zf:

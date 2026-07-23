@@ -17,7 +17,7 @@ defaults:
   mcp:
     mcp_dir: ../bloodhound-mcp
     max_steps: 16
-    resource_mode: off
+    resource_mode: "off"
     tool_loop: auto
     openai_compat_telemetry_adapter: auto
     ollama_read_timeout_seconds: 900

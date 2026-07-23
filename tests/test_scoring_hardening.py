@@ -121,6 +121,43 @@ def test_phase4_adcs_tasks_have_contracts_from_manifest_metadata() -> None:
     assert contract is not None
     assert "ROOTCA@CORP.LOCAL" in contract.required_nodes
     assert "NTAUTH@CORP.LOCAL" in contract.required_nodes
+    assert "root CA" in task.question
+    assert "NTAuth" in task.question
+
+
+def test_phase4_adcs_task_omits_diagnostic_only_nodes_from_question() -> None:
+    manifest = {
+        "domain": "CORP.LOCAL",
+        "planted_paths": [
+            {
+                "template_id": "t4_adcs_esc1",
+                "tier": 4,
+                "source_name": "ALICE@CORP.LOCAL",
+                "target_name": "DOMAIN ADMINS@CORP.LOCAL",
+                "description": "adcs",
+                "verification_cypher": "MATCH p=() RETURN p",
+                "critical_nodes": [
+                    "ALICE@CORP.LOCAL",
+                    "TEMPLATE@CORP.LOCAL",
+                    "CA@CORP.LOCAL",
+                    "DOMAIN ADMINS@CORP.LOCAL",
+                ],
+                "metadata": {
+                    "diagnostic_nodes": ["ROOTCA@CORP.LOCAL", "NTAUTH@CORP.LOCAL"]
+                },
+            }
+        ],
+    }
+    task = next(t for t in generate_mcp_tasks(manifest) if t.id == "t4_adcs_esc1-01")
+
+    contract = task_contract_for(task)
+
+    assert contract is not None
+    assert "ROOTCA@CORP.LOCAL" not in contract.required_nodes
+    assert "NTAUTH@CORP.LOCAL" not in contract.required_nodes
+    assert "root CA" not in task.question
+    assert "NTAuth" not in task.question
+    assert "issuing CA and the privileged target" in task.question
 
 
 def test_score_answers_cli_writes_per_task_diagnostics(tmp_path) -> None:

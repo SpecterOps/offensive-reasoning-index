@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,7 @@ import yaml
 
 from .benchmarks import describe_benchmark, get_benchmark, list_benchmarks
 from .eval.phase4_v2 import generate_phase4_v2_official_tasks
+from .generator.archive_validation import _relationships_from_archive
 from .generator.attack_paths import plant_all_paths
 from .generator.benchmark_profiles import build_benchmark_generation_profile
 from .generator.graph import ADGraph
@@ -22,10 +24,18 @@ from .generator.phase4 import build_phase4_complex_graph, build_phase4_v1_graph
 from .generator.phase4_v2 import build_phase4_v2_forest
 from .generator.security import apply_baseline_security
 from .generator.serializer import (
+    _NODE_TYPE_TO_FILE,
+    _VERSIONS,
+    _build_zip,
     project_nodes_for_sharphound,
     serialize_forest_to_zip,
     serialize_to_dir,
     serialize_to_zip,
+)
+from .relationships import (
+    RELATIONSHIP_CONTRACT_VERSION,
+    SHARPHOUND_PROFILE,
+    canonical_relationship_kind,
 )
 from .run_config import RunConfigOverrides, list_run_profiles, load_run_profile
 
@@ -247,7 +257,7 @@ def _write_generated_dataset(
     metadata: dict[str, Any] | None = None,
 ) -> dict:
     serialize_to_zip(graph, output_zip)
-    manifest = _build_manifest(graph, seed)
+    manifest = _build_manifest(graph, seed, archive=output_zip.read_bytes())
     manifest.setdefault("metadata", {})
     manifest["metadata"].update(
         {
@@ -802,7 +812,8 @@ def generate(
         manifest_path = out_path / "manifest.json"
 
     # Write manifest
-    manifest = _build_manifest(graph, seed)
+    archive = zip_path.read_bytes() if as_zip else None
+    manifest = _build_manifest(graph, seed, archive=archive)
     manifest_path.write_text(json.dumps(manifest, indent=2))
     click.echo(f"        Manifest: {manifest_path}")
 
@@ -821,7 +832,13 @@ def generate(
     type=click.Path(exists=True),
     help="Generated task manifest JSON",
 )
-@click.option("--track", type=click.Choice(["mcp", "cypher"]), default="mcp", show_default=True)
+@click.option(
+    "--track",
+    type=click.Choice(["direct", "mcp", "cypher"]),
+    default="mcp",
+    show_default=True,
+    help="Benchmark track; cypher is retained as a legacy alias for direct.",
+)
 @click.option("--valid-nodes", "valid_nodes_path", type=click.Path(exists=True), default=None)
 @click.option(
     "--output", "output_path", type=click.Path(), default=None, help="Optional JSON report path"
@@ -866,7 +883,13 @@ def preflight_tasks_command(
     type=click.Path(exists=True),
     help="Structured answer JSON to grade",
 )
-@click.option("--track", type=click.Choice(["mcp", "cypher"]), default="mcp", show_default=True)
+@click.option(
+    "--track",
+    type=click.Choice(["direct", "mcp", "cypher"]),
+    default="mcp",
+    show_default=True,
+    help="Benchmark track; cypher is retained as a legacy alias for direct.",
+)
 @click.option(
     "--output", "output_path", required=True, type=click.Path(), help="Projection JSON output path"
 )
@@ -890,7 +913,7 @@ def score_answers(manifest_path: str, answers_path: str, track: str, output_path
             projection = write_score_answers_projection(
                 manifest_path=Path(manifest_path),
                 answers_path=Path(answers_path),
-                track=track,
+                track="cypher" if track == "direct" else track,
                 output_path=Path(output_path),
             )
     except ValueError as exc:
@@ -2184,25 +2207,53 @@ def baseline_mcp_resources(
     )
 
 
-def _build_manifest(graph: ADGraph, seed: int) -> dict:
+def _build_manifest(graph: ADGraph, seed: int, *, archive: bytes | None = None) -> dict:
     """Build the ground-truth manifest for the generated dataset."""
     projected_nodes = list(project_nodes_for_sharphound(graph).values())
-    users = [node for node in projected_nodes if node.node_type == "User"]
-    computers = [node for node in projected_nodes if node.node_type == "Computer"]
-    groups = [node for node in projected_nodes if node.node_type == "Group"]
-    ous = [node for node in projected_nodes if node.node_type == "OU"]
+    projected_node_counts = Counter(
+        _NODE_TYPE_TO_FILE[node.node_type]
+        for node in projected_nodes
+        if node.node_type in _NODE_TYPE_TO_FILE
+    )
+    projected_node_counts_by_file = {
+        file_type: projected_node_counts.get(file_type, 0) for file_type in _VERSIONS
+    }
+    relationships = _relationships_from_archive(
+        archive if archive is not None else _build_zip(graph)
+    )
+    relationship_counts = Counter(canonical_relationship_kind(kind) for _, kind, _ in relationships)
 
     return {
+        "schema_version": "ori-generated-manifest-v2",
         "domain": graph.domain,
         "domain_sid": graph.domain_sid,
         "seed": seed,
+        "metadata": {
+            "relationship_contract_version": RELATIONSHIP_CONTRACT_VERSION,
+            "sharphound": {
+                "encoding_profile": SHARPHOUND_PROFILE,
+                "file_versions": dict(_VERSIONS),
+            },
+            "compatibility": {
+                "bloodhound_ce": {
+                    "tested_version": "9.1.0",
+                    "supported_baseline": "9.1.0",
+                }
+            },
+        },
         "stats": {
-            "users": len(users),
-            "computers": len(computers),
-            "groups": len(groups),
-            "ous": len(ous),
+            **projected_node_counts_by_file,
+            "projected_nodes_by_file": projected_node_counts_by_file,
             "total_nodes": len(projected_nodes),
             "total_edges": graph.edge_count(),
+            "total_edges_scope": "internal_graph",
+            "internal_graph_edges": graph.edge_count(),
+        },
+        "relationship_summary": {
+            "source": "sharphound_archive_projection",
+            "counting": "unique_structural_relationships",
+            "total_relationships": len(relationships),
+            "counts_by_kind": dict(sorted(relationship_counts.items())),
         },
         "planted_paths": [
             {
@@ -2223,13 +2274,18 @@ def _build_manifest(graph: ADGraph, seed: int) -> dict:
                     else ""
                 ),
                 "path_edges": [
-                    {"source": src, "edge": edge, "target": tgt} for src, edge, tgt in p.path_edges
+                    {
+                        "source": src,
+                        "edge": canonical_relationship_kind(edge),
+                        "target": tgt,
+                    }
+                    for src, edge, tgt in p.path_edges
                 ],
                 "supporting_edges": [
                     {
                         "source": src,
                         "source_name": str(graph.require_node(src).properties.get("name", src)),
-                        "edge": edge,
+                        "edge": canonical_relationship_kind(edge),
                         "target": tgt,
                         "target_name": str(graph.require_node(tgt).properties.get("name", tgt)),
                     }

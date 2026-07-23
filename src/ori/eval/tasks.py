@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field, replace
 from typing import Any
+
+from ori.relationships import canonical_relationship_kind, live_relationship_kinds
 
 
 @dataclass
@@ -224,6 +227,52 @@ _TIER6_NEGATIVE_CONTROL_QUESTIONS: list[tuple[str, str, str, list[str], str | No
 ]
 
 
+def _return_projection_aliases(projection: str) -> list[str]:
+    """Return stable aliases for a Cypher projection used across a WITH boundary."""
+    items: list[str] = []
+    start = 0
+    depth = 0
+    quote: str | None = None
+    escaped = False
+    for index, char in enumerate(projection):
+        if quote:
+            if escaped:
+                escaped = False
+            elif char == "\\" and quote != "`":
+                escaped = True
+            elif char == quote:
+                quote = None
+            continue
+        if char in {"'", '"', "`"}:
+            quote = char
+        elif char in "([{":
+            depth += 1
+        elif char in ")]}":
+            depth -= 1
+        elif char == "," and depth == 0:
+            items.append(projection[start:index].strip())
+            start = index + 1
+    items.append(projection[start:].strip())
+
+    aliases: list[str] = []
+    for item in items:
+        alias_match = re.search(
+            r"\s+AS\s+(`?[A-Za-z_][A-Za-z0-9_]*`?)\s*$",
+            item,
+            re.IGNORECASE,
+        )
+        if alias_match:
+            aliases.append(alias_match.group(1))
+        elif re.fullmatch(r"`?[A-Za-z_][A-Za-z0-9_]*`?", item):
+            aliases.append(item)
+        else:
+            raise ValueError(
+                "Supporting-edge reference computed RETURN expressions must declare an alias: "
+                f"{item}"
+            )
+    return aliases
+
+
 def _reference_cypher_with_supporting_edges(path: dict[str, Any]) -> str:
     """Return reference Cypher that also proves declared contextual relationships."""
     reference = str(path["verification_cypher"])
@@ -237,11 +286,12 @@ def _reference_cypher_with_supporting_edges(path: dict[str, Any]) -> str:
             f"Supporting-edge reference for {path.get('template_id', 'unknown')} has no RETURN"
         )
     clauses: list[str] = []
-    return_items = [returns]
+    projection_aliases = _return_projection_aliases(returns)
+    return_items = [*projection_aliases]
     for index, edge in enumerate(supporting_edges, start=1):
         source = str(edge["source"]).replace("'", "\\'")
         target = str(edge["target"]).replace("'", "\\'")
-        edge_kind = str(edge["edge"])
+        edge_kind = "|".join(live_relationship_kinds(str(edge["edge"])))
         source_alias = f"ctx{index}s"
         target_alias = f"ctx{index}t"
         clauses.append(
@@ -250,7 +300,23 @@ def _reference_cypher_with_supporting_edges(path: dict[str, Any]) -> str:
             f"AND coalesce({target_alias}.objectid, {target_alias}.objectId) = '{target}'"
         )
         return_items.extend((source_alias, target_alias))
-    return f"{body} {' '.join(clauses)} RETURN {', '.join(return_items)}"
+    supporting_return_items = return_items[len(projection_aliases) :]
+    grouped_values = [returns, *supporting_return_items]
+    return (
+        f"{body} {' '.join(clauses)} "
+        f"WITH {', '.join(grouped_values)}, count(*) AS ori_evidence_count "
+        f"WHERE ori_evidence_count = 1 RETURN {', '.join(return_items)}"
+    )
+
+
+def _canonical_edge(edge: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(edge)
+    artifact_kind = str(edge["edge"])
+    canonical_kind = canonical_relationship_kind(artifact_kind)
+    if artifact_kind != canonical_kind:
+        normalized["artifact_edge"] = artifact_kind
+    normalized["edge"] = canonical_kind
+    return normalized
 
 
 def _questions_for_template(
@@ -427,6 +493,20 @@ def generate_tasks(manifest: dict) -> list[Task]:
                 target_name=target_name,
                 domain=domain,
             )
+            diagnostic_nodes = path.get("diagnostic_nodes") or path.get("metadata", {}).get(
+                "diagnostic_nodes", []
+            )
+            if (
+                tid == "t4_adcs_esc1"
+                and diagnostic_nodes
+                and set(map(str, path.get("critical_nodes", []))).isdisjoint(
+                    map(str, diagnostic_nodes)
+                )
+            ):
+                question = question.replace(
+                    ", root CA, NTAuth trust object, and ",
+                    " and ",
+                )
             # Use per-task reference Cypher if defined, otherwise fall back to the
             # planted path's verification_cypher (correct for path_finding tasks).
             if ref_cypher_tmpl is not None:
@@ -438,7 +518,9 @@ def generate_tasks(manifest: dict) -> list[Task]:
             else:
                 reference_cypher = _reference_cypher_with_supporting_edges(path)
             supporting_edges = [
-                edge for edge in path.get("supporting_edges", []) if isinstance(edge, dict)
+                _canonical_edge(edge)
+                for edge in path.get("supporting_edges", [])
+                if isinstance(edge, dict)
             ]
             if supporting_edges:
                 contextual_relationships = sorted(
@@ -473,6 +555,15 @@ def generate_tasks(manifest: dict) -> list[Task]:
                         "required_mechanisms": path.get("required_mechanisms", []),
                         "required_sequence": path.get("required_sequence", []),
                         "supporting_edges": supporting_edges,
+                        "reference_evidence": (
+                            {
+                                "required_edges": supporting_edges,
+                                "expected_cardinality": 1,
+                                "endpoint_anchored": True,
+                            }
+                            if supporting_edges
+                            else None
+                        ),
                         "answer_contract": (
                             {
                                 "required_edges": supporting_edges,

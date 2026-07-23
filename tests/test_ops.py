@@ -10,6 +10,7 @@ from ori.eval.ops import (
     SMOKE_EXPECTATIONS,
     PreflightResult,
     SmokeCheck,
+    _count_queries,
     _edge_query,
     print_preflight,
     print_smoke_eval,
@@ -99,11 +100,33 @@ def _manifest(tmp_path: Path) -> Path:
     return path
 
 
+def test_count_queries_cover_every_manifest_v2_node_file_type() -> None:
+    assert set(_count_queries()) == {
+        "users",
+        "computers",
+        "groups",
+        "ous",
+        "domains",
+        "gpos",
+        "containers",
+        "enterprisecas",
+        "rootcas",
+        "aiacas",
+        "ntauthstores",
+        "certtemplates",
+    }
+
+
 def test_edge_query_uses_objectid_coalesce() -> None:
     query = _edge_query("SRC", "AdminTo", "DST")
     assert "[:AdminTo]" in query
     assert "coalesce(a.objectid, a.objectId) = 'SRC'" in query
     assert "coalesce(b.objectid, b.objectId) = 'DST'" in query
+
+
+def test_edge_query_uses_canonical_live_relationship_kinds() -> None:
+    assert "[:SameForestTrust]" in _edge_query("SRC", "TrustedBy", "DST")
+    assert "[:WriteDacl]" in _edge_query("SRC", "WriteDACL", "DST")
 
 
 def test_verify_ingest_happy_path(tmp_path: Path, monkeypatch) -> None:
@@ -135,6 +158,36 @@ def test_verify_ingest_checks_supporting_edges(tmp_path: Path, monkeypatch) -> N
         "MemberOf",
         "TrustedBy",
     ]
+    trust = result.path_checks[0].edge_checks[1]
+    assert trust.canonical_edge_type == "SameForestTrust"
+    assert trust.queried_edge_types == ("SameForestTrust",)
+
+
+def test_verify_ingest_explains_missing_canonicalized_edge(tmp_path: Path, monkeypatch) -> None:
+    import asyncio
+    import json
+
+    class MissingTrustBHCEClient(FakeBHCEClient):
+        async def run_cypher(self, query: str) -> CypherResult:
+            if "SameForestTrust" in query:
+                return CypherResult(success=True, nodes=[], node_names=set(), raw={})
+            return await super().run_cypher(query)
+
+    manifest_path = _manifest(tmp_path)
+    manifest = json.loads(manifest_path.read_text())
+    manifest["planted_paths"][0]["supporting_edges"] = [
+        {"source": "DOMAIN-A", "edge": "TrustedBy", "target": "DOMAIN-B"}
+    ]
+    manifest_path.write_text(json.dumps(manifest))
+    monkeypatch.setattr("ori.eval.ops.BHCEClient", lambda domain=None: MissingTrustBHCEClient())
+
+    result = asyncio.run(verify_ingest(manifest_path))
+
+    assert result.ok is False
+    trust = result.path_checks[0].edge_checks[1]
+    assert trust.found is False
+    assert "canonicalizes to 'SameForestTrust'" in (trust.detail or "")
+    assert "queried live kind(s): SameForestTrust" in (trust.detail or "")
 
 
 def test_verify_ingest_requires_negative_control_path_to_be_absent(

@@ -17,6 +17,8 @@ from copy import deepcopy
 from io import BytesIO
 from pathlib import Path
 
+from ori.relationships import RELATIONSHIP_CONTRACTS, ace_wire_right, relationship_contract
+
 from .graph import ACE, ADEdge, ADGraph, ADNode, TypedPrincipal
 from .phase4_v2 import Phase4V2Forest
 
@@ -86,13 +88,13 @@ def _combined_forest_graph(forest: Phase4V2Forest) -> ADGraph:
             ADEdge(
                 source=child_domain_node.object_id,
                 target=parent_domain_node.object_id,
-                edge_kind="TrustedBy",
+                edge_kind="SameForestTrust",
                 properties={"trust_type": "parent_child"},
             ),
             ADEdge(
                 source=parent_domain_node.object_id,
                 target=child_domain_node.object_id,
-                edge_kind="TrustedBy",
+                edge_kind="SameForestTrust",
                 properties={"trust_type": "parent_child"},
             ),
         ]
@@ -111,12 +113,12 @@ def _add_bidirectional_domain_trusts(parent_domain_node: ADNode, child_domain_no
         child_domain_node.extra["Trusts"].append(trust_to_parent)
 
 
-def _trust_entry(domain_node: ADNode) -> dict:
+def _trust_entry(domain_node: ADNode, direction: str = "Bidirectional") -> dict:
     return {
         "TargetDomainSid": domain_node.properties["domainsid"],
         "TargetDomainName": domain_node.properties["domain"],
         "IsTransitive": True,
-        "TrustDirection": "Bidirectional",
+        "TrustDirection": direction,
         "TrustType": "ParentChild",
     }
 
@@ -156,18 +158,7 @@ def _group_nodes(nodes: dict[str, ADNode]) -> dict[str, list[ADNode]]:
 
 
 _ACL_EDGE_KINDS = {
-    "GenericAll",
-    "GenericWrite",
-    "WriteOwner",
-    "WriteDACL",
-    "AllExtendedRights",
-    "ForceChangePassword",
-    "AddMember",
-    "AddSelf",
-    "Owns",
-    "DCSync",
-    "GetChanges",
-    "GetChangesAll",
+    kind for kind, contract in RELATIONSHIP_CONTRACTS.items() if contract.wire_carrier == "ace"
 }
 
 _GPO_CHANGE_FIELDS = {
@@ -191,6 +182,13 @@ def project_nodes_for_sharphound(graph: ADGraph) -> dict[str, ADNode]:
             continue
 
         handled = False
+        contract = relationship_contract(edge.edge_kind)
+        if contract.support == "supported" and not contract.accepts_endpoints(
+            source.node_type, target.node_type
+        ):
+            raise ValueError(
+                f"Invalid endpoints for {edge.edge_kind}: {source.node_type} -> {target.node_type}"
+            )
         if edge.edge_kind == "MemberOf" and target.node_type == "Group":
             handled = True
             _append_unique(
@@ -199,12 +197,7 @@ def project_nodes_for_sharphound(graph: ADGraph) -> dict[str, ADNode]:
             )
         elif edge.edge_kind in _ACL_EDGE_KINDS:
             handled = True
-            ace = ACE(source.object_id, source.node_type, edge.edge_kind)
-            if ace not in target.aces:
-                target.aces.append(ace)
-        elif edge.edge_kind in {"Enroll", "AutoEnroll"} and target.node_type == "CertTemplate":
-            handled = True
-            ace = ACE(source.object_id, source.node_type, edge.edge_kind)
+            ace = ACE(source.object_id, source.node_type, ace_wire_right(edge.edge_kind))
             if ace not in target.aces:
                 target.aces.append(ace)
         elif edge.edge_kind == "AllowedToDelegate" and target.node_type == "Computer":
@@ -259,21 +252,29 @@ def project_nodes_for_sharphound(graph: ADGraph) -> dict[str, ADNode]:
                 source.extra.setdefault("ChildObjects", []),
                 {"ObjectIdentifier": target.object_id, "ObjectType": target.node_type},
             )
-        elif edge.edge_kind == "TrustedBy":
+        elif edge.edge_kind == "SameForestTrust":
             handled = True
             if source.node_type != "Domain" or target.node_type != "Domain":
                 _raise_invalid_planted_edge(edge, source, target)
                 continue
-            _append_unique(source.extra.setdefault("Trusts", []), _trust_entry(target))
+            _append_unique(source.extra.setdefault("Trusts", []), _trust_entry(target, "Outbound"))
         elif edge.edge_kind == "PublishedTo" and target.node_type == "EnterpriseCA":
             handled = True
             template_ref = {"ObjectIdentifier": source.object_id}
             _append_unique(target.extra.setdefault("CertTemplates", []), template_ref)
             _append_unique(target.extra.setdefault("EnabledCertTemplates", []), template_ref)
+        elif edge.edge_kind == "HasSIDHistory":
+            handled = True
+            _append_unique(
+                source.extra.setdefault("HasSIDHistory", []),
+                {"ObjectIdentifier": target.object_id, "ObjectType": target.node_type},
+            )
 
-        if not handled and edge.properties.get("planted"):
+        is_public = any(edge.properties.get(flag) for flag in ("planted", "supporting", "official"))
+        allowed_internal = contract.support in {"derived", "internal_only"} and not is_public
+        if not handled and not allowed_internal:
             raise ValueError(
-                "Planted edge has no SharpHound projection: "
+                f"{contract.support} edge has no SharpHound projection: "
                 f"{source.node_type}({source.object_id}) -[{edge.edge_kind}]-> "
                 f"{target.node_type}({target.object_id})"
             )
@@ -419,7 +420,7 @@ def _aces(node: ADNode) -> list[dict]:
         {
             "PrincipalSID": ace.principal_sid,
             "PrincipalType": ace.principal_type,
-            "RightName": ace.right_name,
+            "RightName": ace_wire_right(ace.right_name),
             "IsInherited": ace.is_inherited,
         }
         for ace in node.aces

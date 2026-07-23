@@ -95,6 +95,312 @@ uv run ori run \
 If ingest verification fails, stop and fix the BloodHound graph first. Grading a
 model against the wrong graph produces noise, not benchmark signal.
 
+## First Full Campaign: GPT-5.6 Sol vs GPT-5.5
+
+This worked example starts from an existing checkout and runs both ORI tracks
+against the complex seed-4401 dataset:
+
+```text
+direct   model produces a direct/Cypher answer that ORI executes and grades
+mcp      model uses read-only BloodHound MCP tools, then ORI grades its evidence
+```
+
+Run the commands from the repository root. This workstation keeps the
+BloodHound MCP checkout and its credential file at:
+
+```text
+../Bloodhound-MCP
+../Bloodhound-MCP/.env
+```
+
+The `.env` file supplies the BloodHound host and API credentials. Do not print
+its token values, copy it into the repository, or commit it.
+
+### 1. Confirm the checkout and install dependencies
+
+The current SharpHound/MCP grading fix is commit `7e9ed5d`. Confirm that the
+active branch contains it:
+
+```bash
+git status --short --branch
+git branch --contains 7e9ed5d
+uv sync
+```
+
+The branch check must print the active branch. If it prints nothing, switch to a
+branch that contains the fix or update your branch before benchmarking.
+
+Run the local validation gates:
+
+```bash
+uv run pytest
+uv run ruff check src scripts tests
+```
+
+Do not continue if either command fails.
+
+### 2. Confirm Codex login and model access
+
+ORI's `codex` provider reuses the Codex CLI OAuth login. Confirm the login
+without printing `~/.codex/auth.json`:
+
+```bash
+codex --version
+codex login status
+```
+
+If the status says you are not logged in:
+
+```bash
+codex login
+```
+
+On this workstation, the exact model slugs can be checked in the non-secret
+model cache:
+
+```bash
+jq -r '
+  .models[]
+  | select(.slug == "gpt-5.6-sol" or .slug == "gpt-5.5")
+  | [.slug, .display_name]
+  | @tsv
+' ~/.codex/models_cache.json
+```
+
+Require both `gpt-5.6-sol` and `gpt-5.5` in the output. Model availability is an
+account/runtime capability, so verify it again before a later campaign rather
+than assuming the cache never changes.
+
+### 3. Confirm the dedicated BloodHound environment
+
+Check that the local MCP checkout and credential file exist:
+
+```bash
+test -d ../Bloodhound-MCP
+test -f ../Bloodhound-MCP/.env
+```
+
+You may inspect only the non-secret connection fields to confirm the intended
+controlled ORI target:
+
+```bash
+rg '^BLOODHOUND_(DOMAIN|SCHEME|PORT)=' ../Bloodhound-MCP/.env
+```
+
+Then run the independent health gate:
+
+```bash
+uv run --env-file ../Bloodhound-MCP/.env \
+  ori verify-bh-health
+```
+
+A health pass proves reachability only. It does not prove that the correct
+benchmark graph is loaded.
+
+### 4. Generate a matched ZIP and manifest
+
+Generate the complex seed-4401 product without manually setting a domain:
+
+```bash
+uv run ori generate complex \
+  --seed 4401 \
+  --output datasets/benchmarks
+```
+
+This must produce the matched pair:
+
+```text
+datasets/benchmarks/complex-v1-seed-4401.zip
+datasets/benchmarks/complex-v1-seed-4401_manifest.json
+```
+
+Create the campaign directory and record artifact hashes for provenance:
+
+```bash
+mkdir -p results/benchmark-runs/complex-v1-seed-4401-gpt56sol-vs-gpt55
+shasum -a 256 \
+  datasets/benchmarks/complex-v1-seed-4401.zip \
+  datasets/benchmarks/complex-v1-seed-4401_manifest.json \
+  | tee results/benchmark-runs/complex-v1-seed-4401-gpt56sol-vs-gpt55/artifact-sha256.txt
+```
+
+Keep the ZIP and manifest together. A manifest from one generation must never
+be used to validate or grade a different archive.
+
+### 5. Preflight both task/scorer contracts
+
+Run the direct and MCP preflights separately:
+
+```bash
+uv run ori preflight-tasks \
+  --manifest datasets/benchmarks/complex-v1-seed-4401_manifest.json \
+  --track direct \
+  --output results/benchmark-runs/complex-v1-seed-4401-gpt56sol-vs-gpt55/preflight-direct.json
+
+uv run ori preflight-tasks \
+  --manifest datasets/benchmarks/complex-v1-seed-4401_manifest.json \
+  --track mcp \
+  --output results/benchmark-runs/complex-v1-seed-4401-gpt56sol-vs-gpt55/preflight-mcp.json
+```
+
+For the current seed-4401 corpus, expect 42 direct tasks and 62 MCP tasks with
+zero errors. Warnings are reported separately; inspect them, but the blocking
+condition is a preflight error or non-zero command exit.
+
+### 6. Verify or upload the graph
+
+First check whether the dedicated BloodHound instance already matches the
+manifest:
+
+```bash
+uv run --env-file ../Bloodhound-MCP/.env \
+  ori verify-ingest \
+  --manifest datasets/benchmarks/complex-v1-seed-4401_manifest.json
+```
+
+If this ends with `INGEST CHECK: PASS` and all 30 planted paths pass, do not
+upload the archive again.
+
+If the graph is absent or mismatched, stop the terminal workflow and use the
+`ori-ingest` Codex skill to upload the exact ZIP through BloodHound MCP:
+
+```text
+$ori-ingest Upload datasets/benchmarks/complex-v1-seed-4401.zip to the
+configured dedicated ORI BloodHound server, then verify it against
+datasets/benchmarks/complex-v1-seed-4401_manifest.json. Show me the exact target
+and archive and wait for my confirmation before file_upload.
+```
+
+Uploading changes the live benchmark graph. Confirm the target and archive when
+prompted, preserve the returned ingest job/status, wait for materialization, and
+then rerun `ori verify-ingest`. Never continue to model grading on a wrong target,
+count mismatch, partial ingest, or missing planted edge/path.
+
+### 7. Create the two-model campaign config
+
+Store the local config under `results/`, which is gitignored. Create
+`results/models-gpt56sol-vs-gpt55.yaml` with:
+
+```yaml
+modes: [direct, mcp]
+output_dir: benchmark-runs/complex-v1-seed-4401-gpt56sol-vs-gpt55
+
+defaults:
+  concurrency: 1
+  runs_per_model: 1
+  bhce_url: null
+  model_base_url: null
+  max_model_reruns_on_infra: 1
+  health:
+    timeout_seconds: 60
+    poll_interval: 5
+  mcp:
+    # Paths in a model-matrix config are resolved from the config directory.
+    mcp_dir: ../../Bloodhound-MCP
+    max_steps: 16
+    resource_mode: "off"
+    tool_loop: native-openai-compatible
+  telemetry:
+    enabled: true
+
+models:
+  - name: gpt-5-6-sol
+    provider: codex
+    model: gpt-5.6-sol
+    mcp_tool_loop: native-openai-compatible
+
+  - name: gpt-5-5
+    provider: codex
+    model: gpt-5.5
+    mcp_tool_loop: native-openai-compatible
+```
+
+Start with `runs_per_model: 1`. With the current corpus, this is already 208
+graded samples across two models and two tracks. After one complete campaign
+succeeds, use a new output directory and raise `runs_per_model` to `3` or more
+for variance analysis. Do not confuse repeated model passes with
+`max_model_reruns_on_infra`, which only retries infrastructure failures.
+
+### 8. Run the campaign
+
+Re-run the health and ingest gates immediately before spending model usage:
+
+```bash
+uv run --env-file ../Bloodhound-MCP/.env \
+  ori verify-bh-health
+
+uv run --env-file ../Bloodhound-MCP/.env \
+  ori verify-ingest \
+  --manifest datasets/benchmarks/complex-v1-seed-4401_manifest.json
+```
+
+Only after `INGEST CHECK: PASS`, launch both tracks:
+
+```bash
+uv run --env-file ../Bloodhound-MCP/.env \
+  ori run \
+  --config results/models-gpt56sol-vs-gpt55.yaml \
+  --manifest datasets/benchmarks/complex-v1-seed-4401_manifest.json
+```
+
+Keep the terminal open. ORI prints the active model/run as it progresses and
+writes separate direct and MCP artifacts beneath:
+
+```text
+results/benchmark-runs/complex-v1-seed-4401-gpt56sol-vs-gpt55/
+├── direct/
+│   ├── baseline_combined.csv
+│   └── baseline_summary.csv
+└── mcp/
+    ├── baseline_combined.csv
+    └── baseline_summary.csv
+```
+
+Per-model CSVs, telemetry, and inspect logs are written alongside those summary
+files. Preserve them with the manifest, artifact hashes, preflight reports, and
+a sanitized copy of the model config.
+
+### 9. Read the results
+
+List the complete result bundle and inspect both track summaries:
+
+```bash
+find results/benchmark-runs/complex-v1-seed-4401-gpt56sol-vs-gpt55 \
+  -maxdepth 4 \
+  -type f \
+  | sort
+
+sed -n '1,5p' \
+  results/benchmark-runs/complex-v1-seed-4401-gpt56sol-vs-gpt55/direct/baseline_summary.csv
+
+sed -n '1,5p' \
+  results/benchmark-runs/complex-v1-seed-4401-gpt56sol-vs-gpt55/mcp/baseline_summary.csv
+```
+
+Report direct and MCP scores separately. For MCP, distinguish
+`reasoning_accuracy` (correct among completed samples) from
+`effective_accuracy` (correct among all samples), then inspect
+`infra_failure_rate`, `tool_error_rate`, and `timeout_rate`. A model with high
+reasoning accuracy and high infrastructure failure rate is not operationally
+equivalent to a reliable model with the same completed-sample score.
+
+This seed currently exercises the generated 42-task direct and 62-task MCP
+development corpus. It is not yet the final selected 100-task official suite per
+track, so label the resulting comparison accordingly.
+
+### First-run stop conditions
+
+Stop and fix the relevant layer before continuing when:
+
+- `codex login status` fails or either model slug is absent;
+- the BloodHound health check fails or the configured host is not the controlled
+  ORI target;
+- either task preflight reports errors;
+- `verify-ingest` does not report 30/30 planted paths and `INGEST CHECK: PASS`;
+- the MCP checkout path is wrong or its server cannot start;
+- a run reports `INFRA_ERROR`, authentication failures, systematic timeouts, or
+  tool-loop failures that would make the two model scores incomparable.
+
 ## Repository Layout
 
 ```text
@@ -157,7 +463,7 @@ defaults:
   mcp:
     mcp_dir: ../bloodhound-mcp
     max_steps: 16
-    resource_mode: off
+    resource_mode: "off"
     tool_loop: auto
 
 models:
@@ -169,7 +475,7 @@ models:
 
   - name: codex-gpt
     provider: codex
-    model: gpt-5.5-codex
+    model: gpt-5.5
     runs_per_model: 5
     mcp_tool_loop: native-openai-compatible
 ```
@@ -272,6 +578,13 @@ declared planted relationship before writing it. The current corpus must pass al
 30 planted paths at this archive boundary. This proves that the relationships are
 encoded in CE-ingestable SharpHound structures; operators must still upload the
 ZIP and require `ori verify-ingest` to report 30/30 before running models.
+
+Generated manifest v2 records the relationship-contract version, SharpHound file
+versions, tested BloodHound CE baseline, complete projected node counts, and an
+archive-derived relationship summary. Relationship names are canonical end to end:
+for example, `WriteDacl` is the SharpHound ACE right and `SameForestTrust` is the
+live CE relationship. Legacy `WriteDACL` and `TrustedBy` inputs are normalized only
+at compatibility boundaries and are never emitted by new datasets.
 
 The next hardening step is to add an official suite selector that chooses exactly
 100 direct tasks and 100 MCP tasks with intentional tier distribution from the same

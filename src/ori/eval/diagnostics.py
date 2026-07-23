@@ -142,7 +142,9 @@ def _node_alias_groups(ref_result: CypherResult) -> dict[str, set[str]]:
             canonical = (
                 node.get("label") or props.get("name") or props.get("Name") or sorted(aliases)[0]
             )
-            groups[str(canonical)] = aliases
+            aliases.add(str(canonical))
+            for alias in aliases:
+                groups[alias] = aliases
     return groups
 
 

@@ -143,7 +143,8 @@ Do not run live MCP grading until this passes.
 `verify-ingest` checks:
 
 - the domain and domain SID expected by the manifest,
-- node counts by key type,
+- node counts for every projected SharpHound file type, including domains, GPOs,
+  containers, and ADCS objects,
 - planted path nodes,
 - planted path edges that BH CE should expose to the evaluator.
 
@@ -161,6 +162,14 @@ planted paths. Generation fails if a declared path edge is absent from the
 serialized SharpHound structures. After upload, `verify-ingest` remains mandatory:
 it confirms those structures produced the expected live CE relationships and
 requires negative-control paths to remain unresolved.
+
+The manifest and verifier use the shared relationship registry. Manifest v2 records
+the registry/profile versions and archive-derived relationship counts. New artifacts
+emit canonical BloodHound names such as `WriteDacl` and `SameForestTrust`; legacy
+`WriteDACL` and `TrustedBy` names are accepted only as input aliases. Unknown or
+noncanonical ACE rights fail archive validation instead of silently disappearing at
+ingest. `verify-ingest` reports both the manifest kind and the live kind queried when
+an exact source/kind/target relationship is absent.
 
 ## Model Configs
 
@@ -184,7 +193,7 @@ defaults:
   mcp:
     mcp_dir: ../bloodhound-mcp
     max_steps: 16
-    resource_mode: off
+    resource_mode: "off"
     tool_loop: auto
 
 models:
@@ -196,7 +205,7 @@ models:
 
   - name: codex-gpt
     provider: codex
-    model: gpt-5.5-codex
+    model: gpt-5.5
     runs_per_model: 5
     mcp_tool_loop: native-openai-compatible
 ```
