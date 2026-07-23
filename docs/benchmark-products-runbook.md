@@ -193,7 +193,7 @@ defaults:
   mcp:
     mcp_dir: ../bloodhound-mcp
     max_steps: 16
-    resource_mode: off
+    resource_mode: "off"
     tool_loop: auto
 
 models:
@@ -205,7 +205,7 @@ models:
 
   - name: codex-gpt
     provider: codex
-    model: gpt-5.5-codex
+    model: gpt-5.5
     runs_per_model: 5
     mcp_tool_loop: native-openai-compatible
 ```
