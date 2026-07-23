@@ -1,0 +1,15 @@
+Purpose
+
+Capture the first successful full two-model ORI campaign workflow and make the public model/config examples match the runtime values used by the validated campaign.
+
+Changes
+
+Added an end-to-end GPT-5.6 Sol versus GPT-5.5 direct and MCP campaign guide to README.md. The guide covers local gates, Codex login/model checks, dedicated BloodHound health and ingest verification, deterministic seed-4401 generation, task preflight, artifact hashing, local ignored configuration, campaign execution, result interpretation, and stop conditions. Updated README.md and docs/benchmark-products-runbook.md to use model slug gpt-5.5. Quoted resource_mode as "off" in README.md, the runbook, and models.example.yaml so YAML does not coerce it to boolean false.
+
+Validation
+
+Operator reported the two-model benchmark completed successfully. Local validation completed with 294 tests passed and Ruff clean. The CLI help confirmed preflight track choices direct, mcp, and legacy cypher. Staged gitleaks scan found no leaks, and no generated results, credentials, .env files, or private model configs were committed.
+
+Deferred benchmark findings
+
+The campaign exposed prompt/reference mismatches, a stale Tier 5 hardcoded target, rejection of graph-valid alternative paths, recall-only node_set scoring, live/offline normalization drift, a Codex/OpenAI successful-tool finalization counter defect, oversized AdminTo enumerations, and ambiguity between direct versus effective membership/admin semantics. These findings are intentionally documented for a later branch and PR rather than changed in this SharpHound contract hardening branch.
