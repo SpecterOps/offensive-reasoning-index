@@ -22,9 +22,10 @@ Authoritative BloodHound references:
   cannot be reused under changed semantics.
 - [x] Treat inline property maps and equivalent `WHERE` property filters
   consistently for standalone node enumeration.
-- [x] Require exact endpoint selectors, aggregate-only output, or a bounded
-  result for relationship and recursive enumeration; ordinary boolean/property
-  filters do not make a graph traversal selective.
+- [x] Require exact endpoint selectors for recursive traversals; permit
+  aggregate-only output or a bounded result only for non-recursive relationship
+  enumeration. Ordinary boolean/property filters do not make a traversal
+  selective.
 - [x] Canonicalize query fingerprints across comments, keyword case, and
   formatting while preserving case-sensitive identifiers and literal values.
 - [x] Prove that policy rejection and deny-cache quarantine never execute a

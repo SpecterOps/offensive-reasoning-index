@@ -304,6 +304,11 @@ _WHERE_SCALAR_FILTER_BINDING = re.compile(
     r"(?:['\"]|TRUE\b|FALSE\b|NULL\b|-?\d|\[)",
     re.IGNORECASE,
 )
+_WHERE_CLAUSE = re.compile(
+    r"\bWHERE\b(?P<body>.*?)"
+    r"(?=\b(?:WITH|RETURN|UNWIND|OPTIONAL\s+MATCH|MATCH|ORDER\s+BY|SKIP|LIMIT)\b|$)",
+    re.IGNORECASE | re.DOTALL,
+)
 _PROPERTY_EXACT_BINDING = re.compile(
     r"\b([A-Za-z_]\w*)\s*\.\s*(?:name|objectid)\s*=\s*['\"]",
     re.IGNORECASE,
@@ -333,25 +338,40 @@ _NODE_PATTERN = re.compile(
 
 
 def _exact_selector_bindings(masked_query: str) -> set[str]:
+    """Return variables anchored in MATCH node maps or WHERE predicates.
+
+    Property comparisons in RETURN projections are output expressions, not
+    predicates, and must never make an otherwise broad traversal selective.
+    """
+
     bindings: set[str] = set()
-    for pattern in (
-        _INLINE_EXACT_BINDING,
-        _PROPERTY_EXACT_BINDING,
-        _COALESCE_EXACT_BINDING,
-    ):
-        bindings.update(match.group(1) for match in pattern.finditer(masked_query))
+    for clause in _MATCH_CLAUSE.finditer(masked_query):
+        bindings.update(
+            match.group(1)
+            for match in _INLINE_EXACT_BINDING.finditer(clause.group("body"))
+        )
+    for clause in _WHERE_CLAUSE.finditer(masked_query):
+        body = clause.group("body")
+        for pattern in (_PROPERTY_EXACT_BINDING, _COALESCE_EXACT_BINDING):
+            bindings.update(match.group(1) for match in pattern.finditer(body))
     return bindings
 
 
 def _standalone_filter_bindings(masked_query: str) -> set[str]:
     """Return variables narrowed by inline or scalar property predicates."""
 
-    return {
+    inline_bindings = {
         match.group(1) for match in _INLINE_FILTER_BINDING.finditer(masked_query)
-    } | {
-        match.group(1)
-        for match in _WHERE_SCALAR_FILTER_BINDING.finditer(masked_query)
     }
+    where_bindings: set[str] = set()
+    for clause in _WHERE_CLAUSE.finditer(masked_query):
+        where_bindings.update(
+            match.group(1)
+            for match in _WHERE_SCALAR_FILTER_BINDING.finditer(
+                clause.group("body")
+            )
+        )
+    return inline_bindings | where_bindings
 
 
 def _node_context_before(masked_query: str, position: int) -> tuple[str | None, bool]:
@@ -591,11 +611,15 @@ class DirectQueryPolicy:
                     "allShortestPaths requires a finite upper hop bound",
                     fingerprint,
                 )
-            if expansion["shortest"] and upper is None and not expansion_is_selective:
+            if (
+                expansion["shortest"]
+                and upper is None
+                and not expansion_is_selective
+            ):
                 return QuerySafetyDecision(
                     False,
                     "unselective_shortest_path",
-                    "open-ended shortestPath requires an exact name or objectid selector",
+                    "open-ended shortestPath requires an exact endpoint selector",
                     fingerprint,
                 )
             if not expansion["shortest"] and not expansion["typed"] and upper is None:
@@ -635,7 +659,8 @@ class DirectQueryPolicy:
             return QuerySafetyDecision(
                 False,
                 "unselective_relationship_enumeration",
-                "relationship enumeration requires a bound endpoint, count, or LIMIT",
+                "relationship enumeration requires an exact name or objectid "
+                "endpoint, count, or LIMIT",
                 fingerprint,
             )
 

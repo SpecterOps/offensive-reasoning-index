@@ -52,6 +52,10 @@ def test_phase0_greedy_query_is_rejected_without_bloodhound() -> None:
             "MATCH p=shortestPath((u {name: 'A@TEST.LOCAL'})-[*1..12]->"
             "(g {name: 'DOMAIN ADMINS@TEST.LOCAL'})) RETURN p"
         ),
+        (
+            "MATCH p=shortestPath((u:User)-[*1..]->(g:Group)) "
+            "WHERE g.name = 'DOMAIN ADMINS@TEST.LOCAL' RETURN p LIMIT 1"
+        ),
     ],
 )
 def test_documented_selective_cysql_shapes_are_admitted(query: str) -> None:
@@ -101,6 +105,10 @@ def test_inline_and_where_scalar_filters_admit_standalone_node_sets(
             "unselective_recursive_expansion",
         ),
         (
+            "MATCH p=shortestPath((u:User)-[*1..]->(g:Group)) RETURN p LIMIT 1",
+            "unselective_shortest_path",
+        ),
+        (
             "MATCH p=(n)-->(m) RETURN p",
             "unselective_relationship_enumeration",
         ),
@@ -139,6 +147,20 @@ def test_inline_and_where_scalar_filters_admit_standalone_node_sets(
         (
             "MATCH (n)-[r]->(m) RETURN count(r), r",
             "unselective_relationship_enumeration",
+        ),
+        (
+            "MATCH (u:User) RETURN u.enabled = true",
+            "unselective_node_enumeration",
+        ),
+        (
+            "MATCH (u:User)-[r]->(g:Group) "
+            "RETURN u.name = 'A@TEST.LOCAL', r",
+            "unselective_relationship_enumeration",
+        ),
+        (
+            "MATCH p=(u:User)-[:MemberOf*1..]->(g:Group) "
+            "RETURN u.name = 'A@TEST.LOCAL', p",
+            "unselective_recursive_expansion",
         ),
         ("MATCH (n) DELETE n", "non_read_only_query"),
         ("MATCH (n) RETURN n LIMIT 1001", "result_limit_too_large"),

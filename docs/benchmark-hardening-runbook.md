@@ -71,9 +71,11 @@ queries/results, broad relationship enumeration, and broad labeled or unlabeled
 node enumeration. Recursive selectors must bind an endpoint of the path; a
 disconnected selector cannot make a separate expansion safe. For standalone
 node sets, inline property maps and equivalent scalar `WHERE` predicates are
-both valid filters. For traversals, ordinary property filters are not treated as
-exact endpoint selectors; the traversal still needs an exact `name` or
-`objectid`, an aggregate-only result, or an explicit result-stage `LIMIT`.
+both valid filters. Recursive traversals always need an exact endpoint `name`
+or `objectid`; aggregate output and `LIMIT` do not make an unanchored expansion
+safe. Non-recursive relationship enumeration may instead use aggregate-only
+output or an explicit result-stage `LIMIT`. Ordinary property filters are not
+treated as exact traversal selectors.
 
 Admitted model queries are serialized and executed exactly once. ORI sends
 BloodHound's official `Prefer: wait=N` header, uses a slightly longer client
