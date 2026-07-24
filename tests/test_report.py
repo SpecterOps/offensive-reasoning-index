@@ -246,9 +246,23 @@ def test_write_combined_csv_includes_attempt_source_and_infra_subtype(tmp_path) 
 
 def test_write_summary_csv_tracks_query_too_expensive(tmp_path) -> None:
     output = tmp_path / "baseline_summary.csv"
+    result = _result("QUERY_TOO_EXPENSIVE")
+    result.model_result = CypherResult(
+        success=False,
+        error="rejected",
+        failure_type="policy_rejected",
+        failure_subtype="unbounded_wildcard_path_enumeration",
+        query_executed=False,
+        execution_attempts=0,
+        query_fingerprint="abc123",
+        safety_policy_version="bloodhound-cysql-direct-v1",
+        safety_rule="unbounded_wildcard_path_enumeration",
+        bhce_health_after="not_checked",
+        circuit_state="closed",
+    )
     write_summary_csv(
         {
-            "ollama/a:latest": [_result("QUERY_TOO_EXPENSIVE")],
+            "ollama/a:latest": [result],
         },
         output,
     )
@@ -256,6 +270,39 @@ def test_write_summary_csv_tracks_query_too_expensive(tmp_path) -> None:
         rows = list(csv.DictReader(f))
     assert len(rows) == 1
     assert rows[0]["query_too_expensive"] == "1"
+    assert rows[0]["policy_rejections"] == "1"
+    assert rows[0]["executed_direct_queries"] == "0"
+    assert rows[0]["greedy_query_rate"] == "1.0"
+
+
+def test_write_combined_csv_includes_direct_query_containment_fields(tmp_path) -> None:
+    output = tmp_path / "baseline_combined.csv"
+    result = _result("QUERY_TOO_EXPENSIVE")
+    result.model_result = CypherResult(
+        success=False,
+        error="query timeout",
+        failure_type="query_timeout",
+        failure_subtype="bloodhound_query_timeout",
+        query_executed=True,
+        execution_attempts=1,
+        query_fingerprint="fingerprint",
+        safety_policy_version="bloodhound-cysql-direct-v1",
+        safety_rule="allowed",
+        bhce_health_after="healthy",
+        circuit_state="closed",
+    )
+
+    write_combined_csv({"ollama/a:latest": [result]}, output)
+
+    with output.open() as f:
+        row = next(csv.DictReader(f))
+    assert row["query_executed"] == "True"
+    assert row["query_attempts"] == "1"
+    assert row["query_fingerprint"] == "fingerprint"
+    assert row["safety_policy_version"] == "bloodhound-cysql-direct-v1"
+    assert row["safety_rule"] == "allowed"
+    assert row["bhce_health_after"] == "healthy"
+    assert row["circuit_state"] == "closed"
 
 
 def test_write_summary_csv_includes_run_metadata(tmp_path) -> None:

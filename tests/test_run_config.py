@@ -71,6 +71,10 @@ defaults:
   health:
     timeout_seconds: 11
     poll_interval: 1.5
+  direct_query_safety:
+    server_timeout_seconds: 8
+    client_timeout_seconds: 12
+    max_result_rows: 250
   mcp:
     mcp_dir: bloodhound-mcp
     max_steps: 22
@@ -99,6 +103,11 @@ profiles:
     assert resolved.max_model_reruns_on_infra == 3
     assert resolved.health_timeout_seconds == 11.0
     assert resolved.health_poll_interval == 1.5
+    assert resolved.direct_query_safety["policy_version"] == "bloodhound-cysql-direct-v1"
+    assert resolved.direct_query_safety["server_timeout_seconds"] == 8
+    assert resolved.direct_query_safety["client_timeout_seconds"] == 12
+    assert resolved.direct_query_safety["max_result_rows"] == 250
+    assert resolved.direct_query_safety["max_recursive_hops"] == 12
     assert resolved.max_steps == 22
     assert resolved.resource_mode == "on-demand"
     assert resolved.mcp_tool_loop == "native-openai-compatible"
@@ -228,6 +237,31 @@ profiles:
     assert resolved.openai_compat_telemetry_adapter == "auto"
     assert resolved.mcp_ollama_read_timeout_seconds == 900.0
     assert resolved.telemetry_enabled is True
+    assert resolved.direct_query_safety["enabled"] is True
+    assert resolved.direct_query_safety["server_timeout_seconds"] == 10.0
+
+
+def test_load_run_profile_rejects_unknown_direct_query_safety_setting(
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / "run.yaml"
+    config.write_text(
+        """
+version: 1
+defaults:
+  direct_query_safety:
+    mystery_knob: true
+profiles:
+  direct:
+    kind: eval
+    manifest: manifest.json
+    output: results.csv
+    model: mock/perfect
+"""
+    )
+
+    with pytest.raises(ValueError, match="Unsupported direct_query_safety"):
+        load_run_profile(config, profile_name="direct")
 
 
 def test_load_run_profile_accepts_unquoted_yaml_off_resource_mode(tmp_path: Path) -> None:

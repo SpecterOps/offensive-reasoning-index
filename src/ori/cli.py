@@ -14,6 +14,7 @@ import click
 import yaml
 
 from .benchmarks import describe_benchmark, get_benchmark, list_benchmarks
+from .eval.direct_query_safety import DirectQuerySafetyConfig
 from .eval.phase4_v2 import generate_phase4_v2_official_tasks
 from .generator.archive_validation import _relationships_from_archive
 from .generator.attack_paths import plant_all_paths
@@ -350,6 +351,7 @@ def _effective_run_config(
     telemetry_enabled: bool | None = None,
     run_index: int | None = None,
     runs_per_model: int | None = None,
+    direct_query_safety: DirectQuerySafetyConfig | None = None,
 ) -> dict[str, Any]:
     config = dict(run_spec.config_identity)
     if model_base_url is not None and "model_base_url" not in config:
@@ -375,6 +377,8 @@ def _effective_run_config(
         config["run_index"] = run_index
     if runs_per_model is not None:
         config["runs_per_model"] = runs_per_model
+    if direct_query_safety is not None:
+        config["direct_query_safety"] = direct_query_safety.to_jsonable()
     return config
 
 
@@ -391,10 +395,12 @@ async def _run_baseline_with_specs(
     health_timeout_seconds: float = 60.0,
     health_poll_interval: float = 5.0,
     telemetry_enabled: bool = True,
+    direct_query_safety: DirectQuerySafetyConfig | None = None,
 ) -> dict[str, list]:
     from .eval.runner import run_eval_cli_bare
 
     output_dir.mkdir(parents=True, exist_ok=True)
+    safety_config = direct_query_safety or DirectQuerySafetyConfig()
     results = {}
     total_runs = sum(run_spec.runs_per_model for run_spec in run_specs)
     run_number = 0
@@ -437,11 +443,13 @@ async def _run_baseline_with_specs(
                     telemetry_enabled=telemetry_enabled,
                     run_index=run_index,
                     runs_per_model=run_spec.runs_per_model,
+                    direct_query_safety=safety_config,
                 ),
                 model_base_url=effective_model_base_url,
                 health_timeout_seconds=health_timeout_seconds,
                 health_poll_interval=health_poll_interval,
                 telemetry_enabled=telemetry_enabled,
+                direct_query_safety=safety_config,
             )
     return results
 
@@ -977,6 +985,7 @@ def eval(
     run_spec = _build_inline_run_spec(
         model=model, ollama_options=_parse_ollama_options(ollama_options_raw)
     )
+    direct_query_safety = DirectQuerySafetyConfig()
     asyncio.run(
         run_eval_cli(
             manifest_path=Path(manifest),
@@ -986,8 +995,13 @@ def eval(
             bhce_url=bhce_url,
             ollama_options=run_spec.ollama_options,
             run_name=run_spec.run_name,
-            run_config=_effective_run_config(run_spec, telemetry_enabled=telemetry_enabled),
+            run_config=_effective_run_config(
+                run_spec,
+                telemetry_enabled=telemetry_enabled,
+                direct_query_safety=direct_query_safety,
+            ),
             telemetry_enabled=telemetry_enabled,
+            direct_query_safety=direct_query_safety,
         )
     )
 
@@ -1447,6 +1461,17 @@ def run_from_config(
         mcp_defaults = defaults.get("mcp") or {}
         health_defaults = defaults.get("health") or {}
         telemetry_defaults = defaults.get("telemetry") or {}
+        direct_safety_defaults = defaults.get("direct_query_safety") or {}
+        if not isinstance(direct_safety_defaults, dict):
+            raise click.UsageError(
+                "defaults.direct_query_safety must be a mapping when present."
+            )
+        try:
+            effective_direct_safety = DirectQuerySafetyConfig.from_mapping(
+                direct_safety_defaults
+            )
+        except (TypeError, ValueError) as exc:
+            raise click.UsageError(str(exc)) from exc
         effective_bhce_url = bhce_url if bhce_url is not None else defaults.get("bhce_url")
         effective_model_base_url = (
             model_base_url if model_base_url is not None else defaults.get("model_base_url")
@@ -1488,6 +1513,7 @@ def run_from_config(
                     health_timeout_seconds=effective_health_timeout,
                     health_poll_interval=effective_health_poll,
                     telemetry_enabled=effective_telemetry,
+                    direct_query_safety=effective_direct_safety,
                 )
             )
             write_combined_csv(all_results, direct_dir / "baseline_combined.csv")
@@ -1575,6 +1601,9 @@ def run_from_config(
                         health_timeout_seconds=resolved.health_timeout_seconds,
                         health_poll_interval=resolved.health_poll_interval,
                         telemetry_enabled=resolved.telemetry_enabled,
+                        direct_query_safety=DirectQuerySafetyConfig.from_mapping(
+                            resolved.direct_query_safety
+                        ),
                     )
                 )
                 write_combined_csv(all_results, repeated_output_dir / "combined.csv")
@@ -1594,11 +1623,17 @@ def run_from_config(
                         run_spec,
                         model_base_url=effective_model_base_url,
                         telemetry_enabled=resolved.telemetry_enabled,
+                        direct_query_safety=DirectQuerySafetyConfig.from_mapping(
+                            resolved.direct_query_safety
+                        ),
                     ),
                     model_base_url=effective_model_base_url,
                     health_timeout_seconds=resolved.health_timeout_seconds,
                     health_poll_interval=resolved.health_poll_interval,
                     telemetry_enabled=resolved.telemetry_enabled,
+                    direct_query_safety=DirectQuerySafetyConfig.from_mapping(
+                        resolved.direct_query_safety
+                    ),
                 )
             )
             return
@@ -1716,6 +1751,9 @@ def run_from_config(
                     health_timeout_seconds=resolved.health_timeout_seconds,
                     health_poll_interval=resolved.health_poll_interval,
                     telemetry_enabled=resolved.telemetry_enabled,
+                    direct_query_safety=DirectQuerySafetyConfig.from_mapping(
+                        resolved.direct_query_safety
+                    ),
                 )
             )
             combined_csv_path = Path(resolved.output_dir) / "baseline_combined.csv"

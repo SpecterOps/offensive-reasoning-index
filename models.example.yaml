@@ -14,6 +14,17 @@ defaults:
   health:
     timeout_seconds: 60
     poll_interval: 5
+  # Model-blind guard for direct Cypher only. Rejected queries receive
+  # QUERY_TOO_EXPENSIVE without being sent to BloodHound.
+  direct_query_safety:
+    enabled: true
+    policy_version: bloodhound-cysql-direct-v1
+    server_timeout_seconds: 10
+    client_timeout_seconds: 15
+    max_recursive_hops: 12
+    max_result_rows: 1000
+    max_query_characters: 16384
+    max_recursive_patterns: 2
   mcp:
     mcp_dir: ../bloodhound-mcp
     max_steps: 16

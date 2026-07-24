@@ -18,6 +18,15 @@ from inspect_ai.solver import Generate, TaskState, solver
 
 from .adapter import ModelResponse, call_model, extract_cypher_details
 from .bhce import BHCEClient, CypherResult
+from .direct_query_safety import (
+    DirectQueryCoordinator,
+    DirectQueryPolicy,
+    DirectQuerySafetyConfig,
+    QueryDenyCache,
+    get_coordinator,
+    register_coordinator,
+    unregister_coordinator,
+)
 from .grader import GradeResult, grade
 from .tasks import Task
 
@@ -120,6 +129,16 @@ def _cypher_result_to_dict(result: CypherResult) -> dict[str, Any]:
         "node_names": sorted(result.node_names),
         "error": result.error,
         "raw": result.raw,
+        "failure_type": result.failure_type,
+        "failure_subtype": result.failure_subtype,
+        "status_code": result.status_code,
+        "query_executed": result.query_executed,
+        "execution_attempts": result.execution_attempts,
+        "query_fingerprint": result.query_fingerprint,
+        "safety_policy_version": result.safety_policy_version,
+        "safety_rule": result.safety_rule,
+        "bhce_health_after": result.bhce_health_after,
+        "circuit_state": result.circuit_state,
     }
 
 
@@ -130,6 +149,16 @@ def _cypher_result_from_dict(data: dict[str, Any]) -> CypherResult:
         node_names=set(data.get("node_names", [])),
         error=data.get("error"),
         raw=dict(data.get("raw", {})),
+        failure_type=data.get("failure_type"),
+        failure_subtype=data.get("failure_subtype", ""),
+        status_code=data.get("status_code"),
+        query_executed=bool(data.get("query_executed", True)),
+        execution_attempts=int(data.get("execution_attempts", 1)),
+        query_fingerprint=data.get("query_fingerprint", ""),
+        safety_policy_version=data.get("safety_policy_version", ""),
+        safety_rule=data.get("safety_rule", ""),
+        bhce_health_after=data.get("bhce_health_after", ""),
+        circuit_state=data.get("circuit_state", "closed"),
     )
 
 
@@ -228,6 +257,33 @@ def ori_direct_cypher_solver() -> Generate:
         base_url = metadata.get("model_base_url")
         ollama_options = metadata.get("ollama_options")
         model_response: ModelResponse
+        coordinator = get_coordinator(metadata["direct_query_coordinator_token"])
+        model_calls = 0
+
+        if coordinator.circuit_open:
+            detail = (
+                "Model call skipped because the BloodHound direct-query circuit is open: "
+                f"{coordinator.circuit_reason}"
+            )
+            model_response = ModelResponse(
+                raw_text="",
+                cypher=None,
+                parse_stage="not_called_circuit_open",
+                tokens_input=0,
+                tokens_output=0,
+                elapsed_seconds=0.0,
+                model=model_name,
+                thinking="",
+                error=None,
+                provider_metrics={"model_not_called_reason": "circuit_open"},
+            )
+            model_result = coordinator.skipped_result()
+            state.output = ModelOutput.from_content(model=model_name, content=detail)
+            state.store.set("ori_model_response", _model_response_to_dict(model_response))
+            state.store.set("ori_model_result", _cypher_result_to_dict(model_result))
+            state.store.set("ori_model_calls", model_calls)
+            state.store.set("ori_task_wall_seconds", time.monotonic() - task_t0)
+            return state
 
         if _use_adapter_path(model_name):
             model_response = await call_model(
@@ -247,6 +303,7 @@ def ori_direct_cypher_solver() -> Generate:
                 content=model_response.raw_text,
                 error=model_response.error,
             )
+            model_calls = 1
         else:
             state.messages = [
                 ChatMessageSystem(
@@ -271,6 +328,7 @@ def ori_direct_cypher_solver() -> Generate:
                     error=output.error,
                     provider_metrics={},
                 )
+                model_calls = 1
             except Exception as exc:
                 model_response = ModelResponse(
                     raw_text="",
@@ -289,17 +347,24 @@ def ori_direct_cypher_solver() -> Generate:
                     content="",
                     error=str(exc),
                 )
+                model_calls = 1
 
         if model_response.cypher:
-            domain = metadata.get("bhce_domain")
-            async with BHCEClient(domain=domain) as bhce:
-                model_result = await bhce.run_cypher_resilient(model_response.cypher)
+            model_result = await coordinator.execute(model_response.cypher)
         else:
-            model_result = CypherResult(success=False, error="No Cypher extracted")
+            model_result = CypherResult(
+                success=False,
+                error="No Cypher extracted",
+                failure_type="parse_error",
+                failure_subtype="no_cypher_extracted",
+                query_executed=False,
+                execution_attempts=0,
+                safety_policy_version=coordinator.config.policy_version,
+            )
 
         state.store.set("ori_model_response", _model_response_to_dict(model_response))
         state.store.set("ori_model_result", _cypher_result_to_dict(model_result))
-        state.store.set("ori_model_calls", 1)
+        state.store.set("ori_model_calls", model_calls)
         state.store.set("ori_task_wall_seconds", time.monotonic() - task_t0)
         return state
 
@@ -351,6 +416,7 @@ def _sample_for_task(
     bhce_domain: str | None,
     sample_index: int,
     sample_total: int,
+    direct_query_coordinator_token: str,
 ) -> Sample:
     return Sample(
         id=task.id,
@@ -366,6 +432,7 @@ def _sample_for_task(
             "bhce_domain": bhce_domain,
             "sample_index": sample_index,
             "sample_total": sample_total,
+            "direct_query_coordinator_token": direct_query_coordinator_token,
         },
     )
 
@@ -406,6 +473,12 @@ def _result_from_sample(sample: EvalSample, log: EvalLog) -> EvalResult:
         task_wall_seconds=float(
             sample.store.get("ori_task_wall_seconds", model_response.elapsed_seconds)
         ),
+        partial_result=model_result.failure_type == "circuit_open",
+        result_source=(
+            "circuit_open_placeholder"
+            if model_result.failure_type == "circuit_open"
+            else "first_pass"
+        ),
     )
 
 
@@ -419,6 +492,8 @@ async def run_eval_with_inspect(
     ollama_options: dict[str, Any] | None = None,
     log_dir: Path | None = None,
     bhce_domain: str | None = None,
+    direct_query_safety: DirectQuerySafetyConfig | None = None,
+    manifest_fingerprint: str = "",
 ) -> list[EvalResult]:
     """Run ORI direct-Cypher eval using Inspect AI as the runtime."""
 
@@ -431,11 +506,46 @@ async def run_eval_with_inspect(
     else:
         print(f"  {len(valid_names)} node names loaded")
 
+    safety_config = direct_query_safety or DirectQuerySafetyConfig()
+    reference_policy = DirectQueryPolicy(safety_config)
     print(f"Pre-fetching reference Cypher results for {len(tasks)} tasks...")
     ref_results: dict[str, CypherResult] = {}
     for task in tasks:
-        ref_results[task.id] = await bhce.run_cypher_resilient(task.reference_cypher)
+        reference_decision = reference_policy.evaluate(task.reference_cypher)
+        if not reference_decision.allowed:
+            raise RuntimeError(
+                f"Reference query for {task.id} violates direct safety policy "
+                f"{reference_decision.rule}: {reference_decision.detail}"
+            )
+        reference_result = await bhce.run_cypher(
+            task.reference_cypher,
+            server_timeout_seconds=safety_config.server_timeout_seconds,
+            client_timeout_seconds=safety_config.client_timeout_seconds,
+        )
+        if not reference_result.success:
+            health = await bhce.check_health()
+            raise RuntimeError(
+                f"Reference query for {task.id} failed before model grading "
+                f"(failure_type={reference_result.failure_type or 'unknown'}, "
+                f"health={'healthy' if health.ok else 'unhealthy'}): "
+                f"{reference_result.error or 'unknown BloodHound error'}"
+            )
+        ref_results[task.id] = reference_result
     print("  Done")
+
+    if not manifest_fingerprint:
+        raise ValueError("manifest_fingerprint is required for direct query containment.")
+    deny_cache = QueryDenyCache(
+        output_path.parent / "_direct_query_deny_cache.json",
+        manifest_fingerprint=manifest_fingerprint,
+        policy_version=safety_config.policy_version,
+    )
+    coordinator = DirectQueryCoordinator(
+        bhce=bhce,
+        config=safety_config,
+        deny_cache=deny_cache,
+    )
+    coordinator_token = register_coordinator(coordinator)
 
     resolved_base_url = _resolve_model_base_url(model, base_url)
     inspect_model = model if not _use_adapter_path(model) else "none/none"
@@ -450,6 +560,7 @@ async def run_eval_with_inspect(
             bhce_domain=bhce_domain,
             sample_index=i + 1,
             sample_total=len(tasks),
+            direct_query_coordinator_token=coordinator_token,
         )
         for i, task in enumerate(tasks)
     ]
@@ -464,19 +575,27 @@ async def run_eval_with_inspect(
     resolved_log_dir.mkdir(parents=True, exist_ok=True)
     _configure_inspect_runtime_dirs(resolved_log_dir)
 
-    eval_logs = await inspect_eval_async(
-        inspect_task,
-        model=inspect_model,
-        model_base_url=resolved_base_url,
-        log_dir=str(resolved_log_dir),
-        max_samples=max(concurrency, 1),
-        max_subprocesses=1,
-        log_level="warning",
-        log_level_transcript="warning",
-        extra_body={"options": ollama_options}
-        if ollama_options and inspect_model.startswith("ollama/")
-        else None,
-    )
+    if concurrency != 1:
+        print(
+            "  Direct query containment serializes samples; "
+            f"requested concurrency={concurrency}, effective concurrency=1"
+        )
+    try:
+        eval_logs = await inspect_eval_async(
+            inspect_task,
+            model=inspect_model,
+            model_base_url=resolved_base_url,
+            log_dir=str(resolved_log_dir),
+            max_samples=1,
+            max_subprocesses=1,
+            log_level="warning",
+            log_level_transcript="warning",
+            extra_body={"options": ollama_options}
+            if ollama_options and inspect_model.startswith("ollama/")
+            else None,
+        )
+    finally:
+        unregister_coordinator(coordinator_token)
     if not eval_logs:
         raise RuntimeError("Inspect eval returned no logs")
     log = eval_logs[0]

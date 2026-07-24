@@ -8,6 +8,8 @@ from typing import Any
 
 import yaml
 
+from .eval.direct_query_safety import DirectQuerySafetyConfig
+
 
 @dataclass(frozen=True)
 class RunConfigOverrides:
@@ -55,6 +57,7 @@ class ResolvedRunProfile:
     openai_compat_telemetry_adapter: str
     mcp_ollama_read_timeout_seconds: float
     telemetry_enabled: bool
+    direct_query_safety: dict[str, Any]
     model_entry: str | dict[str, Any] | None
     model_entries: list[str | dict[str, Any]] | None
     seed: int | None = None
@@ -368,6 +371,15 @@ def load_run_profile(
             fallback=True,
         )
     )
+    defaults_direct_safety = defaults.get("direct_query_safety") or {}
+    profile_direct_safety = profile.get("direct_query_safety") or {}
+    if not isinstance(defaults_direct_safety, dict):
+        raise ValueError("defaults.direct_query_safety must be a mapping when present.")
+    if not isinstance(profile_direct_safety, dict):
+        raise ValueError("profile direct_query_safety must be a mapping when present.")
+    direct_query_safety = DirectQuerySafetyConfig.from_mapping(
+        {**defaults_direct_safety, **profile_direct_safety}
+    ).to_jsonable()
 
     model_entry = profile.get("model")
     model_entries = profile.get("models")
@@ -456,6 +468,7 @@ def load_run_profile(
         openai_compat_telemetry_adapter=openai_compat_telemetry_adapter,
         mcp_ollama_read_timeout_seconds=float(mcp_ollama_read_timeout_seconds),
         telemetry_enabled=telemetry_enabled,
+        direct_query_safety=direct_query_safety,
         model_entry=model_entry,
         model_entries=model_entries,
         seed=int(seed) if seed is not None else None,

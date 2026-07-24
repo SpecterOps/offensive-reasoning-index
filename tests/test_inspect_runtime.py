@@ -18,7 +18,13 @@ class FakeBHCEClient:
     async def __aexit__(self, *args) -> None:
         return None
 
-    async def run_cypher(self, query: str) -> CypherResult:
+    async def run_cypher(
+        self,
+        query: str,
+        *,
+        server_timeout_seconds: float | None = None,
+        client_timeout_seconds: float | None = None,
+    ) -> CypherResult:
         if "JDOE@TEST.LOCAL" in query and "DC01.TEST.LOCAL" in query:
             return CypherResult(
                 success=True,
@@ -50,6 +56,9 @@ class FakeBHCEClient:
     async def get_all_node_names(self) -> set[str]:
         return {"JDOE@TEST.LOCAL", "DC01.TEST.LOCAL"}
 
+    async def check_health(self):
+        raise AssertionError("health check should not run for successful queries")
+
 
 def _task() -> Task:
     return Task(
@@ -77,6 +86,7 @@ async def _run(model: str, tmp_path: Path, monkeypatch) -> list:
         output_path=tmp_path / "results.csv",
         concurrency=1,
         bhce_domain="bloodhound.test.local",
+        manifest_fingerprint="test-manifest-fingerprint",
     )
 
 
@@ -142,6 +152,7 @@ def test_run_eval_with_inspect_ollama_uses_adapter_path_and_preserves_thinking(
             output_path=tmp_path / "results.csv",
             concurrency=1,
             bhce_domain="bloodhound.test.local",
+            manifest_fingerprint="test-manifest-fingerprint",
         )
     )
 

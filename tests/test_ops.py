@@ -450,6 +450,16 @@ def test_cli_eval_parses_ollama_options(tmp_path: Path, monkeypatch) -> None:
     assert captured["run_config"] == {
         "model": "ollama/gemma4:e4b",
         "options": {"num_ctx": 16384, "temperature": 0.2},
+        "direct_query_safety": {
+            "enabled": True,
+            "policy_version": "bloodhound-cysql-direct-v1",
+            "server_timeout_seconds": 10.0,
+            "client_timeout_seconds": 15.0,
+            "max_recursive_hops": 12,
+            "max_result_rows": 1000,
+            "max_query_characters": 16384,
+            "max_recursive_patterns": 2,
+        },
     }
 
 
@@ -557,6 +567,10 @@ output_dir: out
 
 defaults:
   concurrency: 1
+  direct_query_safety:
+    server_timeout_seconds: 7
+    client_timeout_seconds: 11
+    max_result_rows: 250
   mcp:
     mcp_dir: bloodhound-mcp
     max_steps: 9
@@ -604,6 +618,11 @@ models:
         "anthropic/claude-sonnet-4-5",
     ]
     assert captured["direct"]["output_dir"] == tmp_path / "out" / "direct"
+    safety = captured["direct"]["direct_query_safety"]
+    assert safety.server_timeout_seconds == 7
+    assert safety.client_timeout_seconds == 11
+    assert safety.max_result_rows == 250
+    assert safety.max_recursive_hops == 12
     assert captured["mcp"]["output_dir"] == tmp_path / "out" / "mcp"
     assert captured["mcp"]["mcp_dir"] == tmp_path / "bloodhound-mcp"
     assert captured["mcp"]["max_steps"] == 9

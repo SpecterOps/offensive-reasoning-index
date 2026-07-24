@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
+
+import httpx
 
 from ori.eval.bhce import BHCEClient, CypherResult
 
@@ -64,3 +67,143 @@ def test_get_all_node_names_includes_adcs_labels() -> None:
     assert "CERTTEMPLATE-NODE@CORP.LOCAL" in names
     assert any("MATCH (n:EnterpriseCA)" in query for query in seen_queries)
     assert any("MATCH (n:CertTemplate)" in query for query in seen_queries)
+
+
+def test_run_cypher_uses_official_prefer_wait_header_and_payload() -> None:
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["headers"] = request.headers
+        captured["payload"] = json.loads(request.content)
+        return httpx.Response(200, json={"data": {"nodes": {}, "edges": []}})
+
+    client = BHCEClient(
+        domain="bloodhound.test",
+        token_id="token-id",
+        token_key="token-key",
+    )
+    asyncio.run(client._client.aclose())
+    client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+    result = asyncio.run(
+        client.run_cypher(
+            "MATCH (n:Domain) RETURN n LIMIT 1",
+            server_timeout_seconds=10,
+            client_timeout_seconds=15,
+        )
+    )
+    asyncio.run(client.close())
+
+    assert result.success is True
+    headers = captured["headers"]
+    assert isinstance(headers, httpx.Headers)
+    assert headers["Prefer"] == "wait=10"
+    assert captured["payload"] == {
+        "query": "MATCH (n:Domain) RETURN n LIMIT 1",
+        "include_properties": True,
+    }
+
+
+def test_run_cypher_classifies_bloodhound_timeout_response() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, text="query timeout", request=request)
+
+    client = BHCEClient(
+        domain="bloodhound.test",
+        token_id="token-id",
+        token_key="token-key",
+    )
+    asyncio.run(client._client.aclose())
+    client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+    result = asyncio.run(
+        client.run_cypher(
+            "MATCH (n:Domain) RETURN n LIMIT 1",
+            server_timeout_seconds=10,
+            client_timeout_seconds=15,
+        )
+    )
+    asyncio.run(client.close())
+
+    assert result.success is False
+    assert result.failure_type == "query_timeout"
+    assert result.failure_subtype == "bloodhound_query_timeout"
+    assert result.status_code == 500
+
+
+def test_run_cypher_keeps_gateway_timeout_in_infrastructure_bucket() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(504, text="gateway timeout", request=request)
+
+    client = BHCEClient(
+        domain="bloodhound.test",
+        token_id="token-id",
+        token_key="token-key",
+    )
+    asyncio.run(client._client.aclose())
+    client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+    result = asyncio.run(
+        client.run_cypher(
+            "MATCH (n:Domain) RETURN n LIMIT 1",
+            server_timeout_seconds=10,
+            client_timeout_seconds=15,
+        )
+    )
+    asyncio.run(client.close())
+
+    assert result.success is False
+    assert result.failure_type == "server_unavailable"
+    assert result.failure_subtype == "bloodhound_server_unavailable"
+    assert result.status_code == 504
+
+
+def test_run_cypher_keeps_known_500_cypher_error_in_query_bucket() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            500,
+            text="Neo4jError: Neo.ClientError.Statement.SyntaxError",
+            request=request,
+        )
+
+    client = BHCEClient(
+        domain="bloodhound.test",
+        token_id="token-id",
+        token_key="token-key",
+    )
+    asyncio.run(client._client.aclose())
+    client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+    result = asyncio.run(client.run_cypher("MATCH broken"))
+    asyncio.run(client.close())
+
+    assert result.success is False
+    assert result.failure_type == "query_error"
+    assert result.failure_subtype == "bloodhound_query_error"
+    assert result.status_code == 500
+
+
+def test_run_cypher_classifies_client_transport_timeout() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("client wait expired", request=request)
+
+    client = BHCEClient(
+        domain="bloodhound.test",
+        token_id="token-id",
+        token_key="token-key",
+    )
+    asyncio.run(client._client.aclose())
+    client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+    result = asyncio.run(
+        client.run_cypher(
+            "MATCH (n:Domain) RETURN n LIMIT 1",
+            server_timeout_seconds=10,
+            client_timeout_seconds=15,
+        )
+    )
+    asyncio.run(client.close())
+
+    assert result.success is False
+    assert result.failure_type == "client_timeout"
+    assert result.failure_subtype == "client_transport_timeout"

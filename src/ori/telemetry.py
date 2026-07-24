@@ -520,6 +520,25 @@ def record_eval_telemetry(
                 "provider_metrics": dict(
                     getattr(result.model_response, "provider_metrics", {}) or {}
                 ),
+                "direct_query": {
+                    "failure_type": getattr(result.model_result, "failure_type", None),
+                    "failure_subtype": getattr(result.model_result, "failure_subtype", ""),
+                    "query_executed": getattr(result.model_result, "query_executed", False),
+                    "execution_attempts": getattr(
+                        result.model_result, "execution_attempts", 0
+                    ),
+                    "query_fingerprint": getattr(
+                        result.model_result, "query_fingerprint", ""
+                    ),
+                    "safety_policy_version": getattr(
+                        result.model_result, "safety_policy_version", ""
+                    ),
+                    "safety_rule": getattr(result.model_result, "safety_rule", ""),
+                    "bhce_health_after": getattr(
+                        result.model_result, "bhce_health_after", ""
+                    ),
+                    "circuit_state": getattr(result.model_result, "circuit_state", ""),
+                },
                 "run_config": run_config or {},
                 "ollama": {
                     "version": version,

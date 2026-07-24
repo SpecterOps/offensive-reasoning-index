@@ -94,6 +94,19 @@ def grade(
 ) -> GradeResult:
     """Grade a model response against the reference result."""
 
+    # A circuit-open placeholder is an unexecuted infrastructure result. Check it
+    # before parse handling because the model was intentionally not called.
+    if model_result.failure_type == "circuit_open":
+        return GradeResult(
+            score=0.0,
+            outcome=OUTCOME_INFRA_ERROR,
+            hallucination=False,
+            details=(
+                "Direct Cypher sample was not executed because the BloodHound "
+                f"circuit was open: {model_result.error}"
+            ),
+        )
+
     # Model-level error (API call failed)
     if model_response.error:
         return GradeResult(
@@ -113,7 +126,21 @@ def grade(
         )
 
     # Infrastructure/runtime failure reaching BHCE
-    if not ref_result.success and BHCEClient.classify_error(ref_result.error) == "infra":
+    reference_failure_type = ref_result.failure_type or (
+        "infra"
+        if BHCEClient.classify_error(ref_result.error) == "infra"
+        else "query"
+    )
+    if not ref_result.success and reference_failure_type in {
+        "infra",
+        "auth_error",
+        "client_timeout",
+        "transport_error",
+        "server_unavailable",
+        "server_error",
+        "rate_limited",
+        "response_error",
+    }:
         return GradeResult(
             score=0.0,
             outcome="INFRA_ERROR",
@@ -123,14 +150,35 @@ def grade(
 
     # Cypher execution error
     if not model_result.success:
-        if BHCEClient.classify_error(model_result.error) == "infra":
+        if model_result.failure_type in {"policy_rejected", "query_timeout"}:
             return GradeResult(
                 score=0.0,
-                outcome="QUERY_TOO_EXPENSIVE",
+                outcome=OUTCOME_QUERY_TOO_EXPENSIVE,
                 hallucination=False,
                 details=(
-                    "Model-generated Cypher could not be executed by BloodHound CE "
-                    f"(likely overly expensive or otherwise non-viable): {model_result.error}"
+                    "Model-generated Cypher violated the direct-query resource contract: "
+                    f"{model_result.error}"
+                ),
+            )
+        if model_result.failure_type in {
+            "auth_error",
+            "client_timeout",
+            "transport_error",
+            "server_unavailable",
+            "server_error",
+            "rate_limited",
+            "response_error",
+        } or (
+            model_result.failure_type is None
+            and BHCEClient.classify_error(model_result.error) == "infra"
+        ):
+            return GradeResult(
+                score=0.0,
+                outcome=OUTCOME_INFRA_ERROR,
+                hallucination=False,
+                details=(
+                    "Model-generated Cypher could not be graded because BloodHound "
+                    f"or its transport was unavailable: {model_result.error}"
                 ),
             )
         return GradeResult(

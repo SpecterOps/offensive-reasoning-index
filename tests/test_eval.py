@@ -453,11 +453,34 @@ def test_grade_cypher_error():
     assert result.outcome == "CYPHER_ERROR"
 
 
-def test_grade_query_too_expensive_for_model_query_failure():
+def test_grade_infra_error_for_untyped_model_transport_failure():
     task = _make_task()
     resp = _make_model_response()
     model_result = _make_cypher_result([], success=False)
     model_result.error = "HTTP 502: Bad Gateway"
+    result = grade(task, resp, model_result, _make_cypher_result(["A@CORP.LOCAL"]), set())
+    assert result.score == 0.0
+    assert result.outcome == "INFRA_ERROR"
+
+
+def test_grade_query_too_expensive_for_policy_rejection():
+    task = _make_task()
+    resp = _make_model_response()
+    model_result = _make_cypher_result([], success=False)
+    model_result.error = "rejected unbounded wildcard path"
+    model_result.failure_type = "policy_rejected"
+    model_result.failure_subtype = "unbounded_wildcard_path_enumeration"
+    result = grade(task, resp, model_result, _make_cypher_result(["A@CORP.LOCAL"]), set())
+    assert result.score == 0.0
+    assert result.outcome == "QUERY_TOO_EXPENSIVE"
+
+
+def test_grade_query_too_expensive_for_explicit_server_query_timeout():
+    task = _make_task()
+    resp = _make_model_response()
+    model_result = _make_cypher_result([], success=False)
+    model_result.error = "HTTP 500: query timeout"
+    model_result.failure_type = "query_timeout"
     result = grade(task, resp, model_result, _make_cypher_result(["A@CORP.LOCAL"]), set())
     assert result.score == 0.0
     assert result.outcome == "QUERY_TOO_EXPENSIVE"

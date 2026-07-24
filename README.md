@@ -294,6 +294,15 @@ defaults:
   health:
     timeout_seconds: 60
     poll_interval: 5
+  direct_query_safety:
+    enabled: true
+    policy_version: bloodhound-cysql-direct-v1
+    server_timeout_seconds: 10
+    client_timeout_seconds: 15
+    max_recursive_hops: 12
+    max_result_rows: 1000
+    max_query_characters: 16384
+    max_recursive_patterns: 2
   mcp:
     # Paths in a model-matrix config are resolved from the config directory.
     mcp_dir: ../../Bloodhound-MCP
@@ -320,6 +329,13 @@ graded samples across two models and two tracks. After one complete campaign
 succeeds, use a new output directory and raise `runs_per_model` to `3` or more
 for variance analysis. Do not confuse repeated model passes with
 `max_model_reruns_on_infra`, which only retries infrastructure failures.
+
+The direct-query safety policy is model-blind: it runs after the model has
+finished and does not add query advice to the prompt, rewrite the query, or ask
+the model to repair it. A rejected greedy query receives
+`QUERY_TOO_EXPENSIVE` and is never sent to BloodHound. An admitted query is
+executed once with BloodHound's documented `Prefer: wait=10` server timeout and
+a 15-second client deadline.
 
 ### 8. Run the campaign
 
@@ -359,6 +375,25 @@ results/benchmark-runs/complex-v1-seed-4401-gpt56sol-vs-gpt55/
 Per-model CSVs, telemetry, and inspect logs are written alongside those summary
 files. Preserve them with the manifest, artifact hashes, preflight reports, and
 a sanitized copy of the model config.
+
+For a direct-only comparison, change `modes` to `[direct]`. The current
+seed-4401 development corpus then runs 42 tasks per model, or 84 total samples.
+Direct samples are serialized even if a higher concurrency is requested so only
+one untrusted query can reach BloodHound at a time.
+
+Direct runs also write:
+
+```text
+direct/_direct_query_deny_cache.json
+direct/<model>.csv.checkpoint.json
+```
+
+The deny cache is scoped to the exact manifest fingerprint and safety-policy
+version. A query that times out is quarantined and cannot be executed again in
+that campaign. The checkpoint preserves completed results; rerunning the same
+command resumes only tasks previously classified as infrastructure failures.
+Use a new output directory when changing the manifest, model, run name, or
+safety policy.
 
 ### 9. Read the results
 
@@ -400,6 +435,9 @@ Stop and fix the relevant layer before continuing when:
 - the MCP checkout path is wrong or its server cannot start;
 - a run reports `INFRA_ERROR`, authentication failures, systematic timeouts, or
   tool-loop failures that would make the two model scores incomparable.
+- the direct-query circuit opens because BloodHound fails its post-error health
+  check; later tasks are recorded as unexecuted infrastructure placeholders
+  rather than being blamed on the model.
 
 ## Repository Layout
 
@@ -460,6 +498,15 @@ output_dir: results/benchmark-runs/complex-v1-seed-4401
 defaults:
   concurrency: 1
   runs_per_model: 3
+  direct_query_safety:
+    enabled: true
+    policy_version: bloodhound-cysql-direct-v1
+    server_timeout_seconds: 10
+    client_timeout_seconds: 15
+    max_recursive_hops: 12
+    max_result_rows: 1000
+    max_query_characters: 16384
+    max_recursive_patterns: 2
   mcp:
     mcp_dir: ../bloodhound-mcp
     max_steps: 16
@@ -486,6 +533,39 @@ outputs are isolated under `direct/<model>/run-001.csv` and
 `mcp/<model>/run-001.csv`, with `run_index` and `runs_per_model` retained in the
 CSV metadata. This is separate from `max_model_reruns_on_infra`, which only
 retries infrastructure failures.
+
+## Direct Cypher containment
+
+ORI treats model-produced direct Cypher as untrusted input. The
+`bloodhound-cysql-direct-v1` policy is based on BloodHound's documented CySQL
+surface, including recursive expansions, bounded ranges, `shortestPath`,
+`allShortestPaths`, and `LIMIT`:
+
+- only one read-only statement is accepted;
+- recursive queries must bind an endpoint with an exact `name` or `objectid`
+  selector;
+- raw open-ended wildcard path enumeration is rejected;
+- relationship enumeration requires a bound endpoint, aggregate count, or
+  `LIMIT`;
+- recursive upper bounds above 12 and more than two recursive patterns are
+  rejected;
+- open-ended `allShortestPaths` is rejected because BloodHound documents its
+  higher resource use;
+- broad node results, labeled or unlabeled, require a bound selector, aggregate
+  count, or result-stage `LIMIT`;
+- explicit `LIMIT` values above 1000 are rejected.
+
+The guard does not attempt to convert Neo4j Cypher into BloodHound CySQL.
+BloodHound's official supported-syntax documentation is authoritative:
+
+- [Supported Cypher Syntax](https://bloodhound.specterops.io/analyze-data/explore/cypher-supported)
+- [Search with Cypher](https://bloodhound.specterops.io/analyze-data/explore/cypher-search)
+- [Run a Cypher query API](https://bloodhound.specterops.io/reference/cypher/run-a-cypher-query)
+
+Policy rejection and an explicit BloodHound query timeout are model-attributable
+`QUERY_TOO_EXPENSIVE` outcomes. Authentication, transport, server availability,
+rate-limit, client-timeout, and circuit-open failures are `INFRA_ERROR`. A
+generic HTTP 5xx is never automatically called an expensive model query.
 
 For Codex OAuth, log in with the Codex CLI:
 

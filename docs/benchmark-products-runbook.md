@@ -190,6 +190,15 @@ output_dir: results/benchmark-runs/complex-v1-seed-4401
 defaults:
   concurrency: 1
   runs_per_model: 3
+  direct_query_safety:
+    enabled: true
+    policy_version: bloodhound-cysql-direct-v1
+    server_timeout_seconds: 10
+    client_timeout_seconds: 15
+    max_recursive_hops: 12
+    max_result_rows: 1000
+    max_query_characters: 16384
+    max_recursive_patterns: 2
   mcp:
     mcp_dir: ../bloodhound-mcp
     max_steps: 16
@@ -214,6 +223,13 @@ models:
 dataset and manifest. A model entry overrides the default. Each repetition has
 its own CSV and run metadata. `max_model_reruns_on_infra` remains reserved for
 recovery retries and does not increase the requested sample count.
+
+Direct mode applies the versioned safety policy after model generation. It does
+not alter the prompt or repair the answer. Policy-rejected queries are scored as
+`QUERY_TOO_EXPENSIVE` without reaching BloodHound; admitted queries run once
+with BloodHound's documented server timeout. See
+[Benchmark Hardening Runbook](benchmark-hardening-runbook.md#direct-cypher-containment)
+for circuit-breaker, deny-cache, checkpoint, and reporting details.
 
 For Codex OAuth, log in with Codex CLI first:
 
