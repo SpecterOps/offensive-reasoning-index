@@ -43,7 +43,7 @@ def test_offline_answer_extraction_preserves_mechanism_evidence() -> None:
     }
 
 
-def test_extra_valid_nodes_are_not_hallucinations() -> None:
+def test_extra_valid_nodes_are_incorrect_but_not_hallucinations() -> None:
     task = _task()
     result = grade_mcp_diagnostic(
         task=task,
@@ -55,7 +55,7 @@ def test_extra_valid_nodes_are_not_hallucinations() -> None:
         valid_node_names={"USER1@CORP.LOCAL", "ROOTCA@CORP.LOCAL"},
     )
 
-    assert result.grade.outcome == "CORRECT"
+    assert result.grade.outcome == "INCORRECT"
     assert result.hallucinated_nodes == []
     assert result.extra_valid_nodes == ["ROOTCA@CORP.LOCAL"]
     assert result.metrics["precision"] == 0.5
@@ -288,7 +288,7 @@ def test_score_answers_accepts_top_level_manual_answer_shape(tmp_path) -> None:
     assert projection["tasks"][0]["answer_nodes"] == ["ALICE@CORP.LOCAL", "ROOTCA@CORP.LOCAL"]
 
 
-def test_score_answers_flattens_top_level_manual_paths_shape(tmp_path) -> None:
+def test_score_answers_flattens_paths_and_rejects_extra_node(tmp_path) -> None:
     manifest = {
         "domain": "CORP.LOCAL",
         "planted_paths": [
@@ -332,7 +332,8 @@ def test_score_answers_flattens_top_level_manual_paths_shape(tmp_path) -> None:
         track="mcp",
     )
 
-    assert projection["tasks"][0]["outcome"] == "CORRECT"
+    assert projection["tasks"][0]["outcome"] == "INCORRECT"
+    assert projection["tasks"][0]["extra_valid_nodes"] == ["BOB@CORP.LOCAL"]
     assert projection["tasks"][0]["answer_nodes"] == [
         "ALICE@CORP.LOCAL",
         "BOB@CORP.LOCAL",

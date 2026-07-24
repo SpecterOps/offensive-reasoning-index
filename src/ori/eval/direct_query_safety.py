@@ -20,7 +20,7 @@ if TYPE_CHECKING:
     from .bhce import BHCEClient, CypherResult
 
 
-DIRECT_QUERY_POLICY_VERSION = "bloodhound-cysql-direct-v1"
+DIRECT_QUERY_POLICY_VERSION = "bloodhound-cysql-direct-v2"
 
 
 @dataclass(frozen=True)
@@ -80,10 +80,133 @@ class QuerySafetyDecision:
     fingerprint: str
 
 
-def normalize_query_for_fingerprint(query: str) -> str:
-    """Create a stable query identity without changing string literal case."""
+_FINGERPRINT_KEYWORDS = frozenset(
+    {
+        "ALL",
+        "ALLSHORTESTPATHS",
+        "AND",
+        "ANY",
+        "AS",
+        "ASC",
+        "BY",
+        "CALL",
+        "CASE",
+        "COLLECT",
+        "CONTAINS",
+        "COUNT",
+        "CREATE",
+        "DELETE",
+        "DESC",
+        "DETACH",
+        "DISTINCT",
+        "DROP",
+        "ELSE",
+        "END",
+        "ENDS",
+        "EXISTS",
+        "FALSE",
+        "FOREACH",
+        "IN",
+        "LIMIT",
+        "LOAD",
+        "MATCH",
+        "MERGE",
+        "NONE",
+        "NOT",
+        "NULL",
+        "OPTIONAL",
+        "OR",
+        "ORDER",
+        "REMOVE",
+        "RETURN",
+        "SET",
+        "SHORTESTPATH",
+        "SINGLE",
+        "SKIP",
+        "STARTS",
+        "THEN",
+        "TRUE",
+        "UNION",
+        "UNWIND",
+        "WHEN",
+        "WHERE",
+        "WITH",
+        "XOR",
+    }
+)
+_TWO_CHARACTER_TOKENS = frozenset(
+    {"->", "<-", "<=", ">=", "<>", "=~", "..", "+=", "-=", "*=", "/="}
+)
 
-    return " ".join(query.strip().split())
+
+def normalize_query_for_fingerprint(query: str) -> str:
+    """Canonicalize token-equivalent CySQL without changing identifiers or literals.
+
+    Comments and formatting are discarded and known Cypher keywords are
+    case-normalized. Quoted strings, backtick identifiers, and ordinary
+    identifiers retain their exact spelling so case-sensitive BloodHound names
+    and semantically distinct identifiers cannot collide.
+    """
+
+    tokens: list[str] = []
+    index = 0
+    while index < len(query):
+        current = query[index]
+        following = query[index + 1] if index + 1 < len(query) else ""
+        if current.isspace():
+            index += 1
+            continue
+        if current == "/" and following == "/":
+            index += 2
+            while index < len(query) and query[index] not in "\r\n":
+                index += 1
+            continue
+        if current == "/" and following == "*":
+            index += 2
+            while index + 1 < len(query):
+                if query[index : index + 2] == "*/":
+                    index += 2
+                    break
+                index += 1
+            else:
+                index = len(query)
+            continue
+        if current in {"'", '"', "`"}:
+            delimiter = current
+            start = index
+            index += 1
+            while index < len(query):
+                if query[index] == "\\" and delimiter != "`":
+                    index = min(index + 2, len(query))
+                    continue
+                if query[index] == delimiter:
+                    if index + 1 < len(query) and query[index + 1] == delimiter:
+                        index += 2
+                        continue
+                    index += 1
+                    break
+                index += 1
+            tokens.append(query[start:index])
+            continue
+        if current.isalpha() or current == "_":
+            start = index
+            index += 1
+            while index < len(query) and (
+                query[index].isalnum() or query[index] == "_"
+            ):
+                index += 1
+            identifier = query[start:index]
+            upper = identifier.upper()
+            tokens.append(upper if upper in _FINGERPRINT_KEYWORDS else identifier)
+            continue
+        two_characters = query[index : index + 2]
+        if two_characters in _TWO_CHARACTER_TOKENS:
+            tokens.append(two_characters)
+            index += 2
+            continue
+        tokens.append(current)
+        index += 1
+    return "\x1f".join(tokens)
 
 
 def query_fingerprint(query: str) -> str:
@@ -175,6 +298,12 @@ _INLINE_FILTER_BINDING = re.compile(
     r"\(\s*([A-Za-z_]\w*)[^()]*\{",
     re.IGNORECASE,
 )
+_WHERE_SCALAR_FILTER_BINDING = re.compile(
+    r"\b([A-Za-z_]\w*)\s*\.\s*[A-Za-z_]\w*\s*"
+    r"(?:=~|<>|<=|>=|=|<|>|STARTS\s+WITH|ENDS\s+WITH|CONTAINS|IN)\s*"
+    r"(?:['\"]|TRUE\b|FALSE\b|NULL\b|-?\d|\[)",
+    re.IGNORECASE,
+)
 _PROPERTY_EXACT_BINDING = re.compile(
     r"\b([A-Za-z_]\w*)\s*\.\s*(?:name|objectid)\s*=\s*['\"]",
     re.IGNORECASE,
@@ -212,6 +341,17 @@ def _exact_selector_bindings(masked_query: str) -> set[str]:
     ):
         bindings.update(match.group(1) for match in pattern.finditer(masked_query))
     return bindings
+
+
+def _standalone_filter_bindings(masked_query: str) -> set[str]:
+    """Return variables narrowed by inline or scalar property predicates."""
+
+    return {
+        match.group(1) for match in _INLINE_FILTER_BINDING.finditer(masked_query)
+    } | {
+        match.group(1)
+        for match in _WHERE_SCALAR_FILTER_BINDING.finditer(masked_query)
+    }
 
 
 def _node_context_before(masked_query: str, position: int) -> tuple[str | None, bool]:
@@ -434,9 +574,9 @@ class DirectQueryPolicy:
             )
 
         selector_bindings = _exact_selector_bindings(masked)
-        filter_bindings = selector_bindings | {
-            match.group(1) for match in _INLINE_FILTER_BINDING.finditer(masked)
-        }
+        standalone_filter_bindings = (
+            selector_bindings | _standalone_filter_bindings(masked)
+        )
         returns_count_only = bool(self._RETURN_COUNT_ONLY.search(masked))
         for expansion in expansions:
             upper = expansion["upper"]
@@ -484,7 +624,7 @@ class DirectQueryPolicy:
         relationship_contexts = _relationship_contexts(masked)
         relationship_is_selective = _all_relationship_components_are_selective(
             relationship_contexts,
-            filter_bindings,
+            selector_bindings,
         )
         if (
             relationship_contexts
@@ -513,7 +653,10 @@ class DirectQueryPolicy:
             )
         standalone_nodes = _standalone_node_bindings(masked)
         if (
-            any(variable not in filter_bindings for variable in standalone_nodes)
+            any(
+                variable not in standalone_filter_bindings
+                for variable in standalone_nodes
+            )
             and not returns_count_only
             and not has_result_limit
         ):

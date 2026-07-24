@@ -68,9 +68,9 @@ def plant_unconstrained_delegation(graph: ADGraph) -> PlantedPath:
     )
 
     cypher = (
-        "MATCH p=(c:Computer {unconstraineddelegation: true}) "
-        "-[:HasSession]->(u:User) "
-        "WHERE NOT c.isdc = true "
+        f"MATCH p=(c:Computer {{name: '{target_ws.properties['name']}'}}) "
+        f"-[:HasSession]->(u:User {{name: '{da_user.properties['name']}'}}) "
+        "WHERE c.unconstraineddelegation = true AND NOT c.isdc = true "
         "RETURN p"
     )
 

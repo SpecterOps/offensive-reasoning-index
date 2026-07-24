@@ -452,7 +452,7 @@ def test_cli_eval_parses_ollama_options(tmp_path: Path, monkeypatch) -> None:
         "options": {"num_ctx": 16384, "temperature": 0.2},
         "direct_query_safety": {
             "enabled": True,
-            "policy_version": "bloodhound-cysql-direct-v1",
+            "policy_version": "bloodhound-cysql-direct-v2",
             "server_timeout_seconds": 10.0,
             "client_timeout_seconds": 15.0,
             "max_recursive_hops": 12,

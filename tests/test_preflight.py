@@ -50,3 +50,41 @@ def test_offline_preflight_requires_cardinality_guard_without_claiming_execution
     finding = next(item for item in report["findings"] if item["severity"] == "error")
     assert finding["code"] == "REFERENCE_CARDINALITY_NOT_ENFORCED"
     assert "offline preflight does not execute" in finding["detail"]
+
+
+def test_preflight_rejects_anchored_prompt_that_omits_endpoint() -> None:
+    task = _task("MATCH (a)-[:AdminTo]->(b) RETURN a, b")
+    task.metadata = {
+        "source_name": "ALICE@CORP.LOCAL",
+        "target_name": "DC01.CORP.LOCAL",
+        "reference_scope": "anchored",
+    }
+    task.question = "Find the path from ALICE@CORP.LOCAL."
+
+    report = preflight_tasks([task])
+
+    finding = next(
+        item
+        for item in report["findings"]
+        if item["code"] == "ANCHORED_PROMPT_SCOPE_MISMATCH"
+    )
+    assert finding["severity"] == "error"
+    assert "DC01.CORP.LOCAL" in finding["detail"]
+
+
+def test_preflight_accepts_exact_materialized_node_set_contract() -> None:
+    task = _task("MATCH (u:User {hasspn: true}) RETURN u")
+    task.grade_mode = "node_set"
+    task.question = "List every Kerberoastable account."
+    task.metadata = {
+        "reference_scope": "reference_defined",
+        "answer_contract": {
+            "grade_mode": "node_set",
+            "oracle": "materialized_reference",
+            "set_semantics": "exact",
+        },
+    }
+
+    report = preflight_tasks([task])
+
+    assert report["summary"] == {"tasks_checked": 1, "errors": 0, "warnings": 0}

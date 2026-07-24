@@ -666,13 +666,14 @@ def test_mcp_grade_requires_declared_contextual_relationship() -> None:
     assert present.grade.score == 1.0
 
 
-def test_grade_node_set_superset_ok():
+def test_grade_node_set_rejects_extra_valid_node():
     task = _make_task("node_set")
     resp = _make_model_response()
     ref = _make_cypher_result(["SVC_BACKUP@CORP.LOCAL"])
     model = _make_cypher_result(["SVC_BACKUP@CORP.LOCAL", "SVC_MSSQL@CORP.LOCAL"])
     result = grade(task, resp, model, ref, set())
-    assert result.score == 1.0
+    assert result.score == 0.0
+    assert result.outcome == "INCORRECT"
 
 
 def test_grade_node_set_missing_ref_node():
@@ -923,12 +924,22 @@ def test_acl_chain_02_names_source_and_target():
     assert "abused group" in task.question
 
 
+def test_all_anchored_generated_questions_name_their_graded_endpoints():
+    tasks = generate_tasks(_make_manifest())
+
+    for task in tasks:
+        if task.metadata.get("reference_scope") != "anchored":
+            continue
+        assert task.metadata["source_name"] in task.question
+        assert task.metadata["target_name"] in task.question
+
+
 def test_phase4_composite_names_bridge_and_delegation_target():
     tasks = generate_tasks(_make_manifest())
     task = next(t for t in tasks if t.id == "t5_adcs_to_delegation_composite-01")
     assert "TBERGER@TEST.LOCAL" in task.question
     assert "SVC_PHASE4_BRIDGE@TEST.LOCAL" in task.question
-    assert "WS-IT-04.TEST.LOCAL" in task.question
+    assert task.metadata["target_name"] in task.question
 
 
 # ---------------------------------------------------------------------------

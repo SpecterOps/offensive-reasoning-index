@@ -16,6 +16,8 @@ class AnswerContract:
     forbidden_nodes: tuple[str, ...] = ()
     required_edges: tuple[dict[str, Any], ...] = ()
     grade_mode: str | None = None
+    oracle: str = ""
+    set_semantics: str = ""
     question: str = ""
     notes: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
@@ -28,6 +30,8 @@ class AnswerContract:
             "forbidden_nodes": list(self.forbidden_nodes),
             "required_edges": list(self.required_edges),
             "grade_mode": self.grade_mode,
+            "oracle": self.oracle,
+            "set_semantics": self.set_semantics,
             "question": self.question,
             "notes": self.notes,
             "metadata": dict(self.metadata),
@@ -54,6 +58,8 @@ def task_contract_for(task: Task) -> AnswerContract | None:
                 edge for edge in raw_contract.get("required_edges", []) if isinstance(edge, dict)
             ),
             grade_mode=str(raw_contract.get("grade_mode") or task.grade_mode),
+            oracle=str(raw_contract.get("oracle") or ""),
+            set_semantics=str(raw_contract.get("set_semantics") or ""),
             question=task.question,
             notes=str(raw_contract.get("notes") or "metadata contract"),
             metadata={"source": "metadata"},

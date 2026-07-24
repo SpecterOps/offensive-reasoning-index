@@ -50,8 +50,8 @@ _TEMPLATE_QUESTIONS: dict[str, list[tuple[str, str, str, list[str], str | None]]
             " {{name: 'DOMAIN ADMINS@{domain}'}}) RETURN c",
         ),
         (
-            "Find all workstations where a privileged user (Domain Admin or IT Admin) "
-            "has an active session.",
+            "Show the active-session relationship between {target_name} and "
+            "{source_name}.",
             "path_finding",
             "path_exists",
             ["has_session"],
@@ -60,7 +60,7 @@ _TEMPLATE_QUESTIONS: dict[str, list[tuple[str, str, str, list[str], str | None]]
     ],
     "t1_group_membership": [
         (
-            "Is {source_name} a member of any privileged groups? Show the membership path.",
+            "Show the membership path from {source_name} to {target_name}.",
             "path_finding",
             "path_exists",
             ["member_of", "privilege_escalation"],
@@ -78,8 +78,8 @@ _TEMPLATE_QUESTIONS: dict[str, list[tuple[str, str, str, list[str], str | None]]
     ],
     "t2_kerberoast_chain": [
         (
-            "Find all Kerberoastable service accounts (hasspn = true) and show their path "
-            "to any server computer.",
+            "Show the attack path from Kerberoastable service account {source_name} "
+            "to server {target_name}.",
             "path_finding",
             "path_exists",
             ["kerberoasting", "service_accounts"],
@@ -96,8 +96,8 @@ _TEMPLATE_QUESTIONS: dict[str, list[tuple[str, str, str, list[str], str | None]]
     ],
     "t2_acl_chain": [
         (
-            "Find users with GenericAll rights on any privileged group that has AdminTo "
-            "access on servers.",
+            "Show the GenericAll-to-AdminTo abuse path from {source_name} to "
+            "{target_name}.",
             "path_finding",
             "path_exists",
             ["acl", "generic_all", "admin_to"],
@@ -115,7 +115,7 @@ _TEMPLATE_QUESTIONS: dict[str, list[tuple[str, str, str, list[str], str | None]]
     ],
     "t2_nested_groups": [
         (
-            "Find the full attack path from {source_name} to any server computer, "
+            "Find the full attack path from {source_name} to {target_name}, "
             "including all nested group membership hops.",
             "path_finding",
             "path_exists",
@@ -134,8 +134,9 @@ _TEMPLATE_QUESTIONS: dict[str, list[tuple[str, str, str, list[str], str | None]]
     ],
     "t3_unconstrained_delegation": [
         (
-            "Find all non-domain-controller computers that have unconstrained Kerberos "
-            "delegation enabled and also have active sessions from privileged users.",
+            "Show the active-session relationship proving that {source_name} has a "
+            "session on non-domain-controller {target_name}, which has unconstrained "
+            "Kerberos delegation enabled.",
             "path_finding",
             "path_exists",
             ["unconstrained_delegation", "kerberos"],
@@ -151,8 +152,8 @@ _TEMPLATE_QUESTIONS: dict[str, list[tuple[str, str, str, list[str], str | None]]
     ],
     "t3_constrained_delegation": [
         (
-            "Find all service accounts configured with constrained delegation "
-            "(trustedtoauth = true) that can delegate access to domain controllers.",
+            "Show the constrained-delegation path from service account {source_name} "
+            "to domain controller {target_name}.",
             "path_finding",
             "path_exists",
             ["constrained_delegation", "s4u2proxy"],
@@ -169,7 +170,8 @@ _TEMPLATE_QUESTIONS: dict[str, list[tuple[str, str, str, list[str], str | None]]
     ],
     "t4_adcs_esc1": [
         (
-            "Identify the ESC1-style certificate abuse path from {source_name}. "
+            "Identify the ESC1-style certificate abuse path from {source_name} to "
+            "{target_name}. "
             "Include the enrollee, enrollment group, certificate template, issuing CA, "
             "root CA, NTAuth trust object, and the privileged target.",
             "path_finding",
@@ -180,8 +182,8 @@ _TEMPLATE_QUESTIONS: dict[str, list[tuple[str, str, str, list[str], str | None]]
     ],
     "t4_rbcd_delegation": [
         (
-            "Identify the advanced delegation abuse path from {source_name} to the affected "
-            "target computer or service. Include the principal, delegation edge, and target.",
+            "Identify the advanced delegation abuse path from {source_name} to "
+            "{target_name}. Include the principal, delegation edge, and target.",
             "path_finding",
             "path_exists",
             ["phase4", "delegation", "rbcd"],
@@ -192,7 +194,7 @@ _TEMPLATE_QUESTIONS: dict[str, list[tuple[str, str, str, list[str], str | None]]
         (
             "Find the composite Phase 4 path where {source_name} chains ESC1 certificate "
             "abuse with GenericWrite over SVC_PHASE4_BRIDGE@{domain} and delegation to "
-            "WS-IT-04.{domain}. Include all critical ADCS, service, delegation, and "
+            "{target_name}. Include all critical ADCS, service, delegation, and "
             "target nodes.",
             "path_finding",
             "path_exists",
@@ -275,7 +277,13 @@ def _return_projection_aliases(projection: str) -> list[str]:
 
 def _reference_cypher_with_supporting_edges(path: dict[str, Any]) -> str:
     """Return reference Cypher that also proves declared contextual relationships."""
-    reference = str(path["verification_cypher"])
+    reference = (
+        _exact_edge_reference_cypher(path)
+        if path.get("tier") == 6
+        and not path.get("negative_control")
+        and path.get("path_edges")
+        else str(path["verification_cypher"])
+    )
     supporting_edges = [edge for edge in path.get("supporting_edges", []) if isinstance(edge, dict)]
     if not supporting_edges:
         return reference
@@ -306,6 +314,35 @@ def _reference_cypher_with_supporting_edges(path: dict[str, Any]) -> str:
         f"{body} {' '.join(clauses)} "
         f"WITH {', '.join(grouped_values)}, count(*) AS ori_evidence_count "
         f"WHERE ori_evidence_count = 1 RETURN {', '.join(return_items)}"
+    )
+
+
+def _exact_edge_reference_cypher(path: dict[str, Any]) -> str:
+    """Materialize every planted Tier-6 edge without relying on shortestPath."""
+
+    clauses: list[str] = []
+    return_items: list[str] = []
+    for index, edge in enumerate(path.get("path_edges", []), start=1):
+        source = str(edge["source"]).replace("'", "\\'")
+        target = str(edge["target"]).replace("'", "\\'")
+        edge_kind = "|".join(live_relationship_kinds(str(edge["edge"])))
+        source_alias = f"edge{index}s"
+        target_alias = f"edge{index}t"
+        clauses.append(
+            f"MATCH ({source_alias})-[:{edge_kind}]->({target_alias}) "
+            f"WHERE coalesce({source_alias}.objectid, {source_alias}.objectId) = "
+            f"'{source}' AND coalesce({target_alias}.objectid, "
+            f"{target_alias}.objectId) = '{target}'"
+        )
+        return_items.extend((source_alias, target_alias))
+    if not return_items:
+        raise ValueError(
+            f"Tier-6 reference for {path.get('template_id', 'unknown')} has no path edges"
+        )
+    return (
+        f"{' '.join(clauses)} WITH {', '.join(return_items)}, "
+        "count(*) AS ori_evidence_count WHERE ori_evidence_count = 1 "
+        f"RETURN {', '.join(return_items)}"
     )
 
 
@@ -522,6 +559,11 @@ def generate_tasks(manifest: dict) -> list[Task]:
                 for edge in path.get("supporting_edges", [])
                 if isinstance(edge, dict)
             ]
+            path_edges = [
+                _canonical_edge(edge)
+                for edge in path.get("path_edges", [])
+                if isinstance(edge, dict)
+            ]
             if supporting_edges:
                 contextual_relationships = sorted(
                     f"{edge.get('source_name', edge['source'])} "
@@ -546,6 +588,11 @@ def generate_tasks(manifest: dict) -> list[Task]:
                     metadata={
                         "source_name": source_name,
                         "target_name": target_name,
+                        "reference_scope": (
+                            "reference_defined"
+                            if ref_cypher_tmpl is not None
+                            else "anchored"
+                        ),
                         "domain": domain,
                         "description": path["description"],
                         "mitre": path.get("mitre", []),
@@ -557,20 +604,53 @@ def generate_tasks(manifest: dict) -> list[Task]:
                         "supporting_edges": supporting_edges,
                         "reference_evidence": (
                             {
-                                "required_edges": supporting_edges,
+                                "required_edges": (
+                                    [*path_edges, *supporting_edges]
+                                    if path.get("tier") == 6
+                                    and grade_mode == "path_exists"
+                                    else supporting_edges
+                                ),
                                 "expected_cardinality": 1,
                                 "endpoint_anchored": True,
                             }
-                            if supporting_edges
+                            if (
+                                supporting_edges
+                                or (
+                                    path.get("tier") == 6
+                                    and grade_mode == "path_exists"
+                                )
+                            )
                             else None
                         ),
                         "answer_contract": (
                             {
+                                "required_nodes": (
+                                    path.get("critical_nodes", [])
+                                    if path.get("tier") == 6
+                                    and grade_mode == "path_exists"
+                                    else []
+                                ),
                                 "required_edges": supporting_edges,
                                 "grade_mode": grade_mode,
-                                "notes": "Tier 6 contextual relationships must be reported.",
+                                "oracle": "materialized_reference",
+                                "set_semantics": (
+                                    "exact" if grade_mode == "node_set" else ""
+                                ),
+                                "notes": (
+                                    "The live reference result defines the exact node set."
+                                    if grade_mode == "node_set"
+                                    else "Planted critical nodes and contextual relationships "
+                                    "must be reported."
+                                ),
                             }
-                            if supporting_edges
+                            if (
+                                supporting_edges
+                                or grade_mode == "node_set"
+                                or (
+                                    path.get("tier") == 6
+                                    and grade_mode == "path_exists"
+                                )
+                            )
                             else None
                         ),
                         "terminal_escalation_type": path.get("terminal_escalation_type", ""),
@@ -605,7 +685,16 @@ def generate_tasks(manifest: dict) -> list[Task]:
                 reference_cypher=_GLOBAL_REFERENCE_CYPHER[id_suffix],
                 grade_mode=grade_mode,
                 tags=tags,
-                metadata={"domain": domain},
+                metadata={
+                    "domain": domain,
+                    "reference_scope": "reference_defined",
+                    "answer_contract": {
+                        "grade_mode": grade_mode,
+                        "oracle": "materialized_reference",
+                        "set_semantics": "exact",
+                        "notes": "The live reference result defines the exact node set.",
+                    },
+                },
             )
         )
 
@@ -684,6 +773,23 @@ def _generate_mcp_native_tasks(manifest: dict) -> list[Task]:
         }
         if metadata:
             task_metadata.update(metadata)
+        if grade_mode == "node_set" and "answer_contract" not in task_metadata:
+            task_metadata["answer_contract"] = {
+                "grade_mode": grade_mode,
+                "oracle": "materialized_reference",
+                "set_semantics": "exact",
+                "notes": "The live reference result defines the exact node set.",
+            }
+        task_metadata.setdefault(
+            "reference_scope",
+            (
+                "anchored"
+                if grade_mode in {"path_exists", "no_path"}
+                and task_metadata.get("source_name")
+                and task_metadata.get("target_name")
+                else "reference_defined"
+            ),
+        )
         tasks.append(
             Task(
                 id=id,

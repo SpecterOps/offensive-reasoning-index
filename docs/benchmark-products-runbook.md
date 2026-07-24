@@ -192,7 +192,7 @@ defaults:
   runs_per_model: 3
   direct_query_safety:
     enabled: true
-    policy_version: bloodhound-cysql-direct-v1
+    policy_version: bloodhound-cysql-direct-v2
     server_timeout_seconds: 10
     client_timeout_seconds: 15
     max_recursive_hops: 12

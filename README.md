@@ -296,7 +296,7 @@ defaults:
     poll_interval: 5
   direct_query_safety:
     enabled: true
-    policy_version: bloodhound-cysql-direct-v1
+    policy_version: bloodhound-cysql-direct-v2
     server_timeout_seconds: 10
     client_timeout_seconds: 15
     max_recursive_hops: 12
@@ -500,7 +500,7 @@ defaults:
   runs_per_model: 3
   direct_query_safety:
     enabled: true
-    policy_version: bloodhound-cysql-direct-v1
+    policy_version: bloodhound-cysql-direct-v2
     server_timeout_seconds: 10
     client_timeout_seconds: 15
     max_recursive_hops: 12
@@ -537,7 +537,7 @@ retries infrastructure failures.
 ## Direct Cypher containment
 
 ORI treats model-produced direct Cypher as untrusted input. The
-`bloodhound-cysql-direct-v1` policy is based on BloodHound's documented CySQL
+`bloodhound-cysql-direct-v2` policy is based on BloodHound's documented CySQL
 surface, including recursive expansions, bounded ranges, `shortestPath`,
 `allShortestPaths`, and `LIMIT`:
 
@@ -545,8 +545,11 @@ surface, including recursive expansions, bounded ranges, `shortestPath`,
 - recursive queries must bind an endpoint with an exact `name` or `objectid`
   selector;
 - raw open-ended wildcard path enumeration is rejected;
-- relationship enumeration requires a bound endpoint, aggregate count, or
-  `LIMIT`;
+- relationship enumeration requires an exact `name` or `objectid` endpoint,
+  aggregate count, or `LIMIT`; ordinary boolean/property filters do not make a
+  traversal selective;
+- standalone node-set queries may use either inline property maps or equivalent
+  scalar `WHERE` predicates;
 - recursive upper bounds above 12 and more than two recursive patterns are
   rejected;
 - open-ended `allShortestPaths` is rejected because BloodHound documents its
@@ -554,6 +557,11 @@ surface, including recursive expansions, bounded ranges, `shortestPath`,
 - broad node results, labeled or unlabeled, require a bound selector, aggregate
   count, or result-stage `LIMIT`;
 - explicit `LIMIT` values above 1000 are rejected.
+
+Query fingerprints ignore comments, keyword case, and formatting while
+preserving the exact spelling of identifiers and literal values. This
+quarantines token-equivalent timeout retries without conflating case-sensitive
+BloodHound names or semantically distinct identifiers.
 
 The guard does not attempt to convert Neo4j Cypher into BloodHound CySQL.
 BloodHound's official supported-syntax documentation is authoritative:

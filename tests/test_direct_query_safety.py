@@ -12,6 +12,8 @@ from ori.eval.direct_query_safety import (
     DirectQueryPolicy,
     DirectQuerySafetyConfig,
     QueryDenyCache,
+    normalize_query_for_fingerprint,
+    query_fingerprint,
 )
 
 
@@ -41,10 +43,7 @@ def test_phase0_greedy_query_is_rejected_without_bloodhound() -> None:
             "(g:Group {name: 'DOMAIN ADMINS@TEST.LOCAL'}) RETURN p"
         ),
         "MATCH (u:User {hasspn: true}) RETURN u",
-        (
-            "MATCH p=(c:Computer {unconstraineddelegation: true})"
-            "-[:HasSession]->(u:User) RETURN p"
-        ),
+        "MATCH (u:User) WHERE u.hasspn = true RETURN u",
         (
             "MATCH p=(u:User {name: 'A@TEST.LOCAL'})-[*1..5]->"
             "(c:Computer {name: 'C.TEST.LOCAL'}) RETURN p LIMIT 1"
@@ -58,6 +57,27 @@ def test_phase0_greedy_query_is_rejected_without_bloodhound() -> None:
 def test_documented_selective_cysql_shapes_are_admitted(query: str) -> None:
     decision = _policy().evaluate(query)
     assert decision.allowed is True, decision
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "MATCH (u:User {hasspn: true}) RETURN u",
+        "MATCH (u:User) WHERE u.hasspn = true RETURN u",
+        (
+            "MATCH (c:Computer {unconstraineddelegation: true}) "
+            "WHERE NOT c.isdc = true RETURN c"
+        ),
+        (
+            "MATCH (c:Computer) WHERE c.unconstraineddelegation = true "
+            "AND c.isdc = false RETURN c"
+        ),
+    ],
+)
+def test_inline_and_where_scalar_filters_admit_standalone_node_sets(
+    query: str,
+) -> None:
+    assert _policy().evaluate(query).allowed is True
 
 
 @pytest.mark.parametrize(
@@ -92,6 +112,14 @@ def test_documented_selective_cysql_shapes_are_admitted(query: str) -> None:
         (
             "MATCH (u:User {name:'A@TEST.LOCAL'})-[:MemberOf]->(g:Group), "
             "(x:User)-[r]->(y:Group) RETURN x,y",
+            "unselective_relationship_enumeration",
+        ),
+        (
+            "MATCH p=(c:Computer {enabled: true})-[r]->(n) RETURN p",
+            "unselective_relationship_enumeration",
+        ),
+        (
+            "MATCH p=(c:Computer)-[r]->(n) WHERE c.enabled = true RETURN p",
             "unselective_relationship_enumeration",
         ),
         ("MATCH (n) RETURN n", "unselective_node_enumeration"),
@@ -156,6 +184,33 @@ def test_keywords_inside_literals_and_comments_do_not_trigger_mutation_rule() ->
         "/* DELETE everything */ RETURN u"
     )
     assert _policy().evaluate(query).allowed is True
+
+
+def test_fingerprint_ignores_comments_keyword_case_and_formatting() -> None:
+    first = (
+        "MATCH (u:User {name: 'Alice@TEST.LOCAL'}) "
+        "WHERE u.enabled = true RETURN u"
+    )
+    second = (
+        "match/* same query */(u:User{name:'Alice@TEST.LOCAL'})"
+        "where u.enabled=true return u // trailing comment"
+    )
+
+    assert normalize_query_for_fingerprint(first) == normalize_query_for_fingerprint(
+        second
+    )
+    assert query_fingerprint(first) == query_fingerprint(second)
+
+
+def test_fingerprint_preserves_identifier_and_literal_case() -> None:
+    baseline = "MATCH (u:User {name: 'Alice@TEST.LOCAL'}) RETURN u"
+
+    assert query_fingerprint(baseline) != query_fingerprint(
+        "MATCH (U:User {name: 'Alice@TEST.LOCAL'}) RETURN U"
+    )
+    assert query_fingerprint(baseline) != query_fingerprint(
+        "MATCH (u:User {name: 'ALICE@TEST.LOCAL'}) RETURN u"
+    )
 
 
 def test_config_requires_client_timeout_longer_than_server_timeout() -> None:
@@ -263,6 +318,34 @@ def test_server_timeout_quarantines_query_and_does_not_repeat_it(tmp_path) -> No
     assert len(bhce.queries) == 1
     cache = json.loads((tmp_path / "deny.json").read_text())
     assert len(cache["entries"]) == 1
+
+
+def test_timeout_quarantine_matches_comment_case_and_format_variants(tmp_path) -> None:
+    bhce = FakeBHCE(
+        [
+            CypherResult(
+                success=False,
+                error="HTTP 500: query timeout",
+                failure_type="query_timeout",
+                failure_subtype="bloodhound_query_timeout",
+            )
+        ],
+        health_ok=True,
+    )
+    coordinator = _coordinator(tmp_path, bhce)
+    first_query = "MATCH (u:User {name: 'A@TEST.LOCAL'}) RETURN u"
+    equivalent_query = (
+        "match/* retry */(u:User{name:'A@TEST.LOCAL'})return u"
+    )
+
+    first = asyncio.run(coordinator.execute(first_query))
+    second = asyncio.run(coordinator.execute(equivalent_query))
+
+    assert first.failure_type == "query_timeout"
+    assert second.failure_type == "policy_rejected"
+    assert second.failure_subtype == "known_expensive_query"
+    assert second.query_executed is False
+    assert len(bhce.queries) == 1
 
 
 def test_unhealthy_post_failure_opens_circuit_and_skips_later_queries(tmp_path) -> None:

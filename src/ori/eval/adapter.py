@@ -133,7 +133,7 @@ async def call_model(
         elif variant == "wrong":
             # Returns valid Cypher that executes but returns wrong nodes — should score INCORRECT.
             # Returns all GPO objects, which won't overlap with any planted path nodes.
-            cypher = "MATCH (g:GPO) RETURN g"
+            cypher = "MATCH (g:GPO) RETURN g LIMIT 1"
             return ModelResponse(
                 raw_text=cypher,
                 cypher=cypher,

@@ -64,12 +64,16 @@ MCP summaries separate reasoning quality from reliability:
 
 Direct Cypher is checked only after generation, so the benchmark prompt receives
 no safety hints. ORI does not rewrite or repair the answer. The
-`bloodhound-cysql-direct-v1` policy rejects non-read-only statements,
+`bloodhound-cysql-direct-v2` policy rejects non-read-only statements,
 unselective recursive expansions, raw open-ended wildcard path enumeration,
 open-ended `allShortestPaths`, excessive recursive bounds/patterns, oversized
 queries/results, broad relationship enumeration, and broad labeled or unlabeled
 node enumeration. Recursive selectors must bind an endpoint of the path; a
-disconnected selector cannot make a separate expansion safe.
+disconnected selector cannot make a separate expansion safe. For standalone
+node sets, inline property maps and equivalent scalar `WHERE` predicates are
+both valid filters. For traversals, ordinary property filters are not treated as
+exact endpoint selectors; the traversal still needs an exact `name` or
+`objectid`, an aggregate-only result, or an explicit result-stage `LIMIT`.
 
 Admitted model queries are serialized and executed exactly once. ORI sends
 BloodHound's official `Prefer: wait=N` header, uses a slightly longer client
@@ -78,6 +82,11 @@ quarantines its fingerprint for the manifest/policy pair. A transport, server,
 rate-limit, client-timeout, or authentication failure triggers a cheap health
 check; an unhealthy result opens the campaign circuit and later samples are
 recorded as unexecuted `INFRA_ERROR` placeholders.
+
+Fingerprint canonicalization removes comments and formatting and normalizes
+known Cypher keyword case. It deliberately preserves identifiers and literals,
+including their case. A policy-version, manifest, model, or run-name change
+requires a new output directory and new checkpoint/deny-cache artifacts.
 
 Direct CSV, summary, telemetry, and checkpoint artifacts record:
 

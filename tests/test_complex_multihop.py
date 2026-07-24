@@ -210,6 +210,11 @@ def test_tier6_tasks_are_generated_with_operator_questions() -> None:
             mechanism
         }
 
+    for task in (task for task in tasks if task.grade_mode == "path_exists"):
+        assert set(task.metadata["critical_nodes"]).issubset(
+            task.metadata["answer_contract"]["required_nodes"]
+        )
+
 
 def test_tier6_mcp_tasks_include_complex_direct_tasks() -> None:
     graph, _paths = _complex_paths()

@@ -103,7 +103,7 @@ profiles:
     assert resolved.max_model_reruns_on_infra == 3
     assert resolved.health_timeout_seconds == 11.0
     assert resolved.health_poll_interval == 1.5
-    assert resolved.direct_query_safety["policy_version"] == "bloodhound-cysql-direct-v1"
+    assert resolved.direct_query_safety["policy_version"] == "bloodhound-cysql-direct-v2"
     assert resolved.direct_query_safety["server_timeout_seconds"] == 8
     assert resolved.direct_query_safety["client_timeout_seconds"] == 12
     assert resolved.direct_query_safety["max_result_rows"] == 250
