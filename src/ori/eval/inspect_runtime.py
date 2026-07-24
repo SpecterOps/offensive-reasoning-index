@@ -20,7 +20,6 @@ from .adapter import ModelResponse, call_model, extract_cypher_details
 from .bhce import BHCEClient, CypherResult
 from .direct_query_safety import (
     DirectQueryCoordinator,
-    DirectQueryPolicy,
     DirectQuerySafetyConfig,
     QueryDenyCache,
     get_coordinator,
@@ -507,16 +506,9 @@ async def run_eval_with_inspect(
         print(f"  {len(valid_names)} node names loaded")
 
     safety_config = direct_query_safety or DirectQuerySafetyConfig()
-    reference_policy = DirectQueryPolicy(safety_config)
     print(f"Pre-fetching reference Cypher results for {len(tasks)} tasks...")
     ref_results: dict[str, CypherResult] = {}
     for task in tasks:
-        reference_decision = reference_policy.evaluate(task.reference_cypher)
-        if not reference_decision.allowed:
-            raise RuntimeError(
-                f"Reference query for {task.id} violates direct safety policy "
-                f"{reference_decision.rule}: {reference_decision.detail}"
-            )
         reference_result = await bhce.run_cypher(
             task.reference_cypher,
             server_timeout_seconds=safety_config.server_timeout_seconds,

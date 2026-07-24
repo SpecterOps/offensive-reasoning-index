@@ -26,12 +26,17 @@ Authoritative BloodHound references:
   aggregate-only output or a bounded result only for non-recursive relationship
   enumeration. Ordinary boolean/property filters do not make a traversal
   selective.
+- [x] Scope selectors, filters, aggregates, and result limits to their `WITH`
+  stage; carry bindings only through explicit projection so discarded values
+  cannot authorize later broad enumeration.
 - [x] Canonicalize query fingerprints across comments, keyword case, and
   formatting while preserving case-sensitive identifiers and literal values.
 - [x] Prove that policy rejection and deny-cache quarantine never execute a
   BloodHound query.
 - [x] Prove that admitted queries execute once with both the documented server
   timeout and the longer client deadline.
+- [x] Apply model-attributable policy rejection only to model output; keep
+  trusted reference queries behind preflight and execution deadlines.
 - [x] Prove that an unhealthy post-error health check opens the campaign circuit
   and records later tasks as unexecuted infrastructure outcomes.
 

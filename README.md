@@ -542,6 +542,8 @@ surface, including recursive expansions, bounded ranges, `shortestPath`,
 `allShortestPaths`, and `LIMIT`:
 
 - only one read-only statement is accepted;
+- `UNION` is rejected because it is outside the documented BloodHound
+  direct-query subset;
 - recursive queries must bind an endpoint with an exact `name` or `objectid`
   selector;
 - raw open-ended wildcard path enumeration is rejected;

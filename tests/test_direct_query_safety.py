@@ -162,6 +162,26 @@ def test_inline_and_where_scalar_filters_admit_standalone_node_sets(
             "RETURN u.name = 'A@TEST.LOCAL', p",
             "unselective_recursive_expansion",
         ),
+        (
+            "MATCH (u:User {name:'A@TEST.LOCAL'}) WITH 1 AS ignored "
+            "MATCH (u:User)-[r]->(g:Group) RETURN r",
+            "unselective_relationship_enumeration",
+        ),
+        (
+            "MATCH (u:User) WHERE u.name='A@TEST.LOCAL' WITH 1 AS ignored "
+            "MATCH p=(u:User)-[:MemberOf*1..]->(g:Group) RETURN p",
+            "unselective_recursive_expansion",
+        ),
+        (
+            "MATCH (u:User {hasspn:true}) WITH 1 AS ignored "
+            "MATCH (u:User) RETURN u",
+            "unselective_node_enumeration",
+        ),
+        (
+            "MATCH (u:User {name:'A@TEST.LOCAL'}) RETURN u "
+            "UNION MATCH (u:User)-[r]->(g:Group) RETURN r",
+            "unsupported_set_operation",
+        ),
         ("MATCH (n) DELETE n", "non_read_only_query"),
         ("MATCH (n) RETURN n LIMIT 1001", "result_limit_too_large"),
     ],
@@ -191,6 +211,29 @@ def test_selectivity_propagates_through_anonymous_node_in_connected_path() -> No
 @pytest.mark.parametrize(
     "query",
     [
+        (
+            "MATCH (u:User {name:'A@TEST.LOCAL'}) WITH u "
+            "MATCH (u)-[:HasSession]->(c:Computer) RETURN c"
+        ),
+        (
+            "MATCH (u:User) WHERE u.name='A@TEST.LOCAL' WITH u AS source "
+            "MATCH (source)-[:HasSession]->(c:Computer) RETURN c"
+        ),
+        (
+            "MATCH (u:User {name:'A@TEST.LOCAL'}) WITH * "
+            "MATCH (u)-[:HasSession]->(c:Computer) RETURN c"
+        ),
+    ],
+)
+def test_exact_selectors_propagate_through_explicit_with_projection(
+    query: str,
+) -> None:
+    assert _policy().evaluate(query).allowed is True
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
         "MATCH (n) RETURN count(n)",
         "MATCH (n) RETURN count(*) AS total",
         "MATCH (n)-[r]->(m) RETURN count(r) AS relationship_count",
@@ -205,6 +248,17 @@ def test_keywords_inside_literals_and_comments_do_not_trigger_mutation_rule() ->
         "MATCH (u:User {name: 'CREATE DELETE CALL'}) "
         "/* DELETE everything */ RETURN u"
     )
+    assert _policy().evaluate(query).allowed is True
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "MATCH (u:User) WHERE u.name STARTS WITH 'A' RETURN u",
+        "MATCH (u:User) WHERE u.name ENDS WITH '@TEST.LOCAL' RETURN u",
+    ],
+)
+def test_string_with_predicates_do_not_create_query_stages(query: str) -> None:
     assert _policy().evaluate(query).allowed is True
 
 

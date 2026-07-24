@@ -304,10 +304,9 @@ _WHERE_SCALAR_FILTER_BINDING = re.compile(
     r"(?:['\"]|TRUE\b|FALSE\b|NULL\b|-?\d|\[)",
     re.IGNORECASE,
 )
-_WHERE_CLAUSE = re.compile(
-    r"\bWHERE\b(?P<body>.*?)"
-    r"(?=\b(?:WITH|RETURN|UNWIND|OPTIONAL\s+MATCH|MATCH|ORDER\s+BY|SKIP|LIMIT)\b|$)",
-    re.IGNORECASE | re.DOTALL,
+_WHERE_BOUNDARY = re.compile(
+    r"\b(?:WITH|RETURN|UNWIND|OPTIONAL\s+MATCH|MATCH|ORDER\s+BY|SKIP|LIMIT)\b",
+    re.IGNORECASE,
 )
 _PROPERTY_EXACT_BINDING = re.compile(
     r"\b([A-Za-z_]\w*)\s*\.\s*(?:name|objectid)\s*=\s*['\"]",
@@ -337,6 +336,23 @@ _NODE_PATTERN = re.compile(
 )
 
 
+def _where_clause_bodies(masked_query: str) -> list[str]:
+    bodies: list[str] = []
+    for where in re.finditer(r"\bWHERE\b", masked_query, re.IGNORECASE):
+        end = len(masked_query)
+        for boundary in _WHERE_BOUNDARY.finditer(masked_query, where.end()):
+            if boundary.group(0).upper() == "WITH":
+                prefix_words = re.findall(
+                    r"[A-Za-z_]+", masked_query[where.end() : boundary.start()]
+                )
+                if prefix_words and prefix_words[-1].upper() in {"STARTS", "ENDS"}:
+                    continue
+            end = boundary.start()
+            break
+        bodies.append(masked_query[where.end() : end])
+    return bodies
+
+
 def _exact_selector_bindings(masked_query: str) -> set[str]:
     """Return variables anchored in MATCH node maps or WHERE predicates.
 
@@ -350,8 +366,7 @@ def _exact_selector_bindings(masked_query: str) -> set[str]:
             match.group(1)
             for match in _INLINE_EXACT_BINDING.finditer(clause.group("body"))
         )
-    for clause in _WHERE_CLAUSE.finditer(masked_query):
-        body = clause.group("body")
+    for body in _where_clause_bodies(masked_query):
         for pattern in (_PROPERTY_EXACT_BINDING, _COALESCE_EXACT_BINDING):
             bindings.update(match.group(1) for match in pattern.finditer(body))
     return bindings
@@ -360,18 +375,68 @@ def _exact_selector_bindings(masked_query: str) -> set[str]:
 def _standalone_filter_bindings(masked_query: str) -> set[str]:
     """Return variables narrowed by inline or scalar property predicates."""
 
-    inline_bindings = {
-        match.group(1) for match in _INLINE_FILTER_BINDING.finditer(masked_query)
-    }
+    inline_bindings: set[str] = set()
+    for clause in _MATCH_CLAUSE.finditer(masked_query):
+        inline_bindings.update(
+            match.group(1)
+            for match in _INLINE_FILTER_BINDING.finditer(clause.group("body"))
+        )
     where_bindings: set[str] = set()
-    for clause in _WHERE_CLAUSE.finditer(masked_query):
+    for body in _where_clause_bodies(masked_query):
         where_bindings.update(
             match.group(1)
-            for match in _WHERE_SCALAR_FILTER_BINDING.finditer(
-                clause.group("body")
-            )
+            for match in _WHERE_SCALAR_FILTER_BINDING.finditer(body)
         )
     return inline_bindings | where_bindings
+
+
+def _query_stages(masked_query: str) -> list[str]:
+    """Split query work at WITH scope boundaries.
+
+    A selector in a stage before WITH must not authorize a later MATCH after
+    that variable has been projected away. STARTS WITH and ENDS WITH are
+    predicates, not scope boundaries.
+    """
+
+    boundaries = [0]
+    for match in re.finditer(r"\bWITH\b", masked_query, re.IGNORECASE):
+        prefix_words = re.findall(r"[A-Za-z_]+", masked_query[: match.start()])
+        if prefix_words and prefix_words[-1].upper() in {"STARTS", "ENDS"}:
+            continue
+        boundaries.append(match.start())
+    boundaries.append(len(masked_query))
+    return [
+        masked_query[start:end]
+        for start, end in zip(boundaries, boundaries[1:])
+        if masked_query[start:end].strip()
+    ]
+
+
+def _projected_bindings(stage: str, prior_bindings: set[str]) -> set[str]:
+    """Carry only explicitly projected bindings into a WITH stage."""
+
+    with_match = re.match(r"\s*WITH\b", stage, re.IGNORECASE)
+    if not with_match:
+        return set()
+    tail = stage[with_match.end() :]
+    boundary = re.search(
+        r"\b(?:WHERE|ORDER\s+BY|SKIP|LIMIT|OPTIONAL\s+MATCH|MATCH|UNWIND|RETURN)\b",
+        tail,
+        re.IGNORECASE,
+    )
+    projection = tail[: boundary.start()] if boundary else tail
+    projection = re.sub(r"^\s*DISTINCT\b", "", projection, flags=re.IGNORECASE)
+    carried = set(prior_bindings) if re.search(r"(?:^|,)\s*\*\s*(?:,|$)", projection) else set()
+    for item in projection.split(","):
+        simple = re.fullmatch(
+            r"\s*([A-Za-z_]\w*)(?:\s+AS\s+([A-Za-z_]\w*))?\s*",
+            item,
+            re.IGNORECASE,
+        )
+        if not simple or simple.group(1) not in prior_bindings:
+            continue
+        carried.add(simple.group(2) or simple.group(1))
+    return carried
 
 
 def _node_context_before(masked_query: str, position: int) -> tuple[str | None, bool]:
@@ -526,6 +591,7 @@ class DirectQueryPolicy:
         r"\b(?:CREATE|MERGE|SET|REMOVE|DELETE|DETACH|DROP|FOREACH|LOAD\s+CSV|CALL)\b",
         re.IGNORECASE,
     )
+    _UNSUPPORTED_SET_OPERATION = re.compile(r"\bUNION(?:\s+ALL)?\b", re.IGNORECASE)
     _LIMIT = re.compile(r"\bLIMIT\s+(\d+)\b", re.IGNORECASE)
     _RETURN_COUNT_ONLY = re.compile(
         r"\bRETURN\s+(?:DISTINCT\s+)?COUNT\s*\([^)]*\)"
@@ -567,6 +633,13 @@ class DirectQueryPolicy:
                 f"read-only policy rejected clause {mutation.group(0).upper()}",
                 fingerprint,
             )
+        if self._UNSUPPORTED_SET_OPERATION.search(masked):
+            return QuerySafetyDecision(
+                False,
+                "unsupported_set_operation",
+                "UNION is outside the documented BloodHound direct-query policy",
+                fingerprint,
+            )
 
         limit_matches = list(self._LIMIT.finditer(masked))
         limits = [int(match.group(1)) for match in limit_matches]
@@ -577,13 +650,12 @@ class DirectQueryPolicy:
                 f"LIMIT {max(limits)} exceeds {self.config.max_result_rows}",
                 fingerprint,
             )
-        return_matches = list(re.finditer(r"\bRETURN\b", masked, re.IGNORECASE))
-        has_result_limit = bool(
-            return_matches
-            and any(match.start() > return_matches[-1].start() for match in limit_matches)
-        )
-
-        expansions = _recursive_expansions(masked)
+        stages = _query_stages(masked)
+        expansions = [
+            expansion
+            for stage in stages
+            for expansion in _recursive_expansions(stage)
+        ]
         if len(expansions) > self.config.max_recursive_patterns:
             return QuerySafetyDecision(
                 False,
@@ -593,104 +665,132 @@ class DirectQueryPolicy:
                 fingerprint,
             )
 
-        selector_bindings = _exact_selector_bindings(masked)
-        standalone_filter_bindings = (
-            selector_bindings | _standalone_filter_bindings(masked)
-        )
-        returns_count_only = bool(self._RETURN_COUNT_ONLY.search(masked))
-        for expansion in expansions:
-            upper = expansion["upper"]
-            expansion_is_selective = bool(
-                expansion["inline_selector"]
-                or expansion["endpoint_variables"] & selector_bindings
+        prior_selector_bindings: set[str] = set()
+        prior_filter_bindings: set[str] = set()
+        for stage in stages:
+            stage_limit_matches = list(
+                re.finditer(r"\bLIMIT\s+(\d+)\b", stage, re.IGNORECASE)
             )
-            if expansion["all_shortest"] and upper is None:
-                return QuerySafetyDecision(
-                    False,
-                    "unbounded_all_shortest_paths",
-                    "allShortestPaths requires a finite upper hop bound",
-                    fingerprint,
+            stage_return_matches = list(
+                re.finditer(r"\bRETURN\b", stage, re.IGNORECASE)
+            )
+            has_result_limit = bool(
+                stage_return_matches
+                and any(
+                    match.start() > stage_return_matches[-1].start()
+                    for match in stage_limit_matches
                 )
+            )
+            returns_count_only = bool(self._RETURN_COUNT_ONLY.search(stage))
+            selector_bindings = _exact_selector_bindings(stage) | _projected_bindings(
+                stage, prior_selector_bindings
+            )
+            standalone_filter_bindings = (
+                selector_bindings
+                | _standalone_filter_bindings(stage)
+                | _projected_bindings(stage, prior_filter_bindings)
+            )
+            stage_expansions = _recursive_expansions(stage)
+            for expansion in stage_expansions:
+                upper = expansion["upper"]
+                expansion_is_selective = bool(
+                    expansion["inline_selector"]
+                    or expansion["endpoint_variables"] & selector_bindings
+                )
+                if expansion["all_shortest"] and upper is None:
+                    return QuerySafetyDecision(
+                        False,
+                        "unbounded_all_shortest_paths",
+                        "allShortestPaths requires a finite upper hop bound",
+                        fingerprint,
+                    )
+                if (
+                    expansion["shortest"]
+                    and upper is None
+                    and not expansion_is_selective
+                ):
+                    return QuerySafetyDecision(
+                        False,
+                        "unselective_shortest_path",
+                        "open-ended shortestPath requires an exact endpoint selector",
+                        fingerprint,
+                    )
+                if not expansion["shortest"] and not expansion["typed"] and upper is None:
+                    return QuerySafetyDecision(
+                        False,
+                        "unbounded_wildcard_path_enumeration",
+                        "raw wildcard recursive expansion requires a finite upper hop bound",
+                        fingerprint,
+                    )
+                if upper is not None and upper > self.config.max_recursive_hops:
+                    return QuerySafetyDecision(
+                        False,
+                        "recursive_hop_limit_exceeded",
+                        f"recursive upper bound {upper} exceeds "
+                        f"{self.config.max_recursive_hops}",
+                        fingerprint,
+                    )
+                if not expansion_is_selective:
+                    return QuerySafetyDecision(
+                        False,
+                        "unselective_recursive_expansion",
+                        "recursive expansion requires an exact selector on a path endpoint",
+                        fingerprint,
+                    )
+
+            relationship_contexts = _relationship_contexts(stage)
+            relationship_is_selective = _all_relationship_components_are_selective(
+                relationship_contexts,
+                selector_bindings,
+            )
             if (
-                expansion["shortest"]
-                and upper is None
-                and not expansion_is_selective
+                relationship_contexts
+                and not relationship_is_selective
+                and not returns_count_only
+                and not has_result_limit
             ):
                 return QuerySafetyDecision(
                     False,
-                    "unselective_shortest_path",
-                    "open-ended shortestPath requires an exact endpoint selector",
-                    fingerprint,
-                )
-            if not expansion["shortest"] and not expansion["typed"] and upper is None:
-                return QuerySafetyDecision(
-                    False,
-                    "unbounded_wildcard_path_enumeration",
-                    "raw wildcard recursive expansion requires a finite upper hop bound",
-                    fingerprint,
-                )
-            if upper is not None and upper > self.config.max_recursive_hops:
-                return QuerySafetyDecision(
-                    False,
-                    "recursive_hop_limit_exceeded",
-                    f"recursive upper bound {upper} exceeds "
-                    f"{self.config.max_recursive_hops}",
-                    fingerprint,
-                )
-            if not expansion_is_selective:
-                return QuerySafetyDecision(
-                    False,
-                    "unselective_recursive_expansion",
-                    "recursive expansion requires an exact selector on a path endpoint",
+                    "unselective_relationship_enumeration",
+                    "relationship enumeration requires an exact name or objectid "
+                    "endpoint, count, or LIMIT in the same WITH stage",
                     fingerprint,
                 )
 
-        relationship_contexts = _relationship_contexts(masked)
-        relationship_is_selective = _all_relationship_components_are_selective(
-            relationship_contexts,
-            selector_bindings,
-        )
-        if (
-            relationship_contexts
-            and not relationship_is_selective
-            and not returns_count_only
-            and not has_result_limit
-        ):
-            return QuerySafetyDecision(
-                False,
-                "unselective_relationship_enumeration",
-                "relationship enumeration requires an exact name or objectid "
-                "endpoint, count, or LIMIT",
-                fingerprint,
+            expensive_enumeration = any(
+                expansion["all_shortest"]
+                or (not expansion["shortest"] and not expansion["typed"])
+                for expansion in stage_expansions
             )
-
-        expensive_enumeration = any(
-            expansion["all_shortest"]
-            or (not expansion["shortest"] and not expansion["typed"])
-            for expansion in expansions
-        )
-        if expensive_enumeration and not returns_count_only and not has_result_limit:
-            return QuerySafetyDecision(
-                False,
-                "recursive_enumeration_without_limit",
-                "recursive path enumeration requires an explicit LIMIT",
-                fingerprint,
-            )
-        standalone_nodes = _standalone_node_bindings(masked)
-        if (
-            any(
-                variable not in standalone_filter_bindings
-                for variable in standalone_nodes
-            )
-            and not returns_count_only
-            and not has_result_limit
-        ):
-            return QuerySafetyDecision(
-                False,
-                "unselective_node_enumeration",
-                "node enumeration requires a bound selector, count, or result LIMIT",
-                fingerprint,
-            )
+            if (
+                expensive_enumeration
+                and not returns_count_only
+                and not has_result_limit
+            ):
+                return QuerySafetyDecision(
+                    False,
+                    "recursive_enumeration_without_limit",
+                    "recursive path enumeration requires an explicit LIMIT",
+                    fingerprint,
+                )
+            standalone_nodes = _standalone_node_bindings(stage)
+            if (
+                any(
+                    variable not in standalone_filter_bindings
+                    for variable in standalone_nodes
+                )
+                and not returns_count_only
+                and not has_result_limit
+            ):
+                return QuerySafetyDecision(
+                    False,
+                    "unselective_node_enumeration",
+                    "node enumeration requires a bound selector, count, or result "
+                    "LIMIT in the same WITH stage",
+                    fingerprint,
+                )
+            prior_selector_bindings = selector_bindings
+            prior_filter_bindings = standalone_filter_bindings
         return QuerySafetyDecision(True, "allowed", "query admitted", fingerprint)
 
 
