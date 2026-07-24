@@ -80,6 +80,8 @@ Completed state:
 - Policy version: `bloodhound-cysql-direct-v2`
 - Direct preflight: 42 tasks, 0 errors, 0 warnings
 - MCP preflight: 62 tasks, 0 errors, 0 warnings
+- Full test suite: 373 passed
+- Ruff and Gitleaks: pass
 - Fresh generation: `complex-v1-seed-4401` succeeded
 - BloodHound health: pass
 - Ingest verification: pass, 30/30 planted paths

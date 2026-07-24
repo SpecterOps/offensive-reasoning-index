@@ -412,12 +412,10 @@ def _query_stages(masked_query: str) -> list[str]:
     ]
 
 
-def _projected_bindings(stage: str, prior_bindings: set[str]) -> set[str]:
-    """Carry only explicitly projected bindings into a WITH stage."""
-
+def _with_projection(stage: str) -> str | None:
     with_match = re.match(r"\s*WITH\b", stage, re.IGNORECASE)
     if not with_match:
-        return set()
+        return None
     tail = stage[with_match.end() :]
     boundary = re.search(
         r"\b(?:WHERE|ORDER\s+BY|SKIP|LIMIT|OPTIONAL\s+MATCH|MATCH|UNWIND|RETURN)\b",
@@ -425,7 +423,15 @@ def _projected_bindings(stage: str, prior_bindings: set[str]) -> set[str]:
         re.IGNORECASE,
     )
     projection = tail[: boundary.start()] if boundary else tail
-    projection = re.sub(r"^\s*DISTINCT\b", "", projection, flags=re.IGNORECASE)
+    return re.sub(r"^\s*DISTINCT\b", "", projection, flags=re.IGNORECASE)
+
+
+def _projected_bindings(stage: str, prior_bindings: set[str]) -> set[str]:
+    """Carry only explicitly projected bindings into a WITH stage."""
+
+    projection = _with_projection(stage)
+    if projection is None:
+        return set()
     carried = set(prior_bindings) if re.search(r"(?:^|,)\s*\*\s*(?:,|$)", projection) else set()
     for item in projection.split(","):
         simple = re.fullmatch(
@@ -437,6 +443,23 @@ def _projected_bindings(stage: str, prior_bindings: set[str]) -> set[str]:
             continue
         carried.add(simple.group(2) or simple.group(1))
     return carried
+
+
+def _with_count_only_projection(stage: str) -> bool:
+    """Return whether WITH collapses the prior stage to count scalars only."""
+
+    projection = _with_projection(stage)
+    if projection is None:
+        return False
+    items = [item.strip() for item in projection.split(",") if item.strip()]
+    return bool(items) and all(
+        re.fullmatch(
+            r"COUNT\s*\([^)]*\)(?:\s+AS\s+[A-Za-z_]\w*)?",
+            item,
+            re.IGNORECASE,
+        )
+        for item in items
+    )
 
 
 def _node_context_before(masked_query: str, position: int) -> tuple[str | None, bool]:
@@ -667,7 +690,7 @@ class DirectQueryPolicy:
 
         prior_selector_bindings: set[str] = set()
         prior_filter_bindings: set[str] = set()
-        for stage in stages:
+        for stage_index, stage in enumerate(stages):
             stage_limit_matches = list(
                 re.finditer(r"\bLIMIT\s+(\d+)\b", stage, re.IGNORECASE)
             )
@@ -681,7 +704,15 @@ class DirectQueryPolicy:
                     for match in stage_limit_matches
                 )
             )
-            returns_count_only = bool(self._RETURN_COUNT_ONLY.search(stage))
+            next_stage = (
+                stages[stage_index + 1]
+                if stage_index + 1 < len(stages)
+                else ""
+            )
+            returns_count_only = bool(
+                self._RETURN_COUNT_ONLY.search(stage)
+                or _with_count_only_projection(next_stage)
+            )
             selector_bindings = _exact_selector_bindings(stage) | _projected_bindings(
                 stage, prior_selector_bindings
             )

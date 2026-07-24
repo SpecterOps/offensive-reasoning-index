@@ -74,13 +74,14 @@ node sets, inline property maps and equivalent scalar `WHERE` predicates are
 both valid filters. Recursive traversals always need an exact endpoint `name`
 or `objectid`; aggregate output and `LIMIT` do not make an unanchored expansion
 safe. Non-recursive relationship enumeration may instead use aggregate-only
-output or an explicit result-stage `LIMIT`. Ordinary property filters are not
-treated as exact traversal selectors. A `WITH` clause starts a new containment
-stage. Exact selectors propagate only when the selected variable is explicitly
-projected by name, alias, or `WITH *`; discarded bindings cannot authorize
-later enumeration. `UNION` is rejected because it is outside the documented
-BloodHound direct-query subset and would create an independent branch with
-separate selectivity.
+output, including a pure `WITH count(...)` scalar projection, or an explicit
+result-stage `LIMIT`. Mixed aggregate projections that retain graph entities do
+not qualify. Ordinary property filters are not treated as exact traversal
+selectors. A `WITH` clause starts a new containment stage. Exact selectors
+propagate only when the selected variable is explicitly projected by name,
+alias, or `WITH *`; discarded bindings cannot authorize later enumeration.
+`UNION` is rejected because it is outside the documented BloodHound direct-query
+subset and would create an independent branch with separate selectivity.
 
 The policy applies only to untrusted model output. Trusted benchmark reference
 queries are preflighted as task contracts and execute with the same BloodHound

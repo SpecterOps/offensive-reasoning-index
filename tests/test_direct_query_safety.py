@@ -178,6 +178,14 @@ def test_inline_and_where_scalar_filters_admit_standalone_node_sets(
             "unselective_node_enumeration",
         ),
         (
+            "MATCH (n) WITH count(n) AS total, n RETURN total, n",
+            "unselective_node_enumeration",
+        ),
+        (
+            "MATCH (n)-[r]->(m) WITH count(r) AS total, r RETURN total, r",
+            "unselective_relationship_enumeration",
+        ),
+        (
             "MATCH (u:User {name:'A@TEST.LOCAL'}) RETURN u "
             "UNION MATCH (u:User)-[r]->(g:Group) RETURN r",
             "unsupported_set_operation",
@@ -237,6 +245,9 @@ def test_exact_selectors_propagate_through_explicit_with_projection(
         "MATCH (n) RETURN count(n)",
         "MATCH (n) RETURN count(*) AS total",
         "MATCH (n)-[r]->(m) RETURN count(r) AS relationship_count",
+        "MATCH (n) WITH count(n) AS total RETURN total",
+        "MATCH (n)-[r]->(m) WITH count(r) AS total RETURN total",
+        "MATCH (n) WITH count(n) AS total, count(*) AS rows RETURN total, rows",
     ],
 )
 def test_aggregate_only_counts_are_admitted(query: str) -> None:
