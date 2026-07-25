@@ -19,7 +19,7 @@ Use the product commands for normal benchmark work:
 ```bash
 uv run ori generate simple --seed 1234 --output datasets/benchmarks
 uv run ori generate complex --seed 4401 --output datasets/benchmarks
-uv run ori run --config models.local.yaml --manifest datasets/benchmarks/complex-v1-seed-4401_manifest.json
+uv run ori run --config models.local.yaml
 ```
 
 Older Phase 3 / Phase 4 run configs remain in the repo for historical comparison
@@ -87,9 +87,7 @@ uv run ori verify-ingest \
 Only after `verify-ingest` passes should you run live MCP grading:
 
 ```bash
-uv run ori run \
-  --config models.local.yaml \
-  --manifest datasets/benchmarks/complex-v1-seed-4401_manifest.json
+uv run ori run --config models.local.yaml
 ```
 
 If ingest verification fails, stop and fix the BloodHound graph first. Grading a
@@ -282,6 +280,10 @@ Store the local config under `results/`, which is gitignored. Create
 `results/models-gpt56sol-vs-gpt55.yaml` with:
 
 ```yaml
+version: 1
+
+# Paths are resolved from the config file's directory (`results/`).
+manifest: ../datasets/benchmarks/complex-v1-seed-4401_manifest.json
 modes: [direct, mcp]
 output_dir: benchmark-runs/complex-v1-seed-4401-gpt56sol-vs-gpt55
 
@@ -296,13 +298,14 @@ defaults:
     poll_interval: 5
   direct_query_safety:
     enabled: true
-    policy_version: bloodhound-cysql-direct-v2
+    policy_version: bloodhound-cysql-direct-v3
     server_timeout_seconds: 10
     client_timeout_seconds: 15
     max_recursive_hops: 12
     max_result_rows: 1000
     max_query_characters: 16384
     max_recursive_patterns: 2
+    max_recursive_expansion_complexity: 256
   mcp:
     # Paths in a model-matrix config are resolved from the config directory.
     mcp_dir: ../../Bloodhound-MCP
@@ -323,6 +326,12 @@ models:
     model: gpt-5.5
     mcp_tool_loop: native-openai-compatible
 ```
+
+`output_dir` is the campaign name and artifact root. For every fresh campaign,
+copy the config to a new filename and change `output_dir`; do not reuse an old
+campaign directory because it may contain resumable checkpoints or a
+policy-scoped deny cache. The complete public-safe option reference is
+[`models.example.yaml`](models.example.yaml).
 
 Start with `runs_per_model: 1`. With the current corpus, this is already 208
 graded samples across two models and two tracks. After one complete campaign
@@ -355,8 +364,7 @@ Only after `INGEST CHECK: PASS`, launch both tracks:
 ```bash
 uv run --env-file ../Bloodhound-MCP/.env \
   ori run \
-  --config results/models-gpt56sol-vs-gpt55.yaml \
-  --manifest datasets/benchmarks/complex-v1-seed-4401_manifest.json
+  --config results/models-gpt56sol-vs-gpt55.yaml
 ```
 
 Keep the terminal open. ORI prints the active model/run as it progresses and
@@ -364,6 +372,9 @@ writes separate direct and MCP artifacts beneath:
 
 ```text
 results/benchmark-runs/complex-v1-seed-4401-gpt56sol-vs-gpt55/
+├── campaign-config.yaml
+├── campaign-config.source.yaml
+├── campaign-provenance.yaml
 ├── direct/
 │   ├── baseline_combined.csv
 │   └── baseline_summary.csv
@@ -492,6 +503,8 @@ Edit `models.local.yaml` with your local providers. A typical model matrix can r
 both direct and MCP modes:
 
 ```yaml
+version: 1
+manifest: datasets/benchmarks/complex-v1-seed-4401_manifest.json
 modes: [direct, mcp]
 output_dir: results/benchmark-runs/complex-v1-seed-4401
 
@@ -500,13 +513,14 @@ defaults:
   runs_per_model: 3
   direct_query_safety:
     enabled: true
-    policy_version: bloodhound-cysql-direct-v2
+    policy_version: bloodhound-cysql-direct-v3
     server_timeout_seconds: 10
     client_timeout_seconds: 15
     max_recursive_hops: 12
     max_result_rows: 1000
     max_query_characters: 16384
     max_recursive_patterns: 2
+    max_recursive_expansion_complexity: 256
   mcp:
     mcp_dir: ../bloodhound-mcp
     max_steps: 16
@@ -527,6 +541,19 @@ models:
     mcp_tool_loop: native-openai-compatible
 ```
 
+The top-level `manifest` and `output_dir` make a model-matrix config
+self-contained. Relative paths are resolved from the config file's directory.
+Command-line `--manifest` and `--output-dir` remain available as explicit
+overrides. For normal campaigns, prefer a new config filename and a new
+`output_dir` so the exact run settings remain preserved together.
+
+ORI rejects unknown model-matrix keys instead of silently ignoring misspelled
+settings. At launch it writes the directly runnable, absolute-path
+`campaign-config.yaml`, the untouched input as `campaign-config.source.yaml`,
+and hashes plus any CLI overrides in `campaign-provenance.yaml`. You can resume
+with the generated `campaign-config.yaml`; a later run with different provenance
+is rejected from the same output directory.
+
 `runs_per_model` performs independent complete passes against the same manifest.
 The default applies to every model and a model entry can override it. Repeated
 outputs are isolated under `direct/<model>/run-001.csv` and
@@ -537,7 +564,7 @@ retries infrastructure failures.
 ## Direct Cypher containment
 
 ORI treats model-produced direct Cypher as untrusted input. The
-`bloodhound-cysql-direct-v2` policy is based on BloodHound's documented CySQL
+`bloodhound-cysql-direct-v3` policy is based on BloodHound's documented CySQL
 surface, including recursive expansions, bounded ranges, `shortestPath`,
 `allShortestPaths`, and `LIMIT`:
 
@@ -554,6 +581,8 @@ surface, including recursive expansions, bounded ranges, `shortestPath`,
   scalar `WHERE` predicates;
 - recursive upper bounds above 12 and more than two recursive patterns are
   rejected;
+- recursive hop bounds multiplied by relationship-type alternatives may not
+  exceed 256 total expansion-complexity units;
 - open-ended `allShortestPaths` is rejected because BloodHound documents its
   higher resource use;
 - broad node results, labeled or unlabeled, require a bound selector, aggregate
@@ -572,10 +601,11 @@ BloodHound's official supported-syntax documentation is authoritative:
 - [Search with Cypher](https://bloodhound.specterops.io/analyze-data/explore/cypher-search)
 - [Run a Cypher query API](https://bloodhound.specterops.io/reference/cypher/run-a-cypher-query)
 
-Policy rejection and an explicit BloodHound query timeout are model-attributable
-`QUERY_TOO_EXPENSIVE` outcomes. Authentication, transport, server availability,
-rate-limit, client-timeout, and circuit-open failures are `INFRA_ERROR`. A
-generic HTTP 5xx is never automatically called an expensive model query.
+Policy rejection, an explicit BloodHound query timeout, and BloodHound's explicit
+query-complexity rejection are model-attributable `QUERY_TOO_EXPENSIVE`
+outcomes. Authentication, transport, server availability, rate-limit,
+client-timeout, and circuit-open failures are `INFRA_ERROR`. A generic HTTP 5xx
+is never automatically called an expensive model query.
 
 For Codex OAuth, log in with the Codex CLI:
 
@@ -732,9 +762,7 @@ uv run ori verify-ingest \
 Run a configured benchmark campaign:
 
 ```bash
-uv run ori run \
-  --config models.local.yaml \
-  --manifest datasets/benchmarks/complex-v1-seed-4401_manifest.json
+uv run ori run --config models.local.yaml
 ```
 
 Score structured answers offline without launching a model campaign:

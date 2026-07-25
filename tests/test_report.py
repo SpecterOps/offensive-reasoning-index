@@ -255,7 +255,7 @@ def test_write_summary_csv_tracks_query_too_expensive(tmp_path) -> None:
         query_executed=False,
         execution_attempts=0,
         query_fingerprint="abc123",
-        safety_policy_version="bloodhound-cysql-direct-v2",
+        safety_policy_version="bloodhound-cysql-direct-v3",
         safety_rule="unbounded_wildcard_path_enumeration",
         bhce_health_after="not_checked",
         circuit_state="closed",
@@ -286,7 +286,7 @@ def test_write_combined_csv_includes_direct_query_containment_fields(tmp_path) -
         query_executed=True,
         execution_attempts=1,
         query_fingerprint="fingerprint",
-        safety_policy_version="bloodhound-cysql-direct-v2",
+        safety_policy_version="bloodhound-cysql-direct-v3",
         safety_rule="allowed",
         bhce_health_after="healthy",
         circuit_state="closed",
@@ -299,7 +299,7 @@ def test_write_combined_csv_includes_direct_query_containment_fields(tmp_path) -
     assert row["query_executed"] == "True"
     assert row["query_attempts"] == "1"
     assert row["query_fingerprint"] == "fingerprint"
-    assert row["safety_policy_version"] == "bloodhound-cysql-direct-v2"
+    assert row["safety_policy_version"] == "bloodhound-cysql-direct-v3"
     assert row["safety_rule"] == "allowed"
     assert row["bhce_health_after"] == "healthy"
     assert row["circuit_state"] == "closed"

@@ -1003,6 +1003,21 @@ def test_mock_unknown_variant_returns_error():
     assert "nonexistent" in resp.error
 
 
+def test_provider_stream_failure_is_scored_as_model_error(monkeypatch):
+    async def fail_provider(**kwargs):
+        raise RuntimeError("Codex Responses API response incomplete: max_output_tokens")
+
+    monkeypatch.setattr("ori.eval.adapter._call_provider", fail_provider)
+    task = _make_task_for_mock()
+
+    resp = asyncio.run(call_model(task, "codex/gpt-5.5"))
+    result = grade(task, resp, _make_cypher_result([]), _make_cypher_result([]), set())
+
+    assert resp.cypher is None
+    assert resp.error == "Codex Responses API response incomplete: max_output_tokens"
+    assert result.outcome == "MODEL_ERROR"
+
+
 def _make_phase4b_official_manifest():
     tasks = [
         {

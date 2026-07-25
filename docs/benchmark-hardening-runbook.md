@@ -35,6 +35,11 @@ Pass `--valid-nodes valid_nodes.json` when you have a graph inventory dump; the 
 
 ## Failure taxonomy
 
+- `MODEL_ERROR`: the model/provider call failed, including an OpenAI Responses
+  `error`, `response.failed`, `response.incomplete`, a stream without a terminal
+  completion, or a completed response with neither text nor tool calls.
+- `PARSE_FAIL`: the model call completed with non-empty answer text, but ORI
+  could not extract the required Cypher or structured answer from it.
 - `CYPHER_ERROR`: model/tool query error, including structured BloodHound syntax/query errors.
 - `QUERY_TOO_EXPENSIVE`: the model query was rejected by the versioned direct
   safety policy or BloodHound explicitly terminated that admitted query at the
@@ -64,11 +69,12 @@ MCP summaries separate reasoning quality from reliability:
 
 Direct Cypher is checked only after generation, so the benchmark prompt receives
 no safety hints. ORI does not rewrite or repair the answer. The
-`bloodhound-cysql-direct-v2` policy rejects non-read-only statements,
+`bloodhound-cysql-direct-v3` policy rejects non-read-only statements,
 unselective recursive expansions, raw open-ended wildcard path enumeration,
 open-ended `allShortestPaths`, excessive recursive bounds/patterns, oversized
-queries/results, broad relationship enumeration, and broad labeled or unlabeled
-node enumeration. Recursive selectors must bind an endpoint of the path; a
+queries/results, recursive relationship-alternation complexity, broad
+relationship enumeration, and broad labeled or unlabeled node enumeration.
+Recursive selectors must bind an endpoint of the path; a
 disconnected selector cannot make a separate expansion safe. For standalone
 node sets, inline property maps and equivalent scalar `WHERE` predicates are
 both valid filters. Recursive traversals always need an exact endpoint `name`
@@ -82,6 +88,9 @@ propagate only when the selected variable is explicitly projected by name,
 alias, or `WITH *`; discarded bindings cannot authorize later enumeration.
 `UNION` is rejected because it is outside the documented BloodHound direct-query
 subset and would create an independent branch with separate selectivity.
+BloodHound responses that explicitly reject a query as too complex or likely to
+cause poor or unstable database performance are quarantined and scored as
+`QUERY_TOO_EXPENSIVE`, not syntax errors.
 
 The policy applies only to untrusted model output. Trusted benchmark reference
 queries are preflighted as task contracts and execute with the same BloodHound

@@ -20,7 +20,7 @@ if TYPE_CHECKING:
     from .bhce import BHCEClient, CypherResult
 
 
-DIRECT_QUERY_POLICY_VERSION = "bloodhound-cysql-direct-v2"
+DIRECT_QUERY_POLICY_VERSION = "bloodhound-cysql-direct-v3"
 
 
 @dataclass(frozen=True)
@@ -35,6 +35,7 @@ class DirectQuerySafetyConfig:
     max_result_rows: int = 1000
     max_query_characters: int = 16_384
     max_recursive_patterns: int = 2
+    max_recursive_expansion_complexity: int = 256
 
     @classmethod
     def from_mapping(cls, value: dict[str, Any] | None) -> DirectQuerySafetyConfig:
@@ -63,6 +64,7 @@ class DirectQuerySafetyConfig:
             "max_result_rows",
             "max_query_characters",
             "max_recursive_patterns",
+            "max_recursive_expansion_complexity",
         ):
             if getattr(config, field_name) < 1:
                 raise ValueError(f"direct_query_safety.{field_name} must be at least 1.")
@@ -582,6 +584,20 @@ def _recursive_expansions(masked_query: str) -> list[dict[str, Any]]:
         relationship_text = relationship.group(0)
         before_star = relationship_text[1 : quantifier.start()]
         typed = ":" in before_star
+        if typed:
+            type_expression = before_star.split(":", 1)[1]
+            relationship_type_count = max(
+                1,
+                len(
+                    [
+                        alternative
+                        for alternative in type_expression.split("|")
+                        if alternative.strip().lstrip(":").strip()
+                    ]
+                ),
+            )
+        else:
+            relationship_type_count = 1
         span = relationship.span()
         left_variable, left_inline_selector = _node_context_before(
             masked_query, span[0]
@@ -594,6 +610,7 @@ def _recursive_expansions(masked_query: str) -> list[dict[str, Any]]:
                 "lower": lower,
                 "upper": upper,
                 "typed": typed,
+                "relationship_type_count": relationship_type_count,
                 "shortest": _inside(span, shortest_ranges),
                 "all_shortest": _inside(span, all_shortest_ranges),
                 "endpoint_variables": {
@@ -687,6 +704,45 @@ class DirectQueryPolicy:
                 f"limit is {self.config.max_recursive_patterns}",
                 fingerprint,
             )
+        if any(
+            expansion["lower"] > self.config.max_recursive_hops
+            for expansion in expansions
+        ):
+            return QuerySafetyDecision(
+                False,
+                "recursive_hop_limit_exceeded",
+                f"recursive lower bound exceeds {self.config.max_recursive_hops}",
+                fingerprint,
+            )
+        if not any(
+            expansion["upper"] is not None
+            and expansion["upper"] > self.config.max_recursive_hops
+            for expansion in expansions
+        ):
+            recursive_expansion_complexity = sum(
+                (
+                    max(
+                        expansion["lower"],
+                        expansion["upper"]
+                        if expansion["upper"] is not None
+                        else self.config.max_recursive_hops,
+                    )
+                )
+                * expansion["relationship_type_count"]
+                for expansion in expansions
+            )
+            if (
+                recursive_expansion_complexity
+                > self.config.max_recursive_expansion_complexity
+            ):
+                return QuerySafetyDecision(
+                    False,
+                    "recursive_expansion_complexity_exceeded",
+                    "recursive expansion complexity "
+                    f"{recursive_expansion_complexity} exceeds "
+                    f"{self.config.max_recursive_expansion_complexity}",
+                    fingerprint,
+                )
 
         prior_selector_bindings: set[str] = set()
         prior_filter_bindings: set[str] = set()

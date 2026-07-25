@@ -31,6 +31,71 @@ def test_phase0_greedy_query_is_rejected_without_bloodhound() -> None:
     assert decision.rule == "unbounded_wildcard_path_enumeration"
 
 
+def test_policy_rejects_observed_recursive_alternation_explosion() -> None:
+    query = (
+        "MATCH (s:User {name: 'CAGUIRRE@GRANITEMANUFACTURING.LOCAL'}), "
+        "(t:Group {name: 'DOMAIN ADMINS@GRANITEMANUFACTURING.LOCAL'}) "
+        "MATCH p=(s)-[:MemberOf|AdminTo|HasSession|GenericAll|GenericWrite|"
+        "WriteDacl|WriteOwner|Owns|AllExtendedRights|ForceChangePassword|"
+        "AddMember|AddSelf|AddKeyCredentialLink|WriteSPN|AllowedToAct|"
+        "AllowedToDelegate|CanRDP|CanPSRemote|ExecuteDCOM|SQLAdmin|"
+        "ReadLAPSPassword|ReadGMSAPassword|ReadMSAPassword|DCSync|GetChanges|"
+        "GetChangesAll*0..8]->()-[:ADCSESC1|ADCSESC3|ADCSESC4|ADCSESC6a|"
+        "ADCSESC6b|ADCSESC9a|ADCSESC9b|ADCSESC10a|ADCSESC10b|ADCSESC13|"
+        "GoldenCert|CanAbuseUPNCertMapping|CanAbuseWeakCertBinding]->()-"
+        "[:MemberOf|AdminTo|HasSession|GenericAll|GenericWrite|WriteDacl|"
+        "WriteOwner|Owns|AllExtendedRights|ForceChangePassword|AddMember|"
+        "AddSelf|AddKeyCredentialLink|WriteSPN|AllowedToAct|AllowedToDelegate|"
+        "CanRDP|CanPSRemote|ExecuteDCOM|SQLAdmin|ReadLAPSPassword|"
+        "ReadGMSAPassword|ReadMSAPassword|DCSync|GetChanges|GetChangesAll*0..8]"
+        "->(t) RETURN p ORDER BY length(p) LIMIT 1"
+    )
+
+    decision = _policy().evaluate(query)
+
+    assert decision.allowed is False
+    assert decision.rule == "recursive_expansion_complexity_exceeded"
+    assert "416 exceeds 256" in decision.detail
+
+
+def test_recursive_expansion_complexity_budget_has_an_inclusive_boundary() -> None:
+    config = DirectQuerySafetyConfig(max_recursive_expansion_complexity=16)
+    policy = DirectQueryPolicy(config)
+    allowed = (
+        "MATCH p=(u:User {name:'A@TEST.LOCAL'})-"
+        "[:MemberOf|GenericAll|AdminTo|HasSession*1..4]->(g:Group) RETURN p"
+    )
+    rejected = allowed.replace("|HasSession*1..4", "|HasSession|CanRDP*1..4")
+
+    assert policy.evaluate(allowed).allowed is True
+    decision = policy.evaluate(rejected)
+    assert decision.allowed is False
+    assert decision.rule == "recursive_expansion_complexity_exceeded"
+
+
+def test_zero_hop_recursive_pattern_does_not_consume_fallback_hop_budget() -> None:
+    config = DirectQuerySafetyConfig(max_recursive_expansion_complexity=1)
+    policy = DirectQueryPolicy(config)
+    query = (
+        "MATCH p=(u:User {name:'A@TEST.LOCAL'})-"
+        "[:MemberOf|GenericAll|AdminTo*0..0]->(g:Group) RETURN p"
+    )
+
+    assert policy.evaluate(query).allowed is True
+
+
+def test_greedy_open_ended_recursive_query_is_rejected() -> None:
+    query = (
+        "MATCH p=(u:User {name:'A@TEST.LOCAL'})-[:MemberOf*100..]"
+        "->(g:Group {name:'DOMAIN ADMINS@TEST.LOCAL'}) RETURN p"
+    )
+
+    decision = _policy().evaluate(query)
+
+    assert decision.allowed is False
+    assert decision.rule == "recursive_hop_limit_exceeded"
+
+
 @pytest.mark.parametrize(
     "query",
     [
@@ -307,6 +372,13 @@ def test_config_requires_client_timeout_longer_than_server_timeout() -> None:
         )
 
 
+def test_config_requires_positive_recursive_expansion_complexity() -> None:
+    with pytest.raises(ValueError, match="must be at least 1"):
+        DirectQuerySafetyConfig.from_mapping(
+            {"max_recursive_expansion_complexity": 0}
+        )
+
+
 class FakeBHCE:
     def __init__(
         self,
@@ -429,6 +501,35 @@ def test_timeout_quarantine_matches_comment_case_and_format_variants(tmp_path) -
     second = asyncio.run(coordinator.execute(equivalent_query))
 
     assert first.failure_type == "query_timeout"
+    assert second.failure_type == "policy_rejected"
+    assert second.failure_subtype == "known_expensive_query"
+    assert second.query_executed is False
+    assert len(bhce.queries) == 1
+
+
+def test_complexity_rejection_is_health_checked_and_quarantined(tmp_path) -> None:
+    bhce = FakeBHCE(
+        [
+            CypherResult(
+                success=False,
+                error="HTTP 400: cypher query is too complex",
+                failure_type="query_timeout",
+                failure_subtype="bloodhound_query_too_complex",
+                status_code=400,
+            )
+        ],
+        health_ok=True,
+    )
+    coordinator = _coordinator(tmp_path, bhce)
+    query = "MATCH (u:User {name: 'A@TEST.LOCAL'}) RETURN u"
+
+    first = asyncio.run(coordinator.execute(query))
+    second = asyncio.run(coordinator.execute(query))
+
+    assert first.failure_type == "query_timeout"
+    assert first.failure_subtype == "bloodhound_query_too_complex"
+    assert first.bhce_health_after == "healthy"
+    assert bhce.health_calls == 1
     assert second.failure_type == "policy_rejected"
     assert second.failure_subtype == "known_expensive_query"
     assert second.query_executed is False

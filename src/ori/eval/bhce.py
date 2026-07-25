@@ -200,6 +200,16 @@ class BHCEClient:
         return q.strip()
 
     @staticmethod
+    def _is_query_complexity_rejection(response_text: str) -> bool:
+        text = response_text.lower()
+        complexity_markers = (
+            "query is too complex",
+            "query too complex",
+            "poor or unstable database performance",
+        )
+        return any(marker in text for marker in complexity_markers)
+
+    @staticmethod
     def _http_failure_type(status_code: int, response_text: str) -> str:
         text = response_text.lower()
         if status_code in {401, 403}:
@@ -208,6 +218,8 @@ class BHCEClient:
             return "rate_limited"
         if status_code in {408, 502, 503, 504}:
             return "server_unavailable"
+        if BHCEClient._is_query_complexity_rejection(response_text):
+            return "query_timeout"
         query_markers = (
             "cypher syntax error",
             "neo.clienterror",
@@ -291,6 +303,14 @@ class BHCEClient:
             )
 
         if resp.status_code == 400:
+            if self._is_query_complexity_rejection(resp.text):
+                return CypherResult(
+                    success=False,
+                    error=f"HTTP 400: {resp.text}",
+                    failure_type="query_timeout",
+                    failure_subtype="bloodhound_query_too_complex",
+                    status_code=resp.status_code,
+                )
             return CypherResult(
                 success=False,
                 error=f"Cypher syntax error: {resp.text}",

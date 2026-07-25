@@ -131,6 +131,66 @@ def test_run_cypher_classifies_bloodhound_timeout_response() -> None:
     assert result.status_code == 500
 
 
+def test_run_cypher_classifies_bloodhound_complexity_rejection() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            400,
+            json={
+                "http_status": 400,
+                "errors": [
+                    {
+                        "message": (
+                            "cypher query is too complex and is likely to result in "
+                            "poor or unstable database performance"
+                        )
+                    }
+                ],
+            },
+            request=request,
+        )
+
+    client = BHCEClient(
+        domain="bloodhound.test",
+        token_id="token-id",
+        token_key="token-key",
+    )
+    asyncio.run(client._client.aclose())
+    client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+    result = asyncio.run(client.run_cypher("MATCH p=(s)-[*1..8]->(t) RETURN p"))
+    asyncio.run(client.close())
+
+    assert result.success is False
+    assert result.failure_type == "query_timeout"
+    assert result.failure_subtype == "bloodhound_query_too_complex"
+    assert result.status_code == 400
+
+
+def test_run_cypher_keeps_ordinary_http_400_in_syntax_bucket() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            400,
+            text="line 1:7 no viable alternative at input 'MATCH (start'",
+            request=request,
+        )
+
+    client = BHCEClient(
+        domain="bloodhound.test",
+        token_id="token-id",
+        token_key="token-key",
+    )
+    asyncio.run(client._client.aclose())
+    client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+    result = asyncio.run(client.run_cypher("MATCH (start:User) RETURN start"))
+    asyncio.run(client.close())
+
+    assert result.success is False
+    assert result.failure_type == "query_error"
+    assert result.failure_subtype == "cysql_syntax_error"
+    assert result.status_code == 400
+
+
 def test_run_cypher_keeps_gateway_timeout_in_infrastructure_bucket() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(504, text="gateway timeout", request=request)
