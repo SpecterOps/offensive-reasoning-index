@@ -312,6 +312,31 @@ set answers, and required exact equality with unrequested CE edge properties.
 - [x] Pass fresh no-model readiness and prepare the exact operator rerun command.
 - [x] Record the incident and resolution in AgentVault and Personal Vault.
 
+### Live campaign property-predicate crash
+
+The corrected operator campaign then exposed an unhandled direct-projection
+defect on GPT-5.5 task `simple.direct.t2_kerberoast_chain-01@2`. A successful
+route required the source entity's `hasspn` property, but the adapter accessed
+`PropertyPredicate.key` instead of the schema field `property_name`. The
+resulting `AttributeError` terminated the campaign rather than producing typed
+failure accounting.
+
+- [x] Preserve the complete 20-task GPT-5.6 direct run and the first 12
+  checkpointed GPT-5.5 direct results under the original runtime fingerprint.
+- [x] Read required predicate names from `PropertyPredicate.property_name`.
+- [x] Add a regression that projects a property-constrained route and proves
+  the expected entity property fact reaches `EvidenceIR`.
+- [x] Contain unexpected direct projector/comparator exceptions as
+  `HARNESS_ERROR` with no reasoning verdict.
+- [x] Prove live projection of the two-edge `MemberOf → AdminTo` route retains
+  `hasspn=true` and produces `ROUTE_VALID`.
+- [x] Pass 558 repository tests, Ruff, diff validation, and independent review.
+- [x] Preserve fail-closed runtime provenance; do not adopt the old checkpoint
+  implicitly under the changed implementation fingerprint.
+- [x] Move the operator config to the fresh
+  `campaign-comparator-v3-property-predicate-fix` output namespace.
+- [x] Pass two-model/two-track no-model readiness against the unchanged graph.
+
 ## Definition of done
 
 - [x] All eight CV1 regression cases pass through v2.

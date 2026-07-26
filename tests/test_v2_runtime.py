@@ -102,6 +102,25 @@ def test_direct_runtime_preserves_execution_reasoning_separation(
     assert sample.verdict is None
 
 
+def test_direct_runtime_classifies_internal_adapter_error_as_harness_failure() -> None:
+    sample = sample_from_direct_outcome(
+        TASK,
+        ORACLE,
+        DirectV2Outcome(
+            receipt=_receipt(ExecutionClass.SUCCESS),
+            evidence=None,
+            verdict=None,
+            error="AttributeError: internal projector defect",
+            harness_error=True,
+        ),
+    )
+
+    assert sample.execution_class is ExecutionClass.HARNESS_FAILURE
+    assert sample.outcome is SampleOutcomeCode.HARNESS_ERROR
+    assert sample.reasoning_correct is None
+    assert sample.verdict is None
+
+
 @pytest.mark.parametrize(
     "surface",
     [

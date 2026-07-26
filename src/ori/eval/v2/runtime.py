@@ -47,6 +47,13 @@ def sample_from_direct_outcome(
         "oracle_fingerprint": oracle.oracle_fingerprint,
     }
     receipt = outcome.receipt
+    if outcome.harness_error:
+        return SampleResult(
+            **base,
+            execution_class=ExecutionClass.HARNESS_FAILURE,
+            outcome=SampleOutcomeCode.HARNESS_ERROR,
+            detail=outcome.error,
+        )
     if (
         receipt.execution_class is ExecutionClass.SUCCESS
         and outcome.evidence is not None

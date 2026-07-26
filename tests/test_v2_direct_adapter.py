@@ -27,8 +27,10 @@ from ori.eval.v2.schema import (
     DIRECT_QUERY_POLICY_VERSION,
     CountClaim,
     EdgeWitness,
+    EntityPropertyFact,
     EntityRef,
     EntitySelector,
+    EvidenceIR,
     ExactCountPolicy,
     ExactRoutePolicy,
     ExactSetPolicy,
@@ -36,6 +38,8 @@ from ori.eval.v2.schema import (
     ExecutionClass,
     OracleBundle,
     PopulationScope,
+    PredicateOperator,
+    PropertyPredicate,
     RelationshipSemantics,
     RouteClaim,
     RouteVariant,
@@ -272,6 +276,85 @@ def test_direct_adapter_executes_once_and_scores_returned_edge_evidence() -> Non
     assert outcome.evidence.edges == (EDGE,)
     assert outcome.verdict is not None
     assert outcome.verdict.status is VerdictStatus.CORRECT
+
+
+def test_direct_route_projects_required_property_predicate_by_property_name() -> None:
+    claim = CLAIM.model_copy(
+        update={
+            "required_properties": (
+                PropertyPredicate(
+                    role="source",
+                    property_name="hasspn",
+                    operator=PredicateOperator.EQUALS,
+                    value=True,
+                ),
+            )
+        }
+    )
+    oracle = ORACLE.model_copy(
+        update={
+            "claim": claim,
+            "required_properties": (
+                EntityPropertyFact(
+                    entity_id=ALICE.object_id,
+                    key="hasspn",
+                    value=True,
+                ),
+            ),
+        }
+    )
+    raw = _raw_route()
+    raw["data"]["nodes"]["0"]["properties"]["hasspn"] = True
+
+    evidence = project_direct_evidence(
+        CypherResult(success=True, raw=raw),
+        task=TASK,
+        oracle=oracle,
+        resolver=RESOLVER,
+    )
+
+    assert evidence.observed_properties == oracle.required_properties
+
+
+def test_direct_adapter_contains_unexpected_projection_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    result = CypherResult(
+        success=True,
+        raw=_raw_route(),
+        status_code=200,
+        query_executed=True,
+        execution_attempts=1,
+        query_fingerprint="b" * 64,
+        safety_policy_version=DIRECT_QUERY_POLICY_VERSION,
+        safety_rule="allowed",
+        bhce_health_after="not_checked",
+        circuit_state="closed",
+    )
+    coordinator = FakeCoordinator(result)
+
+    def raise_internal_error(*args: object, **kwargs: object) -> EvidenceIR:
+        raise AttributeError("internal projector defect")
+
+    monkeypatch.setattr(
+        "ori.eval.v2.direct_adapter.project_direct_evidence",
+        raise_internal_error,
+    )
+
+    outcome = asyncio.run(
+        execute_direct_v2(
+            coordinator,
+            query="MATCH p=(a)-[:MemberOf]->(b) RETURN p LIMIT 1",
+            task=TASK,
+            oracle=ORACLE,
+            resolver=RESOLVER,
+        )
+    )
+
+    assert outcome.harness_error is True
+    assert outcome.evidence is None
+    assert outcome.verdict is None
+    assert outcome.error == "AttributeError: internal projector defect"
 
 
 def test_direct_capability_profile_binds_result_contract() -> None:

@@ -69,11 +69,13 @@ class DirectV2Outcome:
         evidence: EvidenceIR | None,
         verdict: Verdict | None,
         error: str | None,
+        harness_error: bool = False,
     ) -> None:
         self.receipt = receipt
         self.evidence = evidence
         self.verdict = verdict
         self.error = error
+        self.harness_error = harness_error
 
 
 def _execution_class(result: Any) -> ExecutionClass:
@@ -526,7 +528,7 @@ def project_direct_evidence(
         payload["count"] = _project_scalar_count(result, raw)
     else:
         required_property_keys = frozenset(
-            predicate.key
+            predicate.property_name
             for predicate in getattr(oracle.claim, "required_properties", ())
         )
         payload["entities"] = [_node_identity(node) for node in nodes]
@@ -591,6 +593,7 @@ async def execute_direct_v2(
             resolver=resolver,
             answer_payload=answer_payload,
         )
+        verdict = compare(task.answer_policy, oracle, evidence)
     except DirectAdapterError as exc:
         return DirectV2Outcome(
             receipt=receipt,
@@ -598,7 +601,14 @@ async def execute_direct_v2(
             verdict=None,
             error=str(exc),
         )
-    verdict = compare(task.answer_policy, oracle, evidence)
+    except Exception as exc:
+        return DirectV2Outcome(
+            receipt=receipt,
+            evidence=None,
+            verdict=None,
+            error=f"{type(exc).__name__}: {exc}",
+            harness_error=True,
+        )
     return DirectV2Outcome(
         receipt=receipt,
         evidence=evidence,
