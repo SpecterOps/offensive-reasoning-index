@@ -337,6 +337,42 @@ failure accounting.
   `campaign-comparator-v3-property-predicate-fix` output namespace.
 - [x] Pass two-model/two-track no-model readiness against the unchanged graph.
 
+### Pre-run analogous boundary audit
+
+Before another operator-authorized campaign, the schema and runtime boundaries
+were audited for defects analogous to the property-predicate crash.
+
+- [x] Make property-bearing route schemas require the property evidence used by
+  the comparator.
+- [x] Define strict nested entity, edge-property, entity-property, and
+  bounded-negative reason schemas.
+- [x] Give the negative certificate task distinct `certificate_template` and
+  `objective` roles, and reject duplicate public logical roles.
+- [x] Use one JSON-Schema-plus-`EvidenceIR` validation boundary for MCP
+  finalization, retry eligibility, fixtures, and offline scoring.
+- [x] Make perfect and empty fixtures schema-valid and gradeable so live parity
+  cannot silently mark malformed fixtures inapplicable.
+- [x] Reject non-finite protocol numbers and safely digest malformed output
+  without re-crashing the error handler.
+- [x] Accept any count alias only for a count-only projection returning exactly
+  one unambiguous non-negative scalar literal.
+- [x] Project direct entity property names case-insensitively while preserving
+  the claim's canonical property key.
+- [x] Contain coordinator/receipt and all comparator exceptions as
+  `HARNESS_ERROR`, preserve the authoritative query fingerprint, and represent
+  unknown execution/attempt provenance as null.
+- [x] Expand runtime and MCP-finalization fingerprints over every shared schema,
+  identity, evidence, adapter, state-machine, and accounting source.
+- [x] Recompile both simple tracks and both complete complex tracks in the fresh
+  `schema-runtime-hardening-v2` namespace without model calls.
+- [x] Live-certify simple seed 1234 against the unchanged controlled graph.
+- [x] Verify the live MCP `member_count` literal shape and the direct
+  `MemberOf → AdminTo` route with `hasspn=true`.
+- [x] Pass fresh two-model/two-track no-model readiness from a new campaign
+  output directory.
+- [x] Pass final repository tests, Ruff, diff validation, secret scan, and
+  independent review.
+
 ## Definition of done
 
 - [x] All eight CV1 regression cases pass through v2.

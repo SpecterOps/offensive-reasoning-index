@@ -6,6 +6,8 @@ import time
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from ori.eval.direct_query_safety import query_fingerprint
+
 from .comparator import compare
 from .evidence import EvidenceNormalizationError, normalize_direct_evidence
 from .fingerprint import canonical_sha256
@@ -128,6 +130,52 @@ def _receipt(result: Any, *, elapsed_seconds: float) -> DirectExecutionReceipt:
         post_query_health=_health_state(result.bhce_health_after),
         circuit_state=_circuit_state(result.circuit_state),
         response_digest=canonical_sha256(raw) if raw else None,
+    )
+
+
+def _harness_receipt(
+    query: str,
+    *,
+    elapsed_seconds: float,
+    policy_version: str,
+    failure_subtype: str,
+    result: Any | None = None,
+) -> DirectExecutionReceipt:
+    """Record an internal boundary failure without inventing provenance."""
+
+    raw_query_executed = getattr(result, "query_executed", None)
+    raw_attempts = getattr(result, "execution_attempts", None)
+    result_fingerprint = getattr(result, "query_fingerprint", None)
+
+    return DirectExecutionReceipt(
+        execution_class=ExecutionClass.HARNESS_FAILURE,
+        failure_type="harness_error",
+        failure_subtype=failure_subtype,
+        query_executed=(
+            raw_query_executed if isinstance(raw_query_executed, bool) else None
+        ),
+        attempts=(
+            raw_attempts
+            if isinstance(raw_attempts, int)
+            and not isinstance(raw_attempts, bool)
+            and raw_attempts >= 0
+            else None
+        ),
+        query_fingerprint=(
+            result_fingerprint
+            if isinstance(result_fingerprint, str)
+            and len(result_fingerprint) == 64
+            else query_fingerprint(query)
+        ),
+        policy_version=policy_version,
+        policy_rule=(
+            "receipt_construction_failed"
+            if result is not None
+            else "execution_state_unconfirmed"
+        ),
+        elapsed_seconds=float(elapsed_seconds),
+        post_query_health=HealthState.NOT_CHECKED,
+        circuit_state=CircuitState.CLOSED,
     )
 
 
@@ -352,6 +400,7 @@ def _project_properties(
 ) -> tuple[dict[str, Any], ...]:
     if not allowed_keys:
         return ()
+    canonical_keys = {key.casefold(): key for key in allowed_keys}
     facts: list[dict[str, Any]] = []
     for node in nodes:
         identity = _node_identity(node)
@@ -362,13 +411,14 @@ def _project_properties(
             raw_properties = node.get("props")
         properties = raw_properties if isinstance(raw_properties, Mapping) else node
         for key, value in properties.items():
-            if str(key) in allowed_keys and (
+            canonical_key = canonical_keys.get(str(key).casefold())
+            if canonical_key is not None and (
                 value is None or isinstance(value, (str, int, float, bool))
             ):
                 facts.append(
                     {
                         "entity_id": identity,
-                        "key": str(key),
+                        "key": canonical_key,
                         "value": value,
                     }
                 )
@@ -528,8 +578,15 @@ def project_direct_evidence(
         payload["count"] = _project_scalar_count(result, raw)
     else:
         required_property_keys = frozenset(
-            predicate.property_name
-            for predicate in getattr(oracle.claim, "required_properties", ())
+            fact.key
+            for fact in (
+                *oracle.required_properties,
+                *(
+                    fact
+                    for witness in oracle.negative_witnesses
+                    for fact in witness.checked_properties
+                ),
+            )
         )
         payload["entities"] = [_node_identity(node) for node in nodes]
         payload["edges"] = route_edges
@@ -576,8 +633,37 @@ async def execute_direct_v2(
             "certified v2 direct execution requires enabled direct-query policy v3"
         )
     started = time.monotonic()
-    result = await coordinator.execute(query)
-    receipt = _receipt(result, elapsed_seconds=time.monotonic() - started)
+    try:
+        result = await coordinator.execute(query)
+    except Exception as exc:
+        return DirectV2Outcome(
+            receipt=_harness_receipt(
+                query,
+                elapsed_seconds=time.monotonic() - started,
+                policy_version=config.policy_version,
+                failure_subtype=type(exc).__name__,
+            ),
+            evidence=None,
+            verdict=None,
+            error=f"{type(exc).__name__}: {exc}",
+            harness_error=True,
+        )
+    try:
+        receipt = _receipt(result, elapsed_seconds=time.monotonic() - started)
+    except Exception as exc:
+        return DirectV2Outcome(
+            receipt=_harness_receipt(
+                query,
+                elapsed_seconds=time.monotonic() - started,
+                policy_version=config.policy_version,
+                failure_subtype=type(exc).__name__,
+                result=result,
+            ),
+            evidence=None,
+            verdict=None,
+            error=f"{type(exc).__name__}: {exc}",
+            harness_error=True,
+        )
     if receipt.execution_class is not ExecutionClass.SUCCESS:
         return DirectV2Outcome(
             receipt=receipt,

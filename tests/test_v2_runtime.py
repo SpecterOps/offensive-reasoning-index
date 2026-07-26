@@ -5,6 +5,7 @@ import inspect
 import pytest
 
 from ori.eval.v2 import runtime
+from ori.eval.v2.campaign_runner import _RUNNER_IMPLEMENTATION_SOURCES
 from ori.eval.v2.direct_adapter import DirectV2Outcome
 from ori.eval.v2.mcp import EvidenceEventKind, classify_evidence_event
 from ori.eval.v2.runtime import (
@@ -48,6 +49,23 @@ def _receipt(
             else CircuitState.CLOSED
         ),
     )
+
+
+def test_runner_fingerprint_covers_shared_runtime_contracts() -> None:
+    assert {
+        "campaign",
+        "campaign_runner",
+        "direct_adapter",
+        "evidence",
+        "identity",
+        "mcp_adapter",
+        "mcp_state_machine",
+        "model_runtime",
+        "provider_loops",
+        "runtime",
+        "schema",
+        "scoring",
+    } <= set(_RUNNER_IMPLEMENTATION_SOURCES)
 
 
 @pytest.mark.parametrize(

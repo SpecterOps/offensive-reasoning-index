@@ -6,6 +6,7 @@ import pytest
 
 from ori.eval.v2.fingerprint import canonical_sha256
 from ori.eval.v2.mcp import (
+    _MCP_FINALIZATION_SOURCES,
     CERTIFIED_MCP_TOOL_LOOPS,
     MCP_BLOODHOUND_CE_VERSION,
     MCP_CAPABILITY_PROFILE_FINGERPRINT,
@@ -57,6 +58,18 @@ def _bounds(*, max_pages: int = 1) -> ExecutionBounds:
         max_tool_calls=12,
         timeout_seconds=120.0,
     )
+
+
+def test_mcp_finalization_fingerprint_covers_shared_evidence_sources() -> None:
+    assert {
+        "evidence",
+        "identity",
+        "mcp_state_machine",
+        "mcp_adapter",
+        "model_runtime",
+        "provider_loops",
+        "schema",
+    } <= set(_MCP_FINALIZATION_SOURCES)
 
 
 def _task(

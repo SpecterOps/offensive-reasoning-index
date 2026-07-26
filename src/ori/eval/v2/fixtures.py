@@ -9,7 +9,7 @@ from pydantic import model_validator
 
 from .comparator import COMPARATOR_FINGERPRINT, compare
 from .compiler import CompiledTask, compiler_fingerprint
-from .evidence import EvidenceNormalizationError, normalize_offline_evidence
+from .evidence import EvidenceNormalizationError, validate_and_normalize_evidence
 from .fingerprint import canonical_sha256
 from .graph import GraphSnapshot
 from .identity import IdentityResolver
@@ -195,7 +195,7 @@ def _perfect_payload(
     aliases: bool = False,
 ) -> dict[str, Any]:
     policy = task.public.answer_policy
-    payload: dict[str, Any] = {"task_id": task.public.task_id}
+    payload: dict[str, Any] = {}
     if isinstance(policy, ExactSetPolicy):
         payload["entities"] = [
             (_entity_token(snapshot, entity.object_id) if aliases else entity.object_id)
@@ -312,7 +312,35 @@ def _extra_payload(task: CompiledTask, snapshot: GraphSnapshot) -> dict[str, Any
 
 
 def _empty_payload(task: CompiledTask) -> dict[str, Any]:
-    return {"task_id": task.public.task_id}
+    policy = task.public.answer_policy
+    if isinstance(policy, ExactSetPolicy):
+        return {"entities": []}
+    if isinstance(policy, ExactCountPolicy):
+        return {"count": 0 if task.oracle.expected_count != 0 else 1}
+    if isinstance(policy, (ExactRoutePolicy, MechanismValidRoutePolicy)):
+        payload: dict[str, Any] = {
+            "edges": [],
+            "path_status": "found",
+        }
+        if "observed_properties" in task.public.answer_schema["required"]:
+            payload["observed_properties"] = []
+        return payload
+    if isinstance(policy, DecisionPolicy):
+        return {
+            "decision": False,
+            "entities": [],
+            "supporting_edges": [],
+            "observed_properties": [],
+        }
+    if isinstance(policy, BoundedNegativePolicy):
+        return {
+            "path_status": "no_path",
+            "entities": [],
+            "negative_reason_codes": [],
+            "observed_properties": [],
+            "supporting_edges": [],
+        }
+    raise TypeError(f"unsupported fixture policy: {type(policy).__name__}")
 
 
 def _alternate_route(
@@ -367,7 +395,12 @@ def _case_from_payload(
     resolver: IdentityResolver,
 ) -> FixtureCase:
     try:
-        evidence = normalize_offline_evidence(payload, resolver=resolver)
+        evidence = validate_and_normalize_evidence(
+            payload,
+            answer_schema=task.public.answer_schema,
+            resolver=resolver,
+            task_id=task.public.task_id,
+        )
     except (EvidenceNormalizationError, ValueError) as exc:
         if expected_status is VerdictStatus.CORRECT:
             raise

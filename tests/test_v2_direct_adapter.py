@@ -9,6 +9,7 @@ from ori.eval.direct_query_safety import (
     DirectQueryCoordinator,
     DirectQuerySafetyConfig,
     QueryDenyCache,
+    query_fingerprint,
 )
 from ori.eval.v2.compiler import DIRECT_RESULT_CONTRACT_VERSION
 from ori.eval.v2.direct_adapter import (
@@ -25,6 +26,8 @@ from ori.eval.v2.profiles import (
 )
 from ori.eval.v2.schema import (
     DIRECT_QUERY_POLICY_VERSION,
+    AbsenceClaim,
+    BoundedNegativePolicy,
     CountClaim,
     EdgeWitness,
     EntityPropertyFact,
@@ -36,6 +39,8 @@ from ori.eval.v2.schema import (
     ExactSetPolicy,
     ExecutionBounds,
     ExecutionClass,
+    NegativeReasonCode,
+    NegativeWitness,
     OracleBundle,
     PopulationScope,
     PredicateOperator,
@@ -304,7 +309,7 @@ def test_direct_route_projects_required_property_predicate_by_property_name() ->
         }
     )
     raw = _raw_route()
-    raw["data"]["nodes"]["0"]["properties"]["hasspn"] = True
+    raw["data"]["nodes"]["0"]["properties"]["hasSPN"] = True
 
     evidence = project_direct_evidence(
         CypherResult(success=True, raw=raw),
@@ -314,6 +319,72 @@ def test_direct_route_projects_required_property_predicate_by_property_name() ->
     )
 
     assert evidence.observed_properties == oracle.required_properties
+
+
+def test_direct_absence_projects_resolved_witness_properties() -> None:
+    property_fact = EntityPropertyFact(
+        entity_id=TARGET.object_id,
+        key="authenticationenabled",
+        value=False,
+    )
+    claim = AbsenceClaim(
+        kind="absence",
+        claim_id="claim:absence",
+        source=EntitySelector(role="source", object_type="User"),
+        target=EntitySelector(role="target", object_type="Group"),
+        relationships=("MemberOf",),
+        blocking_properties=(
+            PropertyPredicate(
+                role="target",
+                property_name="authenticationenabled",
+                operator=PredicateOperator.EQUALS,
+                value=False,
+            ),
+        ),
+        reason_codes=(NegativeReasonCode.TEMPLATE_AUTHENTICATION_DISABLED,),
+        max_hops=1,
+        semantics=RelationshipSemantics.DIRECT,
+        population_scope=PopulationScope.BENCHMARK_NAMESPACE,
+    )
+    task = TASK.model_copy(
+        update={
+            "task_id": "simple.direct.absence@2",
+            "claim_kind": "absence",
+            "answer_policy": BoundedNegativePolicy(kind="bounded_negative"),
+        }
+    )
+    oracle = ORACLE.model_copy(
+        update={
+            "task_id": task.task_id,
+            "claim": claim,
+            "route_variants": (),
+            "required_context": (EDGE,),
+            "required_properties": (property_fact,),
+            "negative_witnesses": (
+                NegativeWitness(
+                    reason_code=NegativeReasonCode.TEMPLATE_AUTHENTICATION_DISABLED,
+                    checked_entity_ids=(TARGET.object_id,),
+                    checked_edges=(EDGE,),
+                    checked_properties=(property_fact,),
+                    max_hops=1,
+                    witness_absent=True,
+                ),
+            ),
+        }
+    )
+    raw = _raw_route()
+    raw["data"]["nodes"]["1"]["properties"]["authenticationenabled"] = False
+
+    evidence = project_direct_evidence(
+        CypherResult(success=True, raw=raw),
+        task=task,
+        oracle=oracle,
+        resolver=RESOLVER,
+    )
+
+    assert evidence.edges == ()
+    assert evidence.supporting_edges == (EDGE,)
+    assert evidence.observed_properties == (property_fact,)
 
 
 def test_direct_adapter_contains_unexpected_projection_failure(
@@ -355,6 +426,64 @@ def test_direct_adapter_contains_unexpected_projection_failure(
     assert outcome.evidence is None
     assert outcome.verdict is None
     assert outcome.error == "AttributeError: internal projector defect"
+
+
+def test_direct_adapter_contains_unexpected_coordinator_failure() -> None:
+    class RaisingCoordinator:
+        config = DirectQuerySafetyConfig(enabled=True)
+
+        async def execute(self, query: str) -> CypherResult:
+            raise AttributeError("internal coordinator defect")
+
+    outcome = asyncio.run(
+        execute_direct_v2(
+            RaisingCoordinator(),
+            query="MATCH p=(a)-[:MemberOf]->(b) RETURN p LIMIT 1",
+            task=TASK,
+            oracle=ORACLE,
+            resolver=RESOLVER,
+        )
+    )
+
+    assert outcome.harness_error is True
+    assert outcome.receipt.execution_class is ExecutionClass.HARNESS_FAILURE
+    assert outcome.receipt.query_executed is None
+    assert outcome.receipt.attempts is None
+    assert outcome.receipt.query_fingerprint == query_fingerprint(
+        "MATCH p=(a)-[:MemberOf]->(b) RETURN p LIMIT 1"
+    )
+    assert outcome.receipt.failure_type == "harness_error"
+    assert outcome.error == "AttributeError: internal coordinator defect"
+
+
+def test_direct_adapter_preserves_receipt_provenance_when_projection_fails() -> None:
+    class MalformedResult:
+        query_executed = True
+        execution_attempts = 2
+        query_fingerprint = "c" * 64
+
+    class MalformedCoordinator:
+        config = DirectQuerySafetyConfig(enabled=True)
+
+        async def execute(self, query: str) -> MalformedResult:
+            return MalformedResult()
+
+    outcome = asyncio.run(
+        execute_direct_v2(
+            MalformedCoordinator(),
+            query="MATCH p=(a)-[:MemberOf]->(b) RETURN p LIMIT 1",
+            task=TASK,
+            oracle=ORACLE,
+            resolver=RESOLVER,
+        )
+    )
+
+    assert outcome.harness_error is True
+    assert outcome.receipt.execution_class is ExecutionClass.HARNESS_FAILURE
+    assert outcome.receipt.query_executed is True
+    assert outcome.receipt.attempts == 2
+    assert outcome.receipt.query_fingerprint == "c" * 64
+    assert outcome.receipt.policy_rule == "receipt_construction_failed"
 
 
 def test_direct_capability_profile_binds_result_contract() -> None:

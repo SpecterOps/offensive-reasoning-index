@@ -16,7 +16,7 @@ from typing import Any, Literal
 from pydantic import Field, model_validator
 
 from .comparator import COMPARATOR_FINGERPRINT, compare
-from .evidence import EvidenceNormalizationError, normalize_offline_evidence
+from .evidence import EvidenceNormalizationError, validate_and_normalize_evidence
 from .fingerprint import canonical_sha256
 from .identity import IdentityResolver
 from .protocol import (
@@ -337,12 +337,13 @@ def score_answers_v2(
         oracle = registry.for_task(task.task_id)
         submission = submissions[task.task_id]
         try:
-            evidence = normalize_offline_evidence(
+            evidence = validate_and_normalize_evidence(
                 submission.answer,
+                answer_schema=task.answer_schema,
                 resolver=resolver,
                 task_id=task.task_id,
             )
-        except EvidenceNormalizationError as exc:
+        except (EvidenceNormalizationError, ValueError) as exc:
             results.append(
                 SampleResult(
                     task_id=task.task_id,
@@ -356,7 +357,20 @@ def score_answers_v2(
             )
             continue
 
-        verdict = compare(task.answer_policy, oracle, evidence)
+        try:
+            verdict = compare(task.answer_policy, oracle, evidence)
+        except Exception as exc:
+            results.append(
+                SampleResult(
+                    task_id=task.task_id,
+                    task_fingerprint=task.task_fingerprint,
+                    oracle_fingerprint=oracle.oracle_fingerprint,
+                    execution_class=ExecutionClass.HARNESS_FAILURE,
+                    outcome=SampleOutcomeCode.HARNESS_ERROR,
+                    detail=f"{type(exc).__name__}: {exc}",
+                )
+            )
+            continue
         results.append(
             SampleResult(
                 task_id=task.task_id,

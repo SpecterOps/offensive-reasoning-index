@@ -16,6 +16,7 @@ from ori.eval.v2 import (
     ExecutionBounds,
     MechanismValidRoutePolicy,
     PopulationScope,
+    PropertyFact,
     RelationshipSemantics,
     RouteClaim,
     TaskBundle,
@@ -132,6 +133,27 @@ def test_evidence_rejects_coerced_counts_and_booleans(field: str, invalid: objec
     payload[field] = invalid
     with pytest.raises(ValidationError):
         EvidenceIR.model_validate(payload)
+
+
+def test_protocol_models_reject_nonfinite_json_numbers() -> None:
+    with pytest.raises(ValidationError):
+        PropertyFact(key="risk", value=float("nan"))
+
+
+def test_task_bundle_rejects_duplicate_public_logical_roles() -> None:
+    payload = _task_bundle().model_dump()
+    payload["input_entities"] = (
+        _entity().model_dump(),
+        _entity(object_id="S-1-5-21-1-1002").model_copy(
+            update={"canonical_name": "BOB@EXAMPLE.LOCAL", "aliases": ("BOB",)}
+        ).model_dump(),
+    )
+
+    with pytest.raises(
+        ValidationError,
+        match="public input entities must have unique logical roles",
+    ):
+        TaskBundle.model_validate(payload)
 
 
 def test_discriminated_claim_union_rejects_unknown_kind() -> None:

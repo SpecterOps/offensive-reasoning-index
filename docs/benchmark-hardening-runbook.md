@@ -189,6 +189,17 @@ stably-ordered page; route witnesses still must pass the shared Evidence IR
 comparator. Any MCP-issued Cypher runs through the same policy-v3 coordinator
 as direct mode.
 
+The compiler publishes strict nested answer schemas for entities, edges,
+entity-property facts, and the generic bounded-negative reason vocabulary.
+MCP output, schema-only retry eligibility, deterministic fixtures, and offline
+replay all use one shared JSON-Schema-plus-`EvidenceIR` validator. This prevents
+one scoring surface from accepting an answer another surface rejects. Malformed
+and non-finite values are model-attributable `OUTPUT_INVALID`; diagnostic
+fingerprinting is deliberately non-canonical so even invalid JSON numbers
+cannot crash the error path. Count aliases are unrestricted only for a
+count-only projection whose tool response contains exactly one unambiguous
+non-negative scalar literal.
+
 Run state is private and atomic. It binds the model/run identity, source
 manifest and archive, task/oracle/catalog/live-certification fingerprints,
 graph, capability profile, containment configuration, runtime configuration,

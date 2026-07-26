@@ -9,6 +9,9 @@ from collections.abc import Iterable, Mapping
 from enum import Enum
 from typing import Any
 
+from jsonschema import Draft202012Validator
+from jsonschema.exceptions import SchemaError, ValidationError
+
 from ori.relationships import canonical_relationship_kind
 
 from .identity import IdentityResolver
@@ -123,6 +126,14 @@ def raw_payload_digest(payload: Any) -> str:
         allow_nan=False,
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def diagnostic_payload_digest(payload: Any) -> str:
+    """Hash untrusted malformed output without asserting canonical JSON."""
+
+    return hashlib.sha256(
+        repr(payload).encode("utf-8", errors="backslashreplace")
+    ).hexdigest()
 
 
 def _assert_no_oracle_fields(value: Any, *, path: str = "$") -> None:
@@ -502,3 +513,30 @@ def normalize_offline_evidence(
         resolver=resolver,
         task_id=task_id,
     )
+
+
+def validate_and_normalize_evidence(
+    payload: Mapping[str, Any],
+    *,
+    answer_schema: Mapping[str, Any],
+    resolver: IdentityResolver | None = None,
+    task_id: str,
+) -> EvidenceIR:
+    """Apply the one public-schema and Evidence IR boundary used by v2 scoring."""
+
+    try:
+        schema = dict(answer_schema)
+        Draft202012Validator.check_schema(schema)
+        Draft202012Validator(schema).validate(dict(payload))
+        return normalize_evidence(
+            payload,
+            resolver=resolver,
+            task_id=task_id,
+        )
+    except (
+        EvidenceNormalizationError,
+        SchemaError,
+        ValidationError,
+        ValueError,
+    ) as exc:
+        raise EvidenceNormalizationError(str(exc)) from exc

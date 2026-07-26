@@ -104,6 +104,12 @@ Every compiled task receives:
 - decoy;
 - alternate route.
 
+The perfect and empty fixtures must both satisfy the public answer schema.
+“Empty” means schema-valid empty evidence that the comparator rejects; it must
+not be implemented as malformed output. Schema failures are covered separately
+by the malformed-answer fixture so live parity cannot silently mark a required
+empty case inapplicable.
+
 Route tasks also exercise reversed edge, disconnected path, cycle, malformed
 answer, and source/target mismatch. If a named fixture is structurally
 inapplicable, the compiler must record why and identify the registered

@@ -72,13 +72,18 @@ RUN_STATE_SCHEMA_VERSION = "ori-v2-private-run-state-v1"
 MODEL_REPORT_SCHEMA_VERSION = "ori-v2-model-report-v1"
 READINESS_SCHEMA_VERSION = "ori-v2-run-readiness-v1"
 _RUNNER_IMPLEMENTATION_SOURCES = {
+    "campaign": Path(__file__).with_name("campaign.py"),
     "campaign_runner": Path(__file__),
     "direct_adapter": Path(__file__).with_name("direct_adapter.py"),
+    "evidence": Path(__file__).with_name("evidence.py"),
+    "identity": Path(__file__).with_name("identity.py"),
     "mcp_adapter": Path(__file__).with_name("mcp_adapter.py"),
     "mcp_state_machine": Path(__file__).with_name("mcp.py"),
     "model_runtime": Path(__file__).with_name("model_runtime.py"),
     "provider_loops": Path(__file__).parent.parent / "mcp_runtime.py",
     "runtime": Path(__file__).with_name("runtime.py"),
+    "schema": Path(__file__).with_name("schema.py"),
+    "scoring": Path(__file__).with_name("scoring.py"),
 }
 RUNNER_IMPLEMENTATION_FINGERPRINT = canonical_sha256(
     {

@@ -31,6 +31,7 @@ class StrictModel(BaseModel):
     """Protocol model that rejects coercion, mutation, and undeclared fields."""
 
     model_config = ConfigDict(
+        allow_inf_nan=False,
         extra="forbid",
         frozen=True,
         strict=True,
@@ -488,6 +489,9 @@ class TaskBundle(StrictModel):
         input_ids = [entity.object_id for entity in self.input_entities]
         if len(input_ids) != len(set(input_ids)):
             raise ValueError("public input entities must have unique object IDs")
+        input_roles = [entity.role for entity in self.input_entities]
+        if len(input_roles) != len(set(input_roles)):
+            raise ValueError("public input entities must have unique logical roles")
         return self
 
 
@@ -633,8 +637,8 @@ class DirectExecutionReceipt(StrictModel):
     failure_type: NonEmptyStr | None = None
     failure_subtype: NonEmptyStr | None = None
     status_code: int | None = Field(default=None, strict=True, ge=100, le=599)
-    query_executed: bool
-    attempts: int = Field(strict=True, ge=0)
+    query_executed: bool | None
+    attempts: int | None = Field(default=None, strict=True, ge=0)
     query_fingerprint: Fingerprint | None = None
     policy_version: NonEmptyStr
     policy_rule: NonEmptyStr | None = None

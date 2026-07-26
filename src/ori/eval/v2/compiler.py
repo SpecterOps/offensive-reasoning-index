@@ -1378,8 +1378,15 @@ def _negative_draft(
     _assert_edges_exist(snapshot, partial_edges, purpose=f"{task.id} partial evidence")
     resolved_roles, roles_by_id = _route_roles(snapshot, partial_edges, ())
     template_id = partial_edges[-1].target_id
+    resolved_roles = tuple(
+        entity.model_copy(update={"role": "certificate_template"})
+        if entity.object_id == template_id
+        else entity
+        for entity in resolved_roles
+    )
+    roles_by_id[template_id] = "certificate_template"
     property_predicate = PropertyPredicate(
-        role=roles_by_id[template_id],
+        role="certificate_template",
         property_name="authenticationenabled",
         operator=PredicateOperator.EQUALS,
         value=False,
@@ -1403,7 +1410,7 @@ def _negative_draft(
             object_type=snapshot.entity(partial_edges[0].source_id).object_type,
         ),
         target=EntitySelector(
-            role="target",
+            role="objective",
             object_type=snapshot.entity(str(path["target_node"])).object_type,
         ),
         relationships=("MemberOf", "Enroll", "PublishedTo"),
@@ -1413,7 +1420,7 @@ def _negative_draft(
         semantics=RelationshipSemantics.DIRECT,
         population_scope=PopulationScope.BENCHMARK_NAMESPACE,
     )
-    target_entity = _entity_with_role(snapshot, str(path["target_node"]), "target")
+    target_entity = _entity_with_role(snapshot, str(path["target_node"]), "objective")
     resolved_roles = (*resolved_roles, target_entity)
     witnesses = (
         NegativeWitness(
@@ -1460,6 +1467,28 @@ def _negative_draft(
 
 
 def _answer_schema(claim: ClaimSpec) -> dict[str, Any]:
+    json_scalar_schema = {
+        "type": ["string", "number", "integer", "boolean", "null"],
+    }
+    property_schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "entity_id": {"type": "string", "minLength": 1},
+            "key": {"type": "string", "minLength": 1},
+            "value": json_scalar_schema,
+        },
+        "required": ["entity_id", "key", "value"],
+    }
+    edge_property_schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "key": {"type": "string", "minLength": 1},
+            "value": json_scalar_schema,
+        },
+        "required": ["key", "value"],
+    }
     edge_schema = {
         "type": "object",
         "additionalProperties": False,
@@ -1468,7 +1497,18 @@ def _answer_schema(claim: ClaimSpec) -> dict[str, Any]:
             "relationship": {"type": "string"},
             "target_id": {"type": "string"},
             "direction": {"enum": ["outbound", "inbound"]},
-            "properties": {"type": "object"},
+            "properties": {
+                "oneOf": [
+                    {
+                        "type": "object",
+                        "additionalProperties": json_scalar_schema,
+                    },
+                    {
+                        "type": "array",
+                        "items": edge_property_schema,
+                    },
+                ]
+            },
         },
         "required": ["source_id", "relationship", "target_id"],
     }
@@ -1484,6 +1524,10 @@ def _answer_schema(claim: ClaimSpec) -> dict[str, Any]:
                         "name": {"type": "string"},
                     },
                     "additionalProperties": False,
+                    "anyOf": [
+                        {"required": ["object_id"]},
+                        {"required": ["name"]},
+                    ],
                 },
             ]
         },
@@ -1505,15 +1549,24 @@ def _answer_schema(claim: ClaimSpec) -> dict[str, Any]:
             "entities": entity_schema,
             "edges": {"type": "array", "items": edge_schema},
             "supporting_edges": {"type": "array", "items": edge_schema},
+            "observed_properties": {
+                "type": "array",
+                "items": property_schema,
+            },
             "path_status": {"const": "found"},
         }
         base["required"] = ["edges", "path_status"]
+        if claim.required_properties:
+            base["required"].append("observed_properties")
     elif claim.kind == "decision":
         base["properties"] = {
             "decision": {"type": "boolean"},
             "entities": entity_schema,
             "supporting_edges": {"type": "array", "items": edge_schema},
-            "observed_properties": {"type": "array"},
+            "observed_properties": {
+                "type": "array",
+                "items": property_schema,
+            },
         }
         base["required"] = [
             "decision",
@@ -1527,9 +1580,15 @@ def _answer_schema(claim: ClaimSpec) -> dict[str, Any]:
             "entities": entity_schema,
             "negative_reason_codes": {
                 "type": "array",
-                "items": {"type": "string"},
+                "items": {
+                    "enum": [reason.value for reason in NegativeReasonCode],
+                },
+                "uniqueItems": True,
             },
-            "observed_properties": {"type": "array"},
+            "observed_properties": {
+                "type": "array",
+                "items": property_schema,
+            },
             "supporting_edges": {"type": "array", "items": edge_schema},
         }
         base["required"] = [
@@ -1698,10 +1757,23 @@ def _public_input_entities(draft: _ClaimDraft) -> tuple[EntityRef, ...]:
     if isinstance(draft.claim, (SetClaim, CountClaim)):
         candidates = draft.resolved_roles
     else:
+        if isinstance(draft.claim, RouteClaim):
+            public_roles = {
+                draft.claim.source.role,
+                draft.claim.target.role,
+            }
+        elif isinstance(draft.claim, DecisionClaim):
+            public_roles = {"source", "target"}
+        else:
+            public_roles = {
+                draft.claim.source.role,
+                draft.claim.target.role,
+                *(predicate.role for predicate in draft.claim.blocking_properties),
+            }
         candidates = tuple(
             entity
             for entity in draft.resolved_roles
-            if entity.role in {"source", "target"}
+            if entity.role in public_roles
         )
     by_id: dict[str, EntityRef] = {}
     for entity in candidates:

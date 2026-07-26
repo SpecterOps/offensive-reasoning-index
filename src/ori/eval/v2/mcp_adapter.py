@@ -6,12 +6,12 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from jsonschema import Draft202012Validator
-from jsonschema.exceptions import SchemaError, ValidationError
-
 from .comparator import compare
-from .evidence import EvidenceNormalizationError, normalize_mcp_evidence
-from .fingerprint import canonical_sha256
+from .evidence import (
+    EvidenceNormalizationError,
+    diagnostic_payload_digest,
+    validate_and_normalize_evidence,
+)
 from .identity import IdentityResolver
 from .mcp import (
     EvidenceEvent,
@@ -55,23 +55,17 @@ def _output_attempt(
             "structured final answer is missing",
         )
     try:
-        Draft202012Validator.check_schema(task.answer_schema)
-        Draft202012Validator(task.answer_schema).validate(dict(answer))
-        evidence = normalize_mcp_evidence(
+        evidence = validate_and_normalize_evidence(
             answer,
+            answer_schema=task.answer_schema,
             resolver=resolver,
             task_id=task.task_id,
         )
-    except (
-        EvidenceNormalizationError,
-        SchemaError,
-        ValidationError,
-        ValueError,
-    ) as exc:
+    except EvidenceNormalizationError as exc:
         return (
             FinalizationAttempt(
                 status=FinalOutputStatus.MALFORMED,
-                output_digest=canonical_sha256(dict(answer)),
+                output_digest=diagnostic_payload_digest(answer),
             ),
             None,
             str(exc),
@@ -160,7 +154,24 @@ def score_mcp_transcript_v2(
             ),
         )
 
-    verdict = compare(task.answer_policy, oracle, evidence)
+    try:
+        verdict = compare(task.answer_policy, oracle, evidence)
+    except Exception as exc:
+        state = state.model_copy(
+            update={
+                "phase": FinalizationPhase.HARNESS_FAILURE,
+                "terminal_reason": "HARNESS_FAILURE",
+            }
+        )
+        return MCPV2Outcome(
+            finalization=state,
+            sample=SampleResult(
+                **base,
+                execution_class=ExecutionClass.HARNESS_FAILURE,
+                outcome=SampleOutcomeCode.HARNESS_ERROR,
+                detail=f"{type(exc).__name__}: {exc}",
+            ),
+        )
     return MCPV2Outcome(
         finalization=state,
         sample=SampleResult(

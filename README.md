@@ -790,6 +790,14 @@ is inconclusive instead of crashing the tool loop. HTTP/transport/timeouts are
 `INFRA_ERROR`, while internal projector, schema, or runner exceptions are
 `HARNESS_ERROR` and are never retried as infrastructure.
 
+Compiled answer schemas define nested entity, edge, property, and bounded-
+negative reason shapes. MCP finalization, its single schema-only retry, fixture
+certification, and offline replay all cross the same JSON-Schema-plus-
+`EvidenceIR` validation boundary. A count-only query may use any alias only when
+its tool response contains exactly one unambiguous non-negative scalar literal.
+Malformed or non-finite output becomes `OUTPUT_INVALID`; it cannot crash while
+the harness records its diagnostic digest.
+
 The MCP finalization fingerprint covers the state machine, model-runtime
 projector, MCP adapter, and native provider loops. Changing any of those files
 invalidates prior MCP certification. Re-run `compile-v2`,

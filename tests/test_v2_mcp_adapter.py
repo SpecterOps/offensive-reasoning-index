@@ -28,6 +28,7 @@ from ori.eval.v2.schema import (
     TrackBinding,
     VerdictStatus,
 )
+from ori.eval.v2.scoring import SampleOutcomeCode
 
 FP = "a" * 64
 ALICE = EntityRef(
@@ -174,6 +175,62 @@ def test_mcp_adapter_uses_comparator_for_wrong_but_well_formed_evidence() -> Non
     assert outcome.sample.reasoning_correct is False
     assert outcome.sample.verdict is not None
     assert outcome.sample.verdict.status is VerdictStatus.INCORRECT
+
+
+def test_mcp_adapter_contains_nonfinite_malformed_output() -> None:
+    answer = _answer()
+    answer["observed_properties"] = [
+        {
+            "entity_id": ALICE.object_id,
+            "key": "risk",
+            "value": float("nan"),
+        }
+    ]
+
+    outcome = score_mcp_transcript_v2(
+        task=TASK,
+        oracle=ORACLE,
+        resolver=RESOLVER,
+        profile=PROFILE,
+        tool_loop=MCPToolLoop.NATIVE_OPENAI_COMPATIBLE,
+        events=(_useful_event(),),
+        final_answer=answer,
+        retry_answer=None,
+    )
+
+    assert outcome.finalization.phase is FinalizationPhase.OUTPUT_INVALID
+    assert outcome.sample.execution_class is ExecutionClass.MODEL_FAILURE
+    assert outcome.sample.outcome is SampleOutcomeCode.OUTPUT_INVALID
+    assert outcome.sample.reasoning_correct is False
+
+
+def test_mcp_adapter_contains_unexpected_comparator_failure(
+    monkeypatch,
+) -> None:
+    def raise_internal_error(*args: object, **kwargs: object):
+        raise AttributeError("internal comparator defect")
+
+    monkeypatch.setattr(
+        "ori.eval.v2.mcp_adapter.compare",
+        raise_internal_error,
+    )
+
+    outcome = score_mcp_transcript_v2(
+        task=TASK,
+        oracle=ORACLE,
+        resolver=RESOLVER,
+        profile=PROFILE,
+        tool_loop=MCPToolLoop.NATIVE_OPENAI_COMPATIBLE,
+        events=(_useful_event(),),
+        final_answer=_answer(),
+    )
+
+    assert outcome.finalization.phase is FinalizationPhase.HARNESS_FAILURE
+    assert outcome.sample.execution_class is ExecutionClass.HARNESS_FAILURE
+    assert outcome.sample.outcome is SampleOutcomeCode.HARNESS_ERROR
+    assert outcome.sample.reasoning_correct is None
+    assert outcome.sample.verdict is None
+    assert outcome.sample.detail == "AttributeError: internal comparator defect"
 
 
 def test_irrelevant_activity_cannot_unlock_mcp_finalization() -> None:

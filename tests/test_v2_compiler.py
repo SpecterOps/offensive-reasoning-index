@@ -31,6 +31,7 @@ from ori.eval.v2.certification import (
 )
 from ori.eval.v2.compiler import V2CompileError, compile_legacy_product
 from ori.eval.v2.determinism import corpus_contract_shape_fingerprint
+from ori.eval.v2.evidence import _KNOWN_TOP_LEVEL_FIELDS
 from ori.eval.v2.fingerprint import canonical_sha256
 from ori.eval.v2.fixtures import REQUIRED_FIXTURES, offline_certify
 from ori.eval.v2.graph import LiveGraphVerification, build_archive_snapshot
@@ -56,6 +57,7 @@ from ori.eval.v2.public_surfaces import (
 from ori.eval.v2.schema import (
     AbsenceClaim,
     DecisionClaim,
+    ExecutionClass,
     MCPBindingMode,
     NegativeReasonCode,
     RouteClaim,
@@ -268,6 +270,11 @@ def test_vertical_slice_claims_are_typed_and_correct(complex_compiled) -> None:
 
     negative = _by_legacy(direct, "t6_negative_control_invalid_cert-01")[0]
     assert isinstance(negative.oracle.claim, AbsenceClaim)
+    input_roles = [entity.role for entity in negative.public.input_entities]
+    assert set(input_roles) == {"source", "certificate_template", "objective"}
+    assert len(input_roles) == len(set(input_roles))
+    assert negative.public.question.count("certificate_template=") == 1
+    assert negative.public.question.count("objective=") == 1
     assert {witness.reason_code for witness in negative.oracle.negative_witnesses} == {
         NegativeReasonCode.TEMPLATE_AUTHENTICATION_DISABLED,
         NegativeReasonCode.MISSING_PUBLISHED_TO,
@@ -550,11 +557,79 @@ def _perfect_answers(corpus, snapshot):
             case for case in certification.fixtures.cases if case.name == "perfect"
         )
         assert perfect.evidence is not None
-        answers[task.public.task_id] = perfect.evidence.model_dump(
-            mode="json",
-            exclude={"raw_digest"},
-        )
+        evidence = perfect.evidence
+        evidence_payload = {
+            "entities": [entity.object_id for entity in evidence.entities],
+            "edges": [
+                {
+                    "source_id": edge.source_id,
+                    "relationship": edge.relationship,
+                    "target_id": edge.target_id,
+                    "direction": edge.direction.value,
+                    "properties": {
+                        fact.key: fact.value for fact in edge.properties
+                    },
+                }
+                for edge in evidence.edges
+            ],
+            "count": evidence.count,
+            "decision": evidence.decision,
+            "path_status": evidence.path_status.value,
+            "supporting_edges": [
+                {
+                    "source_id": edge.source_id,
+                    "relationship": edge.relationship,
+                    "target_id": edge.target_id,
+                    "direction": edge.direction.value,
+                    "properties": {
+                        fact.key: fact.value for fact in edge.properties
+                    },
+                }
+                for edge in evidence.supporting_edges
+            ],
+            "observed_properties": [
+                {
+                    "entity_id": fact.entity_id,
+                    "key": fact.key,
+                    "value": fact.value,
+                }
+                for fact in evidence.observed_properties
+            ],
+            "negative_reason_codes": [
+                reason.value for reason in evidence.negative_reason_codes
+            ],
+        }
+        answers[task.public.task_id] = {
+            key: evidence_payload[key]
+            for key in task.public.answer_schema["properties"]
+            if evidence_payload.get(key) is not None
+        }
     return answers
+
+
+def test_every_compiled_perfect_answer_matches_its_public_schema(
+    complex_compiled,
+) -> None:
+    _, snapshot, direct, mcp = complex_compiled
+
+    for corpus in (direct, mcp):
+        answers = _perfect_answers(corpus, snapshot)
+        for task in corpus.tasks:
+            validate_json_schema(
+                answers[task.public.task_id],
+                task.public.answer_schema,
+            )
+
+
+def test_every_public_answer_field_has_a_shared_evidence_ir_consumer(
+    complex_compiled,
+) -> None:
+    _, _, direct, mcp = complex_compiled
+
+    for task in (*direct.tasks, *mcp.tasks):
+        assert set(task.public.answer_schema["properties"]).issubset(
+            _KNOWN_TOP_LEVEL_FIELDS
+        )
 
 
 def test_offline_scoring_uses_sealed_identity_catalog_and_shared_comparator(
@@ -600,6 +675,62 @@ def test_forged_answer_reference_data_cannot_affect_a_v2_verdict(
     assert forged.reasoning_correct is False
     assert forged.verdict is None
     assert scoring.summary.incorrect == 1
+
+
+def test_offline_scoring_treats_strict_schema_failure_as_output_invalid(
+    simple_compiled,
+) -> None:
+    _, snapshot, _, mcp = simple_compiled
+    public, private = build_artifacts(
+        mcp,
+        identity_catalog=snapshot.entities,
+    )
+    raw_answers = _perfect_answers(mcp, snapshot)
+    count_task = next(task for task in public.tasks if task.claim_kind == "count")
+    raw_answers[count_task.task_id]["count"] = "not-an-integer"
+    answers = build_answers_artifact(public, raw_answers)
+
+    scoring = score_answers_v2(public, private, answers)
+    result = next(
+        item for item in scoring.results if item.task_id == count_task.task_id
+    )
+
+    assert result.execution_class is ExecutionClass.MODEL_FAILURE
+    assert result.outcome.value == "OUTPUT_INVALID"
+    assert result.reasoning_correct is False
+    assert result.verdict is None
+
+
+def test_offline_scoring_contains_unexpected_comparator_failure(
+    simple_compiled,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, snapshot, direct, _ = simple_compiled
+    public, private = build_artifacts(
+        direct,
+        identity_catalog=snapshot.entities,
+    )
+    answers = build_answers_artifact(
+        public,
+        _perfect_answers(direct, snapshot),
+    )
+
+    def raise_internal_error(*args: object, **kwargs: object):
+        raise AttributeError("internal comparator defect")
+
+    monkeypatch.setattr("ori.eval.v2.scoring.compare", raise_internal_error)
+
+    scoring = score_answers_v2(public, private, answers)
+
+    assert scoring.summary.harness_failures == len(public.tasks)
+    assert scoring.summary.campaign_valid is False
+    assert scoring.summary.invalid_reasons == ("HARNESS_FAILURE",)
+    assert all(
+        result.execution_class is ExecutionClass.HARNESS_FAILURE
+        and result.reasoning_correct is None
+        and result.verdict is None
+        for result in scoring.results
+    )
 
 
 def test_v2_scoring_rejects_missing_duplicate_unknown_and_stale_tasks(

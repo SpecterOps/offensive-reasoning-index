@@ -25,6 +25,7 @@ from ori.eval.mcp_runtime import (
 
 from .compiler import DIRECT_RESULT_CONTRACT_VERSION
 from .direct_adapter import DirectV2Outcome
+from .evidence import EvidenceNormalizationError, validate_and_normalize_evidence
 from .fingerprint import canonical_sha256
 from .identity import IdentityResolver
 from .mcp import (
@@ -48,6 +49,7 @@ from .schema import (
     CapabilityProfile,
     DirectExecutionReceipt,
     ExecutionClass,
+    NegativeReasonCode,
     OracleBundle,
     StrictModel,
     TaskBundle,
@@ -183,7 +185,9 @@ def direct_submission_schema(task: TaskBundle) -> dict[str, Any]:
                 "path_status": {"const": "no_path"},
                 "negative_reason_codes": {
                     "type": "array",
-                    "items": {"type": "string"},
+                    "items": {
+                        "enum": [reason.value for reason in NegativeReasonCode],
+                    },
                     "uniqueItems": True,
                 },
             }
@@ -426,16 +430,15 @@ def _scalar_count(payload: Mapping[str, Any]) -> int | None:
     literals = inner.get("literals") if isinstance(inner, Mapping) else None
     if not isinstance(literals, list):
         return None
-    values = {
+    values = [
         item.get("value")
         for item in literals
         if isinstance(item, Mapping)
-        and str(item.get("key") or "").casefold() in {"count", "total_count", "total"}
         and isinstance(item.get("value"), int)
         and not isinstance(item.get("value"), bool)
         and item.get("value") >= 0
-    }
-    return int(values.pop()) if len(values) == 1 else None
+    ]
+    return int(values[0]) if len(values) == 1 else None
 
 
 def _nonnegative_int(value: Any) -> int | None:
@@ -539,7 +542,14 @@ def _page_query_key(query: str) -> str:
 
 
 def _is_count_query(query: str) -> bool:
-    return bool(re.search(r"\bcount\s*\(", query, flags=re.IGNORECASE))
+    return bool(
+        re.search(
+            r"\bRETURN\s+(?:DISTINCT\s+)?COUNT\s*\([^)]*\)"
+            r"\s*(?:AS\s+`?[A-Za-z_][A-Za-z0-9_]*`?)?\s*;?\s*\Z",
+            query,
+            flags=re.IGNORECASE,
+        )
+    )
 
 
 class MCPTranscriptProjector:
@@ -752,13 +762,22 @@ class MCPTranscriptProjector:
         return self.finalization_ready
 
 
-def _answer_schema_valid(task: TaskBundle, value: Mapping[str, Any] | None) -> bool:
+def _answer_schema_valid(
+    task: TaskBundle,
+    value: Mapping[str, Any] | None,
+    *,
+    resolver: IdentityResolver,
+) -> bool:
     if value is None:
         return False
     try:
-        Draft202012Validator.check_schema(task.answer_schema)
-        Draft202012Validator(task.answer_schema).validate(dict(value))
-    except (SchemaError, ValidationError):
+        validate_and_normalize_evidence(
+            value,
+            answer_schema=task.answer_schema,
+            resolver=resolver,
+            task_id=task.task_id,
+        )
+    except EvidenceNormalizationError:
         return False
     return True
 
@@ -937,7 +956,11 @@ async def run_mcp_model_task_v2(
         final_answer = None
     retry_response: ModelResponse | None = None
     retry_answer: Mapping[str, Any] | None = None
-    if projector.finalization_ready and not _answer_schema_valid(task, final_answer):
+    if projector.finalization_ready and not _answer_schema_valid(
+        task,
+        final_answer,
+        resolver=resolver,
+    ):
         retry_response = await _schema_only_retry(
             task=task,
             model=model,

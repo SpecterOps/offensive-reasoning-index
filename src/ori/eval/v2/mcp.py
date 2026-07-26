@@ -35,10 +35,13 @@ MCP_SERVER_REVISION = "009c88f41fae302becad4b00777a3749a0f6f0fa"
 MCP_CAPABILITY_MAX_OUTPUT_BYTES = 65_536
 MCP_EVIDENCE_STATE_MACHINE_VERSION = "ori-mcp-evidence-v2"
 _MCP_FINALIZATION_SOURCES = {
+    "evidence": Path(__file__).with_name("evidence.py"),
+    "identity": Path(__file__).with_name("identity.py"),
     "mcp_state_machine": Path(__file__),
     "mcp_adapter": Path(__file__).with_name("mcp_adapter.py"),
     "model_runtime": Path(__file__).with_name("model_runtime.py"),
     "provider_loops": Path(__file__).parent.parent / "mcp_runtime.py",
+    "schema": Path(__file__).with_name("schema.py"),
 }
 MCP_FINALIZATION_POLICY_FINGERPRINT = canonical_sha256(
     {

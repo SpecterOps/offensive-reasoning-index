@@ -125,6 +125,23 @@ def test_direct_submission_schema_rejects_extra_oracle_fields() -> None:
         )
 
 
+def test_direct_absence_submission_uses_the_public_reason_vocabulary() -> None:
+    task = DIRECT_TASK.model_copy(update={"claim_kind": "absence"})
+    valid = {
+        "query": "MATCH (n) RETURN n LIMIT 1",
+        "assertion": {
+            "path_status": "no_path",
+            "negative_reason_codes": ["objective_unreachable"],
+        },
+    }
+
+    assert parse_direct_submission(json.dumps(valid), task).assertion == valid["assertion"]
+
+    valid["assertion"]["negative_reason_codes"] = ["invented_reason"]
+    with pytest.raises(V2ModelRuntimeError, match="schema mismatch"):
+        parse_direct_submission(json.dumps(valid), task)
+
+
 def test_direct_model_runtime_executes_exactly_once_through_coordinator() -> None:
     query = "MATCH p=(a)-[:MemberOf]->(b) RETURN p LIMIT 1"
 
@@ -345,6 +362,83 @@ def test_exact_set_requires_companion_count_and_bounded_page() -> None:
         is True
     )
     assert projector.events[-1].kind is EvidenceEventKind.USEFUL_POSITIVE
+
+
+def test_count_projection_accepts_one_unambiguous_scalar_alias() -> None:
+    projector = MCPTranscriptProjector(MCP_TASK, PROFILE)
+
+    projector.observe(
+        "cypher_query",
+        {
+            "info_type": "run",
+            "query": "MATCH (n:User) RETURN count(n) AS member_count",
+        },
+        json.dumps(
+            {
+                "success": True,
+                "data": {
+                    "literals": [
+                        {"key": "member_count", "value": 2},
+                    ]
+                },
+            }
+        ),
+        None,
+    )
+
+    assert projector.total_count == 2
+
+
+def test_count_projection_rejects_multiple_scalar_literals() -> None:
+    projector = MCPTranscriptProjector(MCP_TASK, PROFILE)
+
+    projector.observe(
+        "cypher_query",
+        {
+            "info_type": "run",
+            "query": "MATCH (n:User) RETURN count(n) AS a, count(n) AS b",
+        },
+        json.dumps(
+            {
+                "success": True,
+                "data": {
+                    "literals": [
+                        {"key": "a", "value": 2},
+                        {"key": "b", "value": 2},
+                    ]
+                },
+            }
+        ),
+        None,
+    )
+
+    assert projector.total_count is None
+
+
+def test_count_projection_rejects_non_count_only_query() -> None:
+    projector = MCPTranscriptProjector(MCP_TASK, PROFILE)
+
+    projector.observe(
+        "cypher_query",
+        {
+            "info_type": "run",
+            "query": "MATCH (n:User) RETURN count(n) AS ignored, 2 AS member_count",
+        },
+        json.dumps(
+            {
+                "success": True,
+                "data": {
+                    "literals": [
+                        {"key": "member_count", "value": 2},
+                    ]
+                },
+            }
+        ),
+        None,
+    )
+
+    assert projector.total_count is None
+    assert projector.events[-1].kind is EvidenceEventKind.INCONCLUSIVE_EMPTY
 
 
 def test_exact_set_aggregates_contiguous_stable_pages() -> None:
@@ -589,6 +683,59 @@ def test_schema_only_retry_runs_once_after_useful_evidence(
     assert retry_calls[0]["messages"][-1]["content"].startswith(
         "Return only one JSON object"
     )
+    assert outcome.sample.execution_class is ExecutionClass.SUCCESS
+    assert outcome.sample.reasoning_correct is True
+    assert record.mcp_finalization is not None
+    assert record.mcp_finalization["schema_retry_count"] == 1
+
+
+def test_schema_only_retry_uses_schema_and_normalization_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    retry_calls: list[dict[str, Any]] = []
+
+    async def fake_loop(**kwargs: Any):
+        kwargs["tool_result_observer"](
+            "graph_analysis",
+            {"info_type": "shortest_path"},
+            json.dumps(
+                {
+                    "info_type": "shortest_path",
+                    "data": {
+                        "nodes": {"0": {}, "1": {}},
+                        "edges": [{"source": "0", "target": "1"}],
+                    },
+                }
+            ),
+            None,
+        )
+        return _response(json.dumps({"edges": [{}]})), object(), []
+
+    async def retry_transport(**kwargs: Any) -> ModelResponse:
+        retry_calls.append(kwargs)
+        return _response(json.dumps(_answer()))
+
+    monkeypatch.setattr(
+        model_runtime,
+        "_run_openai_compat_mcp_loop",
+        fake_loop,
+    )
+    outcome, record = asyncio.run(
+        run_mcp_model_task_v2(
+            task=MCP_TASK,
+            oracle=MCP_ORACLE,
+            resolver=MCP_RESOLVER,
+            profile=PROFILE,
+            bundle=MCPServerBundle(tools=[]),
+            model="codex/gpt-test",
+            model_base_url=None,
+            tool_loop=MCPToolLoop.NATIVE_OPENAI_COMPATIBLE,
+            max_steps=4,
+            transport=retry_transport,
+        )
+    )
+
+    assert len(retry_calls) == 1
     assert outcome.sample.execution_class is ExecutionClass.SUCCESS
     assert outcome.sample.reasoning_correct is True
     assert record.mcp_finalization is not None
