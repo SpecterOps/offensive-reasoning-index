@@ -8,6 +8,7 @@ import re
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
+import httpx
 from inspect_ai.tool import ToolCallError
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError, ValidationError
@@ -435,6 +436,16 @@ def _result_cardinality(payload: Mapping[str, Any]) -> int | None:
     return None
 
 
+def _graph_search_cardinality(payload: Mapping[str, Any]) -> int | None:
+    """Count the pinned graph-analysis search result map."""
+
+    wrapper = payload.get("data")
+    results = wrapper.get("data") if isinstance(wrapper, Mapping) else None
+    if isinstance(results, (list, Mapping)):
+        return len(results)
+    return None
+
+
 def _page_window(query: str) -> tuple[int, int] | None:
     normalized = " ".join(query.split())
     order = re.search(
@@ -562,6 +573,12 @@ class MCPTranscriptProjector:
 
         result_count = _result_cardinality(payload)
         if (
+            result_count is None
+            and tool_name == "graph_analysis"
+            and operation == "search"
+        ):
+            result_count = _graph_search_cardinality(payload)
+        if (
             self.task.claim_kind in {"route", "decision"}
             and result_count is not None
             and result_count > 0
@@ -640,6 +657,14 @@ class MCPTranscriptProjector:
                 "enterprise_ca_info",
                 "root_ca_info",
             }
+
+        if result_count is None:
+            # Unknown or changed MCP response shapes are not completeness
+            # proofs. Fail closed as inconclusive evidence without violating
+            # the strict ToolObservation invariants or crashing the loop.
+            total_count = None
+            complete = False
+            negative_proof = False
 
         truncated = (
             output_bytes > self.task.binding.bounds.max_output_bytes
@@ -798,13 +823,38 @@ async def run_mcp_model_task_v2(
             if resolved_loop is MCPToolLoop.NATIVE_OPENAI_COMPATIBLE
             else V2RuntimeSurface.MCP_NATIVE_OLLAMA
         )
-    except Exception as exc:
+    except httpx.HTTPError as exc:
         projector.events.append(
             classify_evidence_event(
                 task,
                 profile,
                 kind=EvidenceEventKind.INFRASTRUCTURE_FAILURE,
-                reason=f"MCP runtime failure: {type(exc).__name__}",
+                reason=f"MCP transport failure: {type(exc).__name__}",
+            )
+        )
+        response = ModelResponse(
+            raw_text="",
+            cypher=None,
+            parse_stage="none",
+            tokens_input=0,
+            tokens_output=0,
+            elapsed_seconds=0.0,
+            model=model,
+            error=str(exc),
+        )
+        messages = []
+        surface = (
+            V2RuntimeSurface.MCP_NATIVE_OPENAI_COMPATIBLE
+            if resolved_loop is MCPToolLoop.NATIVE_OPENAI_COMPATIBLE
+            else V2RuntimeSurface.MCP_NATIVE_OLLAMA
+        )
+    except Exception as exc:
+        projector.events.append(
+            classify_evidence_event(
+                task,
+                profile,
+                kind=EvidenceEventKind.HARNESS_FAILURE,
+                reason=f"MCP harness failure: {type(exc).__name__}",
             )
         )
         response = ModelResponse(

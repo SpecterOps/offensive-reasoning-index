@@ -1139,6 +1139,21 @@ def _openai_compat_provider_metrics(
 def _tool_result_to_text(result: Any) -> str:
     if isinstance(result, str):
         return result
+    content_items = result if isinstance(result, (list, tuple)) else (result,)
+    content_text: list[str] = []
+    for item in content_items:
+        if isinstance(item, dict):
+            item_type = item.get("type")
+            text = item.get("text")
+        else:
+            item_type = getattr(item, "type", None)
+            text = getattr(item, "text", None)
+        if item_type != "text" or not isinstance(text, str):
+            content_text = []
+            break
+        content_text.append(text)
+    if content_text:
+        return "\n".join(content_text)
     try:
         return json.dumps(result)
     except Exception:

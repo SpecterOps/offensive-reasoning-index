@@ -760,12 +760,29 @@ uv run --env-file ../Bloodhound-MCP/.env \
 
 The executable path derives its schedule from the candidate-certified catalog,
 keeps direct and MCP tracks separate, routes direct and MCP-issued Cypher
-through policy v3, checkpoints each completed task atomically, retries only
+through policy v3, checkpoints each completed task atomically, retries genuine
 infrastructure failures, and withholds public reports until the post-track graph
-fingerprint still matches. Private run state retains raw provider and execution
-receipts; `public-report-v2.json` contains only redacted task outcomes. One
-manifest/policy-bound deny cache and circuit are shared by every model,
-repetition, and track in the campaign.
+fingerprint still matches. On resume, infrastructure and unexecuted results are
+reopened while model-attributable and successful results remain terminal;
+attempt numbers continue monotonically. Private run state retains raw provider
+and execution receipts; `public-report-v2.json` contains only redacted task
+outcomes. One manifest/policy-bound deny cache and circuit are shared by every
+model, repetition, and track in the campaign.
+
+Native MCP callables may return structured text-content blocks rather than a
+plain JSON string. V2 unwraps those blocks before projecting tool results into
+`ToolObservation`. A recognized response must provide a mechanical
+cardinality/count before it can prove completeness; an unknown response shape
+is inconclusive instead of crashing the tool loop. HTTP/transport/timeouts are
+`INFRA_ERROR`, while internal projector, schema, or runner exceptions are
+`HARNESS_ERROR` and are never retried as infrastructure.
+
+The MCP finalization fingerprint covers the state machine, model-runtime
+projector, MCP adapter, and native provider loops. Changing any of those files
+invalidates prior MCP certification. Re-run `compile-v2`,
+`certify-v2-live`, and no-model `run-v2` readiness, then use a fresh
+`output_dir`; never resume a campaign created by an older runner or
+finalization fingerprint.
 
 During execution, the terminal reports graph gates, model/run transitions, each
 public task ID and claim/policy type, retry decisions, and the checkpointed

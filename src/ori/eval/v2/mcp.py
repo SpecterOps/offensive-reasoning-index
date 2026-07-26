@@ -33,11 +33,20 @@ MCP_CAPABILITY_PROFILE_ID = "ori-mcp-009c88f-bhce-9.1-cypher-v1"
 MCP_BLOODHOUND_CE_VERSION = "9.1.0"
 MCP_SERVER_REVISION = "009c88f41fae302becad4b00777a3749a0f6f0fa"
 MCP_CAPABILITY_MAX_OUTPUT_BYTES = 65_536
-MCP_EVIDENCE_STATE_MACHINE_VERSION = "ori-mcp-evidence-v1"
+MCP_EVIDENCE_STATE_MACHINE_VERSION = "ori-mcp-evidence-v2"
+_MCP_FINALIZATION_SOURCES = {
+    "mcp_state_machine": Path(__file__),
+    "mcp_adapter": Path(__file__).with_name("mcp_adapter.py"),
+    "model_runtime": Path(__file__).with_name("model_runtime.py"),
+    "provider_loops": Path(__file__).parent.parent / "mcp_runtime.py",
+}
 MCP_FINALIZATION_POLICY_FINGERPRINT = canonical_sha256(
     {
         "component": MCP_EVIDENCE_STATE_MACHINE_VERSION,
-        "source_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        "source_sha256": {
+            name: hashlib.sha256(path.read_bytes()).hexdigest()
+            for name, path in sorted(_MCP_FINALIZATION_SOURCES.items())
+        },
     }
 )
 
@@ -78,6 +87,7 @@ class EvidenceEventKind(StrEnum):
     INVALID_ARGUMENTS = "invalid_arguments"
     POLICY_REJECTION = "policy_rejection"
     INFRASTRUCTURE_FAILURE = "infrastructure_failure"
+    HARNESS_FAILURE = "harness_failure"
     IRRELEVANT = "irrelevant"
     RESOURCE_READ = "resource_read"
 
@@ -113,7 +123,14 @@ class EvidenceEvent(StrictModel):
                 raise ValueError("resource_read events cannot declare a tool operation")
         elif self.resource_uri is not None:
             raise ValueError("only resource_read events may declare a resource_uri")
-        elif self.kind is not EvidenceEventKind.INFRASTRUCTURE_FAILURE and self.tool_name is None:
+        elif (
+            self.kind
+            not in {
+                EvidenceEventKind.INFRASTRUCTURE_FAILURE,
+                EvidenceEventKind.HARNESS_FAILURE,
+            }
+            and self.tool_name is None
+        ):
             raise ValueError(f"{self.kind.value} events require a tool operation")
         return self
 
@@ -205,6 +222,7 @@ class FinalizationPhase(StrEnum):
     FINALIZED = "finalized"
     OUTPUT_INVALID = "output_invalid"
     INFRASTRUCTURE_FAILURE = "infrastructure_failure"
+    HARNESS_FAILURE = "harness_failure"
 
 
 TERMINAL_FINALIZATION_PHASES = frozenset(
@@ -212,6 +230,7 @@ TERMINAL_FINALIZATION_PHASES = frozenset(
         FinalizationPhase.FINALIZED,
         FinalizationPhase.OUTPUT_INVALID,
         FinalizationPhase.INFRASTRUCTURE_FAILURE,
+        FinalizationPhase.HARNESS_FAILURE,
     }
 )
 
@@ -219,7 +238,7 @@ TERMINAL_FINALIZATION_PHASES = frozenset(
 class FinalizationState(StrictModel):
     """Immutable evidence/finalization state shared by every certified loop."""
 
-    state_machine_version: Literal["ori-mcp-evidence-v1"] = MCP_EVIDENCE_STATE_MACHINE_VERSION
+    state_machine_version: Literal["ori-mcp-evidence-v2"] = MCP_EVIDENCE_STATE_MACHINE_VERSION
     task_fingerprint: Fingerprint
     capability_profile_fingerprint: Fingerprint
     tool_loop: MCPToolLoop
@@ -278,6 +297,7 @@ class LoopConformanceResult(StrictModel):
     first_malformed_phase: FinalizationPhase
     second_malformed_phase: FinalizationPhase
     infrastructure_phase: FinalizationPhase
+    harness_phase: FinalizationPhase
     schema_retry_count: int = Field(strict=True, ge=0, le=1)
 
 
@@ -750,7 +770,10 @@ def classify_evidence_event(
     if kind is EvidenceEventKind.RESOURCE_READ:
         tool_name = None
         operation = None
-    elif kind is not EvidenceEventKind.INFRASTRUCTURE_FAILURE:
+    elif kind not in {
+        EvidenceEventKind.INFRASTRUCTURE_FAILURE,
+        EvidenceEventKind.HARNESS_FAILURE,
+    }:
         if not tool_name or not operation:
             raise ValueError(f"{kind.value} classification requires a tool operation")
         capability = capability_for_operation(
@@ -981,7 +1004,10 @@ def _reduce_evidence_event(
     if state.is_terminal:
         return state
     if state.phase is FinalizationPhase.RETRY_SCHEMA_ONLY:
-        if event.kind is not EvidenceEventKind.INFRASTRUCTURE_FAILURE:
+        if event.kind not in {
+            EvidenceEventKind.INFRASTRUCTURE_FAILURE,
+            EvidenceEventKind.HARNESS_FAILURE,
+        }:
             return state.model_copy(
                 update={
                     "phase": FinalizationPhase.OUTPUT_INVALID,
@@ -997,6 +1023,15 @@ def _reduce_evidence_event(
                 "finalization_unlocked": unlocked,
                 "phase": FinalizationPhase.INFRASTRUCTURE_FAILURE,
                 "terminal_reason": "INFRASTRUCTURE_FAILURE",
+            }
+        )
+    if event.kind is EvidenceEventKind.HARNESS_FAILURE:
+        return state.model_copy(
+            update={
+                "events": events,
+                "finalization_unlocked": unlocked,
+                "phase": FinalizationPhase.HARNESS_FAILURE,
+                "terminal_reason": "HARNESS_FAILURE",
             }
         )
     return state.model_copy(
@@ -1133,6 +1168,15 @@ def build_mcp_loop_conformance_matrix(
                 reason="conformance-infrastructure-failure",
             ),
         )
+        harness_state = reduce_finalization(
+            initial_finalization_state(task, profile, tool_loop=tool_loop),
+            EvidenceEvent(
+                kind=EvidenceEventKind.HARNESS_FAILURE,
+                task_fingerprint=task.task_fingerprint,
+                capability_profile_fingerprint=profile.profile_fingerprint,
+                reason="conformance-harness-failure",
+            ),
+        )
         results.append(
             LoopConformanceResult(
                 tool_loop=tool_loop,
@@ -1141,6 +1185,7 @@ def build_mcp_loop_conformance_matrix(
                 first_malformed_phase=retry_state.phase,
                 second_malformed_phase=invalid_state.phase,
                 infrastructure_phase=infra_state.phase,
+                harness_phase=harness_state.phase,
                 schema_retry_count=invalid_state.schema_retry_count,
             )
         )

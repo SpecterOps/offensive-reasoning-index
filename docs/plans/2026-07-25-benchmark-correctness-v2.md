@@ -245,6 +245,40 @@ not a v2 implementation or certification gate. As of 2026-07-26,
 `origin/master` does not contain `0a560294`; run them after the containment PR
 is merged and before opening the v2 PR.
 
+## Post-implementation MCP runtime incident
+
+An operator-authorized model campaign after the original no-paid implementation
+gate exposed a V2 MCP adapter regression. Successful BloodHound MCP responses
+arrived as structured text-content blocks, were stringified as Python
+representations, failed JSON projection, and were then mislabeled as
+infrastructure failures.
+
+- [x] Preserve the failed campaign under its original output directory.
+- [x] Reproduce the real in-process `domain_info`, `graph_analysis`, and
+  `cypher_query` response boundaries against the controlled BloodHound target.
+- [x] Unwrap MCP text-content blocks before model delivery and V2 projection.
+- [x] Extract explicit cardinality for the pinned keyed graph-search response.
+- [x] Downgrade unknown response shapes to inconclusive evidence instead of
+  constructing an incoherent `ToolObservation`.
+- [x] Add a distinct MCP harness-failure event and terminal phase.
+- [x] Map unknown internal runtime exceptions to `HARNESS_ERROR`; retain
+  timeout and HTTP failures as `INFRA_ERROR`.
+- [x] Resume compatible checkpoints by reopening infrastructure and unexecuted
+  samples while preserving terminal model/success results.
+- [x] Continue provider attempt numbers monotonically across resume.
+- [x] Bind MCP certification to the state machine, projector, adapter, and
+  native provider-loop source fingerprints.
+- [x] Bind run provenance to the complete runtime implementation fingerprint
+  and bump the campaign runner to `ori-v2-model-campaign-v2`.
+- [x] Add regressions for real content blocks, keyed graph search, unknown
+  shapes, harness classification, graph-progress receipts, and resume
+  reconciliation.
+- [x] Recompile and live-certify the corrected simple seed-1234 catalog in a
+  fresh artifact namespace without model calls.
+- [x] Pass no-model readiness for both models and both tracks against the
+  unchanged live graph.
+- [x] Complete independent code review and final repository validation.
+
 ## Definition of done
 
 - [x] All eight CV1 regression cases pass through v2.
@@ -263,5 +297,6 @@ is merged and before opening the v2 PR.
 - [x] Live and offline verdicts agree.
 - [x] No v2 task depends on hidden template-specific grader behavior.
 - [x] Every candidate is safe under its direct or MCP profile.
-- [x] No paid model run occurred.
+- [x] The original implementation goal launched no paid model run; the later
+  operator-authorized validation campaign is recorded in the incident section.
 - [x] The branch is ready to rebase cleanly after the containment PR merges.

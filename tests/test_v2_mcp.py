@@ -519,6 +519,7 @@ def test_common_loop_conformance_matrix_has_identical_semantics() -> None:
             row.first_malformed_phase,
             row.second_malformed_phase,
             row.infrastructure_phase,
+            row.harness_phase,
             row.schema_retry_count,
         )
         for row in rows
@@ -529,6 +530,7 @@ def test_common_loop_conformance_matrix_has_identical_semantics() -> None:
             FinalizationPhase.RETRY_SCHEMA_ONLY,
             FinalizationPhase.OUTPUT_INVALID,
             FinalizationPhase.INFRASTRUCTURE_FAILURE,
+            FinalizationPhase.HARNESS_FAILURE,
             1,
         )
     }

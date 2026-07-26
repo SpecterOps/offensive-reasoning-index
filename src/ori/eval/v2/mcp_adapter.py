@@ -138,6 +138,16 @@ def score_mcp_transcript_v2(
                 detail=state.terminal_reason,
             ),
         )
+    if state.phase is FinalizationPhase.HARNESS_FAILURE:
+        return MCPV2Outcome(
+            finalization=state,
+            sample=SampleResult(
+                **base,
+                execution_class=ExecutionClass.HARNESS_FAILURE,
+                outcome=SampleOutcomeCode.HARNESS_ERROR,
+                detail=state.terminal_reason,
+            ),
+        )
     if state.phase is not FinalizationPhase.FINALIZED or evidence is None:
         return MCPV2Outcome(
             finalization=state,

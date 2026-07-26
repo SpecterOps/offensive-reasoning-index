@@ -60,16 +60,32 @@ from .schema import (
     CapabilityProfile,
     CatalogRelease,
     CertificationState,
+    ExecutionClass,
     StrictModel,
     TaskCertification,
     Track,
 )
 from .scoring import SampleResult, summarize_results
 
-RUNNER_VERSION = "ori-v2-model-campaign-v1"
+RUNNER_VERSION = "ori-v2-model-campaign-v2"
 RUN_STATE_SCHEMA_VERSION = "ori-v2-private-run-state-v1"
 MODEL_REPORT_SCHEMA_VERSION = "ori-v2-model-report-v1"
 READINESS_SCHEMA_VERSION = "ori-v2-run-readiness-v1"
+_RUNNER_IMPLEMENTATION_SOURCES = {
+    "campaign_runner": Path(__file__),
+    "direct_adapter": Path(__file__).with_name("direct_adapter.py"),
+    "mcp_adapter": Path(__file__).with_name("mcp_adapter.py"),
+    "mcp_state_machine": Path(__file__).with_name("mcp.py"),
+    "model_runtime": Path(__file__).with_name("model_runtime.py"),
+    "provider_loops": Path(__file__).parent.parent / "mcp_runtime.py",
+    "runtime": Path(__file__).with_name("runtime.py"),
+}
+RUNNER_IMPLEMENTATION_FINGERPRINT = canonical_sha256(
+    {
+        name: hashlib.sha256(path.read_bytes()).hexdigest()
+        for name, path in sorted(_RUNNER_IMPLEMENTATION_SOURCES.items())
+    }
+)
 ProgressReporter = Callable[[str], None]
 
 
@@ -87,6 +103,18 @@ def _emit_progress(progress: ProgressReporter | None, message: str) -> None:
     except Exception:
         # Progress output must never change scoring or execution.
         return
+
+
+def _graph_verification_progress(
+    *,
+    track: Track,
+    stage: Literal["pre", "post"],
+    receipt: LiveGraphVerification,
+) -> str:
+    return (
+        f"[{track.value}] {stage}-track graph verified "
+        f"({receipt.observed_graph_fingerprint[:12]})"
+    )
 
 
 def _display_outcome(sample: SampleResult) -> str:
@@ -151,8 +179,10 @@ def _infrastructure_attempt_progress(
     sample: SampleResult,
     attempt_number: int,
     max_infra_retries: int,
+    attempt_index: int | None = None,
 ) -> str:
-    if attempt_number <= max_infra_retries:
+    retry_index = attempt_number if attempt_index is None else attempt_index
+    if retry_index <= max_infra_retries:
         state = "infrastructure healthy, retrying"
         arrow = "↻"
     else:
@@ -165,7 +195,7 @@ def _infrastructure_attempt_progress(
 
 
 class ModelRunProvenanceV2(StrictModel):
-    schema_version: Literal["ori-v2-model-campaign-v1"] = RUNNER_VERSION
+    schema_version: Literal["ori-v2-model-campaign-v2"] = RUNNER_VERSION
     protocol_version: Literal["ori-eval-protocol-v2"] = PROTOCOL_VERSION
     base: RunProvenanceV2
     run_identity: RunIdentity
@@ -174,6 +204,7 @@ class ModelRunProvenanceV2(StrictModel):
     candidate_release_fingerprint: str
     live_certification_fingerprint: str
     containment_config_fingerprint: str
+    runtime_implementation_fingerprint: str
     runtime_config_fingerprint: str
     provenance_fingerprint: str
 
@@ -289,7 +320,7 @@ class ModelReadinessV2(StrictModel):
 class CampaignReadinessV2(StrictModel):
     schema_version: Literal["ori-v2-run-readiness-v1"] = READINESS_SCHEMA_VERSION
     protocol_version: Literal["ori-eval-protocol-v2"] = PROTOCOL_VERSION
-    runner_version: Literal["ori-v2-model-campaign-v1"] = RUNNER_VERSION
+    runner_version: Literal["ori-v2-model-campaign-v2"] = RUNNER_VERSION
     source_config_fingerprint: str
     source_manifest_sha256: str
     archive_sha256: str
@@ -764,6 +795,9 @@ def _provenance(
         "containment_config_fingerprint": canonical_sha256(
             direct_config.to_jsonable()
         ),
+        "runtime_implementation_fingerprint": (
+            RUNNER_IMPLEMENTATION_FINGERPRINT
+        ),
         "runtime_config_fingerprint": canonical_sha256(
             {
                 "runner_version": RUNNER_VERSION,
@@ -937,7 +971,15 @@ async def _run_model(
     )
     results = list(state.checkpoint.results if state is not None else ())
     attempts = list(state.attempts if state is not None else ())
-    completed = {result.task_id for result in results}
+    retryable_execution_classes = {
+        ExecutionClass.INFRA_FAILURE,
+        ExecutionClass.UNEXECUTED,
+    }
+    completed = {
+        result.task_id
+        for result in results
+        if result.execution_class not in retryable_execution_classes
+    }
     _emit_progress(
         progress,
         (
@@ -966,6 +1008,17 @@ async def _run_model(
             continue
         task = task_by_id[task_id]
         oracle = registry.for_task(task_id)
+        previous_attempt_number = max(
+            (
+                attempt.attempt
+                for attempt in attempts
+                if attempt.task_id == task_id
+            ),
+            default=0,
+        )
+        results = [
+            result for result in results if result.task_id != task_id
+        ]
         task_started = time.monotonic()
         _emit_progress(
             progress,
@@ -976,10 +1029,11 @@ async def _run_model(
         )
         last_sample: SampleResult | None = None
         last_provider: ProviderRunRecord | None = None
-        for attempt_number in range(
+        for attempt_index in range(
             1,
             resolved.config.defaults.max_infra_retries + 2,
         ):
+            attempt_number = previous_attempt_number + attempt_index
             model_base_url = (
                 model.model_base_url
                 if model.model_base_url is not None
@@ -1032,6 +1086,7 @@ async def _run_model(
                 _infrastructure_attempt_progress(
                     sample=sample,
                     attempt_number=attempt_number,
+                    attempt_index=attempt_index,
                     max_infra_retries=(
                         resolved.config.defaults.max_infra_retries
                     ),
@@ -1149,9 +1204,10 @@ async def run_v2_campaign(
             )
             _emit_progress(
                 progress,
-                (
-                    f"[{track.value}] pre-track graph verified "
-                    f"({before.graph_fingerprint[:12]})"
+                _graph_verification_progress(
+                    track=track,
+                    stage="pre",
+                    receipt=before,
                 ),
             )
             if not preflight_only:
@@ -1208,9 +1264,10 @@ async def run_v2_campaign(
             )
             _emit_progress(
                 progress,
-                (
-                    f"[{track.value}] post-track graph verified "
-                    f"({after.graph_fingerprint[:12]})"
+                _graph_verification_progress(
+                    track=track,
+                    stage="post",
+                    receipt=after,
                 ),
             )
 

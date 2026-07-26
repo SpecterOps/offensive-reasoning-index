@@ -93,8 +93,15 @@ A binding is tool-only, explicitly Cypher-enabled, or blocked.
 Provider loops submit mechanical `ToolObservation` facts. The harness classifies
 them against the public claim as useful positive evidence, valid negative proof,
 conclusive or inconclusive empty, truncated, invalid arguments, policy
-rejection, infrastructure failure, irrelevant activity, or resource read.
-Models and provider adapters cannot self-declare evidence useful.
+rejection, infrastructure failure, harness failure, irrelevant activity, or
+resource read. Models and provider adapters cannot self-declare evidence useful.
+
+Native MCP tool executors return structured text-content blocks. The shared
+runtime unwraps those blocks to their JSON text before the V2 projector reads
+cardinality, total count, path nodes, or ordered edges. A known complete
+operation without a mechanically extractable result count is downgraded to
+inconclusive evidence. It must not violate the strict `ToolObservation` schema
+or terminate the provider loop.
 
 Only useful positive, valid negative, or conclusive empty evidence unlocks
 finalization. Resource reads, irrelevant calls, incomplete empties, truncation,
@@ -156,9 +163,21 @@ as direct mode.
 Run state is private and atomic. It binds the model/run identity, source
 manifest and archive, task/oracle/catalog/live-certification fingerprints,
 graph, capability profile, containment configuration, runtime configuration,
-and every provider attempt. Resume rejects incompatible provenance. Public
-reports are emitted only after all scheduled tasks are reconciled exactly once
-and the post-track graph gate passes.
+runtime implementation, and every provider attempt. Resume rejects incompatible
+provenance. Within compatible provenance, infrastructure and unexecuted samples
+are rescheduled, their prior terminal row is replaced, and provider attempt
+numbers remain contiguous. Successful and model-attributable samples are not
+replayed. Public reports are emitted only after all scheduled tasks are
+reconciled exactly once and the post-track graph gate passes.
+
+Only external availability failures—HTTP, transport, authentication, server,
+rate-limit, and timeout conditions—are retryable infrastructure. An internal
+projector, schema, adapter, or runner exception is `HARNESS_ERROR`; it receives
+no reasoning verdict and is not retried as infrastructure. The MCP finalization
+fingerprint hashes the state machine, projector, MCP adapter, and provider-loop
+implementations, while model-run provenance binds the complete runtime
+implementation fingerprint. Runtime changes therefore require new compiled and
+live-certified artifacts plus a fresh campaign output directory.
 
 The direct-query coordinator, circuit state, and deny cache are campaign-scoped,
 not model/run-scoped. The cache lives at the V2 output root and is bound to the
@@ -291,7 +310,10 @@ Pass `--valid-nodes valid_nodes.json` when you have a graph inventory dump; the 
 - `QUERY_TOO_EXPENSIVE`: the model query was rejected by the versioned direct
   safety policy or BloodHound explicitly terminated that admitted query at the
   server timeout.
-- `INFRA_ERROR`: BloodHound/runtime availability issue.
+- `INFRA_ERROR`: external BloodHound, provider, HTTP, transport, authentication,
+  rate-limit, server, or timeout availability issue.
+- `HARNESS_ERROR`: internal ORI projector, schema, adapter, or runner failure;
+  never a model reasoning verdict and never an infrastructure retry.
 - `MCP_TURN_TIMEOUT`: native MCP model turn produced no token/tool/log progress before the watchdog expired.
 - `NO_PROGRESS_TIMEOUT`: generic activity watchdog timeout.
 - `SAMPLE_TIMEOUT`: sample-level timeout placeholder/future subtype.

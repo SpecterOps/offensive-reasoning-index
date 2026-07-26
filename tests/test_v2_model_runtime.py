@@ -14,10 +14,15 @@ from ori.eval.bhce import CypherResult
 from ori.eval.mcp_runtime import (
     MCPServerBundle,
     _ollama_tool_spec,
+    _tool_result_to_text,
     _wrap_read_only_tool,
 )
 from ori.eval.v2 import campaign_runner, model_runtime
-from ori.eval.v2.mcp import EvidenceEventKind, MCPToolLoop
+from ori.eval.v2.mcp import (
+    EvidenceEventKind,
+    FinalizationPhase,
+    MCPToolLoop,
+)
 from ori.eval.v2.model_runtime import (
     MCPTranscriptProjector,
     V2ModelRuntimeError,
@@ -193,6 +198,69 @@ def test_shortest_path_wrapper_is_positive_evidence_not_empty() -> None:
 
     assert ready is True
     assert projector.events[-1].kind is EvidenceEventKind.USEFUL_POSITIVE
+
+
+def test_mcp_content_text_wrapper_is_unwrapped_before_projection() -> None:
+    payload = {
+        "info_type": "list",
+        "data": [
+            {
+                "type": "active-directory",
+                "name": "TEST.LOCAL",
+                "id": "S-1-5-21-1",
+            }
+        ],
+    }
+    result_text = _tool_result_to_text(
+        [
+            SimpleNamespace(
+                type="text",
+                text=json.dumps(payload),
+            )
+        ]
+    )
+
+    assert json.loads(result_text) == payload
+    projector = MCPTranscriptProjector(MCP_TASK, PROFILE)
+    projector.observe(
+        "domain_info",
+        {"info_type": "list"},
+        result_text,
+        None,
+    )
+    assert projector.events[-1].kind not in {
+        EvidenceEventKind.INFRASTRUCTURE_FAILURE,
+        EvidenceEventKind.HARNESS_FAILURE,
+    }
+
+
+def test_graph_search_keyed_result_map_has_explicit_cardinality() -> None:
+    projector = MCPTranscriptProjector(MCP_TASK, PROFILE)
+    projector.observe(
+        "graph_analysis",
+        {"info_type": "search", "query": "DOMAIN ADMINS"},
+        json.dumps(
+            {
+                "info_type": "search",
+                "data": {
+                    "data": {
+                        "17242": {
+                            "data": {
+                                "name": "DOMAIN ADMINS@TEST.LOCAL",
+                                "objectid": "S-1-5-21-1-512",
+                            }
+                        }
+                    }
+                },
+            }
+        ),
+        None,
+    )
+
+    assert projector.events[-1].kind not in {
+        EvidenceEventKind.INFRASTRUCTURE_FAILURE,
+        EvidenceEventKind.HARNESS_FAILURE,
+    }
 
 
 def test_exact_set_requires_companion_count_and_bounded_page() -> None:
@@ -561,6 +629,55 @@ def test_schema_retry_provider_failure_is_infrastructure(
     assert outcome.sample.outcome is SampleOutcomeCode.INFRA_ERROR
 
 
+def test_internal_runtime_exception_is_harness_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def invalid_projector_loop(**kwargs: Any):
+        raise ValueError("internal runtime invariant failed")
+
+    monkeypatch.setattr(
+        model_runtime,
+        "_run_openai_compat_mcp_loop",
+        invalid_projector_loop,
+    )
+    outcome, record = asyncio.run(
+        run_mcp_model_task_v2(
+            task=MCP_TASK,
+            oracle=MCP_ORACLE,
+            resolver=MCP_RESOLVER,
+            profile=PROFILE,
+            bundle=MCPServerBundle(tools=[]),
+            model="codex/gpt-test",
+            model_base_url=None,
+            tool_loop=MCPToolLoop.NATIVE_OPENAI_COMPATIBLE,
+            max_steps=4,
+        )
+    )
+
+    assert outcome.sample.execution_class is ExecutionClass.HARNESS_FAILURE
+    assert outcome.sample.outcome is SampleOutcomeCode.HARNESS_ERROR
+    assert outcome.sample.reasoning_correct is None
+    assert outcome.finalization.phase is FinalizationPhase.HARNESS_FAILURE
+    assert record.provider_error is not None
+    assert "internal runtime invariant failed" in record.provider_error
+
+
+def test_unknown_complete_response_shape_fails_closed_without_crashing() -> None:
+    projector = MCPTranscriptProjector(MCP_TASK, PROFILE)
+    ready = projector.observe(
+        "domain_info",
+        {"info_type": "list"},
+        "{}",
+        None,
+    )
+
+    assert ready is False
+    assert projector.events[-1].kind not in {
+        EvidenceEventKind.INFRASTRUCTURE_FAILURE,
+        EvidenceEventKind.HARNESS_FAILURE,
+    }
+
+
 def test_transcript_bound_overrun_invalidates_prior_useful_evidence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -642,6 +759,16 @@ def test_v2_campaign_progress_is_model_blind_and_non_fatal() -> None:
         raise RuntimeError("closed terminal")
 
     campaign_runner._emit_progress(broken_progress, "must not affect scoring")
+
+
+    graph_line = campaign_runner._graph_verification_progress(
+        track=Track.MCP,
+        stage="pre",
+        receipt=SimpleNamespace(
+            observed_graph_fingerprint="a" * 64,
+        ),
+    )
+    assert graph_line == "[mcp] pre-track graph verified (aaaaaaaaaaaa)"
 
     sample = SampleResult(
         task_id=DIRECT_TASK.task_id,
@@ -853,3 +980,46 @@ def test_v2_run_model_emits_task_retry_completion_and_resume_progress(
     assert resumed_results == (terminal,)
     assert any("1 resumed" in message for message in resumed)
     assert not any("[1/1]" in message for message in resumed)
+
+    samples = iter((terminal,))
+    state_holder["value"] = SimpleNamespace(
+        checkpoint=SimpleNamespace(results=(infrastructure,)),
+        attempts=(
+            SimpleNamespace(task_id=DIRECT_TASK.task_id, attempt=1),
+            SimpleNamespace(task_id=DIRECT_TASK.task_id, attempt=2),
+        ),
+    )
+    resumed_infrastructure: list[str] = []
+    resumed_attempt_numbers: list[int] = []
+
+    def resumed_attempt(task_id, number, sample, provider):
+        resumed_attempt_numbers.append(number)
+        return SimpleNamespace(
+            task_id=task_id,
+            attempt=number,
+            sample=sample,
+            provider=provider,
+        )
+
+    monkeypatch.setattr(campaign_runner, "_attempt", resumed_attempt)
+    _provenance, recovered_results = asyncio.run(
+        campaign_runner._run_model(
+            resolved=resolved,
+            prepared=prepared,
+            model=model,
+            run_index=1,
+            bhce=HealthyBHCE(),
+            coordinator=coordinator,
+            loop=None,
+            runs_total=1,
+            progress=resumed_infrastructure.append,
+        )
+    )
+
+    assert recovered_results == (terminal,)
+    assert resumed_attempt_numbers == [3]
+    assert any("0 resumed" in message for message in resumed_infrastructure)
+    assert any(
+        "[1/1]" in message and DIRECT_TASK.task_id in message
+        for message in resumed_infrastructure
+    )
