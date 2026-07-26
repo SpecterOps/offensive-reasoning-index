@@ -1025,6 +1025,122 @@ def generate(
         click.echo(f"  [{path.tier}] {path.template_id}: {path.description[:80]}...")
 
 
+@main.command(name="compile-v2")
+@click.option(
+    "--manifest",
+    "manifest_path",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False),
+    help="Source ori-generated-manifest-v2 JSON.",
+)
+@click.option(
+    "--archive",
+    "archive_path",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False),
+    help="Exact generated SharpHound ZIP paired with the source manifest.",
+)
+@click.option(
+    "--product",
+    type=click.Choice(["simple", "complex"]),
+    required=True,
+)
+@click.option(
+    "--track",
+    type=click.Choice(["direct", "mcp"]),
+    required=True,
+)
+@click.option(
+    "--output-dir",
+    required=True,
+    type=click.Path(file_okay=False),
+    help="Directory for separated public/private v2 artifacts.",
+)
+def compile_v2_command(
+    manifest_path: str,
+    archive_path: str,
+    product: str,
+    track: str,
+    output_dir: str,
+) -> None:
+    """Compile and offline-certify one explicit v2 product track."""
+    from .eval.v2.cli_support import compile_v2_files
+    from .eval.v2.schema import Track
+
+    try:
+        paths = compile_v2_files(
+            source_manifest_path=Path(manifest_path),
+            archive_path=Path(archive_path),
+            product=product,
+            track=Track(track),
+            output_dir=Path(output_dir),
+        )
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    click.echo("V2 COMPILE: PASS")
+    for label, path in paths.items():
+        visibility = "private" if "private" in path.name else "public"
+        click.echo(f"  {label} ({visibility}): {path}")
+
+
+@main.command(name="certify-v2-live")
+@click.option(
+    "--manifest",
+    "manifest_path",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False),
+)
+@click.option(
+    "--archive",
+    "archive_path",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False),
+)
+@click.option(
+    "--product",
+    type=click.Choice(["simple", "complex"]),
+    required=True,
+)
+@click.option(
+    "--output-dir",
+    required=True,
+    type=click.Path(file_okay=False),
+)
+@click.option("--bhce-url", default=None, help="Override BH CE base URL.")
+@click.option("--page-size", type=click.IntRange(min=1, max=2000), default=1000)
+def certify_v2_live_command(
+    manifest_path: str,
+    archive_path: str,
+    product: str,
+    output_dir: str,
+    bhce_url: str | None,
+    page_size: int,
+) -> None:
+    """Certify both v2 tracks against a controlled BloodHound graph."""
+    import asyncio
+
+    from .eval.v2.cli_support import certify_v2_live_files
+
+    try:
+        paths = asyncio.run(
+            certify_v2_live_files(
+                source_manifest_path=Path(manifest_path),
+                archive_path=Path(archive_path),
+                product=product,
+                output_dir=Path(output_dir),
+                bhce_url=bhce_url,
+                page_size=page_size,
+            )
+        )
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    click.echo("V2 LIVE CERTIFICATION: PASS")
+    for label, path in paths.items():
+        click.echo(f"  {label}: {path}")
+
+
 @main.command(name="preflight-tasks")
 @click.option(
     "--manifest",
@@ -1094,7 +1210,28 @@ def preflight_tasks_command(
 @click.option(
     "--output", "output_path", required=True, type=click.Path(), help="Projection JSON output path"
 )
-def score_answers(manifest_path: str, answers_path: str, track: str, output_path: str) -> None:
+@click.option(
+    "--protocol",
+    type=click.Choice(["v1", "v2"]),
+    default="v1",
+    show_default=True,
+    help="Scoring protocol. V2 requires a separate --oracles artifact.",
+)
+@click.option(
+    "--oracles",
+    "oracle_path",
+    type=click.Path(exists=True, dir_okay=False),
+    default=None,
+    help="Sealed scorer-only oracle artifact required by protocol v2.",
+)
+def score_answers(
+    manifest_path: str,
+    answers_path: str,
+    track: str,
+    output_path: str,
+    protocol: str,
+    oracle_path: str | None,
+) -> None:
     """Grade a structured answers file without launching a model campaign."""
     from .eval.answer_scoring import (
         score_official_answers_projection,
@@ -1102,7 +1239,37 @@ def score_answers(manifest_path: str, answers_path: str, track: str, output_path
     )
 
     try:
+        if protocol == "v2":
+            if oracle_path is None:
+                raise ValueError("protocol v2 requires --oracles")
+            from .eval.v2.cli_support import score_v2_files
+            from .eval.v2.schema import Track
+
+            expected_track = "direct" if track == "cypher" else track
+            scoring = score_v2_files(
+                public_path=Path(manifest_path),
+                oracle_path=Path(oracle_path),
+                answers_path=Path(answers_path),
+                output_path=Path(output_path),
+                expected_track=Track(expected_track),
+            )
+            summary = scoring.summary
+            click.echo(
+                f"Scored {summary.completed}/{summary.scheduled} v2 samples; "
+                f"reasoning_accuracy={summary.reasoning_accuracy or 0.0:.3f}; "
+                f"effective_accuracy={summary.effective_accuracy or 0.0:.3f}; "
+                f"campaign_valid={str(summary.campaign_valid).lower()}"
+            )
+            click.echo(f"Projection written to {output_path}")
+            return
         manifest = json.loads(Path(manifest_path).read_text())
+        if (
+            manifest.get("schema_version") == "ori-generated-manifest-v3"
+            or manifest.get("protocol_version") == "ori-eval-protocol-v2"
+        ):
+            raise ValueError(
+                "v2 artifacts require explicit --protocol v2 and --oracles"
+            )
         if manifest.get("schema_version") == "phase4b_v2.0" and "tasks_official" in manifest:
             projection = score_official_answers_projection(
                 manifest_path=Path(manifest_path),

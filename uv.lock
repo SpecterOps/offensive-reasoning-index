@@ -1566,6 +1566,7 @@ dependencies = [
     { name = "mcp" },
     { name = "openai" },
     { name = "psutil" },
+    { name = "pydantic" },
     { name = "python-dotenv" },
     { name = "pyyaml" },
 ]
@@ -1587,6 +1588,7 @@ requires-dist = [
     { name = "mcp", specifier = ">=1.28.1" },
     { name = "openai", specifier = ">=1.0" },
     { name = "psutil", specifier = ">=5.9" },
+    { name = "pydantic", specifier = ">=2.12,<3" },
     { name = "python-dotenv", specifier = ">=1.0" },
     { name = "pyyaml", specifier = ">=6.0" },
 ]

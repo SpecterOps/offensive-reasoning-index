@@ -1,6 +1,166 @@
 # ORI benchmark hardening runbook
 
-## Offline answer scoring
+## Protocol boundary
+
+ORI has two explicit correctness protocols:
+
+- v1 preserves historical generation, campaign, and scoring behavior;
+- `ori-eval-protocol-v2` is an opt-in, typed correctness architecture for the
+  current `simple` and `complex` products.
+
+Artifacts are not interchangeable. V2 public artifacts use generated-manifest
+revision `ori-generated-manifest-v3`; sealed oracles use
+`ori-eval-oracle-v2`. Unknown versions and mixed public/oracle pairs fail
+closed. Phase 3/4 profiles remain v1-only.
+
+## V2 correctness model
+
+### One typed claim
+
+The claim compiler is the only supported path to a v2 task. It resolves logical
+scenario roles to seed-specific `EntityRef` identities and compiles:
+
+- a solver-visible `TaskBundle`;
+- one explicit `AnswerPolicy`;
+- an independent direct or MCP `TrackBinding`;
+- a scorer-only `OracleBundle`;
+- certified execution bounds.
+
+Route, set, count, decision, and absence claims declare their direct,
+transitive, or effective semantics. Human-authored question text is a validated
+template over claim roles and requested answer fields; it cannot add hidden
+grading requirements.
+
+The comparator accepts exactly `AnswerPolicy + OracleBundle + EvidenceIR`.
+It cannot receive a legacy task, template ID, or arbitrary metadata. Exact set
+and count policies reject extras. Route policies validate ordered edge
+witnesses, direction, endpoints, mechanisms, context, exclusions, and
+connectivity. Alternative routes pass only under the declared route policy.
+
+### Sealed oracle boundary
+
+Only `TaskBundle` may cross a solver-visible boundary. The common public
+projection is used for provider requests, Inspect metadata, transcripts, CSV
+metadata, telemetry, and public exports. It recursively rejects oracle field
+names. Sentinel tests cover every surface.
+
+Keep scorer-only files private:
+
+```text
+*-oracles-v2.private.json
+*-offline-certification-v2.private.json
+*-live-certification.private.json
+*-live-{pre,middle,post}.private.json
+*scoring.private.json
+```
+
+V2 answers may contain only the declared answer shape. Caller-provided
+`correct`, reference result, reference node, valid-node inventory, or oracle
+fields are rejected rather than trusted.
+
+### Evidence IR and scoring parity
+
+Direct query results, MCP structured answers, Inspect answers, and offline
+replays normalize into one `EvidenceIR`. Identity resolution supports object
+IDs, SIDs, canonical names, domain-qualified names, and declared aliases.
+Ambiguous aliases fail instead of selecting an arbitrary object.
+
+Only the shared comparator emits a `Verdict`. Precision, recall, overlap,
+missing elements, and extras are diagnostics; they never weaken binary policy.
+Fixture certification fingerprints both Evidence IR and verdicts so a
+live/offline disagreement blocks candidate promotion.
+
+### Direct execution
+
+V2 does not duplicate containment. Every model-produced query goes through the
+authoritative `DirectQueryCoordinator.execute()` path from direct-query policy
+v3. The adapter preserves failure type/subtype, HTTP status, execution flag,
+attempts, query and policy fingerprints, health result, and circuit state.
+
+Correctness is derived from returned graph evidence, never query text. A path
+with nodes but no ordered edges is invalid. Model-attributable policy,
+query-timeout, and query errors are incorrect after readiness. Authentication,
+transport, server, rate-limit, response, and circuit-open failures receive no
+reasoning verdict.
+
+### MCP capabilities and finalization
+
+Every MCP binding is checked against a versioned BloodHound CE/MCP capability
+profile. The profile records operation semantics, pagination, ordering,
+truncation reporting, total-count behavior, proof strength, and output limits.
+A binding is tool-only, explicitly Cypher-enabled, or blocked.
+
+Provider loops submit mechanical `ToolObservation` facts. The harness classifies
+them against the public claim as useful positive evidence, valid negative proof,
+conclusive or inconclusive empty, truncated, invalid arguments, policy
+rejection, infrastructure failure, irrelevant activity, or resource read.
+Models and provider adapters cannot self-declare evidence useful.
+
+Only useful positive, valid negative, or conclusive empty evidence unlocks
+finalization. Resource reads, irrelevant calls, incomplete empties, truncation,
+and errors do not. Native Ollama, native OpenAI-compatible, and Inspect use one
+state machine. Certified runs forbid `auto`; one generic schema-only retry is
+allowed and unresolved malformed output becomes `OUTPUT_INVALID`.
+
+### Bounds and graph identity
+
+Every task binds maximum traversal depth, result cardinality, page size/pages,
+output bytes, transcript bytes, tool calls, and timeout. Oversized enumerations
+are compiled as deterministic 500-object pages. Completeness that cannot be
+distinguished from truncation blocks certification.
+
+The archive graph digest covers benchmark-owned typed objects,
+scorer-relevant properties, canonical ordered relationships, and unexpected
+incident attack-path relationships. The live digest uses bounded, stable,
+paginated harness queries. Only explicitly declared BloodHound-generated
+artifacts are normalized. The graph must match before, between, and after the
+two track certifications; any change invalidates the run.
+
+Certification and checkpoints bind task, prompt, oracle, graph, compiler,
+comparator, capability profile, execution bounds, containment policy, MCP
+finalization policy, and catalog fingerprints. A semantic byte change makes
+prior certification stale.
+
+## V2 compile and certification commands
+
+Compile and offline-certify one product track:
+
+```bash
+uv run ori compile-v2 \
+  --manifest datasets/benchmarks/complex-v1-seed-4401_manifest.json \
+  --archive datasets/benchmarks/complex-v1-seed-4401.zip \
+  --product complex \
+  --track mcp \
+  --output-dir results/v2/complex-seed-4401
+```
+
+Live-certify both tracks without invoking a model:
+
+```bash
+uv run --env-file ../Bloodhound-MCP/.env \
+  ori certify-v2-live \
+  --manifest datasets/benchmarks/complex-v1-seed-4401_manifest.json \
+  --archive datasets/benchmarks/complex-v1-seed-4401.zip \
+  --product complex \
+  --output-dir results/v2/complex-seed-4401/live
+```
+
+This command is read-only. A graph mismatch is a stop condition, not permission
+to upload or replace data.
+
+Score structured answers offline:
+
+```bash
+uv run ori score-answers \
+  --protocol v2 \
+  --track mcp \
+  --manifest results/v2/complex-seed-4401/complex-mcp-seed-4401-public-v2.json \
+  --oracles results/v2/complex-seed-4401/complex-mcp-seed-4401-oracles-v2.private.json \
+  --answers answers.json \
+  --output results/v2/complex-seed-4401/scoring.private.json
+```
+
+## V1 offline answer scoring
 
 Use `ori score-answers` to grade structured answers without launching a model campaign:
 
@@ -12,7 +172,8 @@ ori score-answers \
   --output scorer_projection.json
 ```
 
-The answers file may be either a list of answer objects or an object with an `answers` list. Each answer object should include:
+For legacy v1, the answers file may be either a list of answer objects or an
+object with an `answers` list. Each answer object should include:
 
 - `task_id`
 - `final_answer` (or `answer`), using the MCP final JSON contract

@@ -657,6 +657,78 @@ uv run ori run --config <models.yaml> --manifest <manifest>
 Keep this separation in mind. A health pass is not an ingest pass, and a preflight
 pass does not mean the graph has been uploaded.
 
+## Protocol V2 Development Workflow
+
+Benchmark correctness v2 is opt-in during development. Normal `ori run` and
+Phase 3/4 reproduction remain on the legacy v1 dispatch; no v2 artifact silently
+falls back to a v1 grader. V2 compiles a solver-visible task catalog and a
+separate scorer-only oracle catalog from one typed claim.
+
+Generate a current product as usual, then compile each track explicitly:
+
+```bash
+uv run ori compile-v2 \
+  --manifest datasets/benchmarks/complex-v1-seed-4401_manifest.json \
+  --archive datasets/benchmarks/complex-v1-seed-4401.zip \
+  --product complex \
+  --track direct \
+  --output-dir results/v2/complex-seed-4401
+
+uv run ori compile-v2 \
+  --manifest datasets/benchmarks/complex-v1-seed-4401_manifest.json \
+  --archive datasets/benchmarks/complex-v1-seed-4401.zip \
+  --product complex \
+  --track mcp \
+  --output-dir results/v2/complex-seed-4401
+```
+
+Each command writes a public task artifact plus private oracle, migration
+inventory, and offline-certification artifacts. Keep `*.private.json` files out
+of model requests, Inspect metadata, transcripts, CSVs, telemetry, and public
+exports.
+
+Score deterministic structured answers with the sealed oracle supplied
+separately:
+
+```bash
+uv run ori score-answers \
+  --protocol v2 \
+  --track direct \
+  --manifest results/v2/complex-seed-4401/complex-direct-seed-4401-public-v2.json \
+  --oracles results/v2/complex-seed-4401/complex-direct-seed-4401-oracles-v2.private.json \
+  --answers answers.json \
+  --output results/v2/complex-seed-4401/scoring.private.json
+```
+
+On a controlled BloodHound instance that already contains the exact matching
+archive, run the read-only live certification gate:
+
+```bash
+uv run --env-file ../Bloodhound-MCP/.env \
+  ori certify-v2-live \
+  --manifest datasets/benchmarks/complex-v1-seed-4401_manifest.json \
+  --archive datasets/benchmarks/complex-v1-seed-4401.zip \
+  --product complex \
+  --output-dir results/v2/complex-seed-4401/live
+```
+
+The live command health-checks BloodHound, computes a bounded graph digest three
+times, certifies direct and MCP fixture parity between those graph gates, and
+publishes separate per-track candidate catalogs. It never uploads data or calls
+a model. If the live graph differs, the command stops; upload or replacement is
+a separate operator-confirmed action.
+
+V2 direct execution is admitted only by direct-query policy v3 and executes
+through `DirectQueryCoordinator`. MCP certification requires a pinned capability
+profile and an explicit loop; `mcp_tool_loop: auto` is forbidden. These
+constraints are harness-side and are not inserted into solver prompts.
+
+See [Benchmark Hardening Runbook](docs/benchmark-hardening-runbook.md) for the
+protocol and runtime invariants and
+[V2 Task Authoring and Certification](docs/benchmark-v2-task-authoring.md) for
+adding a task family. V1 campaign instructions below remain valid for
+reproduction.
+
 ## Current Product State
 
 `simple` is the small smoke/triage benchmark.
@@ -721,6 +793,12 @@ dataset.
 - [Benchmark Hardening Runbook](docs/benchmark-hardening-runbook.md): offline
   answer scoring, task/scorer preflight checks, failure taxonomy, and reporting
   metrics.
+- [V2 Task Authoring and Certification](docs/benchmark-v2-task-authoring.md):
+  typed-claim authoring, fixtures, bounds, certification, and the candidate
+  catalog contract.
+- [V2 Certification Evidence](docs/benchmark-v2-certification-evidence.md):
+  deterministic generation, corpus migration, and controlled live/offline
+  parity receipts.
 - [Phase 4 v1 Runbook](docs/phase4-v1-runbook.md): older Phase 4 v1 workflow for
   historical comparison and focused diagnostic profiles.
 - [OpenAI-Compatible Model Examples](docs/openai-compatible-model-examples.yaml):

@@ -17,6 +17,7 @@ dependencies = [
     "python-dotenv>=1.0",
     "inspect-ai>=0.3.203",
     "mcp>=1.28.1",
+    "pydantic>=2.12,<3",
     "psutil>=5.9",
 ]
 

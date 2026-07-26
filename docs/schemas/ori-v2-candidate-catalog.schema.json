@@ -1,0 +1,146 @@
+{
+  "$id": "https://offensive-reasoning-index.local/schemas/ori-v2-candidate-catalog.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "capability_profile_fingerprint": {
+      "$ref": "#/$defs/fingerprint"
+    },
+    "catalog_fingerprint": {
+      "$ref": "#/$defs/fingerprint"
+    },
+    "comparator_fingerprint": {
+      "$ref": "#/$defs/fingerprint"
+    },
+    "compiler_fingerprint": {
+      "$ref": "#/$defs/fingerprint"
+    },
+    "entries": {
+      "items": {
+        "$ref": "#/$defs/catalog_entry"
+      },
+      "type": "array"
+    },
+    "graph_fingerprint": {
+      "$ref": "#/$defs/fingerprint"
+    },
+    "manifest_schema_version": {
+      "const": "ori-generated-manifest-v3"
+    },
+    "product": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "protocol_version": {
+      "const": "ori-eval-protocol-v2"
+    },
+    "release_fingerprint": {
+      "$ref": "#/$defs/fingerprint"
+    },
+    "release_id": {
+      "minLength": 1,
+      "type": "string"
+    }
+  },
+  "required": [
+    "protocol_version",
+    "manifest_schema_version",
+    "release_id",
+    "product",
+    "entries",
+    "graph_fingerprint",
+    "compiler_fingerprint",
+    "comparator_fingerprint",
+    "capability_profile_fingerprint",
+    "catalog_fingerprint",
+    "release_fingerprint"
+  ],
+  "title": "ORI protocol-v2 candidate catalog",
+  "type": "object",
+  "$defs": {
+    "catalog_entry": {
+      "additionalProperties": false,
+      "properties": {
+        "certification_fingerprint": {
+          "$ref": "#/$defs/fingerprint"
+        },
+        "claim_kind": {
+          "enum": [
+            "route",
+            "set",
+            "count",
+            "decision",
+            "absence"
+          ]
+        },
+        "cost_band": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "family": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "oracle_fingerprint": {
+          "$ref": "#/$defs/fingerprint"
+        },
+        "path_concentration_key": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "product": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "revision": {
+          "exclusiveMinimum": 0,
+          "type": "integer"
+        },
+        "semantics": {
+          "enum": [
+            "direct",
+            "transitive",
+            "effective"
+          ]
+        },
+        "task_fingerprint": {
+          "$ref": "#/$defs/fingerprint"
+        },
+        "task_id": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "tier": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "track": {
+          "enum": [
+            "direct",
+            "mcp"
+          ]
+        }
+      },
+      "required": [
+        "task_id",
+        "revision",
+        "product",
+        "track",
+        "family",
+        "tier",
+        "claim_kind",
+        "semantics",
+        "cost_band",
+        "path_concentration_key",
+        "task_fingerprint",
+        "oracle_fingerprint",
+        "certification_fingerprint"
+      ],
+      "type": "object"
+    },
+    "fingerprint": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    }
+  }
+}
