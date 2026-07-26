@@ -279,6 +279,39 @@ infrastructure failures.
   unchanged live graph.
 - [x] Complete independent code review and final repository validation.
 
+## Post-implementation direct runtime incident
+
+The first operator-authorized V2 direct campaign exposed a boundary regression
+that deterministic fixture certification did not cover. V2 had dropped the
+proven v1 CySQL instructions, encouraged models to mirror the answer JSON inside
+Cypher, ignored CE collected-node literals, treated auxiliary returned nodes as
+set answers, and required exact equality with unrequested CE edge properties.
+
+- [x] Preserve the interrupted seven-sample checkpoint in its original output
+  directory and stop further provider calls.
+- [x] Classify the observed failures as projection, CySQL-contract, policy-shape,
+  or comparator defects rather than infrastructure.
+- [x] Reuse the v1 `RETURN p`/node-row CySQL contract without restoring legacy
+  grading, reference-result comparison, or template branches.
+- [x] Add the public, model-neutral `ori-direct-result-contract-v1`.
+- [x] Bind that result contract into the direct capability profile.
+- [x] Parse real CE collected-node literals and keep auxiliary nodes out of
+  exact-set evidence.
+- [x] Validate an optional declared total against the returned entity count.
+- [x] Treat CE edge properties as a superset while enforcing every
+  oracle-required property.
+- [x] Add regressions for v1 node rows, collected entities, auxiliary nodes,
+  inconsistent totals, direct prompt grammar, and CE edge-property supersets.
+- [x] Prove the old certification is rejected before model execution.
+- [x] Recompile and live-certify both simple tracks in a fresh artifact
+  namespace without model calls.
+- [x] Pass live direct conformance for the 2-account kerberoastable set, the
+  58-computer AdminTo set, and the one-edge exact membership route.
+- [x] Pass final full tests, lint, diff check, secret scan, and independent
+  review.
+- [x] Pass fresh no-model readiness and prepare the exact operator rerun command.
+- [x] Record the incident and resolution in AgentVault and Personal Vault.
+
 ## Definition of done
 
 - [x] All eight CV1 regression cases pass through v2.

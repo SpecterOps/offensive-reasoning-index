@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from .compiler import DIRECT_CAPABILITY_PROFILE
+from .compiler import DIRECT_CAPABILITY_PROFILE, DIRECT_RESULT_CONTRACT_VERSION
 from .fingerprint import canonical_sha256
 from .mcp import build_mcp_capability_profile, validate_mcp_capability_profile
 from .schema import (
@@ -23,6 +23,7 @@ def build_direct_capability_profile() -> CapabilityProfile:
         "track": Track.DIRECT,
         "bloodhound_ce_version": DIRECT_BLOODHOUND_CE_VERSION,
         "direct_query_policy_version": DIRECT_QUERY_POLICY_VERSION,
+        "direct_result_contract_version": DIRECT_RESULT_CONTRACT_VERSION,
         "containment_base_commit": CONTAINMENT_BASE_COMMIT,
         "profile_fingerprint": "0" * 64,
     }

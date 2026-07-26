@@ -44,6 +44,7 @@ from .test_v2_direct_adapter import (
 from .test_v2_direct_adapter import (
     RESOLVER as DIRECT_RESOLVER,
 )
+from .test_v2_direct_adapter import SET_TASK as DIRECT_SET_TASK
 from .test_v2_direct_adapter import (
     TASK as DIRECT_TASK,
 )
@@ -87,6 +88,19 @@ def test_direct_public_request_includes_bounds_without_oracle_material() -> None
     assert DIRECT_ORACLE.oracle_id not in prompt
     assert "route_variants" not in prompt
     assert "reference_cypher" not in prompt
+
+
+def test_direct_prompt_preserves_v1_cysql_contract_and_separates_answer_schema() -> None:
+    route_prompt = direct_system_prompt(DIRECT_TASK)
+    set_prompt = direct_system_prompt(DIRECT_SET_TASK)
+
+    assert "Use RETURN p for path queries" in route_prompt
+    assert "list comprehensions" in route_prompt
+    assert "after the final RETURN projection" in route_prompt
+    assert '"version": "ori-direct-result-contract-v1"' in route_prompt
+    assert "does not need to match the task answer_schema" in route_prompt
+    assert "For set queries return only the answer nodes" in set_prompt
+    assert "RETURN entity ORDER BY entity.objectid" in set_prompt
 
 
 def test_direct_submission_schema_rejects_extra_oracle_fields() -> None:

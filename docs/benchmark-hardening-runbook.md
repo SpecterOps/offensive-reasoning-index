@@ -152,6 +152,35 @@ allowed by that public claim kind. The query executes exactly once through
 `DirectQueryCoordinator.execute()`. Correctness comes from the returned graph
 evidence plus the restricted assertion, not the query text.
 
+The public request also carries `ori-direct-result-contract-v1`. It preserves
+the working v1 BloodHound boundary without restoring the legacy grader:
+
+- set queries return only answer nodes as rows, or one
+  `collect(node) AS entities` collection;
+- count queries return one non-negative scalar;
+- route queries return an actual path variable with `RETURN p`, plus any
+  required supporting relationship variables;
+- Cypher must not construct the task's JSON answer schema with maps, list
+  literals, or list comprehensions;
+- `CALL`, `UNION`, `UNWIND`, `CASE`, `labels()`, and `XOR` are outside the
+  certified direct result grammar;
+- recursive route ordering and `LIMIT` belong after the final `RETURN`.
+
+These are model-neutral API/result constraints, not graph or answer hints. The
+policy still evaluates the submitted query after generation and never rewrites
+or retries it. Direct set completeness uses one certified, bounded BloodHound
+response and exact sealed-set comparison; MCP set completeness still requires
+mechanical count/pagination evidence because MCP is a paginated tool surface.
+
+The direct projector accepts both standard `data.nodes` and CE's collected-node
+literal representation (`Props`, `Labels`, and `ElementId`). If exactly one
+node collection is present, it is the answer population and auxiliary graph
+nodes are ignored. A declared total must equal the projected entity count.
+Exact route identity is structural—ordered endpoints, direction, and
+relationship—while oracle-declared edge properties are required predicates.
+Extra CE-generated properties such as `lastseen` do not make an otherwise exact
+route incorrect.
+
 MCP loops project each actual tool result into a mechanical `ToolObservation`.
 High-level MCP response wrappers and coordinator-backed Cypher responses share
 the same projector. Successful activity alone cannot unlock finalization.

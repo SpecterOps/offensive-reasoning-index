@@ -721,10 +721,23 @@ a separate operator-confirmed action.
 V2 direct execution is admitted only by direct-query policy v3 and executes
 through `DirectQueryCoordinator`. MCP certification requires a pinned capability
 profile and an explicit loop; `mcp_tool_loop: auto` is forbidden. These
-admission rules and their rejection grammar remain harness-side and are not
-inserted into solver prompts. The public task envelope does declare model-neutral
-execution budgets such as hops, output size, and tool calls; those are part of
-the answer contract and contain no expected graph facts.
+admission decisions remain harness-side. The public direct request does declare
+the supported, model-neutral CySQL/result grammar inherited from the proven v1
+execution path: return answer nodes for sets, `RETURN p` for paths, return a
+scalar for counts, and do not construct JSON maps or lists inside Cypher. It
+also declares generic unsupported constructs such as `CALL`, `UNION`, and list
+comprehensions so a syntactically invalid query is not mistaken for a reasoning
+failure. The prompt never discloses task-specific policy decisions, reference
+queries, expected graph facts, or grader hints. Public execution budgets such
+as hops, output size, and tool calls remain part of the task contract.
+
+The direct result contract is capability-versioned independently from policy
+v3. Ordinary v1-style node/path responses and BloodHound's real
+`collect(node) AS entities` literal shape project into the same V2 `EvidenceIR`.
+Auxiliary nodes cannot contaminate an explicit entity collection, unrequested
+CE edge properties do not invalidate a structurally exact route, and required
+edge properties still must match. Changing this contract or the comparator
+invalidates compilation, live certification, readiness, and resume provenance.
 
 After both track artifacts have reached candidate state, start from the strict
 V2 model config:

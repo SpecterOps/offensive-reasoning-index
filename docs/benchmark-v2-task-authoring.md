@@ -50,8 +50,12 @@ Author direct and MCP bindings separately.
 For direct:
 
 - require direct-query policy v3;
+- bind the versioned direct result contract;
 - keep `max_tool_calls` at zero;
+- return answer nodes only for set claims, a scalar for count claims, and an
+  actual `RETURN p` path for route claims;
 - ensure a returned path can include ordered edge witnesses;
+- keep JSON maps/list construction out of Cypher;
 - never rely on query text to prove an answer.
 
 For MCP:
@@ -65,10 +69,12 @@ For MCP:
 - block the binding if the capability cannot prove the claim.
 
 Safety admission controls are model-blind and applied by the harness after the
-model produces a query or tool call. The public task envelope discloses only
-the generic execution budgets needed to form a bounded answer. It never
-discloses policy rules, reference queries, expected facts, or task-specific
-grader hints.
+model produces a query or tool call. The public task envelope discloses the
+generic execution budgets and supported result grammar needed to form a
+bounded, executable answer. Generic CySQL compatibility rules—such as using
+`RETURN p` and avoiding map/list construction—are execution constraints, not
+reasoning hints. The envelope never discloses task-specific policy decisions,
+reference queries, expected facts, or grader behavior.
 
 ## Required bounds
 

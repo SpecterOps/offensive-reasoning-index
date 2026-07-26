@@ -34,6 +34,13 @@ secrets. It logged non-fatal Brotli decode errors for three generated
 
 None.
 
+## Direct runtime follow-up
+
+After the direct-result contract and comparator-v3 correction, Gitleaks 8.30.1
+was run again in both Git-history and `--no-git` worktree modes with full
+redaction. It scanned 109 commits and approximately 16.49 MB of worktree
+content. Both scans exited 0 with zero findings.
+
 ## Next steps
 
 Rerun this scan after any later merge/rebase and before publishing the v2 pull

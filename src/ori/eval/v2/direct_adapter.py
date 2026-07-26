@@ -131,6 +131,10 @@ def _receipt(result: Any, *, elapsed_seconds: float) -> DirectExecutionReceipt:
 
 def _node_identity(node: Mapping[str, Any]) -> str:
     properties = node.get("properties")
+    if not isinstance(properties, Mapping):
+        properties = node.get("Props")
+    if not isinstance(properties, Mapping):
+        properties = node.get("props")
     props = properties if isinstance(properties, Mapping) else {}
     for key in (
         "objectId",
@@ -155,6 +159,80 @@ def _node_identity(node: Mapping[str, Any]) -> str:
         if value is not None and str(value).strip():
             return str(value).strip()
     raise DirectAdapterError(f"BloodHound node has no stable identity: {node!r}")
+
+
+def _looks_like_literal_node(value: Any) -> bool:
+    if not isinstance(value, Mapping):
+        return False
+    if any(
+        value.get(key) is not None
+        for key in ("objectId", "objectid", "ObjectIdentifier", "label")
+    ):
+        return True
+    for properties_key in ("properties", "Props", "props"):
+        properties = value.get(properties_key)
+        if not isinstance(properties, Mapping):
+            continue
+        if any(
+            properties.get(key) is not None
+            for key in (
+                "objectId",
+                "objectid",
+                "ObjectIdentifier",
+                "objectidentifier",
+                "name",
+                "Name",
+            )
+        ):
+            return True
+    return False
+
+
+def _literal_node_collections(
+    raw: Mapping[str, Any],
+) -> tuple[tuple[str, tuple[Mapping[str, Any], ...]], ...]:
+    """Read collected CE nodes without confusing collected relationships."""
+
+    inner = raw.get("data", raw)
+    if not isinstance(inner, Mapping):
+        return ()
+    literals = inner.get("literals")
+    if not isinstance(literals, Sequence) or isinstance(literals, (str, bytes)):
+        return ()
+    collections: list[tuple[str, tuple[Mapping[str, Any], ...]]] = []
+    for literal in literals:
+        if not isinstance(literal, Mapping):
+            continue
+        value = literal.get("value")
+        if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+            continue
+        items = tuple(value)
+        key = str(literal.get("key") or "")
+        if items and all(_looks_like_literal_node(item) for item in items):
+            collections.append((key, items))
+        elif not items and key.casefold() in {"entities", "entity"}:
+            collections.append((key, ()))
+    return tuple(collections)
+
+
+def _project_set_nodes(
+    raw: Mapping[str, Any],
+    graph_nodes: Sequence[Mapping[str, Any]],
+) -> tuple[Mapping[str, Any], ...]:
+    """Select answer nodes from one unambiguous direct result surface."""
+
+    collections = _literal_node_collections(raw)
+    named = tuple(
+        nodes for key, nodes in collections if key.casefold() in {"entities", "entity"}
+    )
+    candidates = named or tuple(nodes for _, nodes in collections)
+    if len(candidates) > 1:
+        raise DirectAdapterError(
+            "direct set result contains multiple answer-node collections"
+        )
+    if candidates:
+        return candidates[0]
+    return tuple(graph_nodes)
 
 
 def _raw_graph(raw: Mapping[str, Any]) -> tuple[
@@ -276,6 +354,10 @@ def _project_properties(
     for node in nodes:
         identity = _node_identity(node)
         raw_properties = node.get("properties")
+        if not isinstance(raw_properties, Mapping):
+            raw_properties = node.get("Props")
+        if not isinstance(raw_properties, Mapping):
+            raw_properties = node.get("props")
         properties = raw_properties if isinstance(raw_properties, Mapping) else node
         for key, value in properties.items():
             if str(key) in allowed_keys and (
@@ -313,9 +395,7 @@ def _count_from_mapping(value: Mapping[str, Any]) -> tuple[int, ...]:
     return scalar_values if len(value) == 1 else ()
 
 
-def _project_scalar_count(result: Any, raw: Mapping[str, Any]) -> int:
-    """Extract one unambiguous non-negative scalar count from graph output."""
-
+def _scalar_count_candidates(result: Any, raw: Mapping[str, Any]) -> set[int]:
     candidates: list[int] = []
     for container in (raw, raw.get("data")):
         if isinstance(container, Mapping):
@@ -335,8 +415,20 @@ def _project_scalar_count(result: Any, raw: Mapping[str, Any]) -> int:
     rows = result.nodes if isinstance(result.nodes, Sequence) else ()
     if len(rows) == 1 and isinstance(rows[0], Mapping):
         candidates.extend(_count_from_mapping(rows[0]))
+    return set(candidates)
 
-    distinct = set(candidates)
+
+def _project_scalar_count(
+    result: Any,
+    raw: Mapping[str, Any],
+    *,
+    required: bool = True,
+) -> int | None:
+    """Extract one unambiguous non-negative scalar count from graph output."""
+
+    distinct = _scalar_count_candidates(result, raw)
+    if not distinct and not required:
+        return None
     if len(distinct) != 1:
         detail = "missing" if not distinct else "ambiguous"
         raise DirectAdapterError(
@@ -419,7 +511,17 @@ def project_direct_evidence(
 
     payload: dict[str, Any] = {"task_id": task.task_id}
     if task.claim_kind == "set":
-        payload["entities"] = [_node_identity(node) for node in nodes]
+        answer_nodes = _project_set_nodes(raw, nodes)
+        if len(answer_nodes) > task.binding.bounds.max_result_cardinality:
+            raise DirectAdapterError(
+                "direct set result exceeds its certified cardinality bound"
+            )
+        payload["entities"] = [_node_identity(node) for node in answer_nodes]
+        declared_count = _project_scalar_count(result, raw, required=False)
+        if declared_count is not None and declared_count != len(answer_nodes):
+            raise DirectAdapterError(
+                "direct set total_count does not match returned answer nodes"
+            )
     elif task.claim_kind == "count":
         payload["count"] = _project_scalar_count(result, raw)
     else:

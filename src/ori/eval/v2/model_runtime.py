@@ -23,6 +23,7 @@ from ori.eval.mcp_runtime import (
     _run_openai_compat_mcp_loop,
 )
 
+from .compiler import DIRECT_RESULT_CONTRACT_VERSION
 from .direct_adapter import DirectV2Outcome
 from .fingerprint import canonical_sha256
 from .identity import IdentityResolver
@@ -229,8 +230,58 @@ def _provider_request(task: TaskBundle, *, direct: bool) -> dict[str, Any]:
             direct_submission_schema(task) if direct else task.answer_schema
         ),
     }
+    if direct:
+        payload["query_result_contract"] = _direct_query_result_contract(task)
     assert_solver_visible(payload)
     return payload
+
+
+def _direct_query_result_contract(task: TaskBundle) -> dict[str, Any]:
+    """Describe supported CySQL output without exposing scorer-only material."""
+
+    common = {
+        "one_statement": True,
+        "return_only_answer_evidence": True,
+        "unsupported_cysql": [
+            "CALL",
+            "UNION",
+            "UNWIND",
+            "CASE",
+            "map literals",
+            "list comprehensions",
+            "labels()",
+            "XOR",
+        ],
+    }
+    if task.claim_kind == "set":
+        claim = {
+            "result_shape": (
+                "Return only answer nodes as individual rows, for example "
+                "RETURN entity ORDER BY entity.objectid. A single "
+                "collect(entity) AS entities literal is also accepted."
+            ),
+            "auxiliary_nodes_forbidden": True,
+        }
+    elif task.claim_kind == "count":
+        claim = {
+            "result_shape": "Return exactly one non-negative scalar AS count.",
+        }
+    else:
+        claim = {
+            "result_shape": (
+                "Return an actual BloodHound path variable, for example "
+                "RETURN p ORDER BY length(p) LIMIT 1. Return required supporting "
+                "relationship variables separately; never construct JSON in Cypher."
+            ),
+            "recursive_limit_position": "after the final RETURN projection",
+        }
+    return {
+        "version": DIRECT_RESULT_CONTRACT_VERSION,
+        "claim_kind": task.claim_kind,
+        "bounds": task.binding.bounds.model_dump(mode="json"),
+        "common": common,
+        "claim": claim,
+    }
 
 
 def direct_system_prompt(task: TaskBundle) -> str:
@@ -239,10 +290,16 @@ def direct_system_prompt(task: TaskBundle) -> str:
         "You are being evaluated on a controlled synthetic BloodHound CE graph. "
         "Write exactly one bounded read-only Cypher query that answers the public "
         "question. Return only one JSON object matching submission_schema. The query "
-        "must return graph nodes and ordered relationship witnesses needed by the "
-        "question; use a scalar count for count claims. The assertion object may "
-        "contain only fields declared by submission_schema. Do not use write clauses, "
-        "unbounded traversal, or hidden assumptions.\n\n"
+        "result must follow query_result_contract; it does not need to match the "
+        "task answer_schema because ORI projects returned graph evidence itself. "
+        "Use RETURN p for path queries so BloodHound returns ordered nodes and edges. "
+        "For set queries return only the answer nodes, not source or context nodes. "
+        "Do not use CALL, UNION, UNWIND, CASE expressions, map literals, list "
+        "comprehensions, labels(), or XOR. Put a recursive route's ORDER BY and LIMIT "
+        "after its final RETURN projection. shortestPath requires one variable-length "
+        "pattern. The assertion object may contain only fields declared by "
+        "submission_schema. Do not use write clauses, unbounded traversal, or hidden "
+        "assumptions.\n\n"
         + json.dumps(request, sort_keys=True)
     )
 

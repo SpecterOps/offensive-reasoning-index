@@ -34,6 +34,7 @@ from ori.eval.v2.schema import (
     OracleBundle,
     PathStatus,
     PopulationScope,
+    PropertyFact,
     RelationshipPattern,
     RelationshipSemantics,
     RouteClaim,
@@ -397,6 +398,37 @@ def test_exact_and_closed_route_policies_use_sealed_variants() -> None:
         ).status
         is VerdictStatus.CORRECT
     )
+
+
+def test_exact_route_ignores_unrequested_ce_edge_properties() -> None:
+    oracle = _oracle(
+        "ce-properties",
+        route_variants=(RouteVariant(variant_id="canonical", edges=CANONICAL),),
+        source_id=ALICE.object_id,
+        target_id=TARGET.object_id,
+    )
+    observed = tuple(
+        edge.model_copy(
+            update={
+                "properties": (
+                    PropertyFact(key="lastseen", value="2026-07-26T13:31:34Z"),
+                )
+            }
+        )
+        for edge in CANONICAL
+    )
+
+    verdict = compare(
+        ExactRoutePolicy(kind="exact_route"),
+        oracle,
+        _evidence(
+            "ce-properties",
+            edges=observed,
+            path_status=PathStatus.FOUND,
+        ),
+    )
+
+    assert verdict.status is VerdictStatus.CORRECT
 
 
 def test_exact_route_rejects_contradictory_status_and_extra_connected_context() -> None:

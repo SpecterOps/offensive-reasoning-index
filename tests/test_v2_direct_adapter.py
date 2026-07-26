@@ -10,12 +10,19 @@ from ori.eval.direct_query_safety import (
     DirectQuerySafetyConfig,
     QueryDenyCache,
 )
+from ori.eval.v2.compiler import DIRECT_RESULT_CONTRACT_VERSION
 from ori.eval.v2.direct_adapter import (
     DirectAdapterError,
     execute_direct_v2,
     project_direct_evidence,
 )
+from ori.eval.v2.fingerprint import canonical_sha256
 from ori.eval.v2.identity import IdentityResolver
+from ori.eval.v2.profiles import (
+    DIRECT_CAPABILITY_PROFILE_FINGERPRINT,
+    build_direct_capability_profile,
+    validate_direct_capability_profile,
+)
 from ori.eval.v2.schema import (
     DIRECT_QUERY_POLICY_VERSION,
     CountClaim,
@@ -24,6 +31,7 @@ from ori.eval.v2.schema import (
     EntitySelector,
     ExactCountPolicy,
     ExactRoutePolicy,
+    ExactSetPolicy,
     ExecutionBounds,
     ExecutionClass,
     OracleBundle,
@@ -32,6 +40,7 @@ from ori.eval.v2.schema import (
     RouteClaim,
     RouteVariant,
     SelectionExpression,
+    SetClaim,
     TaskBundle,
     Track,
     TrackBinding,
@@ -151,6 +160,44 @@ COUNT_ORACLE = ORACLE.model_copy(
         "target_id": None,
     }
 )
+SET_CLAIM = SetClaim(
+    kind="set",
+    claim_id="claim:set",
+    selection=SelectionExpression(
+        anchors=(EntitySelector(role="subject", object_type="Base"),),
+        projection_role="subject",
+        projection_type="Base",
+    ),
+    semantics=RelationshipSemantics.DIRECT,
+    population_scope=PopulationScope.BENCHMARK_NAMESPACE,
+)
+SET_TASK = TASK.model_copy(
+    update={
+        "task_id": "simple.direct.set@2",
+        "claim_kind": "set",
+        "answer_policy": ExactSetPolicy(kind="exact_set"),
+        "binding": TASK.binding.model_copy(
+            update={
+                "bounds": TASK.binding.bounds.model_copy(
+                    update={"max_result_cardinality": 2, "page_size": 2}
+                )
+            }
+        ),
+        "question": "Return the complete matching set.",
+    }
+)
+SET_ORACLE = ORACLE.model_copy(
+    update={
+        "oracle_id": "oracle:set",
+        "task_id": SET_TASK.task_id,
+        "claim": SET_CLAIM,
+        "expected_entities": (ALICE, TARGET),
+        "route_variants": (),
+        "required_mechanisms": (),
+        "source_id": None,
+        "target_id": None,
+    }
+)
 
 
 def _raw_route() -> dict:
@@ -227,6 +274,22 @@ def test_direct_adapter_executes_once_and_scores_returned_edge_evidence() -> Non
     assert outcome.verdict.status is VerdictStatus.CORRECT
 
 
+def test_direct_capability_profile_binds_result_contract() -> None:
+    profile = build_direct_capability_profile()
+
+    assert (
+        profile.direct_result_contract_version
+        == DIRECT_RESULT_CONTRACT_VERSION
+        == "ori-direct-result-contract-v1"
+    )
+    assert profile.profile_fingerprint == DIRECT_CAPABILITY_PROFILE_FINGERPRINT
+    assert profile.profile_fingerprint == canonical_sha256(
+        profile,
+        exclude_fields=("profile_fingerprint",),
+    )
+    assert validate_direct_capability_profile(profile) is profile
+
+
 def test_direct_path_rejects_nodes_without_ordered_edges() -> None:
     result = CypherResult(
         success=True,
@@ -279,6 +342,115 @@ def test_direct_count_projects_bloodhound_literal_shape() -> None:
     )
 
     assert evidence.count == 7
+
+
+def test_direct_set_preserves_v1_graph_node_projection() -> None:
+    result = CypherResult(
+        success=True,
+        raw={"data": {**_raw_route()["data"], "edges": [], "literals": []}},
+    )
+
+    evidence = project_direct_evidence(
+        result,
+        task=SET_TASK,
+        oracle=SET_ORACLE,
+        resolver=RESOLVER,
+    )
+
+    assert {entity.object_id for entity in evidence.entities} == {
+        ALICE.object_id,
+        TARGET.object_id,
+    }
+
+
+def test_direct_set_projects_real_ce_collected_node_literals() -> None:
+    result = CypherResult(
+        success=True,
+        raw={
+            "data": {
+                # An auxiliary node returned outside the answer collection must
+                # not contaminate exact-set evidence.
+                "nodes": {
+                    "99": {
+                        "objectId": "AUXILIARY-NODE",
+                        "label": "AUXILIARY@EXAMPLE.LOCAL",
+                        "kind": "Group",
+                    }
+                },
+                "edges": [],
+                "literals": [
+                    {
+                        "key": "entities",
+                        "value": [
+                            {
+                                "Id": 1,
+                                "Labels": ["Base", "User"],
+                                "Props": {
+                                    "name": ALICE.canonical_name,
+                                    "objectid": ALICE.object_id,
+                                },
+                            },
+                            {
+                                "Id": 2,
+                                "Labels": ["Base", "Group"],
+                                "Props": {
+                                    "name": TARGET.canonical_name,
+                                    "objectid": TARGET.object_id,
+                                },
+                            },
+                        ],
+                    },
+                    {"key": "total_count", "value": 2},
+                ],
+            }
+        },
+    )
+
+    evidence = project_direct_evidence(
+        result,
+        task=SET_TASK,
+        oracle=SET_ORACLE,
+        resolver=RESOLVER,
+    )
+
+    assert {entity.object_id for entity in evidence.entities} == {
+        ALICE.object_id,
+        TARGET.object_id,
+    }
+
+
+def test_direct_set_rejects_inconsistent_collected_total() -> None:
+    result = CypherResult(
+        success=True,
+        raw={
+            "data": {
+                "nodes": {},
+                "edges": [],
+                "literals": [
+                    {
+                        "key": "entities",
+                        "value": [
+                            {
+                                "Props": {
+                                    "name": ALICE.canonical_name,
+                                    "objectid": ALICE.object_id,
+                                }
+                            }
+                        ],
+                    },
+                    {"key": "total_count", "value": 2},
+                ],
+            }
+        },
+    )
+
+    with pytest.raises(DirectAdapterError, match="total_count does not match"):
+        project_direct_evidence(
+            result,
+            task=SET_TASK,
+            oracle=SET_ORACLE,
+            resolver=RESOLVER,
+        )
 
 
 @pytest.mark.parametrize(

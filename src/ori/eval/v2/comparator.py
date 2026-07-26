@@ -32,7 +32,7 @@ from .schema import (
     VerdictStatus,
 )
 
-COMPARATOR_VERSION = "ori-v2-comparator-2"
+COMPARATOR_VERSION = "ori-v2-comparator-3"
 COMPARATOR_FINGERPRINT = canonical_sha256(
     {
         "component": "ori-v2-policy-comparator",
@@ -135,7 +135,10 @@ def _route_shape_errors(
     normalized_nodes = [_fold(node) for node in traversed]
     if forbid_cycles and len(set(normalized_nodes)) != len(normalized_nodes):
         errors.add("cyclic_route")
-    if len({_edge_key(edge) for edge in edges}) != len(edges):
+    if (
+        len({_edge_key(edge, include_properties=False) for edge in edges})
+        != len(edges)
+    ):
         errors.add("duplicate_edge")
     return tuple(sorted(errors))
 
@@ -394,22 +397,27 @@ def _compare_route(
     )
     if evidence.path_status is not PathStatus.FOUND:
         constraint_errors.append("path_status_not_found")
-    route_keys = tuple(_edge_key(edge) for edge in evidence.edges)
     matching_variants = tuple(
         index
         for index, variant in enumerate(oracle.route_variants)
-        if route_keys == tuple(_edge_key(edge) for edge in variant.edges)
+        if len(evidence.edges) == len(variant.edges)
+        and all(
+            _edge_satisfies(actual, required)
+            for actual, required in zip(evidence.edges, variant.edges, strict=True)
+        )
     )
 
     if isinstance(policy, ExactRoutePolicy):
         policy_match = bool(matching_variants) and matching_variants[0] == 0
         if not policy_match:
             constraint_errors.append("not_exact_route")
-        expected_context = {_edge_key(edge) for edge in oracle.required_context}
-        actual_context = {
-            _edge_key(edge) for edge in evidence.supporting_edges
-        }
-        if actual_context - expected_context:
+        if any(
+            not any(
+                _edge_satisfies(actual, expected)
+                for expected in oracle.required_context
+            )
+            for actual in evidence.supporting_edges
+        ):
             constraint_errors.append("extra_supporting_edge")
         expected_properties = {
             _property_key(fact) for fact in oracle.required_properties
@@ -423,9 +431,13 @@ def _compare_route(
         policy_match = bool(matching_variants)
         if not policy_match:
             constraint_errors.append("not_closed_variant")
-        if {
-            _edge_key(edge) for edge in evidence.supporting_edges
-        } - {_edge_key(edge) for edge in oracle.required_context}:
+        if any(
+            not any(
+                _edge_satisfies(actual, expected)
+                for expected in oracle.required_context
+            )
+            for actual in evidence.supporting_edges
+        ):
             constraint_errors.append("extra_supporting_edge")
     else:
         required = oracle.required_mechanisms
@@ -436,9 +448,13 @@ def _compare_route(
             policy_match = _ordered_subsequence(required, observed)
         if not policy_match:
             constraint_errors.append("wrong_mechanism_sequence")
-        if policy.forbid_extra_edges and {
-            _edge_key(edge) for edge in evidence.supporting_edges
-        } - {_edge_key(edge) for edge in oracle.required_context}:
+        if policy.forbid_extra_edges and any(
+            not any(
+                _edge_satisfies(actual, expected)
+                for expected in oracle.required_context
+            )
+            for actual in evidence.supporting_edges
+        ):
             constraint_errors.append("extra_supporting_edge")
         if any(
             not any(

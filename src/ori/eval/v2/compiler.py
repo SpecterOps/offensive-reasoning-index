@@ -64,7 +64,10 @@ from .schema import (
 from .selection import evaluate_selection
 
 COMPILER_VERSION = "ori-claim-compiler-v2.0.0"
-DIRECT_CAPABILITY_PROFILE = "ori-direct-policy-v3-bhce-9.1"
+DIRECT_RESULT_CONTRACT_VERSION = "ori-direct-result-contract-v1"
+DIRECT_CAPABILITY_PROFILE = (
+    f"ori-direct-policy-v3-bhce-9.1-{DIRECT_RESULT_CONTRACT_VERSION}"
+)
 MCP_CAPABILITY_PROFILE = "ori-mcp-009c88f-bhce-9.1-cypher-v1"
 MCP_SERVER_REVISION = "009c88f41fae302becad4b00777a3749a0f6f0fa"
 
@@ -1594,7 +1597,10 @@ def _binding(
             max_result_cardinality=min(1000, max(expected_cardinality, 1)),
             page_size=page_size,
             max_pages=1,
-            require_total_count=claim.kind in {"set", "count"},
+            # Direct set results are one bounded BloodHound response, not a
+            # paginated tool surface. Exact completeness is established by the
+            # sealed set comparator and certified cardinality/output bounds.
+            require_total_count=claim.kind == "count",
             require_stable_ordering=True,
             max_output_bytes=524_288,
             max_transcript_bytes=1_048_576,

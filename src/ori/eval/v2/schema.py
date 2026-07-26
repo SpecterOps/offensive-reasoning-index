@@ -592,6 +592,7 @@ class CapabilityProfile(StrictModel):
     mcp_server_revision: NonEmptyStr | None = None
     finalization_policy_fingerprint: Fingerprint | None = None
     direct_query_policy_version: NonEmptyStr | None = None
+    direct_result_contract_version: NonEmptyStr | None = None
     containment_base_commit: GitCommit | None = None
     tools: tuple[ToolCapability, ...] = ()
     resources: tuple[NonEmptyStr, ...] = ()
@@ -603,6 +604,8 @@ class CapabilityProfile(StrictModel):
         if self.track is Track.DIRECT:
             if self.direct_query_policy_version is None:
                 raise ValueError("direct profiles require a direct query policy version")
+            if self.direct_result_contract_version is None:
+                raise ValueError("direct profiles require a result contract version")
             if self.containment_base_commit is None:
                 raise ValueError("direct profiles require the pinned containment commit")
             if self.mcp_server_revision is not None or self.tools or self.resources:
@@ -618,6 +621,8 @@ class CapabilityProfile(StrictModel):
                 raise ValueError("MCP profiles require a finalization policy fingerprint")
             if self.direct_query_policy_version is not None:
                 raise ValueError("MCP profiles cannot declare a direct query policy")
+            if self.direct_result_contract_version is not None:
+                raise ValueError("MCP profiles cannot declare a direct result contract")
             if self.containment_base_commit is not None:
                 raise ValueError("MCP profiles cannot declare a containment commit")
         return self
