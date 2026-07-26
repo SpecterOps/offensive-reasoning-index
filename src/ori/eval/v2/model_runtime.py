@@ -354,6 +354,43 @@ def _model_output_invalid_sample(
     )
 
 
+def contain_model_runtime_exception(
+    *,
+    task: TaskBundle,
+    oracle: OracleBundle,
+    model: str,
+    surface: str,
+    error: Exception,
+) -> tuple[SampleResult, ProviderRunRecord]:
+    """Turn an unexpected task-runtime defect into durable campaign evidence."""
+
+    detail = f"{type(error).__name__}: {error}"
+    response = ModelResponse(
+        raw_text="",
+        cypher=None,
+        parse_stage="harness_failure",
+        tokens_input=0,
+        tokens_output=0,
+        elapsed_seconds=0.0,
+        model=model,
+        error=detail,
+    )
+    sample = SampleResult(
+        task_id=task.task_id,
+        task_fingerprint=task.task_fingerprint,
+        oracle_fingerprint=oracle.oracle_fingerprint,
+        execution_class=ExecutionClass.HARNESS_FAILURE,
+        outcome=SampleOutcomeCode.HARNESS_ERROR,
+        detail=detail,
+    )
+    return sample, _record(
+        task=task,
+        model=model,
+        surface=surface,
+        response=response,
+    )
+
+
 TextTransport = Callable[..., Awaitable[ModelResponse]]
 
 

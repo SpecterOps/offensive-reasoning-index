@@ -10,7 +10,7 @@ from pydantic import model_validator
 from .comparator import COMPARATOR_FINGERPRINT, compare
 from .compiler import CompiledTask, compiler_fingerprint
 from .evidence import EvidenceNormalizationError, validate_and_normalize_evidence
-from .fingerprint import canonical_sha256
+from .fingerprint import canonical_sha256, certifier_fingerprint
 from .graph import GraphSnapshot
 from .identity import IdentityResolver
 from .profiles import capability_profile_for_track
@@ -58,6 +58,7 @@ _POLICY_COVERAGE = {
 class FixtureCase(StrictModel):
     name: str
     applicable: bool
+    answer_payload: dict[str, Any] | None = None
     expected_status: VerdictStatus | None = None
     actual_status: VerdictStatus | None = None
     verdict_reason: str | None = None
@@ -69,6 +70,8 @@ class FixtureCase(StrictModel):
     @model_validator(mode="after")
     def result_is_complete(self) -> FixtureCase:
         if self.applicable:
+            if self.answer_payload is None:
+                raise ValueError("applicable fixtures require their exact answer payload")
             if self.expected_status is None or self.actual_status is None:
                 raise ValueError("applicable fixtures require expected and actual verdicts")
             if self.actual_status is not self.expected_status:
@@ -86,6 +89,8 @@ class FixtureCase(StrictModel):
             raise ValueError(
                 "inapplicable fixtures require a reason and registered policy coverage"
             )
+        elif self.answer_payload is not None:
+            raise ValueError("inapplicable fixtures cannot carry an answer payload")
         return self
 
 
@@ -154,6 +159,39 @@ def _unique_properties(
     return tuple(by_key[key] for key in sorted(by_key))
 
 
+def _entity_payloads(
+    snapshot: GraphSnapshot,
+    object_ids: Sequence[str],
+    *,
+    aliases: bool,
+) -> list[str]:
+    return [
+        _entity_token(snapshot, object_id) if aliases else object_id
+        for object_id in dict.fromkeys(object_ids)
+    ]
+
+
+def _evidence_object_ids(
+    *,
+    entity_ids: Sequence[str] = (),
+    edges: Sequence[EdgeWitness] = (),
+    properties: Sequence[EntityPropertyFact] = (),
+) -> tuple[str, ...]:
+    return tuple(
+        dict.fromkeys(
+            (
+                *entity_ids,
+                *(
+                    endpoint
+                    for edge in edges
+                    for endpoint in (edge.source_id, edge.target_id)
+                ),
+                *(fact.entity_id for fact in properties),
+            )
+        )
+    )
+
+
 def _negative_requirements(
     task: CompiledTask,
 ) -> tuple[
@@ -204,38 +242,59 @@ def _perfect_payload(
     elif isinstance(policy, ExactCountPolicy):
         payload["count"] = task.oracle.expected_count
     elif isinstance(policy, (ExactRoutePolicy, MechanismValidRoutePolicy)):
+        route = task.oracle.route_variants[0].edges
+        context = task.oracle.required_context
+        properties = task.oracle.required_properties
         payload.update(
             {
+                "entities": _entity_payloads(
+                    snapshot,
+                    _evidence_object_ids(
+                        edges=(*route, *context),
+                        properties=properties,
+                    ),
+                    aliases=aliases,
+                ),
                 "path_status": "found",
                 "edges": [
                     _edge_payload(edge, snapshot, aliases=aliases)
-                    for edge in task.oracle.route_variants[0].edges
+                    for edge in route
                 ],
                 "supporting_edges": [
                     _edge_payload(edge, snapshot, aliases=aliases)
-                    for edge in task.oracle.required_context
+                    for edge in context
                 ],
                 "observed_properties": [
                     _property_payload(fact, snapshot, aliases=aliases)
-                    for fact in task.oracle.required_properties
+                    for fact in properties
                 ],
             }
         )
     elif isinstance(policy, DecisionPolicy):
+        context = task.oracle.required_context
+        properties = task.oracle.required_properties
         payload.update(
             {
                 "decision": task.oracle.expected_decision,
-                "entities": [
-                    (_entity_token(snapshot, entity.object_id) if aliases else entity.object_id)
-                    for entity in task.oracle.expected_entities
-                ],
+                "entities": _entity_payloads(
+                    snapshot,
+                    _evidence_object_ids(
+                        entity_ids=tuple(
+                            entity.object_id
+                            for entity in task.oracle.expected_entities
+                        ),
+                        edges=context,
+                        properties=properties,
+                    ),
+                    aliases=aliases,
+                ),
                 "supporting_edges": [
                     _edge_payload(edge, snapshot, aliases=aliases)
-                    for edge in task.oracle.required_context
+                    for edge in context
                 ],
                 "observed_properties": [
                     _property_payload(fact, snapshot, aliases=aliases)
-                    for fact in task.oracle.required_properties
+                    for fact in properties
                 ],
             }
         )
@@ -244,10 +303,11 @@ def _perfect_payload(
         payload.update(
             {
                 "path_status": "no_path",
-                "entities": [
-                    _entity_token(snapshot, object_id) if aliases else object_id
-                    for object_id in checked_ids
-                ],
+                "entities": _entity_payloads(
+                    snapshot,
+                    checked_ids,
+                    aliases=aliases,
+                ),
                 "supporting_edges": [
                     _edge_payload(edge, snapshot, aliases=aliases) for edge in checked_edges
                 ],
@@ -407,6 +467,7 @@ def _case_from_payload(
         return FixtureCase(
             name=name,
             applicable=True,
+            answer_payload=dict(payload),
             expected_status=expected_status,
             actual_status=VerdictStatus.INCORRECT,
             verdict_reason="OUTPUT_INVALID",
@@ -416,6 +477,7 @@ def _case_from_payload(
     return FixtureCase(
         name=name,
         applicable=True,
+        answer_payload=dict(payload),
         expected_status=expected_status,
         actual_status=verdict.status,
         verdict_reason=verdict.reason,
@@ -501,6 +563,17 @@ def build_fixture_manifest(
         decoy_payload["edges"] = [
             _edge_payload(edge, snapshot, aliases=False) for edge in task.oracle.forbidden_edges
         ]
+        decoy_payload["entities"] = _entity_payloads(
+            snapshot,
+            _evidence_object_ids(
+                edges=(
+                    *task.oracle.forbidden_edges,
+                    *task.oracle.required_context,
+                ),
+                properties=task.oracle.required_properties,
+            ),
+            aliases=False,
+        )
         cases.append(
             _case_from_payload(
                 name="decoy",
@@ -526,6 +599,14 @@ def build_fixture_manifest(
         alternate_payload["edges"] = [
             _edge_payload(edge, snapshot, aliases=False) for edge in alternate
         ]
+        alternate_payload["entities"] = _entity_payloads(
+            snapshot,
+            _evidence_object_ids(
+                edges=(*alternate, *task.oracle.required_context),
+                properties=task.oracle.required_properties,
+            ),
+            aliases=False,
+        )
         cases.append(
             _case_from_payload(
                 name="alternate_route",
@@ -665,6 +746,7 @@ def offline_certify(
         "graph_fingerprint": snapshot.graph_fingerprint,
         "compiler_fingerprint": compiler_fingerprint(),
         "comparator_fingerprint": COMPARATOR_FINGERPRINT,
+        "certifier_fingerprint": certifier_fingerprint(),
         "capability_profile_fingerprint": capability_fingerprint,
         "bounds_fingerprint": bounds_fingerprint,
         "certified_profile_id": None,

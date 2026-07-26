@@ -38,7 +38,7 @@ from .campaign_config import (
     load_v2_campaign_config,
 )
 from .certification import LiveCertificationCatalog
-from .fingerprint import canonical_sha256
+from .fingerprint import canonical_sha256, certifier_fingerprint
 from .graph import (
     GraphSnapshot,
     LiveGraphVerification,
@@ -50,6 +50,7 @@ from .identity import IdentityResolver
 from .mcp import MCPToolLoop
 from .model_runtime import (
     ProviderRunRecord,
+    contain_model_runtime_exception,
     run_direct_model_task_v2,
     run_mcp_model_task_v2,
 )
@@ -420,6 +421,8 @@ def _prepare_track(
         mismatches.append("capability profile")
     if live.capability_profile_fingerprint != profile.profile_fingerprint:
         mismatches.append("live capability profile")
+    if live.certifier_fingerprint != certifier_fingerprint():
+        mismatches.append("live certifier")
 
     task_by_id = {task.task_id: task for task in pair.public.tasks}
     oracle_by_id = {oracle.task_id: oracle for oracle in pair.private.oracles}
@@ -1044,36 +1047,49 @@ async def _run_model(
                 if model.model_base_url is not None
                 else resolved.config.defaults.model_base_url
             )
-            if prepared.track is Track.DIRECT:
-                _outcome, sample, provider = await run_direct_model_task_v2(
-                    coordinator=coordinator,
+            try:
+                if prepared.track is Track.DIRECT:
+                    _outcome, sample, provider = await run_direct_model_task_v2(
+                        coordinator=coordinator,
+                        task=task,
+                        oracle=oracle,
+                        resolver=resolver,
+                        model=model.requested_model,
+                        model_base_url=model_base_url,
+                        ollama_options=model.options,
+                    )
+                else:
+                    if bundle is None or loop is None:
+                        raise AssertionError(
+                            "MCP model run is missing its runtime bundle"
+                        )
+                    outcome, provider = await run_mcp_model_task_v2(
+                        task=task,
+                        oracle=oracle,
+                        resolver=resolver,
+                        profile=prepared.profile,
+                        bundle=bundle,
+                        model=model.requested_model,
+                        model_base_url=model_base_url,
+                        tool_loop=loop,
+                        max_steps=resolved.config.defaults.mcp.max_steps,
+                        ollama_options=model.options,
+                        telemetry_adapter=(
+                            resolved.config.defaults.mcp.telemetry_adapter
+                        ),
+                        read_timeout_seconds=(
+                            resolved.config.defaults.mcp.read_timeout_seconds
+                        ),
+                    )
+                    sample = outcome.sample
+            except Exception as exc:
+                sample, provider = contain_model_runtime_exception(
                     task=task,
                     oracle=oracle,
-                    resolver=resolver,
                     model=model.requested_model,
-                    model_base_url=model_base_url,
-                    ollama_options=model.options,
+                    surface=prepared.track.value,
+                    error=exc,
                 )
-            else:
-                if bundle is None or loop is None:
-                    raise AssertionError("MCP model run is missing its runtime bundle")
-                outcome, provider = await run_mcp_model_task_v2(
-                    task=task,
-                    oracle=oracle,
-                    resolver=resolver,
-                    profile=prepared.profile,
-                    bundle=bundle,
-                    model=model.requested_model,
-                    model_base_url=model_base_url,
-                    tool_loop=loop,
-                    max_steps=resolved.config.defaults.mcp.max_steps,
-                    ollama_options=model.options,
-                    telemetry_adapter=resolved.config.defaults.mcp.telemetry_adapter,
-                    read_timeout_seconds=(
-                        resolved.config.defaults.mcp.read_timeout_seconds
-                    ),
-                )
-                sample = outcome.sample
             attempts.append(_attempt(task_id, attempt_number, sample, provider))
             last_sample = sample
             last_provider = provider

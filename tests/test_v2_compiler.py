@@ -20,11 +20,11 @@ from ori.eval.v2.campaign import (
 )
 from ori.eval.v2.certification import (
     CertificationError,
-    ParityCase,
     build_catalog_release,
     build_fixture_parity_cases,
     build_live_certification_proof,
     build_offline_certification_catalog,
+    build_projection_parity_cases,
     live_certify_corpus,
     live_certify_task,
     promote_candidate,
@@ -63,6 +63,7 @@ from ori.eval.v2.schema import (
     RouteClaim,
     SetClaim,
     Track,
+    VerdictStatus,
 )
 from ori.eval.v2.scoring import (
     AnswerSubmission,
@@ -448,6 +449,75 @@ def test_every_complex_candidate_is_offline_certified(complex_certified) -> None
         )
 
 
+def _assert_every_fixture_crosses_its_declared_adapter(
+    snapshot,
+    corpora,
+    certifications,
+) -> None:
+    offline_by_task = {
+        item.certification.task_id: item for item in certifications
+    }
+    for corpus in corpora:
+        profile = capability_profile_for_track(corpus.track)
+        for task in corpus.tasks:
+            offline = offline_by_task[task.public.task_id]
+            projections = build_projection_parity_cases(
+                task,
+                offline,
+                profile,
+                archive_snapshot=snapshot,
+                live_snapshot=snapshot,
+            )
+            assert [case.name for case in projections] == [
+                case.name for case in offline.fixtures.cases
+            ]
+            perfect = next(case for case in projections if case.name == "perfect")
+            assert perfect.applicable is True
+            assert perfect.archive_projection_source == "graph_snapshot_replay"
+            assert perfect.live_projection_source == "graph_snapshot_replay"
+            assert perfect.archive_execution_class is ExecutionClass.SUCCESS
+            assert perfect.archive_outcome.value == "COMPLETED"
+            assert perfect.archive_verdict_status is VerdictStatus.CORRECT
+            assert perfect.live_verdict_status is VerdictStatus.CORRECT
+
+            for fixture, projection in zip(
+                offline.fixtures.cases,
+                projections,
+                strict=True,
+            ):
+                assert projection.applicable is fixture.applicable
+                if fixture.applicable:
+                    assert projection.expected_status is fixture.expected_status
+                    assert projection.archive_raw_source_digest is not None
+                    assert projection.live_raw_source_digest is not None
+                else:
+                    assert projection.inapplicable_reason
+
+
+def test_every_simple_fixture_crosses_direct_and_mcp_adapters(
+    simple_compiled,
+    simple_certified,
+) -> None:
+    _, snapshot, direct, mcp = simple_compiled
+    _assert_every_fixture_crosses_its_declared_adapter(
+        snapshot,
+        (direct, mcp),
+        simple_certified,
+    )
+
+
+def test_every_complex_fixture_crosses_direct_and_mcp_adapters(
+    complex_compiled,
+    complex_certified,
+) -> None:
+    _, snapshot, direct, mcp = complex_compiled
+    _assert_every_fixture_crosses_its_declared_adapter(
+        snapshot,
+        (direct, mcp),
+        complex_certified,
+    )
+
+
 def test_every_mcp_candidate_is_supported_by_the_pinned_capability_profile(
     simple_compiled,
     complex_compiled,
@@ -779,37 +849,11 @@ def test_v2_scoring_rejects_missing_duplicate_unknown_and_stale_tasks(
         score_answers_v2(public, private, stale)
 
 
-def _parity_cases(certification):
-    cases = []
-    for name in ("perfect", "wrong", "empty"):
-        fixture = next(
-            case for case in certification.fixtures.cases if case.name == name
-        )
-        assert fixture.evidence is not None
-        evidence_fingerprint = canonical_sha256(fixture.evidence)
-        verdict_fingerprint = canonical_sha256(
-            {
-                "status": fixture.actual_status,
-                "reason": fixture.verdict_reason,
-            }
-        )
-        cases.append(
-            ParityCase(
-                name=name,
-                offline_evidence_fingerprint=evidence_fingerprint,
-                live_evidence_fingerprint=evidence_fingerprint,
-                offline_verdict_fingerprint=verdict_fingerprint,
-                live_verdict_fingerprint=verdict_fingerprint,
-            )
-        )
-    return tuple(cases)
-
-
 def test_candidate_promotion_and_catalog_bind_every_certification_dimension(
     simple_compiled,
     simple_certified,
 ) -> None:
-    _, _, direct, _ = simple_compiled
+    _, snapshot, direct, _ = simple_compiled
     offline_by_task = {
         item.certification.task_id: item for item in simple_certified
     }
@@ -824,7 +868,18 @@ def test_candidate_promotion_and_catalog_bind_every_certification_dimension(
             profile,
             graph_fingerprint_before=direct.graph_fingerprint,
             graph_fingerprint_after=direct.graph_fingerprint,
-            parity_cases=_parity_cases(offline),
+            parity_cases=build_fixture_parity_cases(
+                task,
+                offline,
+                snapshot,
+            ),
+            projection_cases=build_projection_parity_cases(
+                task,
+                offline,
+                profile,
+                archive_snapshot=snapshot,
+                live_snapshot=snapshot,
+            ),
         )
         candidates[task.public.task_id] = promote_candidate(
             task,
@@ -858,8 +913,17 @@ def test_candidate_promotion_and_catalog_bind_every_certification_dimension(
                 profile,
                 graph_fingerprint_before=direct.graph_fingerprint,
                 graph_fingerprint_after=direct.graph_fingerprint,
-                parity_cases=_parity_cases(
-                    offline_by_task[direct.tasks[0].public.task_id]
+                parity_cases=build_fixture_parity_cases(
+                    direct.tasks[0],
+                    offline_by_task[direct.tasks[0].public.task_id],
+                    snapshot,
+                ),
+                projection_cases=build_projection_parity_cases(
+                    direct.tasks[0],
+                    offline_by_task[direct.tasks[0].public.task_id],
+                    profile,
+                    archive_snapshot=snapshot,
+                    live_snapshot=snapshot,
                 ),
             ),
         )
@@ -883,6 +947,7 @@ def test_live_fixture_parity_promotes_without_a_model_campaign(
         task,
         offline,
         profile,
+        archive_snapshot=snapshot,
         live_snapshot_before=snapshot,
         live_snapshot_after=snapshot,
     )
@@ -924,6 +989,7 @@ def test_live_catalog_promotion_requires_exact_receipts_and_task_accounting(
         direct,
         offline,
         profile,
+        archive_snapshot=snapshot,
         live_snapshot_before=snapshot,
         live_snapshot_after=snapshot,
         verification_before=receipt,

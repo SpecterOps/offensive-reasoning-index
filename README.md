@@ -687,6 +687,14 @@ inventory, and offline-certification artifacts. Keep `*.private.json` files out
 of model requests, Inspect metadata, transcripts, CSVs, telemetry, and public
 exports.
 
+Current certification artifacts use
+`*-offline-certification-v3.private.json` and
+`*-live-certification-v3.private.json`. V3 adds track-adapter replay: every
+applicable fixture crosses the real direct projector or MCP transcript
+projector/finalizer against both archive and live graph snapshots. Changing the
+certifier, adapter, schema, identity, evidence, fixture, or comparator
+implementation makes the prior certification stale.
+
 Score deterministic structured answers with the sealed oracle supplied
 separately:
 
@@ -788,7 +796,10 @@ plain JSON string. V2 unwraps those blocks before projecting tool results into
 cardinality/count before it can prove completeness; an unknown response shape
 is inconclusive instead of crashing the tool loop. HTTP/transport/timeouts are
 `INFRA_ERROR`, while internal projector, schema, or runner exceptions are
-`HARNESS_ERROR` and are never retried as infrastructure.
+`HARNESS_ERROR` and are never retried as infrastructure. A per-task campaign
+containment boundary records an unexpected runtime defect, checkpoints it,
+continues to later tasks, and invalidates the campaign instead of terminating
+the whole process with a traceback.
 
 Compiled answer schemas define nested entity, edge, property, and bounded-
 negative reason shapes. MCP finalization, its single schema-only retry, fixture
@@ -800,7 +811,10 @@ the harness records its diagnostic digest.
 
 The MCP finalization fingerprint covers the state machine, model-runtime
 projector, MCP adapter, and native provider loops. Changing any of those files
-invalidates prior MCP certification. Re-run `compile-v2`,
+invalidates prior MCP certification. Direct property projection also enforces
+the schema boundary between unresolved
+`PropertyPredicate.property_name` values and resolved
+`EntityPropertyFact.key` facts. Re-run `compile-v2`,
 `certify-v2-live`, and no-model `run-v2` readiness, then use a fresh
 `output_dir`; never resume a campaign created by an older runner or
 finalization fingerprint.

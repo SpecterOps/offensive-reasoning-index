@@ -219,9 +219,14 @@ and failure classifier are upstream dependencies and must not be reimplemented.
 - [x] Request confirmation before uploading or replacing graph data.
 - [x] Live-certify the vertical slice with deterministic fixtures.
 - [x] Live-certify the simple catalog after operator-approved graph replacement.
-- [x] Live-certify the complete simple and complex catalogs.
+- [x] Live-certify the complete simple and complex catalogs under their original
+  implementation fingerprints.
 - [x] Verify pre/post graph fingerprints.
-- [x] Confirm simple and complex live and offline Evidence IR and verdict parity.
+- [x] Re-live-certify the complete simple catalog under adapter-certifier v3.
+- [ ] Re-live-certify the complete complex catalog under adapter-certifier v3
+  after the exact complex graph is loaded with operator approval.
+- [ ] Confirm current adapter-certifier-v3 complex live/offline Evidence IR and
+  verdict parity.
 - [x] Run no paid or local model campaign.
 
 ## Phase 11: documentation and handoff
@@ -373,6 +378,57 @@ were audited for defects analogous to the property-predicate crash.
 - [x] Pass final repository tests, Ruff, diff validation, secret scan, and
   independent review.
 
+### Adapter-level parity and campaign-containment audit
+
+A second pre-run audit found that the prior live fixture proof checked graph
+membership but then compared an offline `EvidenceIR` object with itself. It did
+not cross the direct projector, MCP transcript projector, or shared MCP
+finalizer. The audit also identified a campaign-level exception gap: a future
+unexpected task-runtime defect could still terminate the process before a
+durable checkpoint was written.
+
+- [x] Preserve each applicable fixture's exact structured answer payload in the
+  private certification artifact.
+- [x] Add canonical direct graph-response replay through
+  `project_direct_evidence()`.
+- [x] Add canonical MCP tool-response replay through
+  `MCPTranscriptProjector` and `score_mcp_transcript_v2()`.
+- [x] Distinguish graph-backed, adversarial, and malformed replay evidence.
+- [x] Require malformed applicable fixtures to produce typed
+  `MODEL_FAILURE/OUTPUT_INVALID` parity instead of an inapplicable marker.
+- [x] Bind certification to a source-derived certifier fingerprint covering the
+  schema, compiler, comparator, graph, identity, evidence, fixtures,
+  certification, direct/MCP adapters, and model runtime.
+- [x] Reject stale offline, live, candidate, and campaign certification after a
+  certifier change.
+- [x] Add an explicit direct boundary between unresolved
+  `PropertyPredicate.property_name` constraints and resolved
+  `EntityPropertyFact.key` facts.
+- [x] Add a regression that simulates a stale predicate object at the resolved
+  fact boundary and fails with `DirectAdapterError`, not `AttributeError`.
+- [x] Scope direct property projection to the resolved `(entity_id, key)` pair
+  so an unrelated returned node cannot contaminate route, decision, or negative
+  proof evidence.
+- [x] Reject nodes outside the sealed decision/absence context and cover the
+  decision boundary explicitly.
+- [x] Replay every simple fixture across all 20 direct and 40 MCP candidates.
+- [x] Replay every complex fixture across all 46 direct and 70 MCP candidates.
+- [x] Add a per-task campaign containment boundary that records unexpected
+  runtime defects as durable `HARNESS_ERROR`, continues/checkpoints, and makes
+  the campaign invalid.
+- [x] Compile both tracks for simple seed 1234 and complex seed 4401 into the
+  fresh `adapter-parity-v3-entity-scoped` artifact namespace without model
+  calls.
+- [x] Live-certify both simple seed-1234 tracks against the unchanged controlled
+  graph under certifier v3.
+- [x] Pass a fresh two-model/two-track no-model readiness gate from
+  `models-v2-adapter-parity-v3.yaml`.
+- [ ] Live-certify both complex seed-4401 tracks under certifier v3 after an
+  operator-approved graph replacement.
+- [x] Run final full repository tests (581 passed), Ruff, diff validation,
+  source-control secret scan, and independent review for the
+  adapter-certifier-v3 change.
+
 ## Definition of done
 
 - [x] All eight CV1 regression cases pass through v2.
@@ -388,7 +444,9 @@ were audited for defects analogous to the property-predicate crash.
   immutable and enforced.
 - [x] Every current simple/complex capability is migrated or replaced.
 - [x] Every migrated task has complete fixture evidence.
-- [x] Live and offline verdicts agree.
+- [x] Current simple live and offline adapter-projected verdicts agree.
+- [ ] Current complex live and offline adapter-projected verdicts agree under
+  certifier v3.
 - [x] No v2 task depends on hidden template-specific grader behavior.
 - [x] Every candidate is safe under its direct or MCP profile.
 - [x] The original implementation goal launched no paid model run; the later

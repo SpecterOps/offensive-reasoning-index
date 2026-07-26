@@ -11,12 +11,13 @@ from ori.eval.direct_query_safety import query_fingerprint
 from .comparator import compare
 from .evidence import EvidenceNormalizationError, normalize_direct_evidence
 from .fingerprint import canonical_sha256
-from .identity import IdentityResolver
+from .identity import IdentityResolutionError, IdentityResolver
 from .schema import (
     DIRECT_QUERY_POLICY_VERSION,
     CircuitState,
     DirectExecutionReceipt,
     EdgeWitness,
+    EntityPropertyFact,
     EvidenceIR,
     ExecutionClass,
     HealthState,
@@ -38,7 +39,7 @@ _INFRA_FAILURES = frozenset(
         "circuit_open",
     }
 )
-_ANSWER_ONLY_FIELDS = frozenset(
+DIRECT_ASSERTION_FIELDS = frozenset(
     {
         "count",
         "decision",
@@ -396,14 +397,21 @@ def _project_edges(
 def _project_properties(
     nodes: Sequence[Mapping[str, Any]],
     *,
-    allowed_keys: frozenset[str],
+    allowed_fields: Mapping[tuple[str, str], str],
+    resolver: IdentityResolver,
 ) -> tuple[dict[str, Any], ...]:
-    if not allowed_keys:
+    if not allowed_fields:
         return ()
-    canonical_keys = {key.casefold(): key for key in allowed_keys}
     facts: list[dict[str, Any]] = []
     for node in nodes:
-        identity = _node_identity(node)
+        raw_identity = _node_identity(node)
+        try:
+            identity = resolver.resolve(raw_identity)
+        except IdentityResolutionError:
+            # Unknown returned nodes are rejected later by entity
+            # normalization. They must not contribute a property fact for a
+            # different sealed identity in the meantime.
+            continue
         raw_properties = node.get("properties")
         if not isinstance(raw_properties, Mapping):
             raw_properties = node.get("Props")
@@ -411,7 +419,9 @@ def _project_properties(
             raw_properties = node.get("props")
         properties = raw_properties if isinstance(raw_properties, Mapping) else node
         for key, value in properties.items():
-            canonical_key = canonical_keys.get(str(key).casefold())
+            canonical_key = allowed_fields.get(
+                (identity.casefold(), str(key).casefold())
+            )
             if canonical_key is not None and (
                 value is None or isinstance(value, (str, int, float, bool))
             ):
@@ -423,6 +433,98 @@ def _project_properties(
                     }
                 )
     return tuple(facts)
+
+
+def _claim_entity_projection(
+    task: TaskBundle,
+    oracle: OracleBundle,
+    nodes: Sequence[Mapping[str, Any]],
+) -> tuple[str, ...]:
+    identities = tuple(_node_identity(node) for node in nodes)
+    if task.claim_kind == "decision":
+        primary_ids = {
+            entity.object_id.casefold()
+            for entity in oracle.expected_entities
+        }
+        allowed_ids = {
+            *primary_ids,
+            *(
+                endpoint.casefold()
+                for edge in oracle.required_context
+                for endpoint in (edge.source_id, edge.target_id)
+            ),
+            *(fact.entity_id.casefold() for fact in oracle.required_properties),
+        }
+    elif task.claim_kind == "absence":
+        checked_ids = {
+            entity_id.casefold()
+            for witness in oracle.negative_witnesses
+            for entity_id in witness.checked_entity_ids
+        }
+        checked_edges = tuple(
+            edge
+            for witness in oracle.negative_witnesses
+            for edge in witness.checked_edges
+        )
+        checked_properties = tuple(
+            fact
+            for witness in oracle.negative_witnesses
+            for fact in witness.checked_properties
+        )
+        primary_ids = checked_ids
+        allowed_ids = {
+            *checked_ids,
+            *(
+                endpoint.casefold()
+                for edge in checked_edges
+                for endpoint in (edge.source_id, edge.target_id)
+            ),
+            *(fact.entity_id.casefold() for fact in checked_properties),
+            *(fact.entity_id.casefold() for fact in oracle.required_properties),
+        }
+    else:
+        return identities
+
+    unexpected = sorted(
+        identity for identity in identities if identity.casefold() not in allowed_ids
+    )
+    if unexpected:
+        raise DirectAdapterError(
+            "direct result contains nodes outside the sealed decision/proof "
+            f"context: {unexpected}"
+        )
+    return tuple(
+        identity for identity in identities if identity.casefold() in primary_ids
+    )
+
+
+def _required_property_fields(
+    oracle: OracleBundle,
+) -> dict[tuple[str, str], str]:
+    """Keep unresolved claim predicates out of the graph-evidence boundary."""
+
+    facts = (
+        *oracle.required_properties,
+        *(
+            fact
+            for witness in oracle.negative_witnesses
+            for fact in witness.checked_properties
+        ),
+    )
+    unresolved = tuple(
+        type(fact).__name__
+        for fact in facts
+        if not isinstance(fact, EntityPropertyFact)
+    )
+    if unresolved:
+        raise DirectAdapterError(
+            "direct property projection requires resolved EntityPropertyFact "
+            f"objects, received {unresolved}"
+        )
+    return {
+        (fact.entity_id.casefold(), fact.key.casefold()): fact.key
+        for fact in facts
+    }
 
 
 def _non_negative_int(value: Any) -> int | None:
@@ -577,36 +679,31 @@ def project_direct_evidence(
     elif task.claim_kind == "count":
         payload["count"] = _project_scalar_count(result, raw)
     else:
-        required_property_keys = frozenset(
-            fact.key
-            for fact in (
-                *oracle.required_properties,
-                *(
-                    fact
-                    for witness in oracle.negative_witnesses
-                    for fact in witness.checked_properties
-                ),
-            )
+        required_property_fields = _required_property_fields(oracle)
+        payload["entities"] = _claim_entity_projection(
+            task,
+            oracle,
+            nodes,
         )
-        payload["entities"] = [_node_identity(node) for node in nodes]
         payload["edges"] = route_edges
         payload["supporting_edges"] = supporting_edges
         payload["observed_properties"] = _project_properties(
             nodes,
-            allowed_keys=required_property_keys,
+            allowed_fields=required_property_fields,
+            resolver=resolver,
         )
         if route_edges:
             payload["path_status"] = "found"
 
     if answer_payload:
         for key, value in answer_payload.items():
-            if key not in _ANSWER_ONLY_FIELDS:
+            if key not in DIRECT_ASSERTION_FIELDS:
                 raise DirectAdapterError(
                     f"direct answer payload cannot override graph evidence field {key!r}"
                 )
             payload[key] = value
 
-    if task.claim_kind == "route" and not route_edges:
+    if task.claim_kind == "route" and not route_edges and nodes:
         raise DirectAdapterError(
             "path result contains no ordered edge witness; nodes alone are insufficient"
         )

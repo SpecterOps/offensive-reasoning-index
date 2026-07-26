@@ -29,6 +29,8 @@ from ori.eval.v2.schema import (
     AbsenceClaim,
     BoundedNegativePolicy,
     CountClaim,
+    DecisionClaim,
+    DecisionPolicy,
     EdgeWitness,
     EntityPropertyFact,
     EntityRef,
@@ -45,6 +47,7 @@ from ori.eval.v2.schema import (
     PopulationScope,
     PredicateOperator,
     PropertyPredicate,
+    RelationshipPattern,
     RelationshipSemantics,
     RouteClaim,
     RouteVariant,
@@ -319,6 +322,139 @@ def test_direct_route_projects_required_property_predicate_by_property_name() ->
     )
 
     assert evidence.observed_properties == oracle.required_properties
+
+
+def test_direct_property_boundary_rejects_unresolved_claim_predicate() -> None:
+    predicate = PropertyPredicate(
+        role="source",
+        property_name="hasspn",
+        operator=PredicateOperator.EQUALS,
+        value=True,
+    )
+    claim = CLAIM.model_copy(update={"required_properties": (predicate,)})
+    # model_copy intentionally bypasses validation here to simulate a stale or
+    # incorrectly paired private artifact reaching the runtime boundary.
+    malformed_oracle = ORACLE.model_copy(
+        update={
+            "claim": claim,
+            "required_properties": claim.required_properties,
+        }
+    )
+
+    with pytest.raises(
+        DirectAdapterError,
+        match="requires resolved EntityPropertyFact",
+    ):
+        project_direct_evidence(
+            CypherResult(success=True, raw=_raw_route()),
+            task=TASK,
+            oracle=malformed_oracle,
+            resolver=RESOLVER,
+        )
+
+
+def test_direct_property_projection_is_scoped_to_the_resolved_entity() -> None:
+    extra = EntityRef(
+        object_id="USER-EXTRA",
+        object_type="User",
+        domain="EXAMPLE.LOCAL",
+        role="benchmark_object",
+        canonical_name="EXTRA@EXAMPLE.LOCAL",
+    )
+    property_fact = EntityPropertyFact(
+        entity_id=ALICE.object_id,
+        key="hasspn",
+        value=True,
+    )
+    oracle = ORACLE.model_copy(
+        update={"required_properties": (property_fact,)}
+    )
+    raw = _raw_route()
+    raw["data"]["nodes"]["0"]["properties"]["hasSPN"] = True
+    raw["data"]["nodes"]["2"] = {
+        "objectId": extra.object_id,
+        "label": extra.canonical_name,
+        "kind": extra.object_type,
+        "properties": {
+            "name": extra.canonical_name,
+            "hasSPN": False,
+        },
+    }
+
+    evidence = project_direct_evidence(
+        CypherResult(success=True, raw=raw),
+        task=TASK,
+        oracle=oracle,
+        resolver=IdentityResolver((ALICE, TARGET, extra)),
+    )
+
+    assert evidence.observed_properties == (property_fact,)
+    assert extra.object_id in {
+        entity.object_id for entity in evidence.entities
+    }
+
+
+def test_direct_decision_rejects_nodes_outside_the_sealed_context() -> None:
+    extra = EntityRef(
+        object_id="USER-EXTRA",
+        object_type="User",
+        domain="EXAMPLE.LOCAL",
+        role="benchmark_object",
+        canonical_name="EXTRA@EXAMPLE.LOCAL",
+    )
+    decision_claim = DecisionClaim(
+        kind="decision",
+        claim_id="claim:decision",
+        subjects=(
+            EntitySelector(role="source", object_type="User"),
+            EntitySelector(role="target", object_type="Group"),
+        ),
+        required_relationships=(
+            RelationshipPattern(
+                source_role="source",
+                relationship="MemberOf",
+                target_role="target",
+            ),
+        ),
+        semantics=RelationshipSemantics.DIRECT,
+        population_scope=PopulationScope.BENCHMARK_NAMESPACE,
+    )
+    task = TASK.model_copy(
+        update={
+            "task_id": "simple.direct.decision@2",
+            "claim_kind": "decision",
+            "answer_policy": DecisionPolicy(kind="decision"),
+        }
+    )
+    oracle = ORACLE.model_copy(
+        update={
+            "task_id": task.task_id,
+            "claim": decision_claim,
+            "expected_entities": (ALICE, TARGET),
+            "expected_decision": True,
+            "required_context": (EDGE,),
+            "route_variants": (),
+        }
+    )
+    raw = _raw_route()
+    raw["data"]["nodes"]["2"] = {
+        "objectId": extra.object_id,
+        "label": extra.canonical_name,
+        "kind": extra.object_type,
+        "properties": {"name": extra.canonical_name},
+    }
+
+    with pytest.raises(
+        DirectAdapterError,
+        match="outside the sealed decision/proof context",
+    ):
+        project_direct_evidence(
+            CypherResult(success=True, raw=raw),
+            task=task,
+            oracle=oracle,
+            resolver=IdentityResolver((ALICE, TARGET, extra)),
+            answer_payload={"decision": True},
+        )
 
 
 def test_direct_absence_projects_resolved_witness_properties() -> None:

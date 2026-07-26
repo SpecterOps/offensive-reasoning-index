@@ -1184,3 +1184,36 @@ def test_v2_run_model_emits_task_retry_completion_and_resume_progress(
         "[1/1]" in message and DIRECT_TASK.task_id in message
         for message in resumed_infrastructure
     )
+
+    async def exploding_direct_run(**_kwargs: Any):
+        raise AttributeError("future adapter schema drift")
+
+    state_holder["value"] = None
+    monkeypatch.setattr(
+        campaign_runner,
+        "run_direct_model_task_v2",
+        exploding_direct_run,
+    )
+    contained_progress: list[str] = []
+    _provenance, contained_results = asyncio.run(
+        campaign_runner._run_model(
+            resolved=resolved,
+            prepared=prepared,
+            model=model,
+            run_index=1,
+            bhce=HealthyBHCE(),
+            coordinator=coordinator,
+            loop=None,
+            runs_total=1,
+            progress=contained_progress.append,
+        )
+    )
+
+    assert len(contained_results) == 1
+    assert contained_results[0].execution_class is ExecutionClass.HARNESS_FAILURE
+    assert contained_results[0].outcome is SampleOutcomeCode.HARNESS_ERROR
+    assert contained_results[0].reasoning_correct is None
+    assert contained_results[0].detail == (
+        "AttributeError: future adapter schema drift"
+    )
+    assert any("HARNESS_ERROR" in message for message in contained_progress)

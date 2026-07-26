@@ -48,8 +48,8 @@ Keep scorer-only files private:
 
 ```text
 *-oracles-v2.private.json
-*-offline-certification-v2.private.json
-*-live-certification.private.json
+*-offline-certification-v3.private.json
+*-live-certification-v3.private.json
 *-live-{pre,middle,post}.private.json
 *scoring.private.json
 ```
@@ -70,6 +70,24 @@ missing elements, and extras are diagnostics; they never weaken binary policy.
 Fixture certification fingerprints both Evidence IR and verdicts so a
 live/offline disagreement blocks candidate promotion.
 
+Certification uses two distinct parity layers:
+
+- normalized fixture parity proves the sealed policy and comparator produce the
+  same `EvidenceIR` and `Verdict`;
+- adapter parity replays the exact fixture payload through the declared direct
+  projector or MCP transcript projector/finalizer against both the archive and
+  live graph snapshots.
+
+Adapter parity labels each replay as graph-backed, adversarial, or malformed.
+Malformed fixtures must produce typed `OUTPUT_INVALID` accounting instead of
+being silently marked inapplicable. A perfect fixture must be graph-backed and
+gradeable through the real track adapter.
+
+The private certification fingerprint covers the compiler, comparator,
+identity resolver, evidence normalizer, direct and MCP adapters, projector,
+fixture generator, certification code, and schema. Changing any of those
+surfaces invalidates prior offline and live certification.
+
 ### Direct execution
 
 V2 does not duplicate containment. Every model-produced query goes through the
@@ -82,6 +100,13 @@ with nodes but no ordered edges is invalid. Model-attributable policy,
 query-timeout, and query errors are incorrect after readiness. Authentication,
 transport, server, rate-limit, response, and circuit-open failures receive no
 reasoning verdict.
+
+Claim property constraints and graph facts are intentionally different types.
+`PropertyPredicate.property_name` describes the unresolved logical claim;
+`EntityPropertyFact.key` describes a seed-resolved fact bound to an object ID.
+The direct projector accepts only resolved facts at its graph-evidence boundary
+and rejects a stale or incorrectly paired predicate object as a typed adapter
+error.
 
 ### MCP capabilities and finalization
 
@@ -213,7 +238,9 @@ reconciled exactly once and the post-track graph gate passes.
 Only external availability failures—HTTP, transport, authentication, server,
 rate-limit, and timeout conditions—are retryable infrastructure. An internal
 projector, schema, adapter, or runner exception is `HARNESS_ERROR`; it receives
-no reasoning verdict and is not retried as infrastructure. The MCP finalization
+no reasoning verdict and is not retried as infrastructure. The campaign writes
+that terminal task result and its private provider receipt, preserves its
+checkpoint, continues to later tasks, and marks the campaign invalid. The MCP finalization
 fingerprint hashes the state machine, projector, MCP adapter, and provider-loop
 implementations, while model-run provenance binds the complete runtime
 implementation fingerprint. Runtime changes therefore require new compiled and

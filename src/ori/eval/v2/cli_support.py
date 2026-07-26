@@ -72,7 +72,7 @@ def compile_v2_files(
     oracle_path = output_dir / f"{stem}-oracles-v2.private.json"
     inventory_path = output_dir / f"{stem}-inventory-v2.json"
     certification_path = (
-        output_dir / f"{stem}-offline-certification-v2.private.json"
+        output_dir / f"{stem}-offline-certification-v3.private.json"
     )
     write_artifacts(
         corpus,
@@ -152,6 +152,7 @@ async def certify_v2_live_files(
             corpora[Track.DIRECT],
             offline[Track.DIRECT],
             profiles[Track.DIRECT],
+            archive_snapshot=snapshot,
             live_snapshot_before=live_pre,
             live_snapshot_after=live_middle,
             verification_before=receipt_pre,
@@ -167,6 +168,7 @@ async def certify_v2_live_files(
             corpora[Track.MCP],
             offline[Track.MCP],
             profiles[Track.MCP],
+            archive_snapshot=snapshot,
             live_snapshot_before=live_middle,
             live_snapshot_after=live_post,
             verification_before=receipt_middle,
@@ -179,10 +181,10 @@ async def certify_v2_live_files(
         "verification_middle": output_dir / f"{stem}-live-middle.private.json",
         "verification_post": output_dir / f"{stem}-live-post.private.json",
         "direct_certification": (
-            output_dir / f"{stem}-direct-live-certification.private.json"
+            output_dir / f"{stem}-direct-live-certification-v3.private.json"
         ),
         "mcp_certification": (
-            output_dir / f"{stem}-mcp-live-certification.private.json"
+            output_dir / f"{stem}-mcp-live-certification-v3.private.json"
         ),
         "direct_candidates": output_dir / f"{stem}-direct-candidates-v2.json",
         "mcp_candidates": output_dir / f"{stem}-mcp-candidates-v2.json",

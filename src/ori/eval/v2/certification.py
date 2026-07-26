@@ -9,19 +9,32 @@ from pydantic import model_validator
 
 from .comparator import COMPARATOR_FINGERPRINT, compare
 from .compiler import CompiledCorpus, CompiledTask, compiler_fingerprint
-from .fingerprint import canonical_sha256
+from .fingerprint import canonical_sha256, certifier_fingerprint
 from .fixtures import OfflineCertification, offline_certify
 from .graph import GraphSnapshot, LiveGraphVerification
+from .live_projection import (
+    ProjectionSource,
+    SurfaceProjection,
+    project_direct_fixture,
+    project_mcp_fixture,
+    semantic_evidence_fingerprint,
+)
 from .profiles import validate_capability_profile
 from .schema import (
     CapabilityProfile,
     CatalogEntry,
     CatalogRelease,
     CertificationState,
+    ExecutionClass,
     StrictModel,
     TaskCertification,
     Track,
+    VerdictStatus,
 )
+from .scoring import SampleOutcomeCode
+
+OFFLINE_CERTIFICATION_SCHEMA_VERSION = "ori-eval-offline-certification-v3"
+LIVE_CERTIFICATION_SCHEMA_VERSION = "ori-eval-live-certification-v3"
 
 
 class CertificationError(ValueError):
@@ -29,8 +42,8 @@ class CertificationError(ValueError):
 
 
 class OfflineCertificationCatalog(StrictModel):
-    schema_version: Literal["ori-eval-offline-certification-v2"] = (
-        "ori-eval-offline-certification-v2"
+    schema_version: Literal["ori-eval-offline-certification-v3"] = (
+        OFFLINE_CERTIFICATION_SCHEMA_VERSION
     )
     protocol_version: Literal["ori-eval-protocol-v2"] = "ori-eval-protocol-v2"
     product: str
@@ -39,6 +52,7 @@ class OfflineCertificationCatalog(StrictModel):
     graph_fingerprint: str
     compiler_fingerprint: str
     comparator_fingerprint: str
+    certifier_fingerprint: str
     capability_profile_fingerprint: str
     certifications: tuple[OfflineCertification, ...]
     artifact_fingerprint: str
@@ -50,6 +64,12 @@ class OfflineCertificationCatalog(StrictModel):
         ]
         if len(task_ids) != len(set(task_ids)):
             raise ValueError("offline certification catalog has duplicate tasks")
+        current_certifier = certifier_fingerprint()
+        if self.certifier_fingerprint != current_certifier or any(
+            item.certification.certifier_fingerprint != current_certifier
+            for item in self.certifications
+        ):
+            raise ValueError("offline certification certifier is stale")
         expected = canonical_sha256(
             self,
             exclude_fields=("artifact_fingerprint",),
@@ -81,13 +101,14 @@ def build_offline_certification_catalog(
         "graph_fingerprint": corpus.graph_fingerprint,
         "compiler_fingerprint": corpus.compiler_fingerprint,
         "comparator_fingerprint": COMPARATOR_FINGERPRINT,
+        "certifier_fingerprint": certifier_fingerprint(),
         "capability_profile_fingerprint": profile.profile_fingerprint,
         "certifications": certifications,
         "artifact_fingerprint": "0" * 64,
     }
     payload["artifact_fingerprint"] = canonical_sha256(
         {
-            "schema_version": "ori-eval-offline-certification-v2",
+            "schema_version": OFFLINE_CERTIFICATION_SCHEMA_VERSION,
             "protocol_version": "ori-eval-protocol-v2",
             **payload,
         },
@@ -122,16 +143,152 @@ class ParityCase(StrictModel):
         return self
 
 
+class ProjectionParityCase(StrictModel):
+    """Exact archive/live agreement after the declared track adapter."""
+
+    name: str
+    applicable: bool
+    expected_status: VerdictStatus | None = None
+    archive_projection_source: ProjectionSource | None = None
+    live_projection_source: ProjectionSource | None = None
+    archive_execution_class: ExecutionClass | None = None
+    live_execution_class: ExecutionClass | None = None
+    archive_outcome: SampleOutcomeCode | None = None
+    live_outcome: SampleOutcomeCode | None = None
+    archive_evidence_fingerprint: str | None = None
+    live_evidence_fingerprint: str | None = None
+    archive_verdict_fingerprint: str | None = None
+    live_verdict_fingerprint: str | None = None
+    archive_verdict_status: VerdictStatus | None = None
+    live_verdict_status: VerdictStatus | None = None
+    archive_raw_source_digest: str | None = None
+    live_raw_source_digest: str | None = None
+    archive_rejection_fingerprint: str | None = None
+    live_rejection_fingerprint: str | None = None
+    inapplicable_reason: str | None = None
+
+    @model_validator(mode="after")
+    def archive_and_live_agree(self) -> ProjectionParityCase:
+        runtime_fields = (
+            self.archive_projection_source,
+            self.live_projection_source,
+            self.archive_execution_class,
+            self.live_execution_class,
+            self.archive_outcome,
+            self.live_outcome,
+            self.archive_raw_source_digest,
+            self.live_raw_source_digest,
+        )
+        if not self.applicable:
+            if not self.inapplicable_reason:
+                raise ValueError(
+                    "inapplicable projection parity requires a reason"
+                )
+            if any(value is not None for value in runtime_fields):
+                raise ValueError(
+                    "inapplicable projection parity cannot carry runtime results"
+                )
+            return self
+
+        if self.expected_status is None:
+            raise ValueError("applicable projection parity requires an expectation")
+        if self.inapplicable_reason is not None:
+            raise ValueError(
+                "applicable projection parity cannot declare an exception"
+            )
+        if any(value is None for value in runtime_fields):
+            raise ValueError("applicable projection parity is incomplete")
+        if self.archive_projection_source != self.live_projection_source:
+            raise ValueError(f"{self.name} projection source mismatch")
+        if self.archive_execution_class != self.live_execution_class:
+            raise ValueError(f"{self.name} execution classification mismatch")
+        if self.archive_outcome != self.live_outcome:
+            raise ValueError(f"{self.name} outcome mismatch")
+        if self.archive_raw_source_digest != self.live_raw_source_digest:
+            raise ValueError(f"{self.name} raw projection source mismatch")
+
+        evidence_pair = (
+            self.archive_evidence_fingerprint,
+            self.live_evidence_fingerprint,
+        )
+        verdict_pair = (
+            self.archive_verdict_fingerprint,
+            self.live_verdict_fingerprint,
+        )
+        rejection_pair = (
+            self.archive_rejection_fingerprint,
+            self.live_rejection_fingerprint,
+        )
+        if any(value is not None for value in evidence_pair):
+            if (
+                evidence_pair[0] is None
+                or evidence_pair[0] != evidence_pair[1]
+            ):
+                raise ValueError(f"{self.name} Evidence IR parity mismatch")
+            if (
+                verdict_pair[0] is None
+                or verdict_pair[0] != verdict_pair[1]
+                or self.archive_verdict_status is None
+                or self.archive_verdict_status != self.live_verdict_status
+            ):
+                raise ValueError(f"{self.name} verdict parity mismatch")
+            if any(value is not None for value in rejection_pair):
+                raise ValueError(
+                    f"{self.name} cannot be gradeable and rejected"
+                )
+            if (
+                self.archive_execution_class is not ExecutionClass.SUCCESS
+                or self.archive_outcome is not SampleOutcomeCode.COMPLETED
+            ):
+                raise ValueError(
+                    f"{self.name} gradeable projection is not successful"
+                )
+            if self.archive_verdict_status is not self.expected_status:
+                raise ValueError(
+                    f"{self.name} projected verdict violates its expectation"
+                )
+        else:
+            if any(value is not None for value in verdict_pair) or any(
+                value is not None
+                for value in (
+                    self.archive_verdict_status,
+                    self.live_verdict_status,
+                )
+            ):
+                raise ValueError(
+                    f"{self.name} rejected projection cannot carry a verdict"
+                )
+            if (
+                rejection_pair[0] is None
+                or rejection_pair[0] != rejection_pair[1]
+            ):
+                raise ValueError(f"{self.name} rejection parity mismatch")
+            if self.expected_status is not VerdictStatus.INCORRECT:
+                raise ValueError(
+                    f"{self.name} correct fixture cannot be adapter-rejected"
+                )
+            if (
+                self.archive_execution_class is not ExecutionClass.MODEL_FAILURE
+                or self.archive_outcome is not SampleOutcomeCode.OUTPUT_INVALID
+            ):
+                raise ValueError(
+                    f"{self.name} rejection lacks typed model-failure accounting"
+                )
+        return self
+
+
 class LiveCertificationProof(StrictModel):
     task_id: str
     task_fingerprint: str
     oracle_fingerprint: str
     fixture_fingerprint: str
+    certifier_fingerprint: str
     capability_profile_id: str
     capability_profile_fingerprint: str
     graph_fingerprint_before: str
     graph_fingerprint_after: str
     parity_cases: tuple[ParityCase, ...]
+    projection_cases: tuple[ProjectionParityCase, ...]
     proof_fingerprint: str
 
     @model_validator(mode="after")
@@ -145,6 +302,28 @@ class LiveCertificationProof(StrictModel):
         if not {"perfect", "wrong", "empty"}.issubset(applicable):
             raise ValueError(
                 "live certification requires perfect, wrong, and empty parity cases"
+            )
+        projection_names = [case.name for case in self.projection_cases]
+        if projection_names != names:
+            raise ValueError(
+                "projection parity must cover the exact fixture order"
+            )
+        projected = {
+            case.name for case in self.projection_cases if case.applicable
+        }
+        if not {"perfect", "wrong", "empty"}.issubset(projected):
+            raise ValueError(
+                "adapter parity requires perfect, wrong, and empty cases"
+            )
+        perfect = next(
+            case for case in self.projection_cases if case.name == "perfect"
+        )
+        if (
+            perfect.archive_projection_source
+            != "graph_snapshot_replay"
+        ):
+            raise ValueError(
+                "perfect adapter parity must derive from the graph snapshot"
             )
         expected = canonical_sha256(self, exclude_fields=("proof_fingerprint",))
         if self.proof_fingerprint != expected:
@@ -160,6 +339,7 @@ def build_live_certification_proof(
     graph_fingerprint_before: str,
     graph_fingerprint_after: str,
     parity_cases: tuple[ParityCase, ...],
+    projection_cases: tuple[ProjectionParityCase, ...],
 ) -> LiveCertificationProof:
     """Bind deterministic live/offline parity evidence to one task."""
 
@@ -169,11 +349,13 @@ def build_live_certification_proof(
         "task_fingerprint": task.public.task_fingerprint,
         "oracle_fingerprint": task.oracle.oracle_fingerprint,
         "fixture_fingerprint": offline.fixtures.fixture_fingerprint,
+        "certifier_fingerprint": certifier_fingerprint(),
         "capability_profile_id": profile.profile_id,
         "capability_profile_fingerprint": profile.profile_fingerprint,
         "graph_fingerprint_before": graph_fingerprint_before,
         "graph_fingerprint_after": graph_fingerprint_after,
         "parity_cases": parity_cases,
+        "projection_cases": projection_cases,
         "proof_fingerprint": "0" * 64,
     }
     payload["proof_fingerprint"] = canonical_sha256(
@@ -269,7 +451,7 @@ def build_fixture_parity_cases(
     offline: OfflineCertification,
     live_snapshot: GraphSnapshot,
 ) -> tuple[ParityCase, ...]:
-    """Bind every gradeable fixture to an exact live graph projection."""
+    """Bind comparator fixtures to an identity-equivalent live graph."""
 
     if live_snapshot.graph_fingerprint != task.oracle.graph_fingerprint:
         raise CertificationError("fixture parity live graph fingerprint mismatch")
@@ -328,11 +510,155 @@ def build_fixture_parity_cases(
     return tuple(parity)
 
 
+def _projection_case(
+    fixture_name: str,
+    expected_status: VerdictStatus,
+    archive: SurfaceProjection,
+    live: SurfaceProjection,
+) -> ProjectionParityCase:
+    def evidence_fingerprint(result: SurfaceProjection) -> str | None:
+        return (
+            semantic_evidence_fingerprint(result.evidence)
+            if result.evidence is not None
+            else None
+        )
+
+    def verdict_fingerprint(result: SurfaceProjection) -> str | None:
+        return (
+            canonical_sha256(result.verdict)
+            if result.verdict is not None
+            else None
+        )
+
+    def rejection_fingerprint(result: SurfaceProjection) -> str | None:
+        return (
+            canonical_sha256({"reason": result.rejection_reason})
+            if result.rejection_reason is not None
+            else None
+        )
+
+    return ProjectionParityCase(
+        name=fixture_name,
+        applicable=True,
+        expected_status=expected_status,
+        archive_projection_source=archive.projection_source,
+        live_projection_source=live.projection_source,
+        archive_execution_class=archive.execution_class,
+        live_execution_class=live.execution_class,
+        archive_outcome=archive.outcome,
+        live_outcome=live.outcome,
+        archive_evidence_fingerprint=evidence_fingerprint(archive),
+        live_evidence_fingerprint=evidence_fingerprint(live),
+        archive_verdict_fingerprint=verdict_fingerprint(archive),
+        live_verdict_fingerprint=verdict_fingerprint(live),
+        archive_verdict_status=(
+            archive.verdict.status if archive.verdict is not None else None
+        ),
+        live_verdict_status=(
+            live.verdict.status if live.verdict is not None else None
+        ),
+        archive_raw_source_digest=archive.raw_source_digest,
+        live_raw_source_digest=live.raw_source_digest,
+        archive_rejection_fingerprint=rejection_fingerprint(archive),
+        live_rejection_fingerprint=rejection_fingerprint(live),
+    )
+
+
+def build_projection_parity_cases(
+    task: CompiledTask,
+    offline: OfflineCertification,
+    profile: CapabilityProfile,
+    *,
+    archive_snapshot: GraphSnapshot,
+    live_snapshot: GraphSnapshot,
+) -> tuple[ProjectionParityCase, ...]:
+    """Run every fixture through the declared direct or MCP adapter."""
+
+    if (
+        archive_snapshot.graph_fingerprint
+        != live_snapshot.graph_fingerprint
+        or archive_snapshot.graph_fingerprint
+        != task.oracle.graph_fingerprint
+    ):
+        raise CertificationError("adapter parity graph fingerprint mismatch")
+    perfect = next(
+        (
+            case
+            for case in offline.fixtures.cases
+            if case.name == "perfect"
+            and case.applicable
+            and case.evidence is not None
+        ),
+        None,
+    )
+    if perfect is None or perfect.evidence is None:
+        raise CertificationError(
+            f"task {task.public.task_id} lacks gradeable perfect evidence"
+        )
+
+    projections: list[ProjectionParityCase] = []
+    for case in offline.fixtures.cases:
+        if not case.applicable:
+            projections.append(
+                ProjectionParityCase(
+                    name=case.name,
+                    applicable=False,
+                    inapplicable_reason=case.inapplicable_reason,
+                )
+            )
+            continue
+        if case.expected_status is None:
+            raise CertificationError(
+                f"task {task.public.task_id} fixture {case.name} "
+                "has no expected status"
+            )
+        if task.public.binding.track is Track.DIRECT:
+            archive_projection = project_direct_fixture(
+                task=task.public,
+                oracle=task.oracle,
+                case=case,
+                snapshot=archive_snapshot,
+            )
+            live_projection = project_direct_fixture(
+                task=task.public,
+                oracle=task.oracle,
+                case=case,
+                snapshot=live_snapshot,
+            )
+        else:
+            archive_projection = project_mcp_fixture(
+                task=task.public,
+                oracle=task.oracle,
+                case=case,
+                perfect_evidence=perfect.evidence,
+                profile=profile,
+                snapshot=archive_snapshot,
+            )
+            live_projection = project_mcp_fixture(
+                task=task.public,
+                oracle=task.oracle,
+                case=case,
+                perfect_evidence=perfect.evidence,
+                profile=profile,
+                snapshot=live_snapshot,
+            )
+        projections.append(
+            _projection_case(
+                case.name,
+                case.expected_status,
+                archive_projection,
+                live_projection,
+            )
+        )
+    return tuple(projections)
+
+
 def live_certify_task(
     task: CompiledTask,
     offline: OfflineCertification,
     profile: CapabilityProfile,
     *,
+    archive_snapshot: GraphSnapshot,
     live_snapshot_before: GraphSnapshot,
     live_snapshot_after: GraphSnapshot,
 ) -> tuple[LiveCertificationProof, TaskCertification]:
@@ -347,6 +673,13 @@ def live_certify_task(
         offline,
         live_snapshot_before,
     )
+    projection_cases = build_projection_parity_cases(
+        task,
+        offline,
+        profile,
+        archive_snapshot=archive_snapshot,
+        live_snapshot=live_snapshot_before,
+    )
     proof = build_live_certification_proof(
         task,
         offline,
@@ -354,19 +687,21 @@ def live_certify_task(
         graph_fingerprint_before=live_snapshot_before.graph_fingerprint,
         graph_fingerprint_after=live_snapshot_after.graph_fingerprint,
         parity_cases=parity_cases,
+        projection_cases=projection_cases,
     )
     return proof, promote_candidate(task, offline, profile, proof)
 
 
 class LiveCertificationCatalog(StrictModel):
-    schema_version: Literal["ori-eval-live-certification-v2"] = (
-        "ori-eval-live-certification-v2"
+    schema_version: Literal["ori-eval-live-certification-v3"] = (
+        LIVE_CERTIFICATION_SCHEMA_VERSION
     )
     protocol_version: Literal["ori-eval-protocol-v2"] = "ori-eval-protocol-v2"
     product: str
     track: Track
     graph_fingerprint: str
     capability_profile_fingerprint: str
+    certifier_fingerprint: str
     offline_catalog_fingerprint: str
     verification_before_fingerprint: str
     verification_after_fingerprint: str
@@ -395,6 +730,19 @@ class LiveCertificationCatalog(StrictModel):
             entry_ids
         ):
             raise ValueError("live certification catalog task sets differ")
+        current_certifier = certifier_fingerprint()
+        if (
+            self.certifier_fingerprint != current_certifier
+            or any(
+                proof.certifier_fingerprint != current_certifier
+                for proof in self.proofs
+            )
+            or any(
+                certification.certifier_fingerprint != current_certifier
+                for certification in self.certifications
+            )
+        ):
+            raise ValueError("live certification certifier is stale")
         expected = canonical_sha256(
             self,
             exclude_fields=("artifact_fingerprint",),
@@ -409,6 +757,7 @@ def live_certify_corpus(
     offline: OfflineCertificationCatalog,
     profile: CapabilityProfile,
     *,
+    archive_snapshot: GraphSnapshot,
     live_snapshot_before: GraphSnapshot,
     live_snapshot_after: GraphSnapshot,
     verification_before: LiveGraphVerification,
@@ -420,6 +769,8 @@ def live_certify_corpus(
     if offline.track is not corpus.track or profile.track is not corpus.track:
         raise CertificationError("live certification track mismatch")
     if (
+        archive_snapshot.graph_fingerprint != corpus.graph_fingerprint
+        or
         live_snapshot_before.graph_fingerprint != corpus.graph_fingerprint
         or live_snapshot_after.graph_fingerprint != corpus.graph_fingerprint
     ):
@@ -446,6 +797,7 @@ def live_certify_corpus(
             task,
             offline_by_task[task.public.task_id],
             profile,
+            archive_snapshot=archive_snapshot,
             live_snapshot_before=live_snapshot_before,
             live_snapshot_after=live_snapshot_after,
         )
@@ -457,6 +809,7 @@ def live_certify_corpus(
         "track": corpus.track,
         "graph_fingerprint": corpus.graph_fingerprint,
         "capability_profile_fingerprint": profile.profile_fingerprint,
+        "certifier_fingerprint": certifier_fingerprint(),
         "offline_catalog_fingerprint": offline.artifact_fingerprint,
         "verification_before_fingerprint": (
             verification_before.verification_fingerprint
@@ -473,7 +826,7 @@ def live_certify_corpus(
     }
     payload["artifact_fingerprint"] = canonical_sha256(
         {
-            "schema_version": "ori-eval-live-certification-v2",
+            "schema_version": LIVE_CERTIFICATION_SCHEMA_VERSION,
             "protocol_version": "ori-eval-protocol-v2",
             **payload,
         },
@@ -507,6 +860,11 @@ def promote_candidate(
         mismatches.append("proof oracle fingerprint")
     if proof.fixture_fingerprint != offline.fixtures.fixture_fingerprint:
         mismatches.append("fixture fingerprint")
+    if (
+        base.certifier_fingerprint != certifier_fingerprint()
+        or proof.certifier_fingerprint != certifier_fingerprint()
+    ):
+        mismatches.append("certifier")
     if proof.graph_fingerprint_before != base.graph_fingerprint:
         mismatches.append("graph fingerprint")
     if (
@@ -568,6 +926,10 @@ def build_catalog_release(
         if certification.task_fingerprint != task.public.task_fingerprint:
             raise CertificationError(
                 f"task {task.public.task_id} certification is stale"
+            )
+        if certification.certifier_fingerprint != certifier_fingerprint():
+            raise CertificationError(
+                f"task {task.public.task_id} certifier is stale"
             )
         entries.append(
             CatalogEntry(

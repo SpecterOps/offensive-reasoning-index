@@ -7,9 +7,13 @@ import json
 from collections.abc import Iterable, Mapping, Sequence
 from copy import deepcopy
 from enum import Enum
+from functools import lru_cache
+from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel
+
+CERTIFIER_VERSION = "ori-live-certifier-v3"
 
 
 def _json_value(value: Any) -> Any:
@@ -79,3 +83,35 @@ def canonical_sha256(
     return hashlib.sha256(
         canonical_json_bytes(value, exclude_fields=exclude_fields)
     ).hexdigest()
+
+
+@lru_cache(maxsize=1)
+def certifier_fingerprint() -> str:
+    """Bind candidate promotion to every semantic certification boundary."""
+
+    directory = Path(__file__).parent
+    source_names = (
+        "certification.py",
+        "comparator.py",
+        "direct_adapter.py",
+        "evidence.py",
+        "fingerprint.py",
+        "fixtures.py",
+        "graph.py",
+        "identity.py",
+        "live_projection.py",
+        "mcp.py",
+        "mcp_adapter.py",
+        "model_runtime.py",
+        "schema.py",
+    )
+    source_digests = {
+        name: hashlib.sha256((directory / name).read_bytes()).hexdigest()
+        for name in source_names
+    }
+    return canonical_sha256(
+        {
+            "certifier_version": CERTIFIER_VERSION,
+            "source_digests": source_digests,
+        }
+    )

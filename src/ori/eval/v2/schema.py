@@ -656,6 +656,7 @@ class TaskCertification(StrictModel):
     graph_fingerprint: Fingerprint
     compiler_fingerprint: Fingerprint
     comparator_fingerprint: Fingerprint
+    certifier_fingerprint: Fingerprint
     capability_profile_fingerprint: Fingerprint
     bounds_fingerprint: Fingerprint
     certified_profile_id: NonEmptyStr | None = None
