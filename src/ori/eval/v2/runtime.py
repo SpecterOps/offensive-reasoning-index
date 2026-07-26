@@ -14,6 +14,7 @@ from .schema import (
     ExecutionClass,
     OracleBundle,
     TaskBundle,
+    VerdictStatus,
 )
 from .scoring import SampleOutcomeCode, SampleResult
 
@@ -55,7 +56,7 @@ def sample_from_direct_outcome(
             **base,
             execution_class=ExecutionClass.SUCCESS,
             outcome=SampleOutcomeCode.COMPLETED,
-            reasoning_correct=outcome.verdict.correct,
+            reasoning_correct=outcome.verdict.status is VerdictStatus.CORRECT,
             evidence=outcome.evidence,
             verdict=outcome.verdict,
         )

@@ -104,9 +104,9 @@ one domain, and all 8/8 planted paths.
 
 | Gate | Objects | Relationships | Object queries | Relationship queries | Verification fingerprint |
 | --- | ---: | ---: | ---: | ---: | --- |
-| pre-direct | 183 | 894 | 17 | 34 | `5d6341a7eb457ace172e822019e9eca9aca79cb081bbfb8209e89bfc49898bb4` |
-| between tracks | 183 | 894 | 17 | 34 | `5d6341a7eb457ace172e822019e9eca9aca79cb081bbfb8209e89bfc49898bb4` |
-| post-MCP | 183 | 894 | 17 | 34 | `5d6341a7eb457ace172e822019e9eca9aca79cb081bbfb8209e89bfc49898bb4` |
+| pre-direct | 183 | 894 | 17 | 36 | `191e58a71499949a6f5a21e43e20e9c28b1476ec2976d9683273721e481f437f` |
+| between tracks | 183 | 894 | 17 | 36 | `191e58a71499949a6f5a21e43e20e9c28b1476ec2976d9683273721e481f437f` |
+| post-MCP | 183 | 894 | 17 | 36 | `191e58a71499949a6f5a21e43e20e9c28b1476ec2976d9683273721e481f437f` |
 
 Expected and observed graph fingerprints were
 `edcb735723deca3888ad5a3a3c419edb58e023cda7117acdbfcf08e9e0d4afba`
@@ -116,8 +116,23 @@ Live/offline parity:
 
 | Track | Candidates | Applicable parity cases | Evidence/verdict parity | Live certification artifact | Candidate catalog fingerprint |
 | --- | ---: | ---: | --- | --- | --- |
-| direct | 20 | 136 | all equal | `cc6006d356c0452bbc9e214dd578c5ba002b5a176ff18f833d80191e03cd73a9` | `0f5cd44fd95449be64b62cefe3be6b32058627766dcb0bfcc08d66dde2e39aa0` |
-| MCP | 40 | 255 | all equal | `29f1255893bbd0fb1c84867b79ff49af826044e6ccac65ab01352f572f84f176` | `1b5531bdbaeb2839ed713c495c841950f949649111bf587861ac2c2fb5a58621` |
+| direct | 20 | 136 | all equal | `3f48bcc3a7732b1432218ca5d28d28f93a41edaa2325f8d6348019b145cd3ea8` | `0f5cd44fd95449be64b62cefe3be6b32058627766dcb0bfcc08d66dde2e39aa0` |
+| MCP | 40 | 255 | all equal | `930bd407aee453753e2c3dea50d7863730d01b339fd7001030d0dad432deb07a` | `70cdfbbea62c40d47b35c6954c190cc125d4115092f2e418e97bd35e5ffd2531` |
+
+The model-backed V2 entry point was then exercised in readiness-only mode using
+the intended GPT-5.6 Sol and GPT-5.5 config. It verified the exact candidate
+releases, sealed artifacts, clean pinned MCP revision, BloodHound health, and
+live graph before and after both tracks:
+
+| Gate | Result |
+| --- | --- |
+| Readiness fingerprint | `5d49762f65394243a22c763366ec41f79898ee8a23b64f6afb399df5c372be01` |
+| MCP revision | `009c88f41fae302becad4b00777a3749a0f6f0fa` |
+| GPT-5.6 Sol access | Codex login passed; `gpt-5.6-sol` present in the local model cache |
+| GPT-5.5 access | Codex login passed; `gpt-5.5` present in the local model cache |
+| Direct schedule | 20 candidate tasks, release `cbbee7a24db0bfe94cee849ead5124ddf82ee8499a8d2b72924d70767ce3209b` |
+| MCP schedule | 40 candidate tasks, release `f2e5d9aaa3a1447fd72abdb70004da1bdb4370c272da83e415c418bfc3a2d3c3` |
+| Provider calls | zero |
 
 The local private receipts and public candidate catalogs are retained under
 `results/v2/simple-seed-1234/live/`, which is intentionally gitignored. Per the
@@ -127,7 +142,7 @@ receipt for MCP upload job `10`.
 
 ## Final repository gates
 
-- `uv run pytest`: 520 passed.
+- `uv run pytest`: 543 passed.
 - `uv run ruff check src scripts tests`: passed.
 - `uv lock --check`: passed.
 - `git diff --check`: passed.

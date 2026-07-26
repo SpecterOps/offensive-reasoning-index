@@ -862,8 +862,10 @@ def classify_tool_observation(
         or observation.pages_received > bounds.max_pages
         or (count is not None and count > bounds.max_result_cardinality)
     )
+    witness_claim = task.claim_kind in {"route", "decision"}
     incomplete_total = (
         capability.reports_total_count
+        and not witness_claim
         and observation.complete
         and (
             observation.total_count is None
@@ -880,7 +882,12 @@ def classify_tool_observation(
             **event_args,
         )
 
-    if count is not None and count > 0 and not observation.complete:
+    if (
+        count is not None
+        and count > 0
+        and not observation.complete
+        and not witness_claim
+    ):
         return classify_evidence_event(
             task,
             profile,
@@ -894,7 +901,11 @@ def classify_tool_observation(
             task,
             profile,
             kind=EvidenceEventKind.USEFUL_POSITIVE,
-            reason="claim-relevant bounded positive evidence",
+            reason=(
+                "claim-relevant bounded witness evidence"
+                if witness_claim
+                else "claim-relevant bounded complete evidence"
+            ),
             **event_args,
         )
 

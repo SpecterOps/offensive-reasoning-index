@@ -192,6 +192,22 @@ and failure classifier are upstream dependencies and must not be reimplemented.
 - [x] Separate execution status, reasoning verdict, and campaign validity.
 - [x] Give unresolved infrastructure no reasoning verdict.
 - [x] Keep direct and MCP summaries separate.
+- [x] Add an explicit `ori run-v2` model-campaign entry point while keeping
+  normal `ori run` on v1.
+- [x] Make `ori run-v2` a no-model readiness gate unless the operator supplies
+  `--execute`.
+- [x] Derive every V2 model schedule from the candidate-certified catalog.
+- [x] Send solver requests only through the common redacted public envelope,
+  including public semantics and execution bounds.
+- [x] Validate typed direct `{query, assertion}` submissions before any
+  BloodHound execution.
+- [x] Route direct and MCP-issued Cypher through the authoritative policy-v3
+  coordinator.
+- [x] Project native MCP tool results into typed evidence events and perform at
+  most one real schema-only retry after useful evidence.
+- [x] Bind atomic private resume state to run, artifacts, graph, capability,
+  containment, runtime, provider attempts, and exact task accounting.
+- [x] Withhold redacted public reports until the post-track graph gate passes.
 
 ## Phase 10: controlled validation
 

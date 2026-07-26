@@ -1084,6 +1084,63 @@ def compile_v2_command(
         click.echo(f"  {label} ({visibility}): {path}")
 
 
+@main.command(name="run-v2")
+@click.option(
+    "--config",
+    "config_path",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False),
+    help="Strict protocol-v2 campaign YAML.",
+)
+@click.option(
+    "--execute",
+    is_flag=True,
+    default=False,
+    help=(
+        "Launch configured model calls after readiness passes. Without this "
+        "flag, run only artifact, capability, health, and live-graph gates."
+    ),
+)
+def run_v2_command(config_path: str, execute: bool) -> None:
+    """Preflight or execute an explicit, candidate-certified V2 campaign."""
+    import asyncio
+
+    from .eval.v2.campaign_config import load_v2_campaign_config
+    from .eval.v2.campaign_runner import run_v2_campaign
+
+    try:
+        readiness = asyncio.run(
+            run_v2_campaign(
+                Path(config_path),
+                preflight_only=not execute,
+            )
+        )
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    if execute:
+        click.echo("V2 MODEL CAMPAIGN: COMPLETE")
+    else:
+        click.echo("V2 MODEL CAMPAIGN READINESS: PASS")
+        click.echo("  No model calls were launched. Add --execute to run the campaign.")
+    click.echo(f"  Graph: {readiness.graph_fingerprint}")
+    click.echo(f"  Models: {readiness.model_count}")
+    for model in readiness.models:
+        click.echo(
+            f"    {model.name}: {model.provider}/{model.model} "
+            f"({model.credential_check}, {model.capability_check})"
+        )
+    for track in readiness.tracks:
+        click.echo(
+            f"  {track.track.value}: {track.task_count} candidate tasks "
+            f"(release={track.candidate_release_fingerprint[:12]})"
+        )
+    resolved = load_v2_campaign_config(Path(config_path))
+    click.echo(
+        f"  Readiness: {resolved.output_dir / 'v2-run-readiness.private.json'}"
+    )
+
+
 @main.command(name="certify-v2-live")
 @click.option(
     "--manifest",

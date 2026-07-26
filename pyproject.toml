@@ -19,6 +19,7 @@ dependencies = [
     "mcp>=1.28.1",
     "pydantic>=2.12,<3",
     "psutil>=5.9",
+    "jsonschema>=4.26,<5",
 ]
 
 [project.scripts]

@@ -1,0 +1,54 @@
+version: 2
+protocol: ori-eval-protocol-v2
+
+source:
+  manifest: results/v2/simple-seed-1234/source/simple-v1-seed-1234_manifest.json
+  archive: results/v2/simple-seed-1234/source/simple-v1-seed-1234.zip
+
+tracks:
+  direct:
+    public: results/v2/simple-seed-1234/offline/simple-direct-seed-1234-public-v2.json
+    oracles: results/v2/simple-seed-1234/offline/simple-direct-seed-1234-oracles-v2.private.json
+    candidates: results/v2/simple-seed-1234/live/simple-seed-1234-direct-candidates-v2.json
+    live_certification: results/v2/simple-seed-1234/live/simple-seed-1234-direct-live-certification.private.json
+  mcp:
+    public: results/v2/simple-seed-1234/offline/simple-mcp-seed-1234-public-v2.json
+    oracles: results/v2/simple-seed-1234/offline/simple-mcp-seed-1234-oracles-v2.private.json
+    candidates: results/v2/simple-seed-1234/live/simple-seed-1234-mcp-candidates-v2.json
+    live_certification: results/v2/simple-seed-1234/live/simple-seed-1234-mcp-live-certification.private.json
+
+modes: [direct, mcp]
+output_dir: results/benchmark-runs/simple-v2-seed-1234-gpt56sol-vs-gpt55
+
+defaults:
+  concurrency: 1
+  runs_per_model: 1
+  # null uses BLOODHOUND_* values from the environment/.env file.
+  bhce_url: null
+  # null uses the selected provider's normal endpoint or OAuth adapter.
+  model_base_url: null
+  max_infra_retries: 1
+  graph_page_size: 500
+  health:
+    timeout_seconds: 60.0
+    poll_interval: 5.0
+  mcp:
+    mcp_dir: ../Bloodhound-MCP
+    max_steps: 16
+    resource_mode: "off"
+    tool_loop: native-openai-compatible
+    telemetry_adapter: auto
+    read_timeout_seconds: 900.0
+
+models:
+  - name: gpt-5-6-sol
+    provider: codex
+    model: gpt-5.6-sol
+    mcp_tool_loop: native-openai-compatible
+    options: {}
+
+  - name: gpt-5-5
+    provider: codex
+    model: gpt-5.5
+    mcp_tool_loop: native-openai-compatible
+    options: {}

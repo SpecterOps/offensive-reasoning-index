@@ -64,8 +64,11 @@ For MCP:
   whenever completeness depends on it;
 - block the binding if the capability cannot prove the claim.
 
-Execution controls are model-blind. They are applied by the harness after the
-model produces a query or tool call and are never added as task hints.
+Safety admission controls are model-blind and applied by the harness after the
+model produces a query or tool call. The public task envelope discloses only
+the generic execution budgets needed to form a bounded answer. It never
+discloses policy rules, reference queries, expected facts, or task-specific
+grader hints.
 
 ## Required bounds
 
@@ -142,6 +145,19 @@ Promotion is invalidated by changes to the task, prompt, oracle, graph,
 compiler, comparator, capability profile, execution bounds, containment
 policy, or MCP finalization policy.
 
+Before a candidate enters a model campaign, validate the exact local bundle:
+
+```bash
+uv run --env-file <bloodhound-env> \
+  ori run-v2 \
+  --config <models-v2.local.yaml>
+```
+
+This readiness form never calls a model. It proves the candidate release,
+sealed oracle, capability profile, pinned MCP revision, and current live graph
+still match. `--execute` is a separate, explicit boundary and must not be used
+as part of task authoring or certification.
+
 ## Candidate catalog contract
 
 Each track publishes a `CatalogRelease` for the future Task Selector Suite. It
@@ -201,3 +217,4 @@ The machine-readable contract is
 - [ ] Offline and live Evidence IR and verdict fingerprints agree.
 - [ ] Pre/mid/post live graph fingerprints match.
 - [ ] The task reaches candidate state under its pinned capability profile.
+- [ ] `ori run-v2 --config ...` readiness passes without launching a model.

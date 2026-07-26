@@ -1563,6 +1563,7 @@ dependencies = [
     { name = "faker" },
     { name = "httpx" },
     { name = "inspect-ai" },
+    { name = "jsonschema" },
     { name = "mcp" },
     { name = "openai" },
     { name = "psutil" },
@@ -1585,6 +1586,7 @@ requires-dist = [
     { name = "faker", specifier = ">=24.0" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "inspect-ai", specifier = ">=0.3.203" },
+    { name = "jsonschema", specifier = ">=4.26,<5" },
     { name = "mcp", specifier = ">=1.28.1" },
     { name = "openai", specifier = ">=1.0" },
     { name = "psutil", specifier = ">=5.9" },
@@ -2856,7 +2858,7 @@ name = "zipfile-zstd"
 version = "0.0.4"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "zstandard" },
+    { name = "zstandard", marker = "python_full_version < '3.14'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/f7/2a/2e0941bc0058d10ab37d8c578b94a19f611f6ae54f124140f2fb451f0932/zipfile-zstd-0.0.4.tar.gz", hash = "sha256:c1498e15b7922a3d1af0ea55df8b11b2af4e8f7e0e80e414e25d66899f7def89", size = 4603, upload-time = "2021-12-08T07:38:16.245Z" }
 wheels = [

@@ -121,6 +121,51 @@ comparator, capability profile, execution bounds, containment policy, MCP
 finalization policy, and catalog fingerprints. A semantic byte change makes
 prior certification stale.
 
+### Model-backed V2 campaigns
+
+`ori run-v2` is the only model-backed V2 entry point. It accepts the strict
+`models.v2.example.yaml` shape and rejects unknown fields, V1 protocol values,
+mixed track sets, `resource_mode` other than `off`, implicit/automatic tool
+loops, concurrency above one, and provider/loop combinations unsupported by
+the native runtime.
+
+The solver request contains only the common public envelope: task ID and
+fingerprint, track, relationship semantics, execution bounds, question, answer
+schema, and generic instructions. It never contains an oracle, reference query,
+expected identities, route variants, or valid-node inventory.
+
+Direct submissions use a runtime-derived outer schema:
+
+```json
+{"query": "one bounded read-only Cypher query", "assertion": {}}
+```
+
+Decision and absence claims may declare only the specific assertion fields
+allowed by that public claim kind. The query executes exactly once through
+`DirectQueryCoordinator.execute()`. Correctness comes from the returned graph
+evidence plus the restricted assertion, not the query text.
+
+MCP loops project each actual tool result into a mechanical `ToolObservation`.
+High-level MCP response wrappers and coordinator-backed Cypher responses share
+the same projector. Successful activity alone cannot unlock finalization.
+Cypher enumeration requires a companion scalar total and a bounded,
+stably-ordered page; route witnesses still must pass the shared Evidence IR
+comparator. Any MCP-issued Cypher runs through the same policy-v3 coordinator
+as direct mode.
+
+Run state is private and atomic. It binds the model/run identity, source
+manifest and archive, task/oracle/catalog/live-certification fingerprints,
+graph, capability profile, containment configuration, runtime configuration,
+and every provider attempt. Resume rejects incompatible provenance. Public
+reports are emitted only after all scheduled tasks are reconciled exactly once
+and the post-track graph gate passes.
+
+The direct-query coordinator, circuit state, and deny cache are campaign-scoped,
+not model/run-scoped. The cache lives at the V2 output root and is bound to the
+source-manifest digest plus policy version, so a quarantined query cannot be
+re-executed by a later model, repetition, or MCP-issued Cypher call in the same
+campaign.
+
 ## V2 compile and certification commands
 
 Compile and offline-certify one product track:
@@ -147,6 +192,40 @@ uv run --env-file ../Bloodhound-MCP/.env \
 
 This command is read-only. A graph mismatch is a stop condition, not permission
 to upload or replace data.
+
+Create a machine-local campaign config, then run readiness without providers:
+
+```bash
+cp models.v2.example.yaml models.v2.local.yaml
+
+uv run --env-file ../Bloodhound-MCP/.env \
+  ori run-v2 \
+  --config models.v2.local.yaml
+```
+
+Readiness verifies:
+
+- all source, public, oracle, candidate, and live-certification fingerprints;
+- exact candidate/public/oracle/certification task sets;
+- candidate state for every scheduled task;
+- the pinned clean MCP checkout revision;
+- explicit model/loop compatibility;
+- local provider credential configuration and, for Codex, exact model slugs in
+  the Codex capability cache;
+- BloodHound health and the exact archive-derived live graph before and after
+  each configured track.
+
+No model call occurs unless `--execute` is supplied:
+
+```bash
+uv run --env-file ../Bloodhound-MCP/.env \
+  ori run-v2 \
+  --config models.v2.local.yaml \
+  --execute
+```
+
+Treat `--execute` as the paid/external side-effect boundary. Use a new output
+directory for a changed config, model set, or repetition count.
 
 Score structured answers offline:
 

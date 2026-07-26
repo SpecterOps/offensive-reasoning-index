@@ -178,7 +178,7 @@ async def call_model(
 
     t0 = time.monotonic()
     try:
-        text, tokens_in, tokens_out, thinking, provider_metrics = await _call_provider(
+        response = await call_provider_text(
             model=model,
             messages=messages,
             system=system,
@@ -186,18 +186,18 @@ async def call_model(
             base_url=base_url,
             ollama_options=ollama_options,
         )
-        elapsed = time.monotonic() - t0
-        cypher, parse_stage = extract_cypher_details(text)
+        cypher, parse_stage = extract_cypher_details(response.raw_text)
         return ModelResponse(
-            raw_text=text,
+            raw_text=response.raw_text,
             cypher=cypher,
             parse_stage=parse_stage,
-            tokens_input=tokens_in,
-            tokens_output=tokens_out,
-            elapsed_seconds=elapsed,
-            model=model,
-            thinking=thinking,
-            provider_metrics=provider_metrics,
+            tokens_input=response.tokens_input,
+            tokens_output=response.tokens_output,
+            elapsed_seconds=response.elapsed_seconds,
+            model=response.model,
+            thinking=response.thinking,
+            error=response.error,
+            provider_metrics=response.provider_metrics,
         )
     except Exception as exc:
         elapsed = time.monotonic() - t0
@@ -208,6 +208,56 @@ async def call_model(
             tokens_input=0,
             tokens_output=0,
             elapsed_seconds=elapsed,
+            model=model,
+            error=str(exc),
+        )
+
+
+async def call_provider_text(
+    *,
+    model: str,
+    messages: list[dict],
+    system: str,
+    base_url: str | None = None,
+    max_tokens: int = 1024,
+    ollama_options: dict | None = None,
+) -> ModelResponse:
+    """Call a provider without imposing a legacy task or Cypher parse contract.
+
+    Protocol-v2 runtimes use this transport boundary so solver requests contain
+    only their public prompt envelope. Provider failures remain explicit in the
+    returned response and are classified by the owning runtime.
+    """
+
+    started = time.monotonic()
+    try:
+        text, tokens_in, tokens_out, thinking, provider_metrics = await _call_provider(
+            model=model,
+            messages=messages,
+            system=system,
+            max_tokens=max_tokens,
+            base_url=base_url,
+            ollama_options=ollama_options,
+        )
+        return ModelResponse(
+            raw_text=text,
+            cypher=None,
+            parse_stage="raw_text",
+            tokens_input=tokens_in,
+            tokens_output=tokens_out,
+            elapsed_seconds=time.monotonic() - started,
+            model=model,
+            thinking=thinking,
+            provider_metrics=provider_metrics,
+        )
+    except Exception as exc:
+        return ModelResponse(
+            raw_text="",
+            cypher=None,
+            parse_stage="none",
+            tokens_input=0,
+            tokens_output=0,
+            elapsed_seconds=time.monotonic() - started,
             model=model,
             error=str(exc),
         )

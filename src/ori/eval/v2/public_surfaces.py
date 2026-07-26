@@ -9,7 +9,15 @@ from typing import Any
 from pydantic import model_validator
 
 from .fingerprint import canonical_sha256
-from .schema import PROTOCOL_VERSION, Fingerprint, StrictModel, TaskBundle
+from .schema import (
+    PROTOCOL_VERSION,
+    ExecutionBounds,
+    Fingerprint,
+    RelationshipSemantics,
+    StrictModel,
+    TaskBundle,
+    Track,
+)
 
 
 class PublicSurface(StrEnum):
@@ -56,6 +64,9 @@ class SolverVisibleEnvelope(StrictModel):
     surface: PublicSurface
     task_id: str
     task_fingerprint: Fingerprint
+    track: Track
+    semantics: RelationshipSemantics
+    execution_bounds: ExecutionBounds
     question: str
     answer_schema: dict[str, Any]
     generic_instructions: tuple[str, ...]
@@ -119,6 +130,9 @@ def build_solver_visible_envelope(
         "surface": surface,
         "task_id": task.task_id,
         "task_fingerprint": task.task_fingerprint,
+        "track": task.binding.track,
+        "semantics": task.binding.semantics,
+        "execution_bounds": task.binding.bounds,
         "question": task.question,
         "answer_schema": task.answer_schema,
         "generic_instructions": task.generic_instructions,

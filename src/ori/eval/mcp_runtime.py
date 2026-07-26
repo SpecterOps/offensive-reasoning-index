@@ -9,6 +9,7 @@ import json
 import os
 import re
 import time
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from functools import wraps
 from pathlib import Path
@@ -382,7 +383,46 @@ def _tool_doc(tool_obj: Any, name: str, allowed: set[str]) -> str:
     return f"{original}\n\nAllowed info_type values: {allowed_text}."
 
 
-def _wrap_read_only_tool(tool_obj: Any) -> Any:
+def _coordinator_result_to_mcp_text(result: Any) -> str:
+    """Render an authoritative direct-coordinator result like MCP cypher_query."""
+
+    if not result.success:
+        return json.dumps(
+            {
+                "info_type": "run",
+                "success": False,
+                "error": str(result.error or result.failure_type or "query failed"),
+                "error_type": str(result.failure_type or "query_error"),
+                "query_executed": bool(result.query_executed),
+                "policy_rule": str(result.safety_rule or ""),
+            }
+        )
+    raw = result.raw if isinstance(result.raw, dict) else {}
+    data = raw.get("data", raw)
+    if not isinstance(data, dict):
+        data = {}
+    nodes = data.get("nodes") or {}
+    edges = data.get("edges") or ()
+    node_count = len(nodes) if isinstance(nodes, (dict, list)) else 0
+    edge_count = len(edges) if isinstance(edges, list) else 0
+    return json.dumps(
+        {
+            "info_type": "run",
+            "success": True,
+            "has_results": bool(nodes or edges or data.get("literals")),
+            "data": data,
+            "node_count": node_count,
+            "edge_count": edge_count,
+            "query_executed": True,
+        }
+    )
+
+
+def _wrap_read_only_tool(
+    tool_obj: Any,
+    *,
+    cypher_executor: Callable[[str], Any] | None = None,
+) -> Any:
     tool_name = _canonical_tool_name(tool_obj)
     allowed = _READ_ONLY_MCP_INFO_TYPES[tool_name]
 
@@ -395,6 +435,18 @@ def _wrap_read_only_tool(tool_obj: Any) -> Any:
                 raise ToolError(
                     f"POLICY_VIOLATION: {tool_name}.{info_type} is not allowed in ORI eval mode"
                 )
+            if (
+                cypher_executor is not None
+                and tool_name == "cypher_query"
+                and info_type == "run"
+            ):
+                query = kwargs.get("query")
+                if not isinstance(query, str) or not query.strip():
+                    raise ToolError("INVALID_ARGUMENTS: cypher_query.run requires query")
+                result = cypher_executor(query)
+                if inspect.isawaitable(result):
+                    result = await result
+                return _coordinator_result_to_mcp_text(result)
             result = tool_obj(*args, **kwargs)
             if inspect.isawaitable(result):
                 return await result
@@ -559,6 +611,7 @@ async def _load_bloodhound_mcp_bundle(
     *,
     include_resources: bool,
     include_prompt: bool,
+    cypher_executor: Callable[[str], Any] | None = None,
 ) -> MCPServerBundle:
     server = _create_bloodhound_mcp_server(mcp_dir)
     raw_tools = await mcp_tools(server).tools()
@@ -566,7 +619,12 @@ async def _load_bloodhound_mcp_bundle(
     for raw_tool in raw_tools:
         name = _canonical_tool_name(raw_tool)
         if name in _READ_ONLY_MCP_INFO_TYPES:
-            wrapped.append(_wrap_read_only_tool(raw_tool))
+            wrapped.append(
+                _wrap_read_only_tool(
+                    raw_tool,
+                    cypher_executor=cypher_executor,
+                )
+            )
     if include_resources:
         wrapped.extend(_resource_tools(server))
 
@@ -641,10 +699,21 @@ Rules:
 
 
 def _mcp_conversation_messages(
-    task: Task,
+    task: Task | None,
     server_prompt_text: str = "",
     server_prompt_name: str = BLOODHOUND_PROMPT_NAME,
+    system_prompt_override: str | None = None,
+    public_question: str | None = None,
 ) -> list[Any]:
+    question = public_question or (task.question if task is not None else "")
+    if not question:
+        raise ValueError("MCP conversation requires a public question")
+    system_prompt = (
+        system_prompt_override
+        or (_mcp_system_prompt(task) if task is not None else "")
+    )
+    if not system_prompt:
+        raise ValueError("MCP conversation requires a system prompt")
     messages: list[Any] = []
     if server_prompt_text.strip():
         messages.append(
@@ -657,8 +726,10 @@ def _mcp_conversation_messages(
         )
     messages.extend(
         [
-            ChatMessageSystem(content=_mcp_system_prompt(task)),
-            ChatMessageUser(content=task.question),
+            ChatMessageSystem(
+                content=system_prompt
+            ),
+            ChatMessageUser(content=question),
         ]
     )
     return messages
@@ -1315,7 +1386,8 @@ def _tool_result_has_successful_evidence(
 
 async def _run_ollama_mcp_loop(
     *,
-    task: Task,
+    task: Task | None,
+    public_question: str | None = None,
     model_name: str,
     base_url: str | None,
     ollama_options: dict[str, Any] | None,
@@ -1327,18 +1399,38 @@ async def _run_ollama_mcp_loop(
     prompt_discovery_status: str = "",
     resource_mode: str = RESOURCE_MODE_OFF,
     ollama_read_timeout_seconds: float = DEFAULT_MCP_OLLAMA_READ_TIMEOUT_SECONDS,
+    system_prompt_override: str | None = None,
+    tool_result_observer: (
+        Callable[[str, dict[str, Any], str, ToolCallError | None], bool] | None
+    ) = None,
 ) -> tuple[ModelResponse, MCPRunMetadata, list[Any]]:
+    question = public_question or (task.question if task is not None else "")
+    if not question:
+        raise ValueError("MCP loop requires a public question")
+    system_prompt = (
+        system_prompt_override
+        or (_mcp_system_prompt(task) if task is not None else "")
+    )
+    if not system_prompt:
+        raise ValueError("MCP loop requires a system prompt")
     url = _native_ollama_chat_url(base_url)
     messages_payload: list[dict[str, Any]] = []
     if server_prompt_text.strip():
         messages_payload.append({"role": "system", "content": server_prompt_text})
-    messages_payload.append({"role": "system", "content": _mcp_system_prompt(task)})
-    messages_payload.append({"role": "user", "content": task.question})
+    messages_payload.append(
+        {
+            "role": "system",
+            "content": system_prompt,
+        }
+    )
+    messages_payload.append({"role": "user", "content": question})
 
     inspect_messages = _mcp_conversation_messages(
         task,
         server_prompt_text=server_prompt_text,
         server_prompt_name=server_prompt_name,
+        system_prompt_override=system_prompt,
+        public_question=question,
     )
     tool_specs: list[dict[str, Any]] = []
     tool_runners: dict[str, Any] = {}
@@ -1359,14 +1451,20 @@ async def _run_ollama_mcp_loop(
     final_content = ""
     resolved_model = model_name
     successful_tool_results = 0
+    executed_tool_calls = 0
+    typed_finalization_ready = False
     finalization_guard_used = False
     t0 = time.monotonic()
 
     for step in range(max_steps):
         use_finalization_guard = (
             _env_flag("ORI_MCP_FINALIZATION_GUARD", True)
-            and step >= max_steps - 1
-            and successful_tool_results > 0
+            and (step >= max_steps - 1 or executed_tool_calls >= max_steps)
+            and (
+                typed_finalization_ready
+                if tool_result_observer is not None
+                else successful_tool_results > 0
+            )
             and not finalization_guard_used
         )
         if use_finalization_guard:
@@ -1424,21 +1522,48 @@ async def _run_ollama_mcp_loop(
             tool_runner = tool_runners.get(tool_name)
             result_text = ""
             tool_error: ToolCallError | None = None
-            try:
-                if tool_runner is None:
-                    raise RuntimeError(f"Unknown tool: {tool_name}")
-                result = tool_runner(**tool_call.arguments)
-                if inspect.isawaitable(result):
-                    result = await result
-                result_text = _tool_result_to_text(result)
-            except Exception as exc:
+            if executed_tool_calls >= max_steps:
                 result_text = json.dumps(
-                    {"success": False, "error": str(exc), "error_type": "tool_error"}
+                    {
+                        "success": False,
+                        "error": "MCP tool-call budget exhausted",
+                        "error_type": "tool_call_budget_exceeded",
+                    }
                 )
-                tool_error = ToolCallError(type="unknown", message=str(exc))
+                tool_error = ToolCallError(
+                    type="unknown",
+                    message="MCP tool-call budget exhausted",
+                )
+            else:
+                executed_tool_calls += 1
+                try:
+                    if tool_runner is None:
+                        raise RuntimeError(f"Unknown tool: {tool_name}")
+                    result = tool_runner(**tool_call.arguments)
+                    if inspect.isawaitable(result):
+                        result = await result
+                    result_text = _tool_result_to_text(result)
+                except Exception as exc:
+                    result_text = json.dumps(
+                        {
+                            "success": False,
+                            "error": str(exc),
+                            "error_type": "tool_error",
+                        }
+                    )
+                    tool_error = ToolCallError(type="unknown", message=str(exc))
 
             if _tool_result_has_successful_evidence(result_text, tool_error):
                 successful_tool_results += 1
+            if tool_result_observer is not None:
+                typed_finalization_ready = bool(
+                    tool_result_observer(
+                        tool_name,
+                        dict(tool_call.arguments),
+                        result_text,
+                        tool_error,
+                    )
+                ) or typed_finalization_ready
             messages_payload.append(
                 {"role": "tool", "tool_name": tool_name, "content": result_text}
             )
@@ -1490,7 +1615,8 @@ async def _run_ollama_mcp_loop(
 
 async def _run_openai_compat_mcp_loop(
     *,
-    task: Task,
+    task: Task | None,
+    public_question: str | None = None,
     model_name: str,
     base_url: str | None,
     extra_body: dict[str, Any] | None,
@@ -1503,7 +1629,20 @@ async def _run_openai_compat_mcp_loop(
     resource_mode: str = RESOURCE_MODE_OFF,
     telemetry_adapter: str = OPENAI_COMPAT_TELEMETRY_AUTO,
     read_timeout_seconds: float = DEFAULT_MCP_OLLAMA_READ_TIMEOUT_SECONDS,
+    system_prompt_override: str | None = None,
+    tool_result_observer: (
+        Callable[[str, dict[str, Any], str, ToolCallError | None], bool] | None
+    ) = None,
 ) -> tuple[ModelResponse, MCPRunMetadata, list[Any]]:
+    question = public_question or (task.question if task is not None else "")
+    if not question:
+        raise ValueError("MCP loop requires a public question")
+    system_prompt = (
+        system_prompt_override
+        or (_mcp_system_prompt(task) if task is not None else "")
+    )
+    if not system_prompt:
+        raise ValueError("MCP loop requires a system prompt")
     url = _openai_compat_chat_url(base_url, model_name)
     resolved_telemetry_adapter = _infer_openai_compat_telemetry_adapter(
         telemetry_adapter,
@@ -1513,13 +1652,20 @@ async def _run_openai_compat_mcp_loop(
     messages_payload: list[dict[str, Any]] = []
     if server_prompt_text.strip():
         messages_payload.append({"role": "system", "content": server_prompt_text})
-    messages_payload.append({"role": "system", "content": _mcp_system_prompt(task)})
-    messages_payload.append({"role": "user", "content": task.question})
+    messages_payload.append(
+        {
+            "role": "system",
+            "content": system_prompt,
+        }
+    )
+    messages_payload.append({"role": "user", "content": question})
 
     inspect_messages = _mcp_conversation_messages(
         task,
         server_prompt_text=server_prompt_text,
         server_prompt_name=server_prompt_name,
+        system_prompt_override=system_prompt,
+        public_question=question,
     )
     tool_specs: list[dict[str, Any]] = []
     tool_runners: dict[str, Any] = {}
@@ -1536,14 +1682,20 @@ async def _run_openai_compat_mcp_loop(
     final_content = ""
     resolved_model = _openai_compat_model_name(model_name)
     successful_tool_results = 0
+    executed_tool_calls = 0
+    typed_finalization_ready = False
     finalization_guard_used = False
     t0 = time.monotonic()
 
     for step in range(max_steps):
         use_finalization_guard = (
             _env_flag("ORI_MCP_FINALIZATION_GUARD", True)
-            and step >= max_steps - 1
-            and successful_tool_results > 0
+            and (step >= max_steps - 1 or executed_tool_calls >= max_steps)
+            and (
+                typed_finalization_ready
+                if tool_result_observer is not None
+                else successful_tool_results > 0
+            )
             and not finalization_guard_used
         )
         if use_finalization_guard:
@@ -1608,18 +1760,36 @@ async def _run_openai_compat_mcp_loop(
             tool_runner = tool_runners.get(tool_name)
             result_text = ""
             tool_error: ToolCallError | None = None
-            try:
-                if tool_runner is None:
-                    raise RuntimeError(f"Unknown tool: {tool_name}")
-                result = tool_runner(**tool_call.arguments)
-                if inspect.isawaitable(result):
-                    result = await result
-                result_text = _tool_result_to_text(result)
-            except Exception as exc:
+            if executed_tool_calls >= max_steps:
                 result_text = json.dumps(
-                    {"success": False, "error": str(exc), "error_type": "tool_error"}
+                    {
+                        "success": False,
+                        "error": "MCP tool-call budget exhausted",
+                        "error_type": "tool_call_budget_exceeded",
+                    }
                 )
-                tool_error = ToolCallError(type="unknown", message=str(exc))
+                tool_error = ToolCallError(
+                    type="unknown",
+                    message="MCP tool-call budget exhausted",
+                )
+            else:
+                executed_tool_calls += 1
+                try:
+                    if tool_runner is None:
+                        raise RuntimeError(f"Unknown tool: {tool_name}")
+                    result = tool_runner(**tool_call.arguments)
+                    if inspect.isawaitable(result):
+                        result = await result
+                    result_text = _tool_result_to_text(result)
+                except Exception as exc:
+                    result_text = json.dumps(
+                        {
+                            "success": False,
+                            "error": str(exc),
+                            "error_type": "tool_error",
+                        }
+                    )
+                    tool_error = ToolCallError(type="unknown", message=str(exc))
 
             messages_payload.append(
                 {
@@ -1637,6 +1807,15 @@ async def _run_openai_compat_mcp_loop(
                     error=tool_error,
                 )
             )
+            if tool_result_observer is not None:
+                typed_finalization_ready = bool(
+                    tool_result_observer(
+                        tool_name,
+                        dict(tool_call.arguments),
+                        result_text,
+                        tool_error,
+                    )
+                ) or typed_finalization_ready
     else:
         final_content = ""
 

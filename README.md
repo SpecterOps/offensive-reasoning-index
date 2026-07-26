@@ -721,7 +721,56 @@ a separate operator-confirmed action.
 V2 direct execution is admitted only by direct-query policy v3 and executes
 through `DirectQueryCoordinator`. MCP certification requires a pinned capability
 profile and an explicit loop; `mcp_tool_loop: auto` is forbidden. These
-constraints are harness-side and are not inserted into solver prompts.
+admission rules and their rejection grammar remain harness-side and are not
+inserted into solver prompts. The public task envelope does declare model-neutral
+execution budgets such as hops, output size, and tool calls; those are part of
+the answer contract and contain no expected graph facts.
+
+After both track artifacts have reached candidate state, start from the strict
+V2 model config:
+
+```bash
+cp models.v2.example.yaml models.v2.local.yaml
+```
+
+Keep the source archive, public tasks, sealed oracles, candidate catalogs, and
+live-certification receipts from the same compilation/certification run. Adjust
+only machine-local paths and the output directory. Then run the complete
+artifact, capability, MCP-revision, BloodHound-health, and exact-live-graph
+readiness gate:
+
+```bash
+uv run --env-file ../Bloodhound-MCP/.env \
+  ori run-v2 \
+  --config models.v2.local.yaml
+```
+
+`run-v2` is deliberately no-model by default. A passing command writes
+`v2-run-readiness.private.json` and explicitly reports that no model calls were
+launched. For Codex models it also requires a valid local Codex login and the
+exact model slug in the local capability cache. Only the following command
+spends provider usage:
+
+```bash
+uv run --env-file ../Bloodhound-MCP/.env \
+  ori run-v2 \
+  --config models.v2.local.yaml \
+  --execute
+```
+
+The executable path derives its schedule from the candidate-certified catalog,
+keeps direct and MCP tracks separate, routes direct and MCP-issued Cypher
+through policy v3, checkpoints each completed task atomically, retries only
+infrastructure failures, and withholds public reports until the post-track graph
+fingerprint still matches. Private run state retains raw provider and execution
+receipts; `public-report-v2.json` contains only redacted task outcomes. One
+manifest/policy-bound deny cache and circuit are shared by every model,
+repetition, and track in the campaign.
+
+Stop instead of executing when readiness reports a stale/mixed artifact,
+candidate or capability mismatch, dirty/wrong MCP revision, model-loop mismatch,
+BloodHound health failure, or graph mismatch. Uploading or replacing graph data
+is never part of `run-v2`.
 
 See [Benchmark Hardening Runbook](docs/benchmark-hardening-runbook.md) for the
 protocol and runtime invariants and
@@ -841,6 +890,20 @@ Run a configured benchmark campaign:
 
 ```bash
 uv run ori run --config models.local.yaml
+```
+
+Preflight a candidate-certified V2 campaign without model calls:
+
+```bash
+uv run --env-file ../Bloodhound-MCP/.env \
+  ori run-v2 --config models.v2.local.yaml
+```
+
+Execute that exact V2 campaign only after readiness passes:
+
+```bash
+uv run --env-file ../Bloodhound-MCP/.env \
+  ori run-v2 --config models.v2.local.yaml --execute
 ```
 
 Score structured answers offline without launching a model campaign:

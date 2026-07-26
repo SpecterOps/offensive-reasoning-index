@@ -6,6 +6,9 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from jsonschema import Draft202012Validator
+from jsonschema.exceptions import SchemaError, ValidationError
+
 from .comparator import compare
 from .evidence import EvidenceNormalizationError, normalize_mcp_evidence
 from .fingerprint import canonical_sha256
@@ -52,12 +55,19 @@ def _output_attempt(
             "structured final answer is missing",
         )
     try:
+        Draft202012Validator.check_schema(task.answer_schema)
+        Draft202012Validator(task.answer_schema).validate(dict(answer))
         evidence = normalize_mcp_evidence(
             answer,
             resolver=resolver,
             task_id=task.task_id,
         )
-    except (EvidenceNormalizationError, ValueError) as exc:
+    except (
+        EvidenceNormalizationError,
+        SchemaError,
+        ValidationError,
+        ValueError,
+    ) as exc:
         return (
             FinalizationAttempt(
                 status=FinalOutputStatus.MALFORMED,
