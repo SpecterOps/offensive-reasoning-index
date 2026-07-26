@@ -6,7 +6,8 @@ import hashlib
 import json
 import os
 import subprocess
-from collections.abc import Mapping, Sequence
+import time
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -69,10 +70,98 @@ RUNNER_VERSION = "ori-v2-model-campaign-v1"
 RUN_STATE_SCHEMA_VERSION = "ori-v2-private-run-state-v1"
 MODEL_REPORT_SCHEMA_VERSION = "ori-v2-model-report-v1"
 READINESS_SCHEMA_VERSION = "ori-v2-run-readiness-v1"
+ProgressReporter = Callable[[str], None]
 
 
 class V2CampaignRunError(ValueError):
     """Raised before model work when campaign state is unsafe or inconsistent."""
+
+
+def _emit_progress(progress: ProgressReporter | None, message: str) -> None:
+    """Report model-blind operator progress without affecting campaign state."""
+
+    if progress is None:
+        return
+    try:
+        progress(message)
+    except Exception:
+        # Progress output must never change scoring or execution.
+        return
+
+
+def _display_outcome(sample: SampleResult) -> str:
+    if sample.reasoning_correct is True:
+        return "CORRECT"
+    if sample.reasoning_correct is False and sample.outcome.value == "COMPLETED":
+        return "INCORRECT"
+    return sample.outcome.value
+
+
+def _task_completion_progress(
+    *,
+    sample: SampleResult,
+    provider: ProviderRunRecord,
+    task_elapsed_seconds: float,
+    results: Sequence[SampleResult],
+) -> str:
+    correct = sum(item.reasoning_correct is True for item in results)
+    graded = sum(item.reasoning_correct is not None for item in results)
+    infrastructure = sum(
+        item.execution_class.value == "infra_failure" for item in results
+    )
+    score = (
+        "1.0"
+        if sample.reasoning_correct is True
+        else "0.0"
+        if sample.reasoning_correct is False
+        else "n/a"
+    )
+    details = [
+        f"score={score}",
+        f"elapsed={task_elapsed_seconds:.1f}s",
+        f"tokens={provider.tokens_input}+{provider.tokens_output}",
+    ]
+    if provider.surface.startswith("mcp"):
+        tool_events = [
+            event for event in provider.mcp_events if event.tool_name is not None
+        ]
+        details.extend(
+            (
+                f"tools={len(tool_events)}",
+                "cypher="
+                + str(
+                    sum(
+                        event.tool_name == "cypher_query"
+                        for event in tool_events
+                    )
+                ),
+            )
+        )
+    details.extend(
+        (
+            f"running_correct={correct}/{graded}",
+            f"infra={infrastructure}",
+        )
+    )
+    return f"           → {_display_outcome(sample)} ({', '.join(details)})"
+
+
+def _infrastructure_attempt_progress(
+    *,
+    sample: SampleResult,
+    attempt_number: int,
+    max_infra_retries: int,
+) -> str:
+    if attempt_number <= max_infra_retries:
+        state = "infrastructure healthy, retrying"
+        arrow = "↻"
+    else:
+        state = "retry budget exhausted"
+        arrow = "→"
+    return (
+        f"           {arrow} {sample.outcome.value} on attempt "
+        f"{attempt_number}; {state}"
+    )
 
 
 class ModelRunProvenanceV2(StrictModel):
@@ -823,6 +912,8 @@ async def _run_model(
     bhce: BHCEClient,
     coordinator: DirectQueryCoordinator,
     loop: MCPToolLoop | None,
+    runs_total: int,
+    progress: ProgressReporter | None = None,
 ) -> tuple[ModelRunProvenanceV2, tuple[SampleResult, ...]]:
     provenance = _provenance(
         resolved=resolved,
@@ -847,6 +938,14 @@ async def _run_model(
     results = list(state.checkpoint.results if state is not None else ())
     attempts = list(state.attempts if state is not None else ())
     completed = {result.task_id for result in results}
+    _emit_progress(
+        progress,
+        (
+            f"\n[{prepared.track.value}] {model.name} -> "
+            f"{model.requested_model} run {run_index}/{runs_total} "
+            f"({len(prepared.task_ids)} tasks, {len(completed)} resumed)"
+        ),
+    )
 
     bundle = None
     if prepared.track is Track.MCP:
@@ -862,11 +961,19 @@ async def _run_model(
     }
     registry = OracleRegistry(prepared.pair.private)
     resolver = IdentityResolver(prepared.pair.private.identity_catalog)
-    for task_id in prepared.task_ids:
+    for task_index, task_id in enumerate(prepared.task_ids, start=1):
         if task_id in completed:
             continue
         task = task_by_id[task_id]
         oracle = registry.for_task(task_id)
+        task_started = time.monotonic()
+        _emit_progress(
+            progress,
+            (
+                f"  [{task_index}/{len(prepared.task_ids)}] {task.task_id} "
+                f"({task.claim_kind}, {task.answer_policy.kind})"
+            ),
+        )
         last_sample: SampleResult | None = None
         last_provider: ProviderRunRecord | None = None
         for attempt_number in range(
@@ -920,6 +1027,16 @@ async def _run_model(
             if not health.ok:
                 break
             coordinator.close_circuit()
+            _emit_progress(
+                progress,
+                _infrastructure_attempt_progress(
+                    sample=sample,
+                    attempt_number=attempt_number,
+                    max_infra_retries=(
+                        resolved.config.defaults.max_infra_retries
+                    ),
+                ),
+            )
 
         if last_sample is None or last_provider is None:
             raise AssertionError("v2 task loop produced no terminal attempt")
@@ -936,11 +1053,29 @@ async def _run_model(
             attempts=attempts,
         )
         _write_model(state_path, current_state)
+        _emit_progress(
+            progress,
+            _task_completion_progress(
+                sample=last_sample,
+                provider=last_provider,
+                task_elapsed_seconds=time.monotonic() - task_started,
+                results=results,
+            ),
+        )
 
     summary = summarize_results(prepared.task_ids, results)
     _write_model(
         run_dir / "campaign-summary-v2.private.json",
         summary,
+    )
+    _emit_progress(
+        progress,
+        (
+            f"[{prepared.track.value}] {model.name} run {run_index}/{runs_total} "
+            f"complete: correct={summary.correct}/{summary.correct + summary.incorrect}, "
+            f"infra={summary.infrastructure_failures}, "
+            f"campaign_valid={summary.campaign_valid}"
+        ),
     )
     return provenance, tuple(results)
 
@@ -949,9 +1084,11 @@ async def run_v2_campaign(
     config_path: Path,
     *,
     preflight_only: bool = False,
+    progress: ProgressReporter | None = None,
 ) -> CampaignReadinessV2:
     """Run exact V2 candidate catalogs, or stop after readiness when requested."""
 
+    _emit_progress(progress, "V2 CAMPAIGN: validating sealed artifacts and capabilities")
     (
         resolved,
         snapshot,
@@ -959,6 +1096,14 @@ async def run_v2_campaign(
         mcp_revision,
         model_readiness,
     ) = prepare_v2_campaign(config_path)
+    _emit_progress(
+        progress,
+        (
+            "V2 CAMPAIGN: artifact readiness passed "
+            f"({len(resolved.config.models)} models, "
+            f"{len(resolved.config.track_modes)} tracks)"
+        ),
+    )
     receipts_before: dict[Track, LiveGraphVerification] = {}
     receipts_after: dict[Track, LiveGraphVerification] = {}
     pending_reports: list[
@@ -987,6 +1132,10 @@ async def run_v2_campaign(
             ),
         )
         for track in resolved.config.track_modes:
+            _emit_progress(
+                progress,
+                f"[{track.value}] verifying BloodHound graph before track",
+            )
             _observed, before = await _health_and_graph(
                 resolved,
                 snapshot,
@@ -997,6 +1146,13 @@ async def run_v2_campaign(
             _write_model(
                 track_dir / "graph-verification-before-v2.private.json",
                 before,
+            )
+            _emit_progress(
+                progress,
+                (
+                    f"[{track.value}] pre-track graph verified "
+                    f"({before.graph_fingerprint[:12]})"
+                ),
             )
             if not preflight_only:
                 for model in resolved.config.models:
@@ -1019,6 +1175,8 @@ async def run_v2_campaign(
                             bhce=bhce,
                             coordinator=coordinator,
                             loop=loop,
+                            runs_total=runs,
+                            progress=progress,
                         )
                         run_dir = (
                             resolved.output_dir
@@ -1034,6 +1192,10 @@ async def run_v2_campaign(
                                 run_dir,
                             )
                         )
+            _emit_progress(
+                progress,
+                f"[{track.value}] verifying BloodHound graph after track",
+            )
             _observed, after = await _health_and_graph(
                 resolved,
                 snapshot,
@@ -1043,6 +1205,13 @@ async def run_v2_campaign(
             _write_model(
                 track_dir / "graph-verification-after-v2.private.json",
                 after,
+            )
+            _emit_progress(
+                progress,
+                (
+                    f"[{track.value}] post-track graph verified "
+                    f"({after.graph_fingerprint[:12]})"
+                ),
             )
 
     readiness = _readiness(
@@ -1058,6 +1227,7 @@ async def run_v2_campaign(
         readiness,
     )
     if preflight_only:
+        _emit_progress(progress, "V2 CAMPAIGN: readiness checks complete")
         return readiness
 
     invalid_campaigns: list[str] = []
@@ -1081,4 +1251,5 @@ async def run_v2_campaign(
             "v2 campaign completed with invalid execution accounting: "
             + "; ".join(invalid_campaigns)
         )
+    _emit_progress(progress, "V2 CAMPAIGN: all model runs and reports complete")
     return readiness

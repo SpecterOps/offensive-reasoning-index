@@ -166,6 +166,13 @@ source-manifest digest plus policy version, so a quarantined query cannot be
 re-executed by a later model, repetition, or MCP-issued Cypher call in the same
 campaign.
 
+The live terminal stream is also model-blind. It shows artifact and graph-gate
+stages, model/run and public task identifiers, claim/policy type, retry state,
+checkpointed outcome, elapsed time, token counts, running correctness, and MCP
+tool/Cypher counts. It does not expose the submitted query, raw model response,
+oracle, expected identities, or graph evidence. Progress-output failures are
+non-fatal and cannot change execution or scoring.
+
 ## V2 compile and certification commands
 
 Compile and offline-certify one product track:

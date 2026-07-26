@@ -767,6 +767,12 @@ receipts; `public-report-v2.json` contains only redacted task outcomes. One
 manifest/policy-bound deny cache and circuit are shared by every model,
 repetition, and track in the campaign.
 
+During execution, the terminal reports graph gates, model/run transitions, each
+public task ID and claim/policy type, retry decisions, and the checkpointed
+outcome with timing, token, running-score, and MCP tool/Cypher counts. It never
+prints model queries, raw responses, expected answers, oracle identities, or
+sealed evidence.
+
 Stop instead of executing when readiness reports a stale/mixed artifact,
 candidate or capability mismatch, dirty/wrong MCP revision, model-loop mismatch,
 BloodHound health failure, or graph mismatch. Uploading or replacing graph data

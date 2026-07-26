@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -28,8 +29,9 @@ from ori.eval.v2.model_runtime import (
 from ori.eval.v2.schema import (
     ExactSetPolicy,
     ExecutionClass,
+    Track,
 )
-from ori.eval.v2.scoring import SampleOutcomeCode
+from ori.eval.v2.scoring import SampleOutcomeCode, SampleResult
 
 from .test_v2_direct_adapter import (
     ORACLE as DIRECT_ORACLE,
@@ -627,3 +629,227 @@ def test_v2_model_runtime_has_no_legacy_grader_or_template_dispatch() -> None:
     assert "Track.MCP" in source
     assert 'resolved.output_dir\n                    / "direct-query-deny-cache' in source
     assert 'run_dir / "direct-query-deny-cache' not in source
+    assert "progress=progress" in source
+    assert "_emit_progress" in source
+
+
+def test_v2_campaign_progress_is_model_blind_and_non_fatal() -> None:
+    messages: list[str] = []
+    campaign_runner._emit_progress(messages.append, "safe progress")
+    assert messages == ["safe progress"]
+
+    def broken_progress(_message: str) -> None:
+        raise RuntimeError("closed terminal")
+
+    campaign_runner._emit_progress(broken_progress, "must not affect scoring")
+
+    sample = SampleResult(
+        task_id=DIRECT_TASK.task_id,
+        task_fingerprint=DIRECT_TASK.task_fingerprint,
+        oracle_fingerprint=DIRECT_ORACLE.oracle_fingerprint,
+        execution_class=ExecutionClass.MODEL_FAILURE,
+        outcome=SampleOutcomeCode.QUERY_TIMEOUT,
+        reasoning_correct=False,
+        detail="query rejected as too complex",
+    )
+    provider = model_runtime._record(
+        task=DIRECT_TASK,
+        model="codex/gpt-test",
+        surface="direct",
+        response=_response("{}"),
+    )
+    line = campaign_runner._task_completion_progress(
+        sample=sample,
+        provider=provider,
+        task_elapsed_seconds=12.5,
+        results=(sample,),
+    )
+
+    assert "QUERY_TIMEOUT" in line
+    assert "score=0.0" in line
+    assert "elapsed=12.5s" in line
+    assert "running_correct=0/1" in line
+    assert DIRECT_ORACLE.oracle_id not in line
+    assert "reference_cypher" not in line
+
+    infrastructure = SampleResult(
+        task_id=DIRECT_TASK.task_id,
+        task_fingerprint=DIRECT_TASK.task_fingerprint,
+        oracle_fingerprint=DIRECT_ORACLE.oracle_fingerprint,
+        execution_class=ExecutionClass.INFRA_FAILURE,
+        outcome=SampleOutcomeCode.INFRA_ERROR,
+        reasoning_correct=None,
+        detail="transport unavailable",
+    )
+    retry = campaign_runner._infrastructure_attempt_progress(
+        sample=infrastructure,
+        attempt_number=1,
+        max_infra_retries=1,
+    )
+    exhausted = campaign_runner._infrastructure_attempt_progress(
+        sample=infrastructure,
+        attempt_number=2,
+        max_infra_retries=1,
+    )
+    assert "retrying" in retry
+    assert "retry budget exhausted" in exhausted
+
+
+def test_v2_run_model_emits_task_retry_completion_and_resume_progress(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    infrastructure = SampleResult(
+        task_id=DIRECT_TASK.task_id,
+        task_fingerprint=DIRECT_TASK.task_fingerprint,
+        oracle_fingerprint=DIRECT_ORACLE.oracle_fingerprint,
+        execution_class=ExecutionClass.INFRA_FAILURE,
+        outcome=SampleOutcomeCode.INFRA_ERROR,
+        reasoning_correct=None,
+        detail="transport unavailable",
+    )
+    terminal = SampleResult(
+        task_id=DIRECT_TASK.task_id,
+        task_fingerprint=DIRECT_TASK.task_fingerprint,
+        oracle_fingerprint=DIRECT_ORACLE.oracle_fingerprint,
+        execution_class=ExecutionClass.MODEL_FAILURE,
+        outcome=SampleOutcomeCode.QUERY_TIMEOUT,
+        reasoning_correct=False,
+        detail="query too complex",
+    )
+    provider = model_runtime._record(
+        task=DIRECT_TASK,
+        model="codex/gpt-test",
+        surface="direct",
+        response=_response("{}"),
+    )
+    samples = iter((infrastructure, terminal))
+
+    async def fake_direct_run(**_kwargs: Any):
+        return None, next(samples), provider
+
+    class HealthyBHCE:
+        async def wait_until_healthy(self, **_kwargs: Any):
+            return SimpleNamespace(ok=True)
+
+    class Coordinator:
+        def __init__(self) -> None:
+            self.closed = 0
+
+        def close_circuit(self) -> None:
+            self.closed += 1
+
+    pair = SimpleNamespace(
+        public=SimpleNamespace(tasks=(DIRECT_TASK,)),
+        private=SimpleNamespace(
+            identity_catalog=DIRECT_ORACLE.resolved_roles,
+        ),
+    )
+    prepared = campaign_runner.PreparedTrack(
+        track=Track.DIRECT,
+        pair=pair,
+        profile=SimpleNamespace(),
+        release=SimpleNamespace(
+            entries=(SimpleNamespace(task_id=DIRECT_TASK.task_id),),
+        ),
+        live=SimpleNamespace(),
+        certifications={},
+    )
+    resolved = SimpleNamespace(
+        output_dir=tmp_path,
+        config=SimpleNamespace(
+            defaults=SimpleNamespace(
+                max_infra_retries=1,
+                model_base_url=None,
+                health=SimpleNamespace(
+                    timeout_seconds=1.0,
+                    poll_interval=0.01,
+                ),
+            )
+        ),
+    )
+    model = SimpleNamespace(
+        name="gpt-test",
+        requested_model="codex/gpt-test",
+        model_base_url=None,
+        options={},
+    )
+    def checkpoint(*_args: Any, results, **_kwargs: Any):
+        return SimpleNamespace(results=tuple(results))
+
+    state_holder = {"value": None}
+    monkeypatch.setattr(
+        campaign_runner,
+        "_provenance",
+        lambda **_kwargs: SimpleNamespace(run_identity=object()),
+    )
+    monkeypatch.setattr(campaign_runner, "_guard_run_dir", lambda *_args: None)
+    monkeypatch.setattr(
+        campaign_runner,
+        "_load_state",
+        lambda *_args, **_kwargs: state_holder["value"],
+    )
+    monkeypatch.setattr(campaign_runner, "build_checkpoint", checkpoint)
+    monkeypatch.setattr(campaign_runner, "_state", lambda **_kwargs: object())
+    monkeypatch.setattr(campaign_runner, "_write_model", lambda *_args: None)
+    monkeypatch.setattr(
+        campaign_runner,
+        "OracleRegistry",
+        lambda _private: SimpleNamespace(
+            for_task=lambda _task_id: DIRECT_ORACLE,
+        ),
+    )
+    monkeypatch.setattr(
+        campaign_runner,
+        "run_direct_model_task_v2",
+        fake_direct_run,
+    )
+    coordinator = Coordinator()
+    progress: list[str] = []
+
+    _provenance, results = asyncio.run(
+        campaign_runner._run_model(
+            resolved=resolved,
+            prepared=prepared,
+            model=model,
+            run_index=1,
+            bhce=HealthyBHCE(),
+            coordinator=coordinator,
+            loop=None,
+            runs_total=1,
+            progress=progress.append,
+        )
+    )
+
+    assert results == (terminal,)
+    assert coordinator.closed == 1
+    assert any("0 resumed" in message for message in progress)
+    assert any("[1/1]" in message and DIRECT_TASK.task_id in message for message in progress)
+    assert any("INFRA_ERROR" in message and "retrying" in message for message in progress)
+    assert any(
+        "QUERY_TIMEOUT" in message and "running_correct=0/1" in message
+        for message in progress
+    )
+    assert any("run 1/1 complete" in message for message in progress)
+
+    state_holder["value"] = SimpleNamespace(
+        checkpoint=SimpleNamespace(results=(terminal,)),
+        attempts=(),
+    )
+    resumed: list[str] = []
+    _provenance, resumed_results = asyncio.run(
+        campaign_runner._run_model(
+            resolved=resolved,
+            prepared=prepared,
+            model=model,
+            run_index=1,
+            bhce=HealthyBHCE(),
+            coordinator=coordinator,
+            loop=None,
+            runs_total=1,
+            progress=resumed.append,
+        )
+    )
+    assert resumed_results == (terminal,)
+    assert any("1 resumed" in message for message in resumed)
+    assert not any("[1/1]" in message for message in resumed)

@@ -142,7 +142,7 @@ receipt for MCP upload job `10`.
 
 ## Final repository gates
 
-- `uv run pytest`: 543 passed.
+- `uv run pytest`: 545 passed.
 - `uv run ruff check src scripts tests`: passed.
 - `uv lock --check`: passed.
 - `git diff --check`: passed.

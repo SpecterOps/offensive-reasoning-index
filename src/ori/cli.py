@@ -1113,6 +1113,7 @@ def run_v2_command(config_path: str, execute: bool) -> None:
             run_v2_campaign(
                 Path(config_path),
                 preflight_only=not execute,
+                progress=click.echo,
             )
         )
     except ValueError as exc:
