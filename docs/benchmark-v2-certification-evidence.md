@@ -1,12 +1,14 @@
 # ORI benchmark correctness v2 certification evidence
 
-Date: 2026-07-25 through 2026-07-26
+Date: 2026-07-25 through 2026-07-27
 Branch: `feat/benchmark-correctness-v2`
 Containment boundary: `0a56029471c5426be348c61c0969724eaee38599`
 Protocol: `ori-eval-protocol-v2`
 
-This record contains deterministic harness evidence only. No GPT-5.6 Sol,
-GPT-5.5, local-model, or other provider campaign was launched.
+This record contains deterministic harness evidence only. The certification and
+readiness actions recorded here launched no GPT-5.6 Sol, GPT-5.5, local-model,
+or other provider calls. Later operator-authorized development runs that
+exposed runtime incidents are documented separately in the implementation plan.
 
 ## Corpus migration
 
@@ -54,8 +56,21 @@ only those resolved values.
 
 ## Controlled BloodHound certification: complex seed 4401
 
-The existing controlled graph first passed the legacy ingest verifier with all
-30 planted paths. No upload or replacement was performed.
+The operator explicitly approved replacing the simple seed-1234 graph with
+complex seed 4401 on `bloodhound-ori.mwnickerson.com`. Before deletion, the
+recoverable simple archive and manifest were confirmed at their frozen hashes.
+The collected-graph clear returned HTTP 204, and BloodHound MCP upload job `11`
+accepted the exact complex archive:
+
+```text
+complex-v1-seed-4401.zip
+SHA-256 a00e60e0f7ba8a02bcfee74e0ef1b99d7e46107d25b5172ffb1231e51f8f5edb
+```
+
+After the datapipe returned to idle, MCP exposed
+`GRANITEMANUFACTURING.LOCAL` and
+`PARTNER.GRANITEMANUFACTURING.LOCAL`. The independent ingest verifier matched
+all declared object counts and all 30/30 planted paths.
 
 `ori certify-v2-live` then completed three bounded, read-only projections:
 
@@ -71,19 +86,27 @@ at every gate.
 
 Live/offline parity:
 
-| Track | Candidates | Applicable parity cases | Evidence/verdict parity | Live catalog fingerprint | Candidate catalog fingerprint |
-| --- | ---: | ---: | --- | --- | --- |
-| direct | 46 | 348 | all equal | `72438f7bcf09cb666b0c39f9bb7d75031049afcb6875c473cf4159ba50550430` | `5427aafb98f25a3bb3d3f9d9ec405103eb0f74ba28cc9ecdd8ca7d68942e29f9` |
-| MCP | 70 | 487 | all equal | `30df26007da860b87f2a1eedc8f8bd9966022323270f875674d8805c8a4194ca` | `e7d491d284edda1756f674c47fdc9f0a13e5f747fd39ff6bf1e6e380d30db22d` |
+| Track | Candidates | Comparator cases | Adapter cases | Mismatches | Offline certification | Live certification | Candidate release |
+| --- | ---: | ---: | ---: | ---: | --- | --- | --- |
+| direct | 46 | 348 | 376 | 0 | `1f4f1579e4df983b0ff32c72c07a29bc5e6107858d1b62e8bfc19b3403e3c514` | `fc032cbe541daf98fd4b6e7f9be78fdc71390d75730d84b90b1317b905b427ef` | `c7d9a2b02c011f69057e0a192c47ac8ea768b00e10da0acf8b348f8754aa535d` |
+| MCP | 70 | 486 | 520 | 0 | `4a37f4c0dbcd186b426c7d8313455745782ce352a38ceeab39fcda773f4475d2` | `65f1debf039aed00f07040e6d05490cee395e96acf383464268621fa56402b27` | `10ccee8eaa33683e87f6e21ec12dc6b6c5633e8c8d4cbc004c5c5401334b6729` |
 
-The final catalogs were regenerated from the immutable successful pre/middle/post
-receipts after the MCP finalization source fingerprint was added to the
-capability profile. This changed the profile-bound certification fingerprints
-without changing any graph or parity evidence. A fresh `verify-ingest` after
-the regeneration again passed all node counts and 30/30 planted paths.
+All of these artifacts bind certifier fingerprint
+`d0a70336f3078ec8264fb584d644a30604ac0e0c73bfd1605a197268817ac26e`.
+The direct adapter cases comprise 208 graph-snapshot, 140 adversarial, and 28
+malformed replays. The MCP adapter cases comprise 321 graph-snapshot, 165
+adversarial, and 34 malformed replays.
 
-The local private receipts and public candidate catalogs are retained under
-`results/v2/complex-seed-4401/live/`, which is intentionally gitignored.
+The model-backed V2 entry point was then exercised in readiness-only mode using
+the intended GPT-5.6 Sol and GPT-5.5 config. It verified both candidate
+releases, sealed artifacts, the pinned MCP revision, BloodHound health, and the
+live graph before and after both tracks. Readiness fingerprint
+`b1faa48d6692667cb05a7118569d6468aa9584a14752b9be502d10d83954969f`
+passed with 46 direct and 70 MCP tasks and zero provider calls.
+
+The current private receipts and public candidate catalogs are retained under
+`results/v2/complex-seed-4401/adapter-parity-v3-entity-scoped-reaudit/`,
+which is intentionally gitignored.
 
 ## Controlled BloodHound certification: simple seed 1234
 
@@ -135,27 +158,29 @@ live graph before and after both tracks:
 | Provider calls | zero |
 
 The local private receipts and public candidate catalogs are retained under
-`results/v2/simple-seed-1234/live/`, which is intentionally gitignored. Per the
-operator's replacement approval, simple seed 1234 remains loaded on the
-controlled server. The same directory includes the sanitized private ingest
-receipt for MCP upload job `10`.
+`results/v2/simple-seed-1234/live/`, which is intentionally gitignored. The
+same directory includes the sanitized private ingest receipt for MCP upload job
+`10`. Simple seed 1234 was later removed under explicit operator approval so
+the complete complex catalog could be re-certified; its frozen ZIP and manifest
+remain available for recovery.
 
 ## Final repository gates
 
-- `uv run pytest`: 545 passed.
+- `uv run pytest`: 581 passed in 437.85 seconds.
 - `uv run ruff check src scripts tests`: passed.
 - `uv lock --check`: passed.
 - `git diff --check`: passed.
 - Simple final task preflight: 20 direct and 40 MCP tasks, zero errors and
   zero warnings.
 - Candidate-catalog JSON Schema validation: passed for both tracks.
-- Gitleaks: 106 commits and approximately 2.74 MB scanned, zero findings.
+- TruffleHog 3.96.0: 2,516 chunks and 3,062,253 bytes scanned, zero verified
+  or unverified secrets.
 - Independent review: no critical, high, medium, or low findings.
 - Containment-owned modules and tests: no diff from the pinned boundary.
 
 ## Controlled-environment result
 
 Both current products are candidate-certified against immutable live graph
-receipts. Complex seed 4401 remains certified by its preserved receipts and
-simple seed 1234 is the graph currently loaded on the controlled server. No
-provider or model campaign ran during either certification.
+receipts. Complex seed 4401 is the graph currently loaded on the controlled
+server. No provider or model campaign ran during either certification or the
+final complex readiness gate.

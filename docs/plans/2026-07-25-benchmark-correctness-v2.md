@@ -223,9 +223,9 @@ and failure classifier are upstream dependencies and must not be reimplemented.
   implementation fingerprints.
 - [x] Verify pre/post graph fingerprints.
 - [x] Re-live-certify the complete simple catalog under adapter-certifier v3.
-- [ ] Re-live-certify the complete complex catalog under adapter-certifier v3
+- [x] Re-live-certify the complete complex catalog under adapter-certifier v3
   after the exact complex graph is loaded with operator approval.
-- [ ] Confirm current adapter-certifier-v3 complex live/offline Evidence IR and
+- [x] Confirm current adapter-certifier-v3 complex live/offline Evidence IR and
   verdict parity.
 - [x] Run no paid or local model campaign.
 
@@ -245,9 +245,9 @@ and failure classifier are upstream dependencies and must not be reimplemented.
   `LIBRARIAN WRITE COMPLETE`.
 - [ ] Reconcile the final branch against the containment PR merge strategy.
 
-The two unchecked reconciliation items are a deferred integration checkpoint,
-not a v2 implementation or certification gate. As of 2026-07-26,
-`origin/master` does not contain `0a560294`; run them after the containment PR
+The two unchecked checklist entries describe the same deferred integration
+checkpoint, not a v2 implementation or certification gate. As of 2026-07-27,
+`origin/master` does not contain `0a560294`; reconcile after the containment PR
 is merged and before opening the v2 PR.
 
 ## Post-implementation MCP runtime incident
@@ -423,8 +423,10 @@ durable checkpoint was written.
   graph under certifier v3.
 - [x] Pass a fresh two-model/two-track no-model readiness gate from
   `models-v2-adapter-parity-v3.yaml`.
-- [ ] Live-certify both complex seed-4401 tracks under certifier v3 after an
+- [x] Live-certify both complex seed-4401 tracks under certifier v3 after an
   operator-approved graph replacement.
+- [x] Pass a fresh two-model/two-track no-model readiness gate for the 46 direct
+  and 70 MCP complex candidates without provider calls.
 - [x] Run final full repository tests (581 passed), Ruff, diff validation,
   source-control secret scan, and independent review for the
   adapter-certifier-v3 change.
@@ -445,7 +447,7 @@ durable checkpoint was written.
 - [x] Every current simple/complex capability is migrated or replaced.
 - [x] Every migrated task has complete fixture evidence.
 - [x] Current simple live and offline adapter-projected verdicts agree.
-- [ ] Current complex live and offline adapter-projected verdicts agree under
+- [x] Current complex live and offline adapter-projected verdicts agree under
   certifier v3.
 - [x] No v2 task depends on hidden template-specific grader behavior.
 - [x] Every candidate is safe under its direct or MCP profile.
