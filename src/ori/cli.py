@@ -760,6 +760,156 @@ def main() -> None:
     load_dotenv(override=False)
 
 
+@main.group(name="discovery")
+def discovery_group() -> None:
+    """Compile, preflight, and grade V28-native open-world discovery artifacts."""
+
+
+@discovery_group.command(name="compile")
+@click.option(
+    "--manifest",
+    "manifest_path",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False),
+    help="Standard ORI source manifest paired with the SharpHound archive.",
+)
+@click.option(
+    "--archive",
+    "archive_path",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False),
+    help="Exact standard ORI SharpHound ZIP.",
+)
+@click.option(
+    "--v2-public",
+    "v2_public_path",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False),
+    help="V28 public artifact compiled from the same manifest and archive.",
+)
+@click.option(
+    "--v2-oracles",
+    "v2_oracle_path",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False),
+    help="Matching scorer-only V28 oracle artifact.",
+)
+@click.option(
+    "--output-dir",
+    required=True,
+    type=click.Path(file_okay=False),
+)
+def discovery_compile_command(
+    manifest_path: str,
+    archive_path: str,
+    v2_public_path: str,
+    v2_oracle_path: str,
+    output_dir: str,
+) -> None:
+    """Compile closed V28 route truth into separated discovery artifacts."""
+    from .discovery import compile_discovery_files
+
+    try:
+        paths = compile_discovery_files(
+            manifest_path=Path(manifest_path),
+            archive_path=Path(archive_path),
+            v2_public_path=Path(v2_public_path),
+            v2_oracle_path=Path(v2_oracle_path),
+            output_dir=Path(output_dir),
+        )
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo("DISCOVERY COMPILE: PASS")
+    click.echo(f"  public: {paths['public']}")
+    click.echo(f"  private: {paths['private']}")
+
+
+@discovery_group.command(name="preflight")
+@click.option(
+    "--public",
+    "public_path",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False),
+)
+@click.option(
+    "--private",
+    "private_path",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False),
+)
+@click.option("--output", "output_path", type=click.Path(dir_okay=False))
+def discovery_preflight_command(
+    public_path: str,
+    private_path: str,
+    output_path: str | None,
+) -> None:
+    """Validate a discovery pair before any external model execution."""
+    from .discovery import preflight_discovery_files
+
+    try:
+        report = preflight_discovery_files(
+            public_path=Path(public_path),
+            private_path=Path(private_path),
+            output_path=Path(output_path) if output_path else None,
+        )
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo("DISCOVERY PREFLIGHT: PASS")
+    click.echo(
+        f"  objectives={report.target_count} variants={report.variant_count}"
+    )
+
+
+@discovery_group.command(name="grade")
+@click.option(
+    "--public",
+    "public_path",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False),
+)
+@click.option(
+    "--private",
+    "private_path",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False),
+)
+@click.option(
+    "--submission",
+    "submission_path",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False),
+)
+@click.option(
+    "--output",
+    "output_path",
+    required=True,
+    type=click.Path(dir_okay=False),
+)
+def discovery_grade_command(
+    public_path: str,
+    private_path: str,
+    submission_path: str,
+    output_path: str,
+) -> None:
+    """Grade one bounded structured submission; never execute a model or upload."""
+    from .discovery.grader import grade_discovery_files
+
+    try:
+        report = grade_discovery_files(
+            public_path=Path(public_path),
+            private_path=Path(private_path),
+            submission_path=Path(submission_path),
+            output_path=Path(output_path),
+        )
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo("DISCOVERY GRADE: PASS")
+    click.echo(
+        f"  f1={report.f1:.6f} precision={report.precision:.6f} "
+        f"recall={report.recall:.6f} false_positives={report.false_positive_count}"
+    )
+
+
 @main.group(name="benchmark")
 def benchmark_group() -> None:
     """Explore named ORI benchmark products."""
