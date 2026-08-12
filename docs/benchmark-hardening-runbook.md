@@ -21,6 +21,7 @@ The claim compiler is the only supported path to a v2 task. It resolves logical
 scenario roles to seed-specific `EntityRef` identities and compiles:
 
 - a solver-visible `TaskBundle`;
+- a solver-visible `AcceptanceSpec`;
 - one explicit `AnswerPolicy`;
 - an independent direct or MCP `TrackBinding`;
 - a scorer-only `OracleBundle`;
@@ -29,7 +30,10 @@ scenario roles to seed-specific `EntityRef` identities and compiles:
 Route, set, count, decision, and absence claims declare their direct,
 transitive, or effective semantics. Human-authored question text is a validated
 template over claim roles and requested answer fields; it cannot add hidden
-grading requirements.
+grading requirements. `AcceptanceSpec` is the complete public grading contract:
+policy, mechanisms and ordering, context, properties, exclusions, truthful-extra
+evidence behavior, completeness, and bounds. Compilation fails if a sealed
+scorer constraint has no public origin.
 
 The comparator accepts exactly `AnswerPolicy + OracleBundle + EvidenceIR`.
 It cannot receive a legacy task, template ID, or arbitrary metadata. Exact set
@@ -48,8 +52,8 @@ Keep scorer-only files private:
 
 ```text
 *-oracles-v2.private.json
-*-offline-certification-v3.private.json
-*-live-certification-v3.private.json
+*-offline-certification-v4.private.json
+*-live-certification-v4.private.json
 *-live-{pre,middle,post}.private.json
 *scoring.private.json
 ```
@@ -99,6 +103,9 @@ Correctness is derived from returned graph evidence, never query text. A path
 with nodes but no ordered edges is invalid. Model-attributable policy,
 query-timeout, and query errors are incorrect after readiness. Authentication,
 transport, server, rate-limit, response, and circuit-open failures receive no
+reasoning verdict. For bounded-negative claims, a non-zero exact directed count
+is contradictory evidence. A non-zero broader wildcard or undirected count is
+only inconclusive proof and is reported as `PROOF_INSUFFICIENT` without a
 reasoning verdict.
 
 Claim property constraints and graph facts are intentionally different types.
@@ -118,8 +125,46 @@ A binding is tool-only, explicitly Cypher-enabled, or blocked.
 Provider loops submit mechanical `ToolObservation` facts. The harness classifies
 them against the public claim as useful positive evidence, valid negative proof,
 conclusive or inconclusive empty, truncated, invalid arguments, policy
-rejection, infrastructure failure, harness failure, irrelevant activity, or
-resource read. Models and provider adapters cannot self-declare evidence useful.
+rejection, task timeout, infrastructure failure, harness failure, irrelevant
+activity, or resource read. Models and provider adapters cannot self-declare
+evidence useful.
+
+The current certified MCP proof surface is explicitly
+`cypher_query(info_type=run)`. High-level tools may be used for exploration but
+cannot by themselves unlock finalization. The solver-visible result contract
+declares that generic rule and the accepted result kind: stable entity window,
+one scalar count, or one bounded path. Claim relevance uses only public input
+selectors, public projection type, and that result kind. It must never depend on
+sealed mechanisms, properties, expected identities, or reference queries.
+Query selectors bind the exact canonical `name` or exact `objectid`, never a
+display alias substituted as a live property value. BloodHound labels,
+relationship types, and property keys are case-sensitive. An anonymous
+selector-bound anchor is equivalent to the same node with a variable, and
+declared boolean predicates accept a `coalesce(property, false)` form only when
+it is logically equivalent to the typed public predicate.
+For route and decision claims, the returned path variable must retain its
+lineage through every `WITH` projection and the receipt must mechanically
+contain at least two nodes and one edge. Mentioning a correct path earlier in a
+query, rebinding its variable, or returning nodes alone cannot unlock
+finalization. Exact selector bindings are evaluated in the returned path's live
+scope: selectors dropped by `WITH` or introduced only in a later detached
+`MATCH` cannot authorize an unrelated witness, while explicit node
+passthrough/aliasing remains valid.
+
+A bounded-negative Cypher proof counts one path variable between the public
+source and objective selectors over the complete hop bound. A zero wildcard or
+undirected count is a stronger absence proof. A non-zero result from that
+broader search is not evidence that the narrower allowed-mechanism route
+exists; only a complete directed count over exactly the declared relationship
+vocabulary and exact public hop ceiling can contradict `no_path`. An otherwise
+exact relationship query with a wider ceiling is still broader: zero proves
+absence, while non-zero remains inconclusive. For a public one-hop claim,
+ordinary one-edge syntax and `*1..1` are equivalent. Inline and `WHERE`
+endpoint selectors must agree for each path variable; a contradictory
+additional selector makes the query irrelevant rather than turning its forced
+zero into a negative proof. Selector predicates on relationship, path, or
+otherwise non-endpoint variables and extra endpoint labels are rejected as
+undeclared filters for the same reason.
 
 Native MCP tool executors return structured text-content blocks. The shared
 runtime unwraps those blocks to their JSON text before the V2 projector reads
@@ -130,23 +175,45 @@ or terminate the provider loop.
 
 Only useful positive, valid negative, or conclusive empty evidence unlocks
 finalization. Resource reads, irrelevant calls, incomplete empties, truncation,
-and errors do not. Native Ollama, native OpenAI-compatible, and Inspect use one
-state machine. Certified runs forbid `auto`; one generic schema-only retry is
-allowed and unresolved malformed output becomes `OUTPUT_INVALID`.
+and errors do not. A later truncation revokes an earlier unlock in both the
+state machine and native provider loop. Native Ollama, native
+OpenAI-compatible, and Inspect use one state machine. Certified runs forbid
+`auto`; one generic schema-only retry is allowed only inside the original
+task deadline after claim-relevant evidence, cannot add missing answer facts,
+and unresolved malformed output becomes `OUTPUT_INVALID`. A
+schema-valid answer without certified claim-relevant evidence becomes public
+`PROOF_INSUFFICIENT`, retains no reasoning verdict, and remains distinct from
+malformed output.
 
 ### Bounds and graph identity
 
 Every task binds maximum traversal depth, result cardinality, page size/pages,
-output bytes, transcript bytes, tool calls, and timeout. Oversized enumerations
-are compiled as deterministic 500-object pages. Completeness that cannot be
-distinguished from truncation blocks certification.
+starting result offset, output bytes, transcript bytes, tool calls, and timeout.
+Oversized enumerations are compiled as deterministic 500-object windows whose
+public offset/limit exactly match the binding and projector. The compiler
+rejects hidden subpagination or a hidden global-count requirement for such a
+window. Completeness that cannot be distinguished from truncation blocks
+certification. For complete multi-page sets, omitting `SKIP 0` on the first
+page is canonically equivalent to spelling it explicitly; later contiguous
+`SKIP` pages still must match the same normalized population query. Bound
+Cypher variables are alpha-normalized in that population key, so renaming a
+page variable does not create a false proof split. An otherwise equivalent
+single anonymous `COUNT(*)` population binds to its named enumeration page.
+Count and page identity distinctness must also match. A distinct count may bind
+to row-preserving pages only when the actual receipts mechanically prove one
+explicit, globally unique object ID per returned row across all contiguous
+pages. Duplicate or absent row identities cannot prove completeness.
 
 The archive graph digest covers benchmark-owned typed objects,
 scorer-relevant properties, canonical ordered relationships, and unexpected
-incident attack-path relationships. The live digest uses bounded, stable,
-paginated harness queries. Only explicitly declared BloodHound-generated
-artifacts are normalized. The graph must match before, between, and after the
-two track certifications; any change invalidates the run.
+incident attack-path relationships. It also models deterministic
+BloodHound-derived `ADLocalGroup` objects and their `LocalToComputer` and
+`MemberOfLocalGroup` relationships, because those identities can appear in
+model evidence and therefore cannot be excluded from the sealed identity
+catalog. The live digest uses bounded, stable, paginated harness queries. Only
+explicitly declared non-semantic BloodHound system artifacts are normalized.
+The graph must match before, between, and after the two track certifications;
+any change invalidates the run.
 
 Certification and checkpoints bind task, prompt, oracle, graph, compiler,
 comparator, capability profile, execution bounds, containment policy, MCP
@@ -161,10 +228,11 @@ mixed track sets, `resource_mode` other than `off`, implicit/automatic tool
 loops, concurrency above one, and provider/loop combinations unsupported by
 the native runtime.
 
-The solver request contains only the common public envelope: task ID and
-fingerprint, track, relationship semantics, execution bounds, question, answer
-schema, and generic instructions. It never contains an oracle, reference query,
-expected identities, route variants, or valid-node inventory.
+The solver request contains the question once plus one common public contract:
+track, `AcceptanceSpec`, generic instructions, answer schema, and track result
+contract. Provenance fingerprints stay in artifacts rather than being repeated
+as solving context. It never contains an oracle, reference query, expected
+identities, route variants, or valid-node inventory.
 
 Direct submissions use a runtime-derived outer schema:
 
@@ -177,7 +245,7 @@ allowed by that public claim kind. The query executes exactly once through
 `DirectQueryCoordinator.execute()`. Correctness comes from the returned graph
 evidence plus the restricted assertion, not the query text.
 
-The public request also carries `ori-direct-result-contract-v1`. It preserves
+The public request also carries `ori-direct-result-contract-v3`. It preserves
 the working v1 BloodHound boundary without restoring the legacy grader:
 
 - set queries return only answer nodes as rows, or one
@@ -189,13 +257,25 @@ the working v1 BloodHound boundary without restoring the legacy grader:
   literals, or list comprehensions;
 - `CALL`, `UNION`, `UNWIND`, `CASE`, `labels()`, and `XOR` are outside the
   certified direct result grammar;
-- recursive route ordering and `LIMIT` belong after the final `RETURN`.
+- route paths preserve their own edge order and must not be globally sorted or
+  converted with `toString(Path)`;
+- `reduce()` is outside BloodHound's certified query grammar;
+- when a bounded route needs `LIMIT`, it belongs after the final `RETURN`;
+- absence claims return one scalar route count, where zero is the bounded
+  negative proof.
 
 These are model-neutral API/result constraints, not graph or answer hints. The
 policy still evaluates the submitted query after generation and never rewrites
 or retries it. Direct set completeness uses one certified, bounded BloodHound
-response and exact sealed-set comparison; MCP set completeness still requires
-mechanical count/pagination evidence because MCP is a paginated tool surface.
+response and exact sealed-set comparison. Its fixed 1,000-identity public
+capacity is not derived from the expected set size, so in-capacity extras reach
+the comparator and are graded incorrect rather than malformed. MCP full-set
+completeness requires mechanical count/page evidence. A deterministic
+bounded-window claim is complete when one stable query returns its exact public
+offset and limit; it does not acquire hidden 100-row pages or a hidden
+global-total contract.
+Full exact sets and route witnesses do not acquire an unnecessary global
+ordering requirement.
 
 The direct projector accepts both standard `data.nodes` and CE's collected-node
 literal representation (`Props`, `Labels`, and `ElementId`). If exactly one
@@ -206,13 +286,71 @@ relationship—while oracle-declared edge properties are required predicates.
 Extra CE-generated properties such as `lastseen` do not make an otherwise exact
 route incorrect.
 
+For route, decision, and bounded-negative evidence, the ordered graph witness
+must begin and end at the public claim endpoints. A query that merely uses the
+selectors in another clause is not endpoint proof. Additional entities, edges,
+and semantic properties remain usable when the sealed corpus-wide graph
+registry attests them and they are connected to the answer witness; unknown,
+fabricated, or disconnected additions remain incorrect. The registry includes
+stable solver-visible scalar and list-valued properties across the corpus, not
+only properties required by the oracle. Archive and live snapshots apply the
+same case normalization for known CE transformations and exclude only declared
+collection, ACL-bookkeeping, ownership, and tier metadata.
+
 MCP loops project each actual tool result into a mechanical `ToolObservation`.
 High-level MCP response wrappers and coordinator-backed Cypher responses share
 the same projector. Successful activity alone cannot unlock finalization.
-Cypher enumeration requires a companion scalar total and a bounded,
-stably-ordered page; route witnesses still must pass the shared Evidence IR
-comparator. Any MCP-issued Cypher runs through the same policy-v3 coordinator
-as direct mode.
+Full-set Cypher enumeration requires a companion scalar total and bounded,
+stably ordered pages. A pinned high-level list operation can prove a single-page
+exact set when it reports total count, limit, skip, and all returned items.
+Deterministic window claims use their declared offset and limit directly. Set
+and count enumeration omits graph properties unless the public answer requires
+them; that projection flag passes through the same policy-v3 coordinator used
+by direct mode. Route witnesses still must pass the shared Evidence IR
+comparator.
+
+Certified MCP execution uses one authoritative V2 prompt. The MCP server's
+discovered prompt is retained as readiness metadata but is not injected into a
+`resource_mode: off` campaign when it describes a contradictory resource-first
+workflow. A later complete claim-bound proof supersedes an earlier truncation;
+a truncation after the latest complete proof revokes finalization.
+
+BloodHound scalar entity projections can arrive as flat `data.literals` with
+`node_count` and `edge_count` both zero. For a certified entity projection, the
+projector derives row count from repeated `object_id`/`name` columns, rejects
+inconsistent column cardinalities, and leaves an unknown non-empty literal
+shape inconclusive. It must never accept a non-empty literal response as a
+conclusive empty set merely because the graph wrapper reports zero nodes.
+Stable pages may order directly by `<variable>.objectid` or by an alias whose
+current `WITH`/`RETURN` binding is proven to derive from `objectid`; property
+rebindings revoke that proof. Abstract `Principal` results are proven by the
+returned identity or count variable and do not require a concrete node label.
+Concrete projections reject explicitly conflicting result-variable labels but
+may accept an unlabeled result variable when the returned identity is otherwise
+unambiguous. Disconnected decoy labels cannot satisfy that check. Exact public
+selectors and their bound variables are parsed through one matcher, so
+lookalike properties, altered normalized literals, and returning only the
+selected input remain irrelevant. Task wording states bounded transitive hop
+ceilings explicitly and avoids descriptive anchor properties that are not part
+of the typed selection.
+
+A full-set companion count is bound to the normalized population prefix shared
+with its pages; a count over a different match cannot prove completeness even
+when the scalar happens to equal the page size. Certification uses
+`count(DISTINCT result)` because its page query uses `WITH DISTINCT result`.
+The solver-visible result contract tells the model that count and pages must
+share one identity population and distinctness; the harness does not disclose
+the sealed total or expected identities.
+Route and decision receipts prefer positive graph cardinality over auxiliary
+endpoint scalar literals, while zero/unknown graph shapes remain inconclusive.
+
+Complete MCP set claims use a fixed public capacity of 1,000 identities over
+500-row pages. The capacity is deliberately independent of the sealed expected
+set size, so it neither leaks the answer count nor turns one extra identity into
+an adapter failure. Its public task deadline remains capped at 600 seconds. A
+deterministic 500-row window receives 555 seconds; a complete set receives at
+most two pages and 600 seconds. These values are compiled into the task
+fingerprint and cannot be changed by runtime-only configuration.
 
 The compiler publishes strict nested answer schemas for entities, edges,
 entity-property facts, and the generic bounded-negative reason vocabulary.
@@ -223,7 +361,8 @@ and non-finite values are model-attributable `OUTPUT_INVALID`; diagnostic
 fingerprinting is deliberately non-canonical so even invalid JSON numbers
 cannot crash the error path. Count aliases are unrestricted only for a
 count-only projection whose tool response contains exactly one unambiguous
-non-negative scalar literal.
+non-negative scalar literal. A valid answer with insufficient certified tool
+evidence is public `PROOF_INSUFFICIENT`, not malformed output.
 
 Run state is private and atomic. It binds the model/run identity, source
 manifest and archive, task/oracle/catalog/live-certification fingerprints,
@@ -231,16 +370,40 @@ graph, capability profile, containment configuration, runtime configuration,
 runtime implementation, and every provider attempt. Resume rejects incompatible
 provenance. Within compatible provenance, infrastructure and unexecuted samples
 are rescheduled, their prior terminal row is replaced, and provider attempt
-numbers remain contiguous. Successful and model-attributable samples are not
-replayed. Public reports are emitted only after all scheduled tasks are
-reconciled exactly once and the post-track graph gate passes.
+numbers remain contiguous. The configured infrastructure retry allowance is a
+lifetime per-task budget across resumes, not a fresh budget per process. Every
+attempt is written before the retry decision. Successful and
+model-attributable samples are not replayed. Private attempts retain direct
+query provenance or MCP cumulative token usage, partial messages, tool
+arguments and raw results, mechanical observations, evidence events, and policy
+receipts even when cancellation interrupts the main loop or schema retry.
+Public reports omit those traces and are emitted only after all scheduled tasks
+are reconciled exactly once and the post-track graph gate passes.
+
+No-model `run-v2` readiness performs one exact bounded live-graph projection
+and reuses that immutable receipt across the prepared tracks. This is sound
+because readiness cannot invoke a provider, MCP tool, model-authored query, or
+other graph mutation between tracks. An executable campaign never takes that
+shortcut: every track retains independent pre- and post-execution graph gates.
+The harness-owned `graph_page_size` can be increased up to its validated
+2,000-row ceiling to reduce readiness round trips without changing task,
+prompt, oracle, scorer, or model execution semantics.
 
 Only external availability failures—HTTP, transport, authentication, server,
-rate-limit, and timeout conditions—are retryable infrastructure. An internal
-projector, schema, adapter, or runner exception is `HARNESS_ERROR`; it receives
-no reasoning verdict and is not retried as infrastructure. The campaign writes
-that terminal task result and its private provider receipt, preserves its
-checkpoint, continues to later tasks, and marks the campaign invalid. The MCP finalization
+rate-limit, provider-read timeouts, and native turn/no-progress watchdog
+timeouts—are retryable infrastructure. The private receipt retains the narrower
+`MCP_TURN_TIMEOUT` or `NO_PROGRESS_TIMEOUT` subtype.
+Provider and MCP-tool failures retry without probing or changing BloodHound's
+circuit. BloodHound-scoped failures alone require health recovery. An open
+direct circuit is checked before calling the model, and generic transport/server
+failures never poison the shared query deny cache.
+Exhausting the finite whole-task execution budget is model-attributable
+`TASK_TIMEOUT`; it is not retried after a BloodHound-only health probe. An
+internal projector, schema, adapter, or runner exception is `HARNESS_ERROR`; it
+receives no reasoning verdict and is not retried as infrastructure. The
+campaign writes that terminal task result and its private provider receipt,
+preserves its checkpoint, continues to later tasks, and marks the campaign
+invalid. The MCP finalization
 fingerprint hashes the state machine, projector, MCP adapter, and provider-loop
 implementations, while model-run provenance binds the complete runtime
 implementation fingerprint. Runtime changes therefore require new compiled and
@@ -299,6 +462,8 @@ uv run --env-file ../Bloodhound-MCP/.env \
 Readiness verifies:
 
 - all source, public, oracle, candidate, and live-certification fingerprints;
+- one typed `defaults.reasoning_effort`, when configured, is advertised by
+  every selected Codex model and recorded in each model readiness receipt;
 - exact candidate/public/oracle/certification task sets;
 - candidate state for every scheduled task;
 - the pinned clean MCP checkout revision;
@@ -307,6 +472,9 @@ Readiness verifies:
   the Codex capability cache;
 - BloodHound health and the exact archive-derived live graph before and after
   each configured track.
+
+Harness-owned live graph reads use one health-gated retry for transient
+infrastructure failures. Model-authored Cypher does not inherit that retry.
 
 No model call occurs unless `--execute` is supplied:
 
@@ -318,7 +486,9 @@ uv run --env-file ../Bloodhound-MCP/.env \
 ```
 
 Treat `--execute` as the paid/external side-effect boundary. Use a new output
-directory for a changed config, model set, or repetition count.
+directory for a changed config, model set, reasoning effort, or repetition
+count. A reasoning-effort override applies identically to direct calls, MCP
+turns, and the one schema-only retry; it does not alter prompts or scoring.
 
 Score structured answers offline:
 
@@ -389,15 +559,28 @@ Pass `--valid-nodes valid_nodes.json` when you have a graph inventory dump; the 
 
 ## Reporting metrics
 
-MCP summaries separate reasoning quality from reliability:
+V2 summaries separate reasoning quality, proof completion, and campaign
+reliability. Let `C` be comparator-correct samples, `W` comparator-incorrect
+completed samples, `M` model-attributable failures, `P` proof failures, `X`
+infrastructure failures, `H` harness failures, `U` unexecuted samples, and `S`
+scheduled tasks. Exact accounting requires:
 
-- `completed_samples`
-- `correct_completed`
-- `reasoning_accuracy = correct_completed / completed_samples`
-- `effective_accuracy = correct / total_samples`
-- `infra_failure_rate`
-- `tool_error_rate`
-- `timeout_rate`
+```text
+S = C + W + M + P + X + H + U
+incorrect = W + M
+reasoning_accuracy = C / (C + W + M)
+effective_accuracy = C / S
+campaign_valid = (X = 0) AND (H = 0) AND (U = 0)
+```
+
+Model failures count as incorrect. `PROOF_INSUFFICIENT` has no reasoning
+verdict and lowers effective accuracy. Infrastructure, harness, and unexecuted
+samples have no reasoning verdict and invalidate the campaign. Historical V1
+summary columns may use older completed-sample terminology and must not be
+presented as the V2 formula.
+
+See [ORI V2 Design Rationale](benchmark-v2-design-rationale.md#campaign-accounting)
+for worked 70-task calculations and the reasons behind each denominator.
 
 ## BloodHound Cypher runtime guidance
 

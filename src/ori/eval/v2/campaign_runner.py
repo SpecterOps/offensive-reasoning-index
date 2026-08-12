@@ -33,6 +33,7 @@ from .campaign import (
     validate_checkpoint,
 )
 from .campaign_config import (
+    ReasoningEffort,
     ResolvedV2CampaignConfig,
     V2ModelEntry,
     load_v2_campaign_config,
@@ -50,9 +51,11 @@ from .identity import IdentityResolver
 from .mcp import MCPToolLoop
 from .model_runtime import (
     ProviderRunRecord,
+    V2ModelTaskCancelled,
     contain_model_runtime_exception,
     run_direct_model_task_v2,
     run_mcp_model_task_v2,
+    unexecuted_model_record,
 )
 from .profiles import capability_profile_for_track
 from .protocol import OracleRegistry, V2ArtifactPair, load_v2_pair
@@ -68,19 +71,25 @@ from .schema import (
 )
 from .scoring import SampleResult, summarize_results
 
-RUNNER_VERSION = "ori-v2-model-campaign-v2"
-RUN_STATE_SCHEMA_VERSION = "ori-v2-private-run-state-v1"
-MODEL_REPORT_SCHEMA_VERSION = "ori-v2-model-report-v1"
-READINESS_SCHEMA_VERSION = "ori-v2-run-readiness-v1"
+RUNNER_VERSION = "ori-v2-model-campaign-v11"
+RUN_STATE_SCHEMA_VERSION = "ori-v2-private-run-state-v5"
+MODEL_REPORT_SCHEMA_VERSION = "ori-v2-model-report-v2"
+READINESS_SCHEMA_VERSION = "ori-v2-run-readiness-v8"
 _RUNNER_IMPLEMENTATION_SOURCES = {
+    "adapter": Path(__file__).parent.parent / "adapter.py",
+    "bhce": Path(__file__).parent.parent / "bhce.py",
     "campaign": Path(__file__).with_name("campaign.py"),
     "campaign_runner": Path(__file__),
+    "campaign_config": Path(__file__).with_name("campaign_config.py"),
+    "codex_oauth": Path(__file__).parent.parent / "codex_oauth.py",
     "direct_adapter": Path(__file__).with_name("direct_adapter.py"),
+    "direct_query_safety": Path(__file__).parent.parent / "direct_query_safety.py",
     "evidence": Path(__file__).with_name("evidence.py"),
     "identity": Path(__file__).with_name("identity.py"),
     "mcp_adapter": Path(__file__).with_name("mcp_adapter.py"),
     "mcp_state_machine": Path(__file__).with_name("mcp.py"),
     "model_runtime": Path(__file__).with_name("model_runtime.py"),
+    "query_contract": Path(__file__).with_name("query_contract.py"),
     "provider_loops": Path(__file__).parent.parent / "mcp_runtime.py",
     "runtime": Path(__file__).with_name("runtime.py"),
     "schema": Path(__file__).with_name("schema.py"),
@@ -118,8 +127,7 @@ def _graph_verification_progress(
     receipt: LiveGraphVerification,
 ) -> str:
     return (
-        f"[{track.value}] {stage}-track graph verified "
-        f"({receipt.observed_graph_fingerprint[:12]})"
+        f"[{track.value}] {stage}-track graph verified ({receipt.observed_graph_fingerprint[:12]})"
     )
 
 
@@ -140,9 +148,8 @@ def _task_completion_progress(
 ) -> str:
     correct = sum(item.reasoning_correct is True for item in results)
     graded = sum(item.reasoning_correct is not None for item in results)
-    infrastructure = sum(
-        item.execution_class.value == "infra_failure" for item in results
-    )
+    infrastructure = sum(item.execution_class.value == "infra_failure" for item in results)
+    proof_failures = sum(item.execution_class.value == "proof_failure" for item in results)
     score = (
         "1.0"
         if sample.reasoning_correct is True
@@ -156,24 +163,17 @@ def _task_completion_progress(
         f"tokens={provider.tokens_input}+{provider.tokens_output}",
     ]
     if provider.surface.startswith("mcp"):
-        tool_events = [
-            event for event in provider.mcp_events if event.tool_name is not None
-        ]
+        tool_events = [event for event in provider.mcp_events if event.tool_name is not None]
         details.extend(
             (
                 f"tools={len(tool_events)}",
-                "cypher="
-                + str(
-                    sum(
-                        event.tool_name == "cypher_query"
-                        for event in tool_events
-                    )
-                ),
+                "cypher=" + str(sum(event.tool_name == "cypher_query" for event in tool_events)),
             )
         )
     details.extend(
         (
             f"running_correct={correct}/{graded}",
+            f"proof={proof_failures}",
             f"infra={infrastructure}",
         )
     )
@@ -194,14 +194,11 @@ def _infrastructure_attempt_progress(
     else:
         state = "retry budget exhausted"
         arrow = "→"
-    return (
-        f"           {arrow} {sample.outcome.value} on attempt "
-        f"{attempt_number}; {state}"
-    )
+    return f"           {arrow} {sample.outcome.value} on attempt {attempt_number}; {state}"
 
 
 class ModelRunProvenanceV2(StrictModel):
-    schema_version: Literal["ori-v2-model-campaign-v2"] = RUNNER_VERSION
+    schema_version: Literal["ori-v2-model-campaign-v11"] = RUNNER_VERSION
     protocol_version: Literal["ori-eval-protocol-v2"] = PROTOCOL_VERSION
     base: RunProvenanceV2
     run_identity: RunIdentity
@@ -246,7 +243,7 @@ class ProviderAttemptV2(StrictModel):
 
 
 class PrivateRunStateV2(StrictModel):
-    schema_version: Literal["ori-v2-private-run-state-v1"] = RUN_STATE_SCHEMA_VERSION
+    schema_version: Literal["ori-v2-private-run-state-v5"] = RUN_STATE_SCHEMA_VERSION
     protocol_version: Literal["ori-eval-protocol-v2"] = PROTOCOL_VERSION
     provenance_fingerprint: str
     checkpoint: CheckpointV2
@@ -262,12 +259,8 @@ class PrivateRunStateV2(StrictModel):
             attempt_numbers.setdefault(attempt.task_id, []).append(attempt.attempt)
         for task_id, numbers in attempt_numbers.items():
             if numbers != list(range(1, len(numbers) + 1)):
-                raise ValueError(
-                    f"provider attempts for {task_id} are not contiguous"
-                )
-        result_by_task = {
-            result.task_id: result for result in self.checkpoint.results
-        }
+                raise ValueError(f"provider attempts for {task_id} are not contiguous")
+        result_by_task = {result.task_id: result for result in self.checkpoint.results}
         if set(final_by_task) != set(result_by_task):
             raise ValueError("private trace and checkpoint task sets differ")
         for task_id, result in result_by_task.items():
@@ -283,7 +276,7 @@ class PrivateRunStateV2(StrictModel):
 
 
 class ModelPublicReportV2(StrictModel):
-    schema_version: Literal["ori-v2-model-report-v1"] = MODEL_REPORT_SCHEMA_VERSION
+    schema_version: Literal["ori-v2-model-report-v2"] = MODEL_REPORT_SCHEMA_VERSION
     protocol_version: Literal["ori-eval-protocol-v2"] = PROTOCOL_VERSION
     run_identity: RunIdentity
     candidate_release_fingerprint: str
@@ -321,12 +314,13 @@ class ModelReadinessV2(StrictModel):
     model: str
     credential_check: str
     capability_check: str
+    reasoning_effort: ReasoningEffort | None = None
 
 
 class CampaignReadinessV2(StrictModel):
-    schema_version: Literal["ori-v2-run-readiness-v1"] = READINESS_SCHEMA_VERSION
+    schema_version: Literal["ori-v2-run-readiness-v8"] = READINESS_SCHEMA_VERSION
     protocol_version: Literal["ori-eval-protocol-v2"] = PROTOCOL_VERSION
-    runner_version: Literal["ori-v2-model-campaign-v2"] = RUNNER_VERSION
+    runner_version: Literal["ori-v2-model-campaign-v11"] = RUNNER_VERSION
     source_config_fingerprint: str
     source_manifest_sha256: str
     archive_sha256: str
@@ -427,8 +421,7 @@ def _prepare_track(
     task_by_id = {task.task_id: task for task in pair.public.tasks}
     oracle_by_id = {oracle.task_id: oracle for oracle in pair.private.oracles}
     certification_by_id = {
-        certification.task_id: certification
-        for certification in live.certifications
+        certification.task_id: certification for certification in live.certifications
     }
     entry_ids = [entry.task_id for entry in release.entries]
     if len(entry_ids) != len(set(entry_ids)):
@@ -457,8 +450,7 @@ def _prepare_track(
             mismatches.append(f"{entry.task_id} state")
     if mismatches:
         raise V2CampaignRunError(
-            f"{track.value} candidate certification mismatch: "
-            + ", ".join(sorted(set(mismatches)))
+            f"{track.value} candidate certification mismatch: " + ", ".join(sorted(set(mismatches)))
         )
     return PreparedTrack(
         track=track,
@@ -503,7 +495,7 @@ def _model_readiness(
 
     receipts: list[ModelReadinessV2] = []
     codex_status_checked = False
-    codex_slugs: set[str] | None = None
+    codex_capabilities: dict[str, set[str]] | None = None
     for model in resolved.config.models:
         if model.provider == "codex":
             if not codex_status_checked:
@@ -519,26 +511,41 @@ def _model_readiness(
                         "Codex OAuth readiness failed; run `codex login`"
                     ) from exc
                 if "logged in" not in (status.stdout + status.stderr).casefold():
-                    raise V2CampaignRunError(
-                        "Codex OAuth readiness failed; run `codex login`"
-                    )
+                    raise V2CampaignRunError("Codex OAuth readiness failed; run `codex login`")
                 cache_path = Path.home() / ".codex" / "models_cache.json"
                 try:
                     cache = json.loads(cache_path.read_text())
-                    codex_slugs = {
-                        str(item.get("slug") or "")
-                        for item in cache.get("models", ())
-                        if isinstance(item, Mapping)
-                    }
+                    codex_capabilities = {}
+                    for item in cache.get("models", ()):
+                        if not isinstance(item, Mapping):
+                            continue
+                        slug = str(item.get("slug") or "")
+                        if not slug:
+                            continue
+                        supported: set[str] = set()
+                        for level in item.get("supported_reasoning_levels", ()):
+                            effort = level.get("effort") if isinstance(level, Mapping) else level
+                            if isinstance(effort, str) and effort:
+                                supported.add(effort)
+                        codex_capabilities[slug] = supported
                 except (FileNotFoundError, json.JSONDecodeError, AttributeError) as exc:
                     raise V2CampaignRunError(
                         "Codex model cache is unavailable; run Codex once to refresh it"
                     ) from exc
                 codex_status_checked = True
             slug = _codex_model_slug(model)
-            if codex_slugs is None or slug not in codex_slugs:
+            if codex_capabilities is None or slug not in codex_capabilities:
                 raise V2CampaignRunError(
                     f"Codex model {slug!r} is absent from ~/.codex/models_cache.json"
+                )
+            reasoning_effort = resolved.config.defaults.reasoning_effort
+            if (
+                reasoning_effort is not None
+                and reasoning_effort not in codex_capabilities[slug]
+            ):
+                raise V2CampaignRunError(
+                    f"Codex model {slug!r} does not advertise reasoning effort "
+                    f"{reasoning_effort!r} in ~/.codex/models_cache.json"
                 )
             receipts.append(
                 ModelReadinessV2(
@@ -546,7 +553,12 @@ def _model_readiness(
                     provider=model.provider,
                     model=slug,
                     credential_check="codex-login-status",
-                    capability_check="codex-model-cache",
+                    capability_check=(
+                        "codex-model-cache+reasoning-effort"
+                        if reasoning_effort is not None
+                        else "codex-model-cache"
+                    ),
+                    reasoning_effort=reasoning_effort,
                 )
             )
             continue
@@ -557,9 +569,7 @@ def _model_readiness(
             "openai": "OPENAI_API_KEY",
         }.get(model.provider)
         if required_key is not None and not os.getenv(required_key):
-            raise V2CampaignRunError(
-                f"model {model.name} requires {required_key}"
-            )
+            raise V2CampaignRunError(f"model {model.name} requires {required_key}")
         if model.provider == "openai-compat":
             base_url = (
                 model.model_base_url
@@ -575,9 +585,7 @@ def _model_readiness(
                 name=model.name,
                 provider=model.provider,
                 model=model.model,
-                credential_check=(
-                    required_key or "provider-does-not-require-a-key"
-                ),
+                credential_check=(required_key or "provider-does-not-require-a-key"),
                 capability_check="configured-not-probed",
             )
         )
@@ -593,18 +601,24 @@ def _model_loop(
     if loop is MCPToolLoop.AUTO:
         raise V2CampaignRunError("certified v2 campaigns forbid MCP tool_loop=auto")
     if loop is MCPToolLoop.INSPECT:
-        raise V2CampaignRunError(
-            "Inspect-backed v2 model campaigns are not enabled by run-v2"
-        )
+        raise V2CampaignRunError("Inspect-backed v2 model campaigns are not enabled by run-v2")
     if model.provider == "ollama" and loop is not MCPToolLoop.NATIVE_OLLAMA:
-        raise V2CampaignRunError(
-            f"model {model.name} requires native-ollama MCP loop"
-        )
+        raise V2CampaignRunError(f"model {model.name} requires native-ollama MCP loop")
     if model.provider != "ollama" and loop is MCPToolLoop.NATIVE_OLLAMA:
-        raise V2CampaignRunError(
-            f"model {model.name} cannot use native-ollama MCP loop"
-        )
+        raise V2CampaignRunError(f"model {model.name} cannot use native-ollama MCP loop")
     return loop
+
+
+def _provider_options(
+    model: V2ModelEntry,
+    reasoning_effort: ReasoningEffort | None,
+) -> dict[str, Any]:
+    """Return one immutable provider-option map for every task and track."""
+
+    options = dict(model.options)
+    if model.provider == "codex" and reasoning_effort is not None:
+        options["reasoning_effort"] = reasoning_effort
+    return options
 
 
 def _validate_model_bindings(
@@ -624,6 +638,35 @@ def _validate_model_bindings(
             raise V2CampaignRunError(
                 f"model {model.name} loop {loop.value!r} does not match "
                 f"the certified MCP catalog binding ({len(mismatched)} tasks)"
+            )
+
+
+def _validate_runtime_bounds(
+    resolved: ResolvedV2CampaignConfig,
+    prepared: Mapping[Track, PreparedTrack],
+) -> None:
+    """Reject hidden runtime caps that are stricter than certified task bounds."""
+
+    mcp = prepared.get(Track.MCP)
+    if mcp is None:
+        return
+    tasks = mcp.pair.public.tasks
+    required_steps = max(task.binding.bounds.max_tool_calls for task in tasks)
+    minimum_task_timeout = min(task.binding.bounds.timeout_seconds for task in tasks)
+    configured = resolved.config.defaults.mcp
+    if configured.max_steps < required_steps:
+        raise V2CampaignRunError(
+            "configured MCP max_steps is below the certified task budget: "
+            f"configured={configured.max_steps} required={required_steps}"
+        )
+    for name, value in (
+        ("read_timeout_seconds", configured.read_timeout_seconds),
+        ("tool_timeout_seconds", configured.tool_timeout_seconds),
+    ):
+        if value >= minimum_task_timeout:
+            raise V2CampaignRunError(
+                f"configured MCP {name} must be below every task deadline: "
+                f"configured={value} minimum_task_timeout={minimum_task_timeout}"
             )
 
 
@@ -652,10 +695,10 @@ def prepare_v2_campaign(
         ),
     )
     prepared = {
-        track: _prepare_track(resolved, track, snapshot)
-        for track in resolved.config.track_modes
+        track: _prepare_track(resolved, track, snapshot) for track in resolved.config.track_modes
     }
     _validate_model_bindings(resolved, prepared)
+    _validate_runtime_bounds(resolved, prepared)
     model_readiness = _model_readiness(resolved)
     mcp_revision = _git_revision(resolved.mcp_dir)
     if Track.MCP in prepared:
@@ -691,6 +734,23 @@ async def _health_and_graph(
     return observed, receipt
 
 
+async def _graph_before_track(
+    resolved: ResolvedV2CampaignConfig,
+    snapshot: GraphSnapshot,
+    bhce: BHCEClient,
+    *,
+    preflight_only: bool,
+    shared_preflight: tuple[GraphSnapshot, LiveGraphVerification] | None,
+) -> tuple[GraphSnapshot, LiveGraphVerification, bool]:
+    """Reuse one exact graph gate only when the campaign cannot execute work."""
+
+    if preflight_only and shared_preflight is not None:
+        observed, receipt = shared_preflight
+        return observed, receipt, True
+    observed, receipt = await _health_and_graph(resolved, snapshot, bhce)
+    return observed, receipt, False
+
+
 def _readiness(
     *,
     resolved: ResolvedV2CampaignConfig,
@@ -717,9 +777,7 @@ def _readiness(
                 candidate_release_fingerprint=item.release.release_fingerprint,
                 live_certification_fingerprint=item.live.artifact_fingerprint,
                 capability_profile_fingerprint=item.profile.profile_fingerprint,
-                graph_verification_fingerprint=receipts[
-                    track
-                ].verification_fingerprint,
+                graph_verification_fingerprint=receipts[track].verification_fingerprint,
                 task_count=len(item.release.entries),
             )
             for track, item in prepared.items()
@@ -751,9 +809,7 @@ async def preflight_v2_campaign(config_path: Path) -> CampaignReadinessV2:
         model_readiness,
     ) = prepare_v2_campaign(config_path)
     receipts: dict[Track, LiveGraphVerification] = {}
-    async with BHCEClient(
-        **parse_bhce_url(resolved.config.defaults.bhce_url)
-    ) as bhce:
+    async with BHCEClient(**parse_bhce_url(resolved.config.defaults.bhce_url)) as bhce:
         for track in resolved.config.track_modes:
             _observed, receipts[track] = await _health_and_graph(
                 resolved,
@@ -787,9 +843,7 @@ def _provenance(
         provider=model.provider,
         model=model.model,
         run_index=run_index,
-        target_fingerprint=canonical_sha256(
-            resolve_bhce_target(resolved.config.defaults.bhce_url)
-        ),
+        target_fingerprint=canonical_sha256(resolve_bhce_target(resolved.config.defaults.bhce_url)),
         tool_loop=loop.value if loop is not None else None,
     )
     direct_config = DirectQuerySafetyConfig()
@@ -800,12 +854,8 @@ def _provenance(
         "archive_sha256": _sha256(resolved.archive),
         "candidate_release_fingerprint": prepared.release.release_fingerprint,
         "live_certification_fingerprint": prepared.live.artifact_fingerprint,
-        "containment_config_fingerprint": canonical_sha256(
-            direct_config.to_jsonable()
-        ),
-        "runtime_implementation_fingerprint": (
-            RUNNER_IMPLEMENTATION_FINGERPRINT
-        ),
+        "containment_config_fingerprint": canonical_sha256(direct_config.to_jsonable()),
+        "runtime_implementation_fingerprint": (RUNNER_IMPLEMENTATION_FINGERPRINT),
         "runtime_config_fingerprint": canonical_sha256(
             {
                 "runner_version": RUNNER_VERSION,
@@ -834,15 +884,11 @@ def _guard_run_dir(path: Path, provenance: ModelRunProvenanceV2) -> None:
     if guard.exists():
         existing = ModelRunProvenanceV2.model_validate_json(guard.read_text())
         if existing != provenance:
-            raise V2CampaignRunError(
-                f"{path} contains incompatible v2 campaign provenance"
-            )
+            raise V2CampaignRunError(f"{path} contains incompatible v2 campaign provenance")
         return
     entries = tuple(path.iterdir())
     if entries:
-        raise V2CampaignRunError(
-            f"{path} is non-empty and has no v2 provenance guard"
-        )
+        raise V2CampaignRunError(f"{path} is non-empty and has no v2 provenance guard")
     _write_model(guard, provenance)
 
 
@@ -945,6 +991,32 @@ def _model_report(
     return ModelPublicReportV2.model_validate(payload)
 
 
+def _infrastructure_retry_policy(
+    sample: SampleResult,
+    provider: ProviderRunRecord,
+) -> tuple[str, bool] | None:
+    if sample.execution_class not in {
+        ExecutionClass.INFRA_FAILURE,
+        ExecutionClass.UNEXECUTED,
+    }:
+        return None
+    scope = provider.provider_metrics.get("infra_scope")
+    retryable = provider.provider_metrics.get("infra_retryable")
+    if isinstance(scope, str) and isinstance(retryable, bool):
+        return scope, retryable
+    receipt = provider.direct_receipt
+    if receipt is not None:
+        return (
+            "bloodhound",
+            receipt.failure_type
+            not in {
+                "auth_error",
+                "policy_rejected",
+            },
+        )
+    return "unknown", False
+
+
 async def _run_model(
     *,
     resolved: ResolvedV2CampaignConfig,
@@ -964,14 +1036,9 @@ async def _run_model(
         run_index=run_index,
         loop=loop,
     )
-    run_dir = (
-        resolved.output_dir
-        / prepared.track.value
-        / model.name
-        / f"run-{run_index:03d}"
-    )
+    run_dir = resolved.output_dir / prepared.track.value / model.name / f"run-{run_index:03d}"
     _guard_run_dir(run_dir, provenance)
-    state_path = run_dir / "run-state-v2.private.json"
+    state_path = run_dir / "run-state-v5.private.json"
     state = _load_state(
         state_path,
         provenance=provenance,
@@ -1006,27 +1073,41 @@ async def _run_model(
             cypher_executor=coordinator.execute,
         )
 
-    task_by_id = {
-        task.task_id: task for task in prepared.pair.public.tasks
-    }
+    task_by_id = {task.task_id: task for task in prepared.pair.public.tasks}
     registry = OracleRegistry(prepared.pair.private)
     resolver = IdentityResolver(prepared.pair.private.identity_catalog)
+    provider_options = _provider_options(
+        model,
+        resolved.config.defaults.reasoning_effort,
+    )
     for task_index, task_id in enumerate(prepared.task_ids, start=1):
         if task_id in completed:
             continue
         task = task_by_id[task_id]
         oracle = registry.for_task(task_id)
+        existing_result = next(
+            (result for result in results if result.task_id == task_id),
+            None,
+        )
         previous_attempt_number = max(
-            (
-                attempt.attempt
-                for attempt in attempts
-                if attempt.task_id == task_id
-            ),
+            (attempt.attempt for attempt in attempts if attempt.task_id == task_id),
             default=0,
         )
-        results = [
-            result for result in results if result.task_id != task_id
-        ]
+        max_attempts = resolved.config.defaults.max_infra_retries + 1
+        if previous_attempt_number >= max_attempts:
+            if existing_result is None:
+                raise V2CampaignRunError(
+                    f"{task_id} exhausted its lifetime retry budget without a result"
+                )
+            _emit_progress(
+                progress,
+                (
+                    f"  [{task_index}/{len(prepared.task_ids)}] {task.task_id} "
+                    "retry budget already exhausted; no provider call made"
+                ),
+            )
+            continue
+        results = [result for result in results if result.task_id != task_id]
         task_started = time.monotonic()
         _emit_progress(
             progress,
@@ -1037,11 +1118,13 @@ async def _run_model(
         )
         last_sample: SampleResult | None = None
         last_provider: ProviderRunRecord | None = None
-        for attempt_index in range(
-            1,
-            resolved.config.defaults.max_infra_retries + 2,
-        ):
+        remaining_attempts = max_attempts - previous_attempt_number
+        for attempt_index in range(1, remaining_attempts + 1):
             attempt_number = previous_attempt_number + attempt_index
+            sample: SampleResult
+            provider: ProviderRunRecord
+            direct_preflight_blocked = False
+            cancellation: V2ModelTaskCancelled | None = None
             model_base_url = (
                 model.model_base_url
                 if model.model_base_url is not None
@@ -1049,20 +1132,37 @@ async def _run_model(
             )
             try:
                 if prepared.track is Track.DIRECT:
-                    _outcome, sample, provider = await run_direct_model_task_v2(
-                        coordinator=coordinator,
-                        task=task,
-                        oracle=oracle,
-                        resolver=resolver,
-                        model=model.requested_model,
-                        model_base_url=model_base_url,
-                        ollama_options=model.options,
-                    )
+                    if coordinator.circuit_open:
+                        health = await bhce.wait_until_healthy(
+                            timeout_seconds=(resolved.config.defaults.health.timeout_seconds),
+                            poll_interval=(resolved.config.defaults.health.poll_interval),
+                        )
+                        if health.ok:
+                            coordinator.close_circuit()
+                        else:
+                            direct_preflight_blocked = True
+                            sample, provider = unexecuted_model_record(
+                                task=task,
+                                oracle=oracle,
+                                model=model.requested_model,
+                                surface=prepared.track.value,
+                                detail=(
+                                    "BloodHound circuit remained open before provider execution"
+                                ),
+                            )
+                    if not direct_preflight_blocked:
+                        _outcome, sample, provider = await run_direct_model_task_v2(
+                            coordinator=coordinator,
+                            task=task,
+                            oracle=oracle,
+                            resolver=resolver,
+                            model=model.requested_model,
+                            model_base_url=model_base_url,
+                            ollama_options=provider_options,
+                        )
                 else:
                     if bundle is None or loop is None:
-                        raise AssertionError(
-                            "MCP model run is missing its runtime bundle"
-                        )
+                        raise AssertionError("MCP model run is missing its runtime bundle")
                     outcome, provider = await run_mcp_model_task_v2(
                         task=task,
                         oracle=oracle,
@@ -1073,15 +1173,19 @@ async def _run_model(
                         model_base_url=model_base_url,
                         tool_loop=loop,
                         max_steps=resolved.config.defaults.mcp.max_steps,
-                        ollama_options=model.options,
-                        telemetry_adapter=(
-                            resolved.config.defaults.mcp.telemetry_adapter
-                        ),
-                        read_timeout_seconds=(
-                            resolved.config.defaults.mcp.read_timeout_seconds
+                        ollama_options=provider_options,
+                        telemetry_adapter=(resolved.config.defaults.mcp.telemetry_adapter),
+                        read_timeout_seconds=(resolved.config.defaults.mcp.read_timeout_seconds),
+                        tool_timeout_seconds=(resolved.config.defaults.mcp.tool_timeout_seconds),
+                        graph_fact_registry=(
+                            prepared.pair.private.graph_fact_registry
                         ),
                     )
                     sample = outcome.sample
+            except V2ModelTaskCancelled as exc:
+                sample = exc.sample
+                provider = exc.provider
+                cancellation = exc
             except Exception as exc:
                 sample, provider = contain_model_runtime_exception(
                     task=task,
@@ -1093,42 +1197,51 @@ async def _run_model(
             attempts.append(_attempt(task_id, attempt_number, sample, provider))
             last_sample = sample
             last_provider = provider
-            if sample.execution_class.value != "infra_failure":
-                break
-            health = await bhce.wait_until_healthy(
-                timeout_seconds=resolved.config.defaults.health.timeout_seconds,
-                poll_interval=resolved.config.defaults.health.poll_interval,
+            results = [result for result in results if result.task_id != task_id]
+            results.append(sample)
+            checkpoint = build_checkpoint(
+                prepared.pair,
+                prepared.profile,
+                provenance.run_identity,
+                results=results,
             )
-            if not health.ok:
+            current_state = _state(
+                provenance=provenance,
+                checkpoint=checkpoint,
+                attempts=attempts,
+            )
+            _write_model(state_path, current_state)
+            if cancellation is not None:
+                raise cancellation
+
+            retry_policy = _infrastructure_retry_policy(sample, provider)
+            if retry_policy is None:
                 break
-            coordinator.close_circuit()
+            scope, retryable = retry_policy
+            if not retryable or attempt_index >= remaining_attempts:
+                break
+            if scope == "bloodhound":
+                health = await bhce.wait_until_healthy(
+                    timeout_seconds=resolved.config.defaults.health.timeout_seconds,
+                    poll_interval=resolved.config.defaults.health.poll_interval,
+                )
+                if not health.ok:
+                    break
+                coordinator.close_circuit()
+            elif scope not in {"provider", "mcp_tool"}:
+                break
             _emit_progress(
                 progress,
                 _infrastructure_attempt_progress(
                     sample=sample,
                     attempt_number=attempt_number,
                     attempt_index=attempt_index,
-                    max_infra_retries=(
-                        resolved.config.defaults.max_infra_retries
-                    ),
+                    max_infra_retries=(resolved.config.defaults.max_infra_retries),
                 ),
             )
 
         if last_sample is None or last_provider is None:
             raise AssertionError("v2 task loop produced no terminal attempt")
-        results.append(last_sample)
-        checkpoint = build_checkpoint(
-            prepared.pair,
-            prepared.profile,
-            provenance.run_identity,
-            results=results,
-        )
-        current_state = _state(
-            provenance=provenance,
-            checkpoint=checkpoint,
-            attempts=attempts,
-        )
-        _write_model(state_path, current_state)
         _emit_progress(
             progress,
             _task_completion_progress(
@@ -1149,6 +1262,7 @@ async def _run_model(
         (
             f"[{prepared.track.value}] {model.name} run {run_index}/{runs_total} "
             f"complete: correct={summary.correct}/{summary.correct + summary.incorrect}, "
+            f"proof={summary.proof_failures}, "
             f"infra={summary.infrastructure_failures}, "
             f"campaign_valid={summary.campaign_valid}"
         ),
@@ -1190,19 +1304,15 @@ async def run_v2_campaign(
             Path,
         ]
     ] = []
+    shared_preflight: tuple[GraphSnapshot, LiveGraphVerification] | None = None
 
-    async with BHCEClient(
-        **parse_bhce_url(resolved.config.defaults.bhce_url)
-    ) as bhce:
+    async with BHCEClient(**parse_bhce_url(resolved.config.defaults.bhce_url)) as bhce:
         direct_config = DirectQuerySafetyConfig()
         coordinator = DirectQueryCoordinator(
             bhce=bhce,
             config=direct_config,
             deny_cache=QueryDenyCache(
-                (
-                    resolved.output_dir
-                    / "direct-query-deny-cache-v3.private.json"
-                ),
+                (resolved.output_dir / "direct-query-deny-cache-v3.private.json"),
                 manifest_fingerprint=_sha256(resolved.source_manifest),
                 policy_version=direct_config.policy_version,
             ),
@@ -1212,11 +1322,15 @@ async def run_v2_campaign(
                 progress,
                 f"[{track.value}] verifying BloodHound graph before track",
             )
-            _observed, before = await _health_and_graph(
+            observed, before, reused = await _graph_before_track(
                 resolved,
                 snapshot,
                 bhce,
+                preflight_only=preflight_only,
+                shared_preflight=shared_preflight,
             )
+            if preflight_only and shared_preflight is None:
+                shared_preflight = (observed, before)
             receipts_before[track] = before
             track_dir = resolved.output_dir / track.value
             _write_model(
@@ -1231,44 +1345,50 @@ async def run_v2_campaign(
                     receipt=before,
                 ),
             )
-            if not preflight_only:
-                for model in resolved.config.models:
-                    loop = (
-                        _model_loop(model, resolved)
-                        if track is Track.MCP
-                        else None
+            if reused:
+                _emit_progress(
+                    progress,
+                    (
+                        f"[{track.value}] reused no-model graph verification "
+                        f"({before.observed_graph_fingerprint[:12]})"
+                    ),
+                )
+            if preflight_only:
+                # No provider, tool, or model-authored query can run in this
+                # mode. One exact live snapshot therefore proves the graph for
+                # every prepared track; repeated post-track snapshots add no
+                # evidence and can turn readiness into an hours-long operation.
+                continue
+            for model in resolved.config.models:
+                loop = _model_loop(model, resolved) if track is Track.MCP else None
+                runs = (
+                    model.runs_per_model
+                    if model.runs_per_model is not None
+                    else resolved.config.defaults.runs_per_model
+                )
+                for run_index in range(1, runs + 1):
+                    provenance, results = await _run_model(
+                        resolved=resolved,
+                        prepared=prepared[track],
+                        model=model,
+                        run_index=run_index,
+                        bhce=bhce,
+                        coordinator=coordinator,
+                        loop=loop,
+                        runs_total=runs,
+                        progress=progress,
                     )
-                    runs = (
-                        model.runs_per_model
-                        if model.runs_per_model is not None
-                        else resolved.config.defaults.runs_per_model
+                    run_dir = (
+                        resolved.output_dir / track.value / model.name / f"run-{run_index:03d}"
                     )
-                    for run_index in range(1, runs + 1):
-                        provenance, results = await _run_model(
-                            resolved=resolved,
-                            prepared=prepared[track],
-                            model=model,
-                            run_index=run_index,
-                            bhce=bhce,
-                            coordinator=coordinator,
-                            loop=loop,
-                            runs_total=runs,
-                            progress=progress,
+                    pending_reports.append(
+                        (
+                            provenance,
+                            prepared[track],
+                            results,
+                            run_dir,
                         )
-                        run_dir = (
-                            resolved.output_dir
-                            / track.value
-                            / model.name
-                            / f"run-{run_index:03d}"
-                        )
-                        pending_reports.append(
-                            (
-                                provenance,
-                                prepared[track],
-                                results,
-                                run_dir,
-                            )
-                        )
+                    )
             _emit_progress(
                 progress,
                 f"[{track.value}] verifying BloodHound graph after track",

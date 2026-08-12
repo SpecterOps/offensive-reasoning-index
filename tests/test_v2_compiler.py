@@ -20,6 +20,8 @@ from ori.eval.v2.campaign import (
 )
 from ori.eval.v2.certification import (
     CertificationError,
+    LiveCertificationCatalog,
+    OfflineCertificationCatalog,
     build_catalog_release,
     build_fixture_parity_cases,
     build_live_certification_proof,
@@ -29,7 +31,15 @@ from ori.eval.v2.certification import (
     live_certify_task,
     promote_candidate,
 )
-from ori.eval.v2.compiler import V2CompileError, compile_legacy_product
+from ori.eval.v2.compiler import (
+    CompiledTask,
+    V2CompileError,
+    _extra_evidence_policy,
+    _validate_binding_matches_claim,
+    _validate_no_contradictory_oracles,
+    compile_acceptance_spec,
+    compile_legacy_product,
+)
 from ori.eval.v2.determinism import corpus_contract_shape_fingerprint
 from ori.eval.v2.evidence import _KNOWN_TOP_LEVEL_FIELDS
 from ori.eval.v2.fingerprint import canonical_sha256
@@ -57,9 +67,12 @@ from ori.eval.v2.public_surfaces import (
 from ori.eval.v2.schema import (
     AbsenceClaim,
     DecisionClaim,
+    DecisionPolicy,
     ExecutionClass,
+    ExtraEvidenceRule,
     MCPBindingMode,
     NegativeReasonCode,
+    RouteAcceptanceKind,
     RouteClaim,
     SetClaim,
     Track,
@@ -152,25 +165,17 @@ def complex_compiled():
 @pytest.fixture(scope="module")
 def simple_certified(simple_compiled):
     _, snapshot, direct, mcp = simple_compiled
-    return tuple(
-        offline_certify(task, snapshot) for task in (*direct.tasks, *mcp.tasks)
-    )
+    return tuple(offline_certify(task, snapshot) for task in (*direct.tasks, *mcp.tasks))
 
 
 @pytest.fixture(scope="module")
 def complex_certified(complex_compiled):
     _, snapshot, direct, mcp = complex_compiled
-    return tuple(
-        offline_certify(task, snapshot) for task in (*direct.tasks, *mcp.tasks)
-    )
+    return tuple(offline_certify(task, snapshot) for task in (*direct.tasks, *mcp.tasks))
 
 
 def _by_legacy(corpus, legacy_task_id: str):
-    return [
-        task
-        for task in corpus.tasks
-        if task.migration.legacy_task_id == legacy_task_id
-    ]
+    return [task for task in corpus.tasks if task.migration.legacy_task_id == legacy_task_id]
 
 
 def test_simple_corpus_is_completely_migrated(simple_compiled) -> None:
@@ -201,6 +206,30 @@ def test_complex_corpus_replaces_oversized_enumerations(complex_compiled) -> Non
         task.oracle.claim.selection.offset  # type: ignore[union-attr]
         for task in direct_pages
     ] == [0, 500, 1000, 1500, 2000]
+    for pages in (direct_pages, native_mcp_pages):
+        assert [task.public.binding.bounds.page_size for task in pages] == [500] * 5
+        assert [task.public.binding.bounds.result_offset for task in pages] == [
+            0,
+            500,
+            1000,
+            1500,
+            2000,
+        ]
+        assert all(task.public.binding.bounds.max_pages == 1 for task in pages)
+        assert all(
+            f"offset {task.public.binding.bounds.result_offset} and limit 500"
+            in task.public.question
+            for task in pages
+        )
+    assert all(not task.public.binding.bounds.require_total_count for task in native_mcp_pages)
+    assert all(task.public.binding.bounds.timeout_seconds == 555.0 for task in native_mcp_pages)
+
+    page = native_mcp_pages[1]
+    mismatched_binding = page.public.binding.model_copy(
+        update={"bounds": page.public.binding.bounds.model_copy(update={"page_size": 100})}
+    )
+    with pytest.raises(V2CompileError, match="one matching execution page"):
+        _validate_binding_matches_claim(page.oracle.claim, mismatched_binding)
 
 
 def test_changed_seed_preserves_task_contract_shape_and_resolves_new_identity(
@@ -229,9 +258,9 @@ def test_changed_seed_preserves_task_contract_shape_and_resolves_new_identity(
         assert [task.public.task_id for task in first.tasks] == [
             task.public.task_id for task in changed.tasks
         ]
-        assert corpus_contract_shape_fingerprint(
-            first
-        ) == corpus_contract_shape_fingerprint(changed)
+        assert corpus_contract_shape_fingerprint(first) == corpus_contract_shape_fingerprint(
+            changed
+        )
         assert first.catalog_fingerprint != changed.catalog_fingerprint
 
 
@@ -242,6 +271,15 @@ def test_vertical_slice_claims_are_typed_and_correct(complex_compiled) -> None:
     assert isinstance(membership.oracle.claim, RouteClaim)
     assert membership.public.answer_policy.kind == "exact_route"
     assert membership.oracle.required_mechanisms == ("MemberOf",)
+    assert membership.public.binding.bounds.require_stable_ordering is False
+
+    nested_route = _by_legacy(direct, "t2_nested_groups-02")[0]
+    assert nested_route.public.answer_policy.kind == "mechanism_valid_route"
+    assert nested_route.public.acceptance_spec.required_mechanisms == (
+        "MemberOf",
+        "MemberOf",
+    )
+    assert "MemberOf -> MemberOf" in nested_route.public.question
 
     sessions = _by_legacy(direct, "t1_has_session-01")[0]
     assert isinstance(sessions.oracle.claim, SetClaim)
@@ -250,18 +288,51 @@ def test_vertical_slice_claims_are_typed_and_correct(complex_compiled) -> None:
         "direct",
         "transitive",
     ]
+    session_membership = sessions.oracle.claim.selection.relationships[1]
+    assert (
+        f"within {session_membership.max_hops} MemberOf hops"
+        in sessions.public.question
+    )
 
     da_members = _by_legacy(direct, "global-da-members")[0]
     assert len(da_members.oracle.expected_entities) == 561
+    assert da_members.public.binding.bounds.require_stable_ordering is False
+    assert da_members.public.binding.bounds.max_result_cardinality == 1000
+
+    direct_page = _by_legacy(direct, "global-admin-to")[0]
+    assert direct_page.public.binding.bounds.result_offset == 0
+    assert direct_page.public.binding.bounds.max_result_cardinality == 500
+    assert direct_page.public.binding.bounds.require_stable_ordering is True
+
+    mcp_da_members = _by_legacy(mcp, "global-da-members")[0]
+    assert len(mcp_da_members.oracle.expected_entities) == 561
+    assert mcp_da_members.public.binding.bounds.page_size == 500
+    assert mcp_da_members.public.binding.bounds.max_pages == 2
+    assert mcp_da_members.public.binding.bounds.max_result_cardinality == 1000
+    assert mcp_da_members.public.binding.bounds.require_total_count is True
+    assert mcp_da_members.public.binding.bounds.require_stable_ordering is True
+    assert mcp_da_members.public.binding.bounds.timeout_seconds == 600.0
 
     direct_members = _by_legacy(mcp, "mcp-global-da-direct-members")[0]
     direct_count = _by_legacy(mcp, "mcp-global-da-direct-member-count")[0]
-    privileged_groups = _by_legacy(
-        mcp, "mcp-user-privileged-group-memberships"
+    privileged_groups = _by_legacy(mcp, "mcp-user-privileged-group-memberships")[0]
+    active_sessions = _by_legacy(
+        mcp,
+        "mcp-computer-active-sessions-unconstrained",
     )[0]
     assert len(direct_members.oracle.expected_entities) == 21
+    assert direct_members.public.binding.bounds.max_result_cardinality == 1000
+    assert direct_members.public.binding.bounds.max_pages == 2
     assert direct_count.oracle.expected_count == 21
+    assert direct_count.public.binding.bounds.max_result_cardinality == 1
     assert len(privileged_groups.oracle.expected_entities) == 2
+    privileged_membership = privileged_groups.oracle.claim.selection.relationships[0]
+    assert (
+        f"within {privileged_membership.max_hops} MemberOf hops"
+        in privileged_groups.public.question
+    )
+    assert "declared subject computer" in active_sessions.public.question
+    assert "unconstrained-delegation computer" not in active_sessions.public.question
 
     adcs = _by_legacy(direct, "t4_adcs_esc1-01")[0]
     assert isinstance(adcs.oracle.claim, DecisionClaim)
@@ -272,15 +343,14 @@ def test_vertical_slice_claims_are_typed_and_correct(complex_compiled) -> None:
     negative = _by_legacy(direct, "t6_negative_control_invalid_cert-01")[0]
     assert isinstance(negative.oracle.claim, AbsenceClaim)
     input_roles = [entity.role for entity in negative.public.input_entities]
-    assert set(input_roles) == {"source", "certificate_template", "objective"}
+    assert set(input_roles) == {"source", "objective"}
     assert len(input_roles) == len(set(input_roles))
-    assert negative.public.question.count("certificate_template=") == 1
     assert negative.public.question.count("objective=") == 1
     assert {witness.reason_code for witness in negative.oracle.negative_witnesses} == {
-        NegativeReasonCode.TEMPLATE_AUTHENTICATION_DISABLED,
-        NegativeReasonCode.MISSING_PUBLISHED_TO,
-        NegativeReasonCode.MISSING_PRIVILEGED_IDENTITY_TRANSITION,
+        NegativeReasonCode.OBJECTIVE_UNREACHABLE,
     }
+    assert negative.oracle.required_context == ()
+    assert negative.oracle.required_properties == ()
 
 
 def test_route_repairs_are_generic_context_not_comparator_exceptions(
@@ -353,6 +423,15 @@ def test_oracle_sentinel_never_reaches_any_solver_visible_surface(
 
 
 def test_solver_visible_redaction_recursively_rejects_keys_and_sentinels() -> None:
+    assert_solver_visible(
+        {
+            "acceptance_spec": {
+                "required_mechanisms": ["MemberOf"],
+                "required_context": [],
+                "required_properties": [],
+            }
+        }
+    )
     with pytest.raises(ValueError, match="scorer-only field"):
         assert_solver_visible({"nested": [{"reference_results": ["secret"]}]})
     with pytest.raises(ValueError, match="oracle sentinel"):
@@ -371,26 +450,137 @@ def test_public_questions_name_every_required_input_without_exposing_outputs(
         for entity in task.public.input_entities:
             display = entity.canonical_name or entity.object_id
             assert display in task.public.question
-        assert {
-            entity.object_id for entity in task.public.input_entities
-        }.issubset({entity.object_id for entity in task.oracle.resolved_roles})
+        assert {entity.object_id for entity in task.public.input_entities}.issubset(
+            {entity.object_id for entity in task.oracle.resolved_roles}
+        )
 
-    privileged_groups = _by_legacy(
-        mcp, "mcp-user-privileged-group-memberships"
-    )[0]
+    privileged_groups = _by_legacy(mcp, "mcp-user-privileged-group-memberships")[0]
     assert "WTORRES@" in privileged_groups.public.question
-    assert {
-        entity.object_id for entity in privileged_groups.public.input_entities
-    }.isdisjoint(
-        {
-            entity.object_id
-            for entity in privileged_groups.oracle.expected_entities
-        }
+    assert {entity.object_id for entity in privileged_groups.public.input_entities}.isdisjoint(
+        {entity.object_id for entity in privileged_groups.oracle.expected_entities}
     )
 
     adcs = _by_legacy(direct, "t4_adcs_esc1-01")[0]
     assert len(adcs.public.input_entities) == 2
     assert len(adcs.public.input_entities) < len(adcs.oracle.expected_entities)
+
+
+def test_acceptance_spec_is_the_complete_public_semantic_contract(
+    complex_compiled,
+) -> None:
+    _, _, direct, mcp = complex_compiled
+
+    for task in (*direct.tasks, *mcp.tasks):
+        expected = compile_acceptance_spec(
+            task.oracle.claim,
+            task.public.answer_policy,
+            task.public.binding,
+        )
+        assert task.public.acceptance_spec == expected
+        assert task.public.acceptance_spec.bounds == task.public.binding.bounds
+        serialized = task.public.acceptance_spec.model_dump_json()
+        assert all(entity.object_id not in serialized for entity in task.oracle.resolved_roles)
+        for envelope in build_all_solver_visible_envelopes(task.public):
+            assert envelope.acceptance_spec == expected
+
+    routes = [
+        task for task in (*direct.tasks, *mcp.tasks) if isinstance(task.oracle.claim, RouteClaim)
+    ]
+    assert routes
+    for task in routes:
+        acceptance = task.public.acceptance_spec
+        if acceptance.route_acceptance is RouteAcceptanceKind.ANY_GRAPH_VALID:
+            assert not acceptance.required_mechanisms
+            assert "any graph-valid route" in task.public.question
+        else:
+            assert acceptance.required_mechanisms
+            assert all(
+                mechanism in task.public.question for mechanism in acceptance.required_mechanisms
+            )
+
+
+def test_decision_entity_closure_policy_is_solver_visible() -> None:
+    closed = DecisionPolicy(
+        kind="decision",
+        require_evidence_entities=False,
+        forbid_unrelated_entities=True,
+    )
+    open_policy = closed.model_copy(
+        update={"forbid_unrelated_entities": False}
+    )
+
+    assert (
+        _extra_evidence_policy(closed).entities
+        is ExtraEvidenceRule.REQUIRE_EVIDENCE_CLOSURE
+    )
+    assert (
+        _extra_evidence_policy(open_policy).entities
+        is ExtraEvidenceRule.ALLOW_TRUTHFUL
+    )
+
+
+def test_scorer_constraints_cannot_diverge_from_public_acceptance(
+    complex_compiled,
+) -> None:
+    _, _, direct, _ = complex_compiled
+    route = next(
+        task
+        for task in direct.tasks
+        if isinstance(task.oracle.claim, RouteClaim) and task.oracle.required_mechanisms
+    )
+    contradictory = route.oracle.model_copy(
+        update={"required_mechanisms": ("ContradictoryMechanism",)}
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="oracle mechanisms are not declared by public acceptance",
+    ):
+        CompiledTask(
+            public=route.public,
+            oracle=contradictory,
+            migration=route.migration,
+        )
+
+
+def test_identical_solver_visible_contracts_cannot_bind_contradictory_oracles(
+    complex_compiled,
+) -> None:
+    _, _, direct, _ = complex_compiled
+    original = next(
+        task
+        for task in direct.tasks
+        if isinstance(task.oracle.claim, SetClaim) and len(task.oracle.expected_entities) > 1
+    )
+    contradictory = CompiledTask(
+        public=original.public,
+        oracle=original.oracle.model_copy(
+            update={"expected_entities": original.oracle.expected_entities[:-1]}
+        ),
+        migration=original.migration,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="identical solver-visible contracts bind contradictory oracles",
+    ):
+        _validate_no_contradictory_oracles((original, contradictory))
+
+
+def test_direct_user_and_principal_membership_contracts_are_distinguishable(
+    complex_compiled,
+) -> None:
+    _, _, _, mcp = complex_compiled
+    users = _by_legacy(mcp, "t1_group_membership-02")[0]
+    principals = _by_legacy(mcp, "mcp-global-da-direct-members")[0]
+
+    assert users.public.acceptance_spec.selection is not None
+    assert principals.public.acceptance_spec.selection is not None
+    assert users.public.acceptance_spec.selection.projection_type == "User"
+    assert principals.public.acceptance_spec.selection.projection_type == "Principal"
+    assert "direct User members" in users.public.question
+    assert "direct Principal members" in principals.public.question
+    assert users.public.prompt_fingerprint != principals.public.prompt_fingerprint
 
 
 def test_claim_kinds_cover_full_complex_catalog(complex_compiled) -> None:
@@ -431,18 +621,14 @@ def test_every_simple_candidate_is_offline_certified(simple_certified) -> None:
     assert len(simple_certified) == 60
     for result in simple_certified:
         assert result.certification.state.value == "offline-certified"
-        assert set(REQUIRED_FIXTURES).issubset(
-            case.name for case in result.fixtures.cases
-        )
+        assert set(REQUIRED_FIXTURES).issubset(case.name for case in result.fixtures.cases)
 
 
 def test_every_complex_candidate_is_offline_certified(complex_certified) -> None:
     assert len(complex_certified) == 116
     for result in complex_certified:
         assert result.certification.state.value == "offline-certified"
-        assert set(REQUIRED_FIXTURES).issubset(
-            case.name for case in result.fixtures.cases
-        )
+        assert set(REQUIRED_FIXTURES).issubset(case.name for case in result.fixtures.cases)
         assert all(
             not case.applicable or case.actual_status is case.expected_status
             for case in result.fixtures.cases
@@ -454,9 +640,7 @@ def _assert_every_fixture_crosses_its_declared_adapter(
     corpora,
     certifications,
 ) -> None:
-    offline_by_task = {
-        item.certification.task_id: item for item in certifications
-    }
+    offline_by_task = {item.certification.task_id: item for item in certifications}
     for corpus in corpora:
         profile = capability_profile_for_track(corpus.track)
         for task in corpus.tasks:
@@ -603,9 +787,7 @@ def test_v2_pair_rejects_wrong_track_and_incomplete_identity_catalog(
 
     truncated_payload = private_direct.model_dump(mode="python")
     truncated_payload["oracles"] = private_direct.oracles[:-1]
-    truncated_payload["oracle_catalog_fingerprint"] = canonical_sha256(
-        truncated_payload["oracles"]
-    )
+    truncated_payload["oracle_catalog_fingerprint"] = canonical_sha256(truncated_payload["oracles"])
     truncated_payload["artifact_fingerprint"] = "0" * 64
     truncated_payload["artifact_fingerprint"] = canonical_sha256(
         truncated_payload,
@@ -623,9 +805,7 @@ def _perfect_answers(corpus, snapshot):
     answers = {}
     for task in corpus.tasks:
         certification = offline_certify(task, snapshot)
-        perfect = next(
-            case for case in certification.fixtures.cases if case.name == "perfect"
-        )
+        perfect = next(case for case in certification.fixtures.cases if case.name == "perfect")
         assert perfect.evidence is not None
         evidence = perfect.evidence
         evidence_payload = {
@@ -636,9 +816,7 @@ def _perfect_answers(corpus, snapshot):
                     "relationship": edge.relationship,
                     "target_id": edge.target_id,
                     "direction": edge.direction.value,
-                    "properties": {
-                        fact.key: fact.value for fact in edge.properties
-                    },
+                    "properties": {fact.key: fact.value for fact in edge.properties},
                 }
                 for edge in evidence.edges
             ],
@@ -651,9 +829,7 @@ def _perfect_answers(corpus, snapshot):
                     "relationship": edge.relationship,
                     "target_id": edge.target_id,
                     "direction": edge.direction.value,
-                    "properties": {
-                        fact.key: fact.value for fact in edge.properties
-                    },
+                    "properties": {fact.key: fact.value for fact in edge.properties},
                 }
                 for edge in evidence.supporting_edges
             ],
@@ -665,9 +841,7 @@ def _perfect_answers(corpus, snapshot):
                 }
                 for fact in evidence.observed_properties
             ],
-            "negative_reason_codes": [
-                reason.value for reason in evidence.negative_reason_codes
-            ],
+            "negative_reason_codes": [reason.value for reason in evidence.negative_reason_codes],
         }
         answers[task.public.task_id] = {
             key: evidence_payload[key]
@@ -691,15 +865,30 @@ def test_every_compiled_perfect_answer_matches_its_public_schema(
             )
 
 
+def test_absence_prompt_does_not_offer_fields_forbidden_by_its_schema(
+    complex_compiled,
+) -> None:
+    _, _, direct, mcp = complex_compiled
+
+    for corpus in (direct, mcp):
+        task = next(
+            item.public
+            for item in corpus.tasks
+            if item.public.claim_kind == "absence"
+        )
+        assert "supporting_edges" not in task.answer_schema["properties"]
+        assert "observed_properties" not in task.answer_schema["properties"]
+        assert "additional supporting edges" not in task.question
+        assert "additional observed properties" not in task.question
+
+
 def test_every_public_answer_field_has_a_shared_evidence_ir_consumer(
     complex_compiled,
 ) -> None:
     _, _, direct, mcp = complex_compiled
 
     for task in (*direct.tasks, *mcp.tasks):
-        assert set(task.public.answer_schema["properties"]).issubset(
-            _KNOWN_TOP_LEVEL_FIELDS
-        )
+        assert set(task.public.answer_schema["properties"]).issubset(_KNOWN_TOP_LEVEL_FIELDS)
 
 
 def test_offline_scoring_uses_sealed_identity_catalog_and_shared_comparator(
@@ -761,9 +950,7 @@ def test_offline_scoring_treats_strict_schema_failure_as_output_invalid(
     answers = build_answers_artifact(public, raw_answers)
 
     scoring = score_answers_v2(public, private, answers)
-    result = next(
-        item for item in scoring.results if item.task_id == count_task.task_id
-    )
+    result = next(item for item in scoring.results if item.task_id == count_task.task_id)
 
     assert result.execution_class is ExecutionClass.MODEL_FAILURE
     assert result.outcome.value == "OUTPUT_INVALID"
@@ -838,9 +1025,7 @@ def test_v2_scoring_rejects_missing_duplicate_unknown_and_stale_tasks(
     with pytest.raises(V2ScoringError, match="unknown"):
         score_answers_v2(public, private, unknown)
 
-    stale_submission = submissions[0].model_copy(
-        update={"task_fingerprint": "f" * 64}
-    )
+    stale_submission = submissions[0].model_copy(update={"task_fingerprint": "f" * 64})
     stale = build_answers_artifact(
         public,
         (stale_submission, *submissions[1:]),
@@ -854,9 +1039,7 @@ def test_candidate_promotion_and_catalog_bind_every_certification_dimension(
     simple_certified,
 ) -> None:
     _, snapshot, direct, _ = simple_compiled
-    offline_by_task = {
-        item.certification.task_id: item for item in simple_certified
-    }
+    offline_by_task = {item.certification.task_id: item for item in simple_certified}
     profile = capability_profile_for_track(Track.DIRECT)
     candidates = {}
 
@@ -898,9 +1081,7 @@ def test_candidate_promotion_and_catalog_bind_every_certification_dimension(
     assert all(entry.path_concentration_key for entry in release.entries)
     assert all(entry.certification_fingerprint for entry in release.entries)
 
-    stale = direct.tasks[0].public.model_copy(
-        update={"task_fingerprint": "f" * 64}
-    )
+    stale = direct.tasks[0].public.model_copy(update={"task_fingerprint": "f" * 64})
     stale_task = direct.tasks[0].model_copy(update={"public": stale})
     with pytest.raises(CertificationError, match="cannot be promoted"):
         promote_candidate(
@@ -936,9 +1117,7 @@ def test_live_fixture_parity_promotes_without_a_model_campaign(
     _, snapshot, direct, _ = simple_compiled
     task = direct.tasks[0]
     offline = next(
-        item
-        for item in simple_certified
-        if item.certification.task_id == task.public.task_id
+        item for item in simple_certified if item.certification.task_id == task.public.task_id
     )
     profile = capability_profile_for_track(Track.DIRECT)
 
@@ -952,9 +1131,7 @@ def test_live_fixture_parity_promotes_without_a_model_campaign(
         live_snapshot_after=snapshot,
     )
 
-    assert {"perfect", "wrong", "empty"}.issubset(
-        {case.name for case in parity if case.applicable}
-    )
+    assert {"perfect", "wrong", "empty"}.issubset({case.name for case in parity if case.applicable})
     assert proof.graph_fingerprint_before == snapshot.graph_fingerprint
     assert certification.state.value == "candidate"
 
@@ -978,7 +1155,7 @@ def test_live_catalog_promotion_requires_exact_receipts_and_task_accounting(
     }
     receipt_payload["verification_fingerprint"] = canonical_sha256(
         {
-            "schema_version": "ori-live-graph-verification-v1",
+            "schema_version": "ori-live-graph-verification-v2",
             **receipt_payload,
         },
         exclude_fields=("verification_fingerprint",),
@@ -999,10 +1176,15 @@ def test_live_catalog_promotion_requires_exact_receipts_and_task_accounting(
     assert len(catalog.proofs) == len(direct.tasks)
     assert len(catalog.certifications) == len(direct.tasks)
     assert len(catalog.candidate_catalog.entries) == len(direct.tasks)
-    assert all(
-        certification.state.value == "candidate"
-        for certification in catalog.certifications
-    )
+    assert all(certification.state.value == "candidate" for certification in catalog.certifications)
+    legacy_offline = offline.model_dump(mode="python")
+    legacy_offline["schema_version"] = "ori-eval-offline-certification-v3"
+    with pytest.raises(ValueError, match="schema_version"):
+        OfflineCertificationCatalog.model_validate(legacy_offline)
+    legacy_live = catalog.model_dump(mode="python")
+    legacy_live["schema_version"] = "ori-eval-live-certification-v3"
+    with pytest.raises(ValueError, match="schema_version"):
+        LiveCertificationCatalog.model_validate(legacy_live)
     candidate_schema = json.loads(
         (
             Path(__file__).resolve().parents[1]
@@ -1145,6 +1327,4 @@ def test_score_answers_cli_requires_explicit_v2_and_separate_oracles(
         ],
     )
     assert explicit.exit_code == 0, explicit.output
-    assert f"Scored {len(public.tasks)}/{len(public.tasks)} v2 samples" in (
-        explicit.output
-    )
+    assert f"Scored {len(public.tasks)}/{len(public.tasks)} v2 samples" in (explicit.output)

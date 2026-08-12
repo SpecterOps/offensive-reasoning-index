@@ -70,6 +70,51 @@ def test_v2_config_is_strict_and_resolves_paths_from_config(
     assert resolved.output_dir == tmp_path / "campaign"
     assert set(resolved.tracks) == {Track.DIRECT}
     assert resolved.config.models[0].requested_model == "codex/gpt-test"
+    assert resolved.config.defaults.mcp.read_timeout_seconds == 120.0
+    assert resolved.config.defaults.mcp.tool_timeout_seconds == 60.0
+
+
+def test_v2_config_accepts_one_codex_reasoning_effort_for_all_models(
+    tmp_path: Path,
+) -> None:
+    path, payload = _config(tmp_path)
+    payload["defaults"]["reasoning_effort"] = "high"
+    payload["models"].append(
+        {
+            "name": "gpt-test-two",
+            "provider": "codex",
+            "model": "gpt-test-two",
+        }
+    )
+    path.write_text(yaml.safe_dump(payload, sort_keys=False))
+
+    resolved = load_v2_campaign_config(path)
+
+    assert resolved.config.defaults.reasoning_effort == "high"
+    assert all("reasoning_effort" not in model.options for model in resolved.config.models)
+
+
+def test_v2_config_rejects_untyped_or_non_codex_reasoning_effort(tmp_path: Path) -> None:
+    path, payload = _config(tmp_path)
+    payload["defaults"]["reasoning_effort"] = "extreme"
+    path.write_text(yaml.safe_dump(payload, sort_keys=False))
+    with pytest.raises(ValueError, match="literal_error"):
+        load_v2_campaign_config(path)
+
+    payload["defaults"]["reasoning_effort"] = "high"
+    payload["models"][0]["provider"] = "openai"
+    path.write_text(yaml.safe_dump(payload, sort_keys=False))
+    with pytest.raises(ValueError, match="only for Codex models"):
+        load_v2_campaign_config(path)
+
+
+def test_v2_config_rejects_reasoning_effort_hidden_in_model_options(tmp_path: Path) -> None:
+    path, payload = _config(tmp_path)
+    payload["models"][0]["options"] = {"reasoning_effort": "high"}
+    path.write_text(yaml.safe_dump(payload, sort_keys=False))
+
+    with pytest.raises(ValueError, match="defaults.reasoning_effort"):
+        load_v2_campaign_config(path)
 
 
 @pytest.mark.parametrize(

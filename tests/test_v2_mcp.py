@@ -4,6 +4,7 @@ from typing import cast
 
 import pytest
 
+from ori.eval.v2.compiler import compile_acceptance_spec
 from ori.eval.v2.fingerprint import canonical_sha256
 from ori.eval.v2.mcp import (
     _MCP_FINALIZATION_SOURCES,
@@ -32,11 +33,17 @@ from ori.eval.v2.mcp import (
     validate_mcp_capability_profile,
 )
 from ori.eval.v2.schema import (
+    AbsenceClaim,
     BoundedNegativePolicy,
+    EntitySelector,
     ExactRoutePolicy,
     ExecutionBounds,
     MCPBindingMode,
+    MCPClaimEvidenceContract,
+    NegativeReasonCode,
+    PopulationScope,
     RelationshipSemantics,
+    RouteClaim,
     TaskBundle,
     Track,
     TrackBinding,
@@ -68,6 +75,8 @@ def test_mcp_finalization_fingerprint_covers_shared_evidence_sources() -> None:
         "mcp_adapter",
         "model_runtime",
         "provider_loops",
+        "query_contract",
+        "relationships",
         "schema",
     } <= set(_MCP_FINALIZATION_SOURCES)
 
@@ -83,21 +92,50 @@ def _task(
         if claim_kind == "absence"
         else ExactRoutePolicy(kind="exact_route")
     )
+    binding = TrackBinding(
+        track=Track.MCP,
+        capability_profile_id=MCP_CAPABILITY_PROFILE_ID,
+        semantics=RelationshipSemantics.EFFECTIVE,
+        bounds=_bounds(max_pages=max_pages),
+        mcp_tool_loop=MCPToolLoop.NATIVE_OPENAI_COMPATIBLE.value,
+        mcp_resource_mode="off",
+        mcp_binding_mode=mode,
+        mcp_evidence_contract=MCPClaimEvidenceContract(
+            result_kind=("scalar_count" if claim_kind == "absence" else "path"),
+        ),
+    )
+    claim = (
+        AbsenceClaim(
+            kind="absence",
+            claim_id="claim:absence",
+            source=EntitySelector(role="source", object_type="User"),
+            target=EntitySelector(role="target", object_type="Group"),
+            relationships=("MemberOf",),
+            reason_codes=(NegativeReasonCode.OBJECTIVE_UNREACHABLE,),
+            max_hops=6,
+            semantics=RelationshipSemantics.EFFECTIVE,
+            population_scope=PopulationScope.BENCHMARK_NAMESPACE,
+        )
+        if claim_kind == "absence"
+        else RouteClaim(
+            kind="route",
+            claim_id="claim:route",
+            source=EntitySelector(role="source", object_type="User"),
+            target=EntitySelector(role="target", object_type="Group"),
+            semantics=RelationshipSemantics.EFFECTIVE,
+            population_scope=PopulationScope.BENCHMARK_NAMESPACE,
+            required_mechanisms=("MemberOf",),
+            max_hops=6,
+        )
+    )
     return TaskBundle(
         task_id=f"complex.mcp.{claim_kind}@2",
         revision=2,
         product="complex",
         claim_kind=claim_kind,
         answer_policy=answer_policy,
-        binding=TrackBinding(
-            track=Track.MCP,
-            capability_profile_id=MCP_CAPABILITY_PROFILE_ID,
-            semantics=RelationshipSemantics.EFFECTIVE,
-            bounds=_bounds(max_pages=max_pages),
-            mcp_tool_loop=MCPToolLoop.NATIVE_OPENAI_COMPATIBLE.value,
-            mcp_resource_mode="off",
-            mcp_binding_mode=mode,
-        ),
+        acceptance_spec=compile_acceptance_spec(claim, answer_policy, binding),
+        binding=binding,
         question="Return the bounded effective route evidence.",
         answer_schema={"type": "object"},
         claim_fingerprint=FP,
@@ -155,9 +193,7 @@ def test_profile_validation_rejects_fingerprint_and_rehashed_content_drift() -> 
     with pytest.raises(ValueError, match="does not match the pinned revision"):
         validate_mcp_capability_profile(changed)
 
-    changed_finalization = profile.model_copy(
-        update={"finalization_policy_fingerprint": "c" * 64}
-    )
+    changed_finalization = profile.model_copy(update={"finalization_policy_fingerprint": "c" * 64})
     changed_finalization = changed_finalization.model_copy(
         update={
             "profile_fingerprint": canonical_sha256(
@@ -178,10 +214,7 @@ def test_binding_classification_is_explicit_and_fails_closed() -> None:
         classify_mcp_binding(_task(mode=MCPBindingMode.TOOL_ONLY), profile)
         is MCPBindingMode.TOOL_ONLY
     )
-    assert (
-        classify_mcp_binding(_task(max_pages=2), profile)
-        is MCPBindingMode.CYPHER_ENABLED
-    )
+    assert classify_mcp_binding(_task(max_pages=2), profile) is MCPBindingMode.CYPHER_ENABLED
     assert (
         classify_mcp_binding(
             _task(mode=MCPBindingMode.TOOL_ONLY, max_pages=2),
@@ -210,6 +243,7 @@ def test_event_classifier_accepts_only_public_task_contracts() -> None:
                 tool_name="graph_analysis",
                 operation="shortest_path",
                 succeeded=True,
+                claim_relevant=True,
                 result_count=1,
                 complete=True,
                 output_bytes=256,
@@ -221,6 +255,7 @@ def test_event_classifier_accepts_only_public_task_contracts() -> None:
                 tool_name="graph_analysis",
                 operation="shortest_path",
                 succeeded=True,
+                claim_relevant=True,
                 result_count=1,
                 complete=False,
                 output_bytes=256,
@@ -232,6 +267,7 @@ def test_event_classifier_accepts_only_public_task_contracts() -> None:
                 tool_name="graph_analysis",
                 operation="shortest_path",
                 succeeded=True,
+                claim_relevant=True,
                 result_count=0,
                 complete=True,
                 negative_proof=True,
@@ -244,6 +280,7 @@ def test_event_classifier_accepts_only_public_task_contracts() -> None:
                 tool_name="graph_analysis",
                 operation="shortest_path",
                 succeeded=True,
+                claim_relevant=True,
                 result_count=0,
                 complete=True,
                 output_bytes=64,
@@ -255,6 +292,7 @@ def test_event_classifier_accepts_only_public_task_contracts() -> None:
                 tool_name="graph_analysis",
                 operation="shortest_path",
                 succeeded=True,
+                claim_relevant=True,
                 result_count=0,
                 complete=False,
                 output_bytes=64,
@@ -266,6 +304,7 @@ def test_event_classifier_accepts_only_public_task_contracts() -> None:
                 tool_name="graph_analysis",
                 operation="shortest_path",
                 succeeded=True,
+                claim_relevant=True,
                 result_count=1,
                 truncated=True,
                 output_bytes=64,
@@ -277,6 +316,7 @@ def test_event_classifier_accepts_only_public_task_contracts() -> None:
                 tool_name="graph_analysis",
                 operation="shortest_path",
                 succeeded=False,
+                claim_relevant=True,
                 arguments_valid=False,
             ),
             EvidenceEventKind.INVALID_ARGUMENTS,
@@ -286,15 +326,27 @@ def test_event_classifier_accepts_only_public_task_contracts() -> None:
                 tool_name="graph_analysis",
                 operation="shortest_path",
                 succeeded=False,
+                claim_relevant=True,
                 policy_rejected=True,
             ),
             EvidenceEventKind.POLICY_REJECTION,
         ),
         (
             ToolObservation(
+                tool_name="cypher_query",
+                operation="run",
+                succeeded=False,
+                claim_relevant=True,
+                query_timeout=True,
+            ),
+            EvidenceEventKind.QUERY_TIMEOUT,
+        ),
+        (
+            ToolObservation(
                 tool_name="graph_analysis",
                 operation="shortest_path",
                 succeeded=False,
+                claim_relevant=True,
                 infrastructure_failure=True,
             ),
             EvidenceEventKind.INFRASTRUCTURE_FAILURE,
@@ -324,6 +376,7 @@ def test_raw_tool_observation_cannot_claim_completeness_without_total_count() ->
             tool_name="cypher_query",
             operation="run",
             succeeded=True,
+            claim_relevant=True,
             result_count=0,
             complete=True,
             output_bytes=64,
@@ -485,9 +538,48 @@ def test_valid_output_requires_claim_relevant_evidence() -> None:
         FinalizationAttempt(status=FinalOutputStatus.VALID, output_digest="c" * 64),
     )
 
-    assert without_evidence.phase is FinalizationPhase.OUTPUT_INVALID
-    assert without_evidence.terminal_reason == "NO_CLAIM_RELEVANT_EVIDENCE"
+    assert without_evidence.phase is FinalizationPhase.EVIDENCE_INSUFFICIENT
+    assert without_evidence.terminal_reason == "EVIDENCE_INSUFFICIENT"
     assert with_evidence.phase is FinalizationPhase.FINALIZED
+
+
+def test_reducer_uses_latest_complete_proof_and_truncation_boundary() -> None:
+    task = _task()
+    profile = build_mcp_capability_profile()
+    initial = initial_finalization_state(
+        task,
+        profile,
+        tool_loop=MCPToolLoop.NATIVE_OPENAI_COMPATIBLE,
+    )
+    useful = _useful_event(task)
+    truncated = useful.model_copy(update={"kind": EvidenceEventKind.TRUNCATED})
+
+    after_truncation = reduce_finalization(initial, truncated)
+    recovered = reduce_finalization(after_truncation, useful)
+    revoked = reduce_finalization(recovered, truncated)
+
+    assert after_truncation.phase is FinalizationPhase.COLLECTING
+    assert recovered.phase is FinalizationPhase.READY
+    assert recovered.finalization_unlocked is True
+    assert revoked.phase is FinalizationPhase.COLLECTING
+    assert revoked.finalization_unlocked is False
+
+
+def test_task_timeout_is_model_terminal_and_not_infrastructure() -> None:
+    task = _task()
+    profile = build_mcp_capability_profile()
+    initial = initial_finalization_state(task, profile, tool_loop=MCPToolLoop.INSPECT)
+    task_timeout = classify_evidence_event(
+        task,
+        profile,
+        kind=EvidenceEventKind.TASK_TIMEOUT,
+        reason="task budget exhausted",
+    )
+
+    terminal = reduce_finalization(initial, task_timeout)
+
+    assert terminal.phase is FinalizationPhase.TASK_TIMEOUT
+    assert terminal.terminal_reason == "TASK_TIMEOUT"
 
 
 def test_infrastructure_failure_is_terminal_and_absorbing() -> None:

@@ -72,7 +72,7 @@ def compile_v2_files(
     oracle_path = output_dir / f"{stem}-oracles-v2.private.json"
     inventory_path = output_dir / f"{stem}-inventory-v2.json"
     certification_path = (
-        output_dir / f"{stem}-offline-certification-v3.private.json"
+        output_dir / f"{stem}-offline-certification-v4.private.json"
     )
     write_artifacts(
         corpus,
@@ -181,10 +181,10 @@ async def certify_v2_live_files(
         "verification_middle": output_dir / f"{stem}-live-middle.private.json",
         "verification_post": output_dir / f"{stem}-live-post.private.json",
         "direct_certification": (
-            output_dir / f"{stem}-direct-live-certification-v3.private.json"
+            output_dir / f"{stem}-direct-live-certification-v4.private.json"
         ),
         "mcp_certification": (
-            output_dir / f"{stem}-mcp-live-certification-v3.private.json"
+            output_dir / f"{stem}-mcp-live-certification-v4.private.json"
         ),
         "direct_candidates": output_dir / f"{stem}-direct-candidates-v2.json",
         "mcp_candidates": output_dir / f"{stem}-mcp-candidates-v2.json",

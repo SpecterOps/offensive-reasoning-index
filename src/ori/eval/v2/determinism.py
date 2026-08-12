@@ -47,12 +47,6 @@ def task_contract_shape(task: CompiledTask) -> dict[str, Any]:
 
     replacements = _replacement_map(task)
     binding = task.public.binding.model_dump(mode="json")
-    # These two limits are resolved from the selected seed's certified
-    # cardinality.  The bound strategy remains compiler-fingerprinted while the
-    # concrete values stay bound to the seed-specific TaskBundle.
-    binding["bounds"]["max_result_cardinality"] = "<seed-resolved-cardinality>"
-    binding["bounds"]["page_size"] = "<seed-resolved-page-size>"
-    binding["bounds"]["max_pages"] = "<seed-resolved-page-count>"
     return {
         "task_id": task.public.task_id,
         "revision": task.public.revision,

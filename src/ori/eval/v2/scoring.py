@@ -16,7 +16,11 @@ from typing import Any, Literal
 from pydantic import Field, model_validator
 
 from .comparator import COMPARATOR_FINGERPRINT, compare
-from .evidence import EvidenceNormalizationError, validate_and_normalize_evidence
+from .evidence import (
+    EvidenceNormalizationError,
+    attest_graph_facts,
+    validate_and_normalize_evidence,
+)
 from .fingerprint import canonical_sha256
 from .identity import IdentityResolver
 from .protocol import (
@@ -46,12 +50,15 @@ class V2ScoringError(ValueError):
 class SampleOutcomeCode(StrEnum):
     COMPLETED = "COMPLETED"
     OUTPUT_INVALID = "OUTPUT_INVALID"
+    PROOF_INSUFFICIENT = "PROOF_INSUFFICIENT"
+    TASK_TIMEOUT = "TASK_TIMEOUT"
     POLICY_REJECTED = "POLICY_REJECTED"
     QUERY_TIMEOUT = "QUERY_TIMEOUT"
     QUERY_ERROR = "QUERY_ERROR"
     INFRA_ERROR = "INFRA_ERROR"
     HARNESS_ERROR = "HARNESS_ERROR"
     CIRCUIT_OPEN = "CIRCUIT_OPEN"
+    INTERRUPTED = "INTERRUPTED"
 
 
 class AnswerSubmission(StrictModel):
@@ -94,10 +101,13 @@ class SampleResult(StrictModel):
                 raise ValueError("successful samples must use COMPLETED")
             if self.evidence is None or self.verdict is None:
                 raise ValueError("successful samples require evidence and a verdict")
-            if self.reasoning_correct is not (
-                self.verdict.status is VerdictStatus.CORRECT
-            ):
+            if self.reasoning_correct is not (self.verdict.status is VerdictStatus.CORRECT):
                 raise ValueError("reasoning correctness must match comparator verdict")
+        elif self.execution_class is ExecutionClass.PROOF_FAILURE:
+            if self.outcome is not SampleOutcomeCode.PROOF_INSUFFICIENT:
+                raise ValueError("proof failures must use PROOF_INSUFFICIENT")
+            if self.reasoning_correct is not None or self.verdict is not None:
+                raise ValueError("proof failures have no reasoning verdict")
         elif self.execution_class in {
             ExecutionClass.INFRA_FAILURE,
             ExecutionClass.HARNESS_FAILURE,
@@ -121,6 +131,7 @@ class CampaignSummary(StrictModel):
     correct: int = Field(strict=True, ge=0)
     incorrect: int = Field(strict=True, ge=0)
     model_failures: int = Field(strict=True, ge=0)
+    proof_failures: int = Field(strict=True, ge=0)
     infrastructure_failures: int = Field(strict=True, ge=0)
     harness_failures: int = Field(strict=True, ge=0)
     unexecuted: int = Field(strict=True, ge=0)
@@ -134,6 +145,7 @@ class CampaignSummary(StrictModel):
         if (
             self.completed
             + self.model_failures
+            + self.proof_failures
             + self.infrastructure_failures
             + self.harness_failures
             + self.unexecuted
@@ -171,8 +183,7 @@ class ScoringV2Artifact(StrictModel):
 
 def build_answers_artifact(
     public: PublicV2Artifact,
-    answers: Mapping[str, Mapping[str, Any]]
-    | Sequence[AnswerSubmission],
+    answers: Mapping[str, Mapping[str, Any]] | Sequence[AnswerSubmission],
 ) -> AnswersV2Artifact:
     """Bind structured answers to one immutable public task catalog."""
 
@@ -224,9 +235,7 @@ def _validate_artifact_bindings(
     if answers.catalog_fingerprint != public.catalog_fingerprint:
         mismatches.append("answer/public catalog")
     if mismatches:
-        raise V2ScoringError(
-            "v2 scoring artifact fingerprint mismatch: " + ", ".join(mismatches)
-        )
+        raise V2ScoringError("v2 scoring artifact fingerprint mismatch: " + ", ".join(mismatches))
 
 
 def _exact_submissions(
@@ -240,8 +249,7 @@ def _exact_submissions(
     unknown = sorted(set(answer_counts) - set(task_by_id))
     if duplicates or missing or unknown:
         raise V2ScoringError(
-            "answer accounting failed: "
-            f"missing={missing} duplicates={duplicates} unknown={unknown}"
+            f"answer accounting failed: missing={missing} duplicates={duplicates} unknown={unknown}"
         )
 
     submissions = {item.task_id: item for item in answers.answers}
@@ -272,15 +280,15 @@ def summarize_results(
     unknown = sorted(set(counts) - set(expected))
     if duplicates or missing or unknown:
         raise V2ScoringError(
-            "result accounting failed: "
-            f"missing={missing} duplicates={duplicates} unknown={unknown}"
+            f"result accounting failed: missing={missing} duplicates={duplicates} unknown={unknown}"
         )
 
-    completed = sum(
-        result.execution_class is ExecutionClass.SUCCESS for result in results
-    )
+    completed = sum(result.execution_class is ExecutionClass.SUCCESS for result in results)
     model_failures = sum(
         result.execution_class is ExecutionClass.MODEL_FAILURE for result in results
+    )
+    proof_failures = sum(
+        result.execution_class is ExecutionClass.PROOF_FAILURE for result in results
     )
     infrastructure_failures = sum(
         result.execution_class is ExecutionClass.INFRA_FAILURE for result in results
@@ -288,9 +296,7 @@ def summarize_results(
     harness_failures = sum(
         result.execution_class is ExecutionClass.HARNESS_FAILURE for result in results
     )
-    unexecuted = sum(
-        result.execution_class is ExecutionClass.UNEXECUTED for result in results
-    )
+    unexecuted = sum(result.execution_class is ExecutionClass.UNEXECUTED for result in results)
     correct = sum(result.reasoning_correct is True for result in results)
     incorrect = sum(result.reasoning_correct is False for result in results)
     reasoning_denominator = correct + incorrect
@@ -308,12 +314,11 @@ def summarize_results(
         correct=correct,
         incorrect=incorrect,
         model_failures=model_failures,
+        proof_failures=proof_failures,
         infrastructure_failures=infrastructure_failures,
         harness_failures=harness_failures,
         unexecuted=unexecuted,
-        reasoning_accuracy=(
-            correct / reasoning_denominator if reasoning_denominator else None
-        ),
+        reasoning_accuracy=(correct / reasoning_denominator if reasoning_denominator else None),
         effective_accuracy=correct / len(expected) if expected else None,
         campaign_valid=not invalid_reasons,
         invalid_reasons=tuple(invalid_reasons),
@@ -342,6 +347,10 @@ def score_answers_v2(
                 answer_schema=task.answer_schema,
                 resolver=resolver,
                 task_id=task.task_id,
+            )
+            evidence = attest_graph_facts(
+                evidence,
+                private.graph_fact_registry,
             )
         except (EvidenceNormalizationError, ValueError) as exc:
             results.append(

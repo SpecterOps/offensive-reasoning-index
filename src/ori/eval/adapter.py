@@ -397,12 +397,15 @@ async def _call_provider(
 
         resolved_base = codex_request_base_url(model, base_url)
         resolved_model = codex_model_name(model)
+        reasoning_effort = (ollama_options or {}).get("reasoning_effort")
         full_messages = [{"role": "system", "content": system}] + messages
         body: dict[str, object] = {
             "model": resolved_model,
             "messages": full_messages,
             "max_tokens": max_tokens,
         }
+        if reasoning_effort is not None:
+            body["reasoning_effort"] = reasoning_effort
         params = chat_request_to_codex_responses_params(body)
         thread_id = str(params.get("prompt_cache_key") or "")
         headers = codex_headers(thread_id=thread_id)
@@ -425,7 +428,11 @@ async def _call_provider(
             int(usage.get("prompt_tokens") or 0),
             int(usage.get("completion_tokens") or 0),
             "",
-            {"provider": "codex_oauth", "response_id": data.get("id", "")},
+            {
+                "provider": "codex_oauth",
+                "response_id": data.get("id", ""),
+                "reasoning_effort": reasoning_effort or "native_default",
+            },
         )
 
     else:

@@ -4,6 +4,10 @@ Protocol v2 treats a benchmark task as a compiled semantic contract, not a
 prompt plus a template-specific grader. New task families must follow this
 workflow before they can enter a later selector suite.
 
+Read [ORI V2 Design Rationale](benchmark-v2-design-rationale.md) first when you
+need the plain-language model, incident history, decision tradeoffs, or scoring
+mathematics behind these authoring rules.
+
 ## Authoring boundary
 
 Add a declarative claim recipe in `src/ori/eval/v2/compiler.py`. A recipe must
@@ -15,13 +19,20 @@ define:
 4. direct, transitive, or effective semantics;
 5. population scope, mechanisms, ordering, context, and exclusions;
 6. one explicit answer policy;
-7. independent direct and MCP bindings where supported;
-8. execution bounds and selector-facing metadata.
+7. one solver-visible `AcceptanceSpec` compiled from that claim and policy;
+8. independent direct and MCP bindings where supported;
+9. execution bounds and selector-facing metadata.
 
 Do not add a comparator branch keyed by task ID, template ID, family, tier, or
 prompt text. Do not parse reference Cypher to infer semantics. If a legacy
 capability cannot be expressed and certified, compilation must block it or
 replace it with an explicitly bounded equivalent.
+
+The `AcceptanceSpec` must expose every semantic fact that can change the
+verdict without disclosing seed-resolved answer identities. This includes route
+mechanisms and ordering, context, properties, exclusions, additional truthful
+evidence behavior, completeness, and bounds. The structural compiler lint must
+be able to derive every sealed scorer requirement from it.
 
 ## Claim and policy selection
 
@@ -35,13 +46,20 @@ Use the narrowest correct policy:
 - `ClosedRouteVariants` for a finite, explicitly sealed set of acceptable
   routes.
 - `BoundedNegative` for absence with a bounded proof and a mutation that would
-  flip the oracle.
+  flip the oracle. Its declared proof operation and submitted answer must be
+  compatible; for a count-zero route proof, do not additionally require hidden
+  partial edges or properties.
 - `Decision` for a boolean conclusion backed by the declared entities, edges,
   and properties.
 
 Display names are not identities. Resolve every role to an `EntityRef` and use
 object ID as primary identity. Declare aliases only when they identify exactly
-one object.
+one object. Keep query selection separate from answer normalization: query
+predicates use the exact canonical `name` or exact `objectid`; aliases may
+normalize a final answer but are not alternate live graph property values.
+State every semantic traversal ceiling in the public question, and do not
+describe an anchor with a property unless that property is part of the typed
+selection.
 
 ## Track bindings
 
@@ -55,6 +73,9 @@ For direct:
 - return answer nodes only for set claims, a scalar for count claims, and an
   actual `RETURN p` path for route claims;
 - ensure a returned path can include ordered edge witnesses;
+- do not impose a global ordering on paths or complete exact sets; require
+  stable ordering only for a deterministic set window;
+- use one scalar route count for a bounded-negative direct claim;
 - keep JSON maps/list construction out of Cypher;
 - never rely on query text to prove an answer.
 
@@ -62,10 +83,68 @@ For MCP:
 
 - choose an explicit certified loop;
 - keep resource mode explicit;
-- select tool-only or explicitly Cypher-enabled support from the pinned
-  capability profile;
+- select explicitly Cypher-enabled support from the pinned capability profile
+  for the current certified runtime;
+- treat high-level tools as exploratory until a future tool-only binding
+  publishes and certifies its own solver-visible proof contract;
+- compile one public evidence result kind: entities, scalar count, or path;
+- require only public input selectors and public projection types for
+  claim-relevance; never copy sealed mechanisms, properties, or expected facts
+  into the runtime relevance gate;
 - require stable ordering, pagination, total count, or truncation reporting
   whenever completeness depends on it;
+- return entity rows with a stable identity column such as
+  `entity.objectid AS object_id`; BloodHound may flatten these rows into
+  `data.literals` while reporting zero graph-node cardinality;
+- accept stable ordering only when the ordered property or current alias is
+  proven to derive from `objectid`, including safe `WITH` passthroughs but not
+  property rebindings;
+- bind a companion count and every page to the same normalized population, and
+  count distinct result identities whenever the page window is deduplicated;
+  if a distinct count is paired with row-preserving pages, require the receipts
+  to prove one globally unique explicit object ID per row instead of trusting
+  equal scalar and row totals;
+- use exact `name`/`objectid` selector predicates and return an identity-bearing
+  result variable other than a required input selector;
+- preserve BloodHound's case-sensitive label, relationship, and property
+  identifiers; accept an anonymous node carrying the exact public selector as
+  equivalent to a named anchor;
+- accept `coalesce(boolean_property, false)` only when it is logically
+  equivalent to the declared typed boolean predicate;
+- treat `Principal` as an abstract projection type and validate the returned
+  identity/count variable instead of emitting or requiring `:Principal`;
+- preserve positive route/decision graph witnesses when the pinned MCP response
+  also contains endpoint scalar literals;
+- require the ordered route witness itself to begin and end at the public claim
+  selectors; selectors elsewhere in the query or response do not bind the
+  returned path;
+- require the returned path variable to preserve lineage through `WITH`
+  projections and the BloodHound receipt to contain actual nodes and edges;
+  node-only results and rebound path variables are not route proof;
+- require public endpoint selectors to remain live in the returned path's
+  Cypher scope; selectors dropped by `WITH` or added only by a later detached
+  `MATCH` do not bind that path;
+- accept additional route/decision entities, edges, and properties only when
+  the corpus-wide graph registry attests them and they remain connected to the
+  returned witness;
+- add any newly solver-assertable stable property to the shared archive/live
+  registry and declare its CE normalization explicitly; never add a
+  template-specific comparator exception;
+- ensure a later complete proof can supersede an earlier truncated attempt,
+  while a later truncation revokes readiness;
+- for a bounded-negative scalar, count one source-to-objective path variable
+  over the complete public hop bound; a broader wildcard/undirected search can
+  prove zero but its non-zero result cannot contradict the narrower claim; the
+  same rule applies when the relationship vocabulary is exact but the query's
+  hop ceiling is wider than the public ceiling; accept ordinary exact one-edge
+  syntax as equivalent to `*1..1` for a one-hop claim, and reject conflicting
+  inline/`WHERE` endpoint selectors, selector predicates on non-endpoint
+  variables, and undeclared extra endpoint labels;
+- make deterministic window claims use the exact public offset and limit as one
+  execution page, without hidden subpages or a hidden global count; normalize an
+  omitted first-page `SKIP 0` to the same population key as later contiguous
+  pages, alpha-normalize bound variable names across those pages, and treat an
+  equivalent single anonymous `COUNT(*)` population as the same population;
 - block the binding if the capability cannot prove the claim.
 
 Safety admission controls are model-blind and applied by the harness after the
@@ -76,21 +155,36 @@ bounded, executable answer. Generic CySQL compatibility rules—such as using
 reasoning hints. The envelope never discloses task-specific policy decisions,
 reference queries, expected facts, or grader behavior.
 
+The runtime provider payload should contain the question once and one
+authoritative public task contract. Do not also inject a discovered MCP server
+prompt whose resource workflow conflicts with the certified track binding.
+
 ## Required bounds
 
 Every binding must set:
 
 - maximum hops;
 - maximum result cardinality;
-- page size and maximum pages;
+- page size, starting result offset, and maximum pages;
 - total-count and stable-order requirements;
 - maximum output and transcript bytes;
 - maximum tool calls;
 - timeout.
 
 Use a deterministic bounded page, subset, count, or route claim when a complete
-unbounded enumeration would exceed those limits. Do not certify a task when a
-truncated answer is indistinguishable from a complete answer.
+unbounded enumeration would exceed those limits. Its typed selection, public
+question, binding, runtime projector, and certification replay must agree on
+the same offset and limit. Do not certify a task when a truncated answer is
+indistinguishable from a complete answer.
+
+For complete MCP set claims, the compiler currently uses a fixed public
+1,000-identity capacity over 500-row pages and requires a companion total. The
+capacity must not be derived from the sealed expected set size. This lets the
+exact-set comparator grade extras while avoiding answer-count leakage. The
+whole-task deadline includes the capacity-derived serialization allowance,
+capped at 600 seconds. Do not override these values with smaller hidden
+model-loop, tool, or read deadlines; campaign readiness rejects runtime caps
+that contradict certified bounds.
 
 ## Fixture contract
 

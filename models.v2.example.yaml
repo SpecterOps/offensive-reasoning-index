@@ -27,6 +27,9 @@ defaults:
   bhce_url: null
   # null uses the selected provider's normal endpoint or OAuth adapter.
   model_base_url: null
+  # One explicit effort applies to every Codex model and both tracks. Readiness
+  # fails if any selected model does not advertise this level locally.
+  reasoning_effort: high
   max_infra_retries: 1
   graph_page_size: 500
   health:
@@ -38,7 +41,10 @@ defaults:
     resource_mode: "off"
     tool_loop: native-openai-compatible
     telemetry_adapter: auto
-    read_timeout_seconds: 900.0
+    # Provider and tool sub-deadlines must remain below every task deadline so
+    # stalls are classified as infrastructure instead of model task timeouts.
+    read_timeout_seconds: 120.0
+    tool_timeout_seconds: 60.0
 
 models:
   - name: gpt-5-6-sol

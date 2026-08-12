@@ -16,6 +16,7 @@ from .schema import (
     MANIFEST_SCHEMA_VERSION,
     PROTOCOL_VERSION,
     EntityRef,
+    GraphFactRegistry,
     OracleBundle,
     StrictModel,
     TaskBundle,
@@ -35,6 +36,9 @@ _PUBLIC_FORBIDDEN_FIELDS = frozenset(
         "forbidden_edges",
         "forbidden_entity_ids",
         "graph_edge_registry",
+        "graph_fact_attestation",
+        "graph_fact_registry",
+        "graph_fact_registry_fingerprint",
         "negative_witnesses",
         "oracle",
         "oracle_bundle",
@@ -44,9 +48,6 @@ _PUBLIC_FORBIDDEN_FIELDS = frozenset(
         "reference_nodes",
         "reference_results",
         "ref_result",
-        "required_context",
-        "required_mechanisms",
-        "required_properties",
         "route_variants",
         "valid_node_names",
     }
@@ -99,6 +100,7 @@ class OracleV2Artifact(StrictModel):
     comparator_fingerprint: str
     identity_catalog: tuple[EntityRef, ...]
     identity_catalog_fingerprint: str
+    graph_fact_registry: GraphFactRegistry
     oracles: tuple[OracleBundle, ...]
     oracle_catalog_fingerprint: str
     artifact_fingerprint: str
@@ -112,6 +114,12 @@ class OracleV2Artifact(StrictModel):
             self.identity_catalog
         ):
             raise ValueError("sealed identity catalog fingerprint mismatch")
+        if any(
+            oracle.graph_fact_registry_fingerprint
+            != self.graph_fact_registry.registry_fingerprint
+            for oracle in self.oracles
+        ):
+            raise ValueError("oracle graph fact registry fingerprint mismatch")
         expected_catalog = canonical_sha256(self.oracles)
         if self.oracle_catalog_fingerprint != expected_catalog:
             raise ValueError("oracle catalog fingerprint mismatch")
@@ -308,6 +316,7 @@ def build_artifacts(
         "comparator_fingerprint": COMPARATOR_FINGERPRINT,
         "identity_catalog": sealed_identities,
         "identity_catalog_fingerprint": canonical_sha256(sealed_identities),
+        "graph_fact_registry": corpus.graph_fact_registry,
         "oracles": oracles,
         "oracle_catalog_fingerprint": canonical_sha256(oracles),
         "artifact_fingerprint": "0" * 64,

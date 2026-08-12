@@ -21,6 +21,9 @@ DEFAULT_CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex"
 DEFAULT_CODEX_ORIGINATOR = "codex_cli_rs"
 DEFAULT_CODEX_VERSION = "0.133.0"
 DEFAULT_CODEX_MODEL = "gpt-5.5-codex"
+CODEX_REASONING_EFFORTS = frozenset(
+    {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
+)
 
 
 class CodexResponseStreamError(RuntimeError):
@@ -171,6 +174,14 @@ def chat_request_to_codex_responses_params(body: dict[str, Any]) -> dict[str, An
         params["instructions"] = "\n\n".join(instructions_parts)
     if body.get("tools"):
         params["tools"] = [_translate_tool(tool) for tool in body["tools"]]
+    options = body.get("options")
+    reasoning_effort = body.get("reasoning_effort")
+    if reasoning_effort is None and isinstance(options, dict):
+        reasoning_effort = options.get("reasoning_effort")
+    if reasoning_effort is not None:
+        if reasoning_effort not in CODEX_REASONING_EFFORTS:
+            raise ValueError(f"unsupported Codex reasoning effort: {reasoning_effort!r}")
+        params["reasoning"] = {"effort": reasoning_effort}
     # The ChatGPT Codex backend used by Codex OAuth currently rejects some
     # optional Responses parameters that ORI's OpenAI-compatible callers may
     # supply by default. Omit them unless explicitly opted in so Codex model

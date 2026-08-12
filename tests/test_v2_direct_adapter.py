@@ -11,7 +11,11 @@ from ori.eval.direct_query_safety import (
     QueryDenyCache,
     query_fingerprint,
 )
-from ori.eval.v2.compiler import DIRECT_RESULT_CONTRACT_VERSION
+from ori.eval.v2.comparator import compare
+from ori.eval.v2.compiler import (
+    DIRECT_RESULT_CONTRACT_VERSION,
+    compile_acceptance_spec,
+)
 from ori.eval.v2.direct_adapter import (
     DirectAdapterError,
     execute_direct_v2,
@@ -24,6 +28,7 @@ from ori.eval.v2.profiles import (
     build_direct_capability_profile,
     validate_direct_capability_profile,
 )
+from ori.eval.v2.runtime import sample_from_direct_outcome
 from ori.eval.v2.schema import (
     DIRECT_QUERY_POLICY_VERSION,
     AbsenceClaim,
@@ -58,6 +63,7 @@ from ori.eval.v2.schema import (
     TrackBinding,
     VerdictStatus,
 )
+from ori.eval.v2.scoring import SampleOutcomeCode
 
 FP = "a" * 64
 
@@ -77,6 +83,14 @@ TARGET = EntityRef(
     canonical_name="DOMAIN ADMINS@EXAMPLE.LOCAL",
     aliases=("DOMAIN ADMINS",),
 )
+BOB = EntityRef(
+    object_id="USER-C",
+    object_type="User",
+    domain="EXAMPLE.LOCAL",
+    role="benchmark_object",
+    canonical_name="BOB@EXAMPLE.LOCAL",
+    aliases=("BOB",),
+)
 EDGE = EdgeWitness(
     source_id=ALICE.object_id,
     relationship="MemberOf",
@@ -92,30 +106,33 @@ CLAIM = RouteClaim(
     required_mechanisms=("MemberOf",),
     max_hops=1,
 )
+POLICY = ExactRoutePolicy(kind="exact_route")
+BINDING = TrackBinding(
+    track=Track.DIRECT,
+    capability_profile_id="direct-v3",
+    semantics=RelationshipSemantics.DIRECT,
+    bounds=ExecutionBounds(
+        max_hops=1,
+        max_result_cardinality=1,
+        page_size=1,
+        max_pages=1,
+        require_total_count=False,
+        require_stable_ordering=True,
+        max_output_bytes=1024,
+        max_transcript_bytes=4096,
+        max_tool_calls=0,
+        timeout_seconds=10.0,
+    ),
+    direct_query_policy_version=DIRECT_QUERY_POLICY_VERSION,
+)
 TASK = TaskBundle(
     task_id="simple.direct.route@2",
     revision=2,
     product="simple",
     claim_kind="route",
-    answer_policy=ExactRoutePolicy(kind="exact_route"),
-    binding=TrackBinding(
-        track=Track.DIRECT,
-        capability_profile_id="direct-v3",
-        semantics=RelationshipSemantics.DIRECT,
-        bounds=ExecutionBounds(
-            max_hops=1,
-            max_result_cardinality=1,
-            page_size=1,
-            max_pages=1,
-            require_total_count=False,
-            require_stable_ordering=True,
-            max_output_bytes=1024,
-            max_transcript_bytes=4096,
-            max_tool_calls=0,
-            timeout_seconds=10.0,
-        ),
-        direct_query_policy_version=DIRECT_QUERY_POLICY_VERSION,
-    ),
+    answer_policy=POLICY,
+    acceptance_spec=compile_acceptance_spec(CLAIM, POLICY, BINDING),
+    binding=BINDING,
     question="Find the edge route.",
     answer_schema={"type": "object"},
     claim_fingerprint=FP,
@@ -135,6 +152,7 @@ ORACLE = OracleBundle(
     ),
     route_variants=(RouteVariant(variant_id="canonical", edges=(EDGE,)),),
     graph_edge_registry=(EDGE,),
+    graph_fact_registry_fingerprint=FP,
     required_mechanisms=("MemberOf",),
     source_id=ALICE.object_id,
     target_id=TARGET.object_id,
@@ -156,7 +174,12 @@ COUNT_TASK = TASK.model_copy(
     update={
         "task_id": "simple.direct.count@2",
         "claim_kind": "count",
-        "answer_policy": ExactCountPolicy(kind="exact_count"),
+        "answer_policy": (count_policy := ExactCountPolicy(kind="exact_count")),
+        "acceptance_spec": compile_acceptance_spec(
+            COUNT_CLAIM,
+            count_policy,
+            TASK.binding,
+        ),
         "question": "Count the matching users.",
     }
 )
@@ -187,13 +210,20 @@ SET_TASK = TASK.model_copy(
     update={
         "task_id": "simple.direct.set@2",
         "claim_kind": "set",
-        "answer_policy": ExactSetPolicy(kind="exact_set"),
-        "binding": TASK.binding.model_copy(
-            update={
-                "bounds": TASK.binding.bounds.model_copy(
-                    update={"max_result_cardinality": 2, "page_size": 2}
-                )
-            }
+        "answer_policy": (set_policy := ExactSetPolicy(kind="exact_set")),
+        "binding": (
+            set_binding := TASK.binding.model_copy(
+                update={
+                    "bounds": TASK.binding.bounds.model_copy(
+                        update={"max_result_cardinality": 2, "page_size": 2}
+                    )
+                }
+            )
+        ),
+        "acceptance_spec": compile_acceptance_spec(
+            SET_CLAIM,
+            set_policy,
+            set_binding,
         ),
         "question": "Return the complete matching set.",
     }
@@ -366,9 +396,7 @@ def test_direct_property_projection_is_scoped_to_the_resolved_entity() -> None:
         key="hasspn",
         value=True,
     )
-    oracle = ORACLE.model_copy(
-        update={"required_properties": (property_fact,)}
-    )
+    oracle = ORACLE.model_copy(update={"required_properties": (property_fact,)})
     raw = _raw_route()
     raw["data"]["nodes"]["0"]["properties"]["hasSPN"] = True
     raw["data"]["nodes"]["2"] = {
@@ -389,9 +417,7 @@ def test_direct_property_projection_is_scoped_to_the_resolved_entity() -> None:
     )
 
     assert evidence.observed_properties == (property_fact,)
-    assert extra.object_id in {
-        entity.object_id for entity in evidence.entities
-    }
+    assert extra.object_id in {entity.object_id for entity in evidence.entities}
 
 
 def test_direct_decision_rejects_nodes_outside_the_sealed_context() -> None:
@@ -423,7 +449,12 @@ def test_direct_decision_rejects_nodes_outside_the_sealed_context() -> None:
         update={
             "task_id": "simple.direct.decision@2",
             "claim_kind": "decision",
-            "answer_policy": DecisionPolicy(kind="decision"),
+            "answer_policy": (decision_policy := DecisionPolicy(kind="decision")),
+            "acceptance_spec": compile_acceptance_spec(
+                decision_claim,
+                decision_policy,
+                TASK.binding,
+            ),
         }
     )
     oracle = ORACLE.model_copy(
@@ -457,27 +488,14 @@ def test_direct_decision_rejects_nodes_outside_the_sealed_context() -> None:
         )
 
 
-def test_direct_absence_projects_resolved_witness_properties() -> None:
-    property_fact = EntityPropertyFact(
-        entity_id=TARGET.object_id,
-        key="authenticationenabled",
-        value=False,
-    )
+def test_direct_absence_requires_exact_zero_count_proof() -> None:
     claim = AbsenceClaim(
         kind="absence",
         claim_id="claim:absence",
         source=EntitySelector(role="source", object_type="User"),
         target=EntitySelector(role="target", object_type="Group"),
         relationships=("MemberOf",),
-        blocking_properties=(
-            PropertyPredicate(
-                role="target",
-                property_name="authenticationenabled",
-                operator=PredicateOperator.EQUALS,
-                value=False,
-            ),
-        ),
-        reason_codes=(NegativeReasonCode.TEMPLATE_AUTHENTICATION_DISABLED,),
+        reason_codes=(NegativeReasonCode.OBJECTIVE_UNREACHABLE,),
         max_hops=1,
         semantics=RelationshipSemantics.DIRECT,
         population_scope=PopulationScope.BENCHMARK_NAMESPACE,
@@ -486,7 +504,12 @@ def test_direct_absence_projects_resolved_witness_properties() -> None:
         update={
             "task_id": "simple.direct.absence@2",
             "claim_kind": "absence",
-            "answer_policy": BoundedNegativePolicy(kind="bounded_negative"),
+            "answer_policy": (absence_policy := BoundedNegativePolicy(kind="bounded_negative")),
+            "acceptance_spec": compile_acceptance_spec(
+                claim,
+                absence_policy,
+                TASK.binding,
+            ),
         }
     )
     oracle = ORACLE.model_copy(
@@ -494,33 +517,220 @@ def test_direct_absence_projects_resolved_witness_properties() -> None:
             "task_id": task.task_id,
             "claim": claim,
             "route_variants": (),
-            "required_context": (EDGE,),
-            "required_properties": (property_fact,),
+            "required_context": (),
+            "required_properties": (),
             "negative_witnesses": (
                 NegativeWitness(
-                    reason_code=NegativeReasonCode.TEMPLATE_AUTHENTICATION_DISABLED,
-                    checked_entity_ids=(TARGET.object_id,),
-                    checked_edges=(EDGE,),
-                    checked_properties=(property_fact,),
+                    reason_code=NegativeReasonCode.OBJECTIVE_UNREACHABLE,
+                    checked_entity_ids=(ALICE.object_id, TARGET.object_id),
                     max_hops=1,
                     witness_absent=True,
                 ),
             ),
         }
     )
-    raw = _raw_route()
-    raw["data"]["nodes"]["1"]["properties"]["authenticationenabled"] = False
 
     evidence = project_direct_evidence(
-        CypherResult(success=True, raw=raw),
+        CypherResult(
+            success=True,
+            raw={
+                "data": {
+                    "nodes": {},
+                    "edges": [],
+                    "literals": [{"key": "count", "value": 0}],
+                }
+            },
+        ),
         task=task,
         oracle=oracle,
         resolver=RESOLVER,
+        answer_payload={
+            "path_status": "no_path",
+            "negative_reason_codes": ["objective_unreachable"],
+        },
     )
 
     assert evidence.edges == ()
-    assert evidence.supporting_edges == (EDGE,)
-    assert evidence.observed_properties == (property_fact,)
+    assert evidence.supporting_edges == ()
+    assert evidence.observed_properties == ()
+    assert evidence.path_status.value == "no_path"
+
+    contradictory = project_direct_evidence(
+        CypherResult(
+            success=True,
+            raw={
+                "data": {
+                    "nodes": {},
+                    "edges": [],
+                    "literals": [{"key": "count", "value": 1}],
+                }
+            },
+        ),
+        task=task,
+        oracle=oracle,
+        resolver=RESOLVER,
+        answer_payload={
+            "path_status": "no_path",
+            "negative_reason_codes": ["objective_unreachable"],
+        },
+    )
+    verdict = compare(task.answer_policy, oracle, contradictory)
+
+    assert contradictory.path_status.value == "found"
+    assert verdict.status is VerdictStatus.INCORRECT
+    assert verdict.reason == "BOUNDED_NEGATIVE_INVALID"
+
+
+def test_direct_absence_rejects_unrelated_zero_count_before_execution() -> None:
+    claim = AbsenceClaim(
+        kind="absence",
+        claim_id="claim:absence",
+        source=EntitySelector(role="source", object_type="User"),
+        target=EntitySelector(role="target", object_type="Group"),
+        relationships=("MemberOf",),
+        reason_codes=(NegativeReasonCode.OBJECTIVE_UNREACHABLE,),
+        max_hops=1,
+        semantics=RelationshipSemantics.DIRECT,
+        population_scope=PopulationScope.BENCHMARK_NAMESPACE,
+    )
+    policy = BoundedNegativePolicy(kind="bounded_negative")
+    task = TASK.model_copy(
+        update={
+            "task_id": "simple.direct.absence-scope@2",
+            "claim_kind": "absence",
+            "answer_policy": policy,
+            "acceptance_spec": compile_acceptance_spec(claim, policy, TASK.binding),
+            "input_entities": (
+                ALICE.model_copy(update={"role": "source"}),
+                TARGET.model_copy(update={"role": "target"}),
+            ),
+        }
+    )
+    coordinator = FakeCoordinator(
+        CypherResult(
+            success=True,
+            raw={
+                "data": {
+                    "nodes": {},
+                    "edges": [],
+                    "literals": [{"key": "count", "value": 0}],
+                }
+            },
+        )
+    )
+
+    outcome = asyncio.run(
+        execute_direct_v2(
+            coordinator,
+            query="MATCH (n:Computer) RETURN count(n) AS count",
+            task=task,
+            oracle=ORACLE,
+            resolver=RESOLVER,
+            answer_payload={
+                "path_status": "no_path",
+                "negative_reason_codes": ["objective_unreachable"],
+            },
+        )
+    )
+
+    assert coordinator.queries == []
+    assert outcome.receipt.execution_class is ExecutionClass.MODEL_FAILURE
+    assert outcome.receipt.failure_subtype == "negative_scope_invalid"
+    assert outcome.receipt.query_executed is False
+    assert outcome.evidence is None
+    assert outcome.verdict is None
+
+
+def test_direct_broader_nonzero_absence_is_proof_insufficient() -> None:
+    claim = AbsenceClaim(
+        kind="absence",
+        claim_id="claim:absence-broader",
+        source=EntitySelector(role="source", object_type="User"),
+        target=EntitySelector(role="target", object_type="Group"),
+        relationships=("MemberOf",),
+        reason_codes=(NegativeReasonCode.OBJECTIVE_UNREACHABLE,),
+        max_hops=1,
+        semantics=RelationshipSemantics.DIRECT,
+        population_scope=PopulationScope.BENCHMARK_NAMESPACE,
+    )
+    policy = BoundedNegativePolicy(kind="bounded_negative")
+    binding = TASK.binding.model_copy(
+        update={
+            "bounds": TASK.binding.bounds.model_copy(update={"max_hops": 1}),
+        }
+    )
+    task = TASK.model_copy(
+        update={
+            "task_id": "simple.direct.absence-broader@2",
+            "claim_kind": "absence",
+            "answer_policy": policy,
+            "acceptance_spec": compile_acceptance_spec(
+                claim,
+                policy,
+                binding,
+            ),
+            "binding": binding,
+            "input_entities": (
+                ALICE.model_copy(update={"role": "source"}),
+                TARGET.model_copy(update={"role": "target"}),
+            ),
+        }
+    )
+    oracle = ORACLE.model_copy(
+        update={
+            "task_id": task.task_id,
+            "claim": claim,
+            "route_variants": (),
+            "required_context": (),
+            "required_properties": (),
+            "negative_witnesses": (
+                NegativeWitness(
+                    reason_code=NegativeReasonCode.OBJECTIVE_UNREACHABLE,
+                    checked_entity_ids=(ALICE.object_id, TARGET.object_id),
+                    max_hops=1,
+                    witness_absent=True,
+                ),
+            ),
+        }
+    )
+    coordinator = FakeCoordinator(
+        CypherResult(
+            success=True,
+            raw={
+                "data": {
+                    "nodes": {},
+                    "edges": [],
+                    "literals": [{"key": "count", "value": 1}],
+                }
+            },
+        )
+    )
+
+    outcome = asyncio.run(
+        execute_direct_v2(
+            coordinator,
+            query=(
+                "MATCH p=(s {objectid:'USER-A'})-[:MemberOf*1..12]->"
+                "(t {objectid:'GROUP-B'}) RETURN count(p) AS count"
+            ),
+            task=task,
+            oracle=oracle,
+            resolver=RESOLVER,
+            answer_payload={
+                "path_status": "no_path",
+                "negative_reason_codes": ["objective_unreachable"],
+            },
+        )
+    )
+    sample = sample_from_direct_outcome(task, oracle, outcome)
+
+    assert len(coordinator.queries) == 1
+    assert outcome.proof_insufficient is True
+    assert outcome.evidence is None
+    assert outcome.verdict is None
+    assert sample.execution_class is ExecutionClass.PROOF_FAILURE
+    assert sample.outcome is SampleOutcomeCode.PROOF_INSUFFICIENT
+    assert sample.reasoning_correct is None
 
 
 def test_direct_adapter_contains_unexpected_projection_failure(
@@ -562,6 +772,45 @@ def test_direct_adapter_contains_unexpected_projection_failure(
     assert outcome.evidence is None
     assert outcome.verdict is None
     assert outcome.error == "AttributeError: internal projector defect"
+
+
+def test_direct_live_identity_missing_from_catalog_is_harness_failure() -> None:
+    raw = _raw_route()
+    raw["data"]["nodes"]["1"].update(
+        {
+            "objectId": "CE-LOCAL-GROUP-544",
+            "label": "CE-LOCAL-GROUP-544",
+            "kind": "ADLocalGroup",
+            "properties": {"name": "CE-LOCAL-GROUP-544"},
+        }
+    )
+    result = CypherResult(
+        success=True,
+        raw=raw,
+        status_code=200,
+        query_executed=True,
+        execution_attempts=1,
+        query_fingerprint="b" * 64,
+        safety_policy_version=DIRECT_QUERY_POLICY_VERSION,
+        safety_rule="allowed",
+        bhce_health_after="not_checked",
+        circuit_state="closed",
+    )
+
+    outcome = asyncio.run(
+        execute_direct_v2(
+            FakeCoordinator(result),
+            query="MATCH p=(a)-[:MemberOf]->(b) RETURN p LIMIT 1",
+            task=TASK,
+            oracle=ORACLE,
+            resolver=RESOLVER,
+        )
+    )
+
+    assert outcome.harness_error is True
+    assert outcome.evidence is None
+    assert outcome.verdict is None
+    assert "IDENTITY_NOT_IN_CATALOG" in (outcome.error or "")
 
 
 def test_direct_adapter_contains_unexpected_coordinator_failure() -> None:
@@ -628,7 +877,7 @@ def test_direct_capability_profile_binds_result_contract() -> None:
     assert (
         profile.direct_result_contract_version
         == DIRECT_RESULT_CONTRACT_VERSION
-        == "ori-direct-result-contract-v1"
+        == "ori-direct-result-contract-v13"
     )
     assert profile.profile_fingerprint == DIRECT_CAPABILITY_PROFILE_FINGERPRINT
     assert profile.profile_fingerprint == canonical_sha256(
@@ -709,6 +958,75 @@ def test_direct_set_preserves_v1_graph_node_projection() -> None:
         ALICE.object_id,
         TARGET.object_id,
     }
+
+
+def test_direct_set_extra_identity_within_public_capacity_reaches_exact_comparator() -> None:
+    task = SET_TASK.model_copy(
+        update={
+            "binding": (
+                binding := SET_TASK.binding.model_copy(
+                    update={
+                        "bounds": SET_TASK.binding.bounds.model_copy(
+                            update={"max_result_cardinality": 3, "page_size": 3}
+                        )
+                    }
+                )
+            ),
+            "acceptance_spec": compile_acceptance_spec(
+                SET_CLAIM,
+                SET_TASK.answer_policy,
+                binding,
+            ),
+        }
+    )
+    result = CypherResult(
+        success=True,
+        raw={
+            "data": {
+                "nodes": {
+                    "0": {
+                        "objectId": ALICE.object_id,
+                        "label": ALICE.canonical_name,
+                        "kind": ALICE.object_type,
+                    },
+                    "1": {
+                        "objectId": TARGET.object_id,
+                        "label": TARGET.canonical_name,
+                        "kind": TARGET.object_type,
+                    },
+                    "2": {
+                        "objectId": BOB.object_id,
+                        "label": BOB.canonical_name,
+                        "kind": BOB.object_type,
+                    },
+                },
+                "edges": [],
+                "literals": [],
+            }
+        },
+        status_code=200,
+        query_executed=True,
+        execution_attempts=1,
+        query_fingerprint="b" * 64,
+        safety_policy_version=DIRECT_QUERY_POLICY_VERSION,
+        safety_rule="allowed",
+        bhce_health_after="not_checked",
+        circuit_state="closed",
+    )
+
+    outcome = asyncio.run(
+        execute_direct_v2(
+            FakeCoordinator(result),
+            query="MATCH (n:Base) RETURN n LIMIT 3",
+            task=task,
+            oracle=SET_ORACLE,
+            resolver=IdentityResolver((ALICE, TARGET, BOB)),
+        )
+    )
+
+    assert outcome.verdict is not None
+    assert outcome.verdict.status is VerdictStatus.INCORRECT
+    assert outcome.verdict.reason == "EXACT_SET_MISMATCH"
 
 
 def test_direct_set_projects_real_ce_collected_node_literals() -> None:

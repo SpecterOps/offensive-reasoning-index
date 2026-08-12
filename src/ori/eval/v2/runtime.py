@@ -12,6 +12,7 @@ from .mcp_adapter import MCPV2Outcome, score_mcp_transcript_v2
 from .schema import (
     CapabilityProfile,
     ExecutionClass,
+    GraphFactRegistry,
     OracleBundle,
     TaskBundle,
     VerdictStatus,
@@ -52,6 +53,13 @@ def sample_from_direct_outcome(
             **base,
             execution_class=ExecutionClass.HARNESS_FAILURE,
             outcome=SampleOutcomeCode.HARNESS_ERROR,
+            detail=outcome.error,
+        )
+    if outcome.proof_insufficient:
+        return SampleResult(
+            **base,
+            execution_class=ExecutionClass.PROOF_FAILURE,
+            outcome=SampleOutcomeCode.PROOF_INSUFFICIENT,
             detail=outcome.error,
         )
     if (
@@ -142,6 +150,8 @@ def run_mcp_task_v2(
     events: Sequence[EvidenceEvent],
     final_answer: Mapping[str, Any] | None,
     retry_answer: Mapping[str, Any] | None = None,
+    observed_identity_ids: Sequence[str] = (),
+    graph_fact_registry: GraphFactRegistry | None = None,
 ) -> MCPV2Outcome:
     """Dispatch every MCP/Inspect loop through the common finalizer."""
 
@@ -165,4 +175,6 @@ def run_mcp_task_v2(
         events=events,
         final_answer=final_answer,
         retry_answer=retry_answer,
+        observed_identity_ids=observed_identity_ids,
+        graph_fact_registry=graph_fact_registry,
     )

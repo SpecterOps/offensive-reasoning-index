@@ -25,6 +25,7 @@ from ori.eval.v2 import (
     canonical_json_bytes,
     canonical_sha256,
 )
+from ori.eval.v2.compiler import compile_acceptance_spec
 
 FP_A = "a" * 64
 FP_B = "b" * 64
@@ -71,19 +72,22 @@ def _bounds() -> ExecutionBounds:
 
 
 def _task_bundle() -> TaskBundle:
+    policy = MechanismValidRoutePolicy(kind="mechanism_valid_route")
+    binding = TrackBinding(
+        track=Track.DIRECT,
+        capability_profile_id="direct-policy-v3",
+        semantics=RelationshipSemantics.EFFECTIVE,
+        bounds=_bounds(),
+        direct_query_policy_version="bloodhound-cysql-direct-v3",
+    )
     return TaskBundle(
         task_id="task-1",
         revision=1,
         product="complex",
         claim_kind="route",
-        answer_policy=MechanismValidRoutePolicy(kind="mechanism_valid_route"),
-        binding=TrackBinding(
-            track=Track.DIRECT,
-            capability_profile_id="direct-policy-v3",
-            semantics=RelationshipSemantics.EFFECTIVE,
-            bounds=_bounds(),
-            direct_query_policy_version="bloodhound-cysql-direct-v3",
-        ),
+        answer_policy=policy,
+        acceptance_spec=compile_acceptance_spec(_route_claim(), policy, binding),
+        binding=binding,
         question="Return the effective principals.",
         answer_schema={
             "type": "object",
@@ -144,14 +148,29 @@ def test_task_bundle_rejects_duplicate_public_logical_roles() -> None:
     payload = _task_bundle().model_dump()
     payload["input_entities"] = (
         _entity().model_dump(),
-        _entity(object_id="S-1-5-21-1-1002").model_copy(
-            update={"canonical_name": "BOB@EXAMPLE.LOCAL", "aliases": ("BOB",)}
-        ).model_dump(),
+        _entity(object_id="S-1-5-21-1-1002")
+        .model_copy(update={"canonical_name": "BOB@EXAMPLE.LOCAL", "aliases": ("BOB",)})
+        .model_dump(),
     )
 
     with pytest.raises(
         ValidationError,
         match="public input entities must have unique logical roles",
+    ):
+        TaskBundle.model_validate(payload)
+
+
+def test_task_bundle_requires_and_binds_solver_visible_acceptance() -> None:
+    payload = _task_bundle().model_dump()
+    payload.pop("acceptance_spec")
+    with pytest.raises(ValidationError, match="Field required"):
+        TaskBundle.model_validate(payload)
+
+    payload = _task_bundle().model_dump()
+    payload["acceptance_spec"]["semantics"] = RelationshipSemantics.DIRECT
+    with pytest.raises(
+        ValidationError,
+        match="acceptance semantics do not match track binding semantics",
     ):
         TaskBundle.model_validate(payload)
 

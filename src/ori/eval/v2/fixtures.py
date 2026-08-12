@@ -299,21 +299,10 @@ def _perfect_payload(
             }
         )
     elif isinstance(policy, BoundedNegativePolicy):
-        checked_ids, checked_edges, properties, reasons = _negative_requirements(task)
+        _checked_ids, _checked_edges, _properties, reasons = _negative_requirements(task)
         payload.update(
             {
                 "path_status": "no_path",
-                "entities": _entity_payloads(
-                    snapshot,
-                    checked_ids,
-                    aliases=aliases,
-                ),
-                "supporting_edges": [
-                    _edge_payload(edge, snapshot, aliases=aliases) for edge in checked_edges
-                ],
-                "observed_properties": [
-                    _property_payload(fact, snapshot, aliases=aliases) for fact in properties
-                ],
                 "negative_reason_codes": [reason.value for reason in reasons],
             }
         )
@@ -395,10 +384,7 @@ def _empty_payload(task: CompiledTask) -> dict[str, Any]:
     if isinstance(policy, BoundedNegativePolicy):
         return {
             "path_status": "no_path",
-            "entities": [],
             "negative_reason_codes": [],
-            "observed_properties": [],
-            "supporting_edges": [],
         }
     raise TypeError(f"unsupported fixture policy: {type(policy).__name__}")
 
@@ -525,7 +511,10 @@ def build_fixture_manifest(
         ),
     ]
 
-    if isinstance(task.public.answer_policy, ExactCountPolicy):
+    if isinstance(
+        task.public.answer_policy,
+        (ExactCountPolicy, BoundedNegativePolicy),
+    ):
         cases.append(
             _inapplicable(
                 "alias",

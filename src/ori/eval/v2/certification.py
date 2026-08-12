@@ -33,8 +33,8 @@ from .schema import (
 )
 from .scoring import SampleOutcomeCode
 
-OFFLINE_CERTIFICATION_SCHEMA_VERSION = "ori-eval-offline-certification-v3"
-LIVE_CERTIFICATION_SCHEMA_VERSION = "ori-eval-live-certification-v3"
+OFFLINE_CERTIFICATION_SCHEMA_VERSION = "ori-eval-offline-certification-v4"
+LIVE_CERTIFICATION_SCHEMA_VERSION = "ori-eval-live-certification-v4"
 
 
 class CertificationError(ValueError):
@@ -42,7 +42,7 @@ class CertificationError(ValueError):
 
 
 class OfflineCertificationCatalog(StrictModel):
-    schema_version: Literal["ori-eval-offline-certification-v3"] = (
+    schema_version: Literal["ori-eval-offline-certification-v4"] = (
         OFFLINE_CERTIFICATION_SCHEMA_VERSION
     )
     protocol_version: Literal["ori-eval-protocol-v2"] = "ori-eval-protocol-v2"
@@ -693,7 +693,7 @@ def live_certify_task(
 
 
 class LiveCertificationCatalog(StrictModel):
-    schema_version: Literal["ori-eval-live-certification-v3"] = (
+    schema_version: Literal["ori-eval-live-certification-v4"] = (
         LIVE_CERTIFICATION_SCHEMA_VERSION
     )
     protocol_version: Literal["ori-eval-protocol-v2"] = "ori-eval-protocol-v2"

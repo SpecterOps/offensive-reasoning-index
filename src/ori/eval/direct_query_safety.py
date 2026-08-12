@@ -43,9 +43,7 @@ class DirectQuerySafetyConfig:
         supported = {field.name for field in cls.__dataclass_fields__.values()}
         unknown = sorted(set(raw) - supported)
         if unknown:
-            raise ValueError(
-                "Unsupported direct_query_safety setting(s): " + ", ".join(unknown)
-            )
+            raise ValueError("Unsupported direct_query_safety setting(s): " + ", ".join(unknown))
         config = cls(**raw)
         if config.policy_version != DIRECT_QUERY_POLICY_VERSION:
             raise ValueError(
@@ -193,9 +191,7 @@ def normalize_query_for_fingerprint(query: str) -> str:
         if current.isalpha() or current == "_":
             start = index
             index += 1
-            while index < len(query) and (
-                query[index].isalnum() or query[index] == "_"
-            ):
+            while index < len(query) and (query[index].isalnum() or query[index] == "_"):
                 index += 1
             identifier = query[start:index]
             upper = identifier.upper()
@@ -365,8 +361,7 @@ def _exact_selector_bindings(masked_query: str) -> set[str]:
     bindings: set[str] = set()
     for clause in _MATCH_CLAUSE.finditer(masked_query):
         bindings.update(
-            match.group(1)
-            for match in _INLINE_EXACT_BINDING.finditer(clause.group("body"))
+            match.group(1) for match in _INLINE_EXACT_BINDING.finditer(clause.group("body"))
         )
     for body in _where_clause_bodies(masked_query):
         for pattern in (_PROPERTY_EXACT_BINDING, _COALESCE_EXACT_BINDING):
@@ -380,14 +375,12 @@ def _standalone_filter_bindings(masked_query: str) -> set[str]:
     inline_bindings: set[str] = set()
     for clause in _MATCH_CLAUSE.finditer(masked_query):
         inline_bindings.update(
-            match.group(1)
-            for match in _INLINE_FILTER_BINDING.finditer(clause.group("body"))
+            match.group(1) for match in _INLINE_FILTER_BINDING.finditer(clause.group("body"))
         )
     where_bindings: set[str] = set()
     for body in _where_clause_bodies(masked_query):
         where_bindings.update(
-            match.group(1)
-            for match in _WHERE_SCALAR_FILTER_BINDING.finditer(body)
+            match.group(1) for match in _WHERE_SCALAR_FILTER_BINDING.finditer(body)
         )
     return inline_bindings | where_bindings
 
@@ -499,9 +492,7 @@ def _relationship_contexts(masked_query: str) -> list[dict[str, Any]]:
         contexts.append(
             {
                 "endpoint_variables": {
-                    variable
-                    for variable in (left_variable, right_variable)
-                    if variable is not None
+                    variable for variable in (left_variable, right_variable) if variable is not None
                 },
                 "inline_selector": left_inline_selector or right_inline_selector,
             }
@@ -599,12 +590,8 @@ def _recursive_expansions(masked_query: str) -> list[dict[str, Any]]:
         else:
             relationship_type_count = 1
         span = relationship.span()
-        left_variable, left_inline_selector = _node_context_before(
-            masked_query, span[0]
-        )
-        right_variable, right_inline_selector = _node_context_after(
-            masked_query, span[1]
-        )
+        left_variable, left_inline_selector = _node_context_before(masked_query, span[0])
+        right_variable, right_inline_selector = _node_context_after(masked_query, span[1])
         expansions.append(
             {
                 "lower": lower,
@@ -614,9 +601,7 @@ def _recursive_expansions(masked_query: str) -> list[dict[str, Any]]:
                 "shortest": _inside(span, shortest_ranges),
                 "all_shortest": _inside(span, all_shortest_ranges),
                 "endpoint_variables": {
-                    variable
-                    for variable in (left_variable, right_variable)
-                    if variable is not None
+                    variable for variable in (left_variable, right_variable) if variable is not None
                 },
                 "inline_selector": left_inline_selector or right_inline_selector,
             }
@@ -691,11 +676,7 @@ class DirectQueryPolicy:
                 fingerprint,
             )
         stages = _query_stages(masked)
-        expansions = [
-            expansion
-            for stage in stages
-            for expansion in _recursive_expansions(stage)
-        ]
+        expansions = [expansion for stage in stages for expansion in _recursive_expansions(stage)]
         if len(expansions) > self.config.max_recursive_patterns:
             return QuerySafetyDecision(
                 False,
@@ -704,10 +685,7 @@ class DirectQueryPolicy:
                 f"limit is {self.config.max_recursive_patterns}",
                 fingerprint,
             )
-        if any(
-            expansion["lower"] > self.config.max_recursive_hops
-            for expansion in expansions
-        ):
+        if any(expansion["lower"] > self.config.max_recursive_hops for expansion in expansions):
             return QuerySafetyDecision(
                 False,
                 "recursive_hop_limit_exceeded",
@@ -715,8 +693,7 @@ class DirectQueryPolicy:
                 fingerprint,
             )
         if not any(
-            expansion["upper"] is not None
-            and expansion["upper"] > self.config.max_recursive_hops
+            expansion["upper"] is not None and expansion["upper"] > self.config.max_recursive_hops
             for expansion in expansions
         ):
             recursive_expansion_complexity = sum(
@@ -731,10 +708,7 @@ class DirectQueryPolicy:
                 * expansion["relationship_type_count"]
                 for expansion in expansions
             )
-            if (
-                recursive_expansion_complexity
-                > self.config.max_recursive_expansion_complexity
-            ):
+            if recursive_expansion_complexity > self.config.max_recursive_expansion_complexity:
                 return QuerySafetyDecision(
                     False,
                     "recursive_expansion_complexity_exceeded",
@@ -747,12 +721,8 @@ class DirectQueryPolicy:
         prior_selector_bindings: set[str] = set()
         prior_filter_bindings: set[str] = set()
         for stage_index, stage in enumerate(stages):
-            stage_limit_matches = list(
-                re.finditer(r"\bLIMIT\s+(\d+)\b", stage, re.IGNORECASE)
-            )
-            stage_return_matches = list(
-                re.finditer(r"\bRETURN\b", stage, re.IGNORECASE)
-            )
+            stage_limit_matches = list(re.finditer(r"\bLIMIT\s+(\d+)\b", stage, re.IGNORECASE))
+            stage_return_matches = list(re.finditer(r"\bRETURN\b", stage, re.IGNORECASE))
             has_result_limit = bool(
                 stage_return_matches
                 and any(
@@ -760,14 +730,9 @@ class DirectQueryPolicy:
                     for match in stage_limit_matches
                 )
             )
-            next_stage = (
-                stages[stage_index + 1]
-                if stage_index + 1 < len(stages)
-                else ""
-            )
+            next_stage = stages[stage_index + 1] if stage_index + 1 < len(stages) else ""
             returns_count_only = bool(
-                self._RETURN_COUNT_ONLY.search(stage)
-                or _with_count_only_projection(next_stage)
+                self._RETURN_COUNT_ONLY.search(stage) or _with_count_only_projection(next_stage)
             )
             selector_bindings = _exact_selector_bindings(stage) | _projected_bindings(
                 stage, prior_selector_bindings
@@ -791,11 +756,7 @@ class DirectQueryPolicy:
                         "allShortestPaths requires a finite upper hop bound",
                         fingerprint,
                     )
-                if (
-                    expansion["shortest"]
-                    and upper is None
-                    and not expansion_is_selective
-                ):
+                if expansion["shortest"] and upper is None and not expansion_is_selective:
                     return QuerySafetyDecision(
                         False,
                         "unselective_shortest_path",
@@ -813,8 +774,7 @@ class DirectQueryPolicy:
                     return QuerySafetyDecision(
                         False,
                         "recursive_hop_limit_exceeded",
-                        f"recursive upper bound {upper} exceeds "
-                        f"{self.config.max_recursive_hops}",
+                        f"recursive upper bound {upper} exceeds {self.config.max_recursive_hops}",
                         fingerprint,
                     )
                 if not expansion_is_selective:
@@ -845,15 +805,10 @@ class DirectQueryPolicy:
                 )
 
             expensive_enumeration = any(
-                expansion["all_shortest"]
-                or (not expansion["shortest"] and not expansion["typed"])
+                expansion["all_shortest"] or (not expansion["shortest"] and not expansion["typed"])
                 for expansion in stage_expansions
             )
-            if (
-                expensive_enumeration
-                and not returns_count_only
-                and not has_result_limit
-            ):
+            if expensive_enumeration and not returns_count_only and not has_result_limit:
                 return QuerySafetyDecision(
                     False,
                     "recursive_enumeration_without_limit",
@@ -862,10 +817,7 @@ class DirectQueryPolicy:
                 )
             standalone_nodes = _standalone_node_bindings(stage)
             if (
-                any(
-                    variable not in standalone_filter_bindings
-                    for variable in standalone_nodes
-                )
+                any(variable not in standalone_filter_bindings for variable in standalone_nodes)
                 and not returns_count_only
                 and not has_result_limit
             ):
@@ -993,7 +945,12 @@ class DirectQueryCoordinator:
             circuit_state="open",
         )
 
-    async def execute(self, query: str) -> CypherResult:
+    async def execute(
+        self,
+        query: str,
+        *,
+        include_properties: bool = True,
+    ) -> CypherResult:
         from .bhce import CypherResult
 
         decision = self.policy.evaluate(query)
@@ -1026,9 +983,7 @@ class DirectQueryCoordinator:
                     "Direct query rejected because its fingerprint is already quarantined "
                     f"by rule {cached_rule}"
                 ),
-                failure_type=(
-                    "policy_rejected" if timeout_quarantine else "server_unavailable"
-                ),
+                failure_type=("policy_rejected" if timeout_quarantine else "server_unavailable"),
                 failure_subtype=(
                     "known_expensive_query"
                     if timeout_quarantine
@@ -1049,11 +1004,13 @@ class DirectQueryCoordinator:
                 result.query_fingerprint = decision.fingerprint
                 return result
 
-            result = await self.bhce.run_cypher(
-                query,
-                server_timeout_seconds=self.config.server_timeout_seconds,
-                client_timeout_seconds=self.config.client_timeout_seconds,
-            )
+            execution_kwargs = {
+                "server_timeout_seconds": self.config.server_timeout_seconds,
+                "client_timeout_seconds": self.config.client_timeout_seconds,
+            }
+            if not include_properties:
+                execution_kwargs["include_properties"] = False
+            result = await self.bhce.run_cypher(query, **execution_kwargs)
             result.query_fingerprint = decision.fingerprint
             result.safety_policy_version = self.config.policy_version
             result.safety_rule = "allowed"
@@ -1084,11 +1041,6 @@ class DirectQueryCoordinator:
                 if health is None or not health.ok:
                     self.circuit_open = True
                     self.circuit_reason = result.error or "BloodHound health check failed"
-                    self.deny_cache.record(
-                        decision.fingerprint,
-                        rule="destabilizing_query",
-                        detail=self.circuit_reason,
-                    )
             else:
                 result.bhce_health_after = "not_checked"
 

@@ -6,12 +6,17 @@ import pytest
 
 from ori.eval.v2.comparator import COMPARATOR_FINGERPRINT, compare
 from ori.eval.v2.evidence import (
+    EvidenceIdentityCatalogError,
     EvidenceNormalizationError,
+    attest_graph_facts,
     normalize_direct_evidence,
     normalize_evidence,
     normalize_mcp_evidence,
     normalize_offline_evidence,
+    validate_and_normalize_evidence,
 )
+from ori.eval.v2.fingerprint import canonical_sha256
+from ori.eval.v2.graph import edge_fact_key, entity_property_fact_key
 from ori.eval.v2.identity import IdentityResolver
 from ori.eval.v2.schema import (
     AbsenceClaim,
@@ -28,6 +33,7 @@ from ori.eval.v2.schema import (
     ExactCountPolicy,
     ExactRoutePolicy,
     ExactSetPolicy,
+    GraphFactRegistry,
     MechanismValidRoutePolicy,
     NegativeReasonCode,
     NegativeWitness,
@@ -159,6 +165,7 @@ def _oracle(task_id: str, **updates: object) -> OracleBundle:
         "claim_fingerprint": FP,
         "task_fingerprint": FP,
         "graph_fingerprint": FP,
+        "graph_fact_registry_fingerprint": FP,
         "oracle_fingerprint": FP,
     }
     values.update(updates)
@@ -169,6 +176,29 @@ def _evidence(task_id: str, **updates: object) -> EvidenceIR:
     values: dict[str, object] = {"task_id": task_id, "raw_digest": RAW}
     values.update(updates)
     return EvidenceIR(**values)
+
+
+def _graph_registry(
+    *,
+    edges: tuple[EdgeWitness, ...],
+    properties: tuple[EntityPropertyFact, ...],
+) -> GraphFactRegistry:
+    payload = {
+        "edge_keys": tuple(sorted(edge_fact_key(edge) for edge in edges)),
+        "edge_property_facts": (),
+        "entity_property_facts": tuple(
+            sorted(
+                entity_property_fact_key(fact.entity_id, fact.key, fact.value)
+                for fact in properties
+            )
+        ),
+        "registry_fingerprint": "0" * 64,
+    }
+    payload["registry_fingerprint"] = canonical_sha256(
+        payload,
+        exclude_fields=("registry_fingerprint",),
+    )
+    return GraphFactRegistry.model_validate(payload)
 
 
 def test_exact_set_accepts_aliases_and_rejects_wrong_empty_and_extra_entities() -> None:
@@ -431,7 +461,64 @@ def test_exact_route_ignores_unrequested_ce_edge_properties() -> None:
     assert verdict.status is VerdictStatus.CORRECT
 
 
-def test_exact_route_rejects_contradictory_status_and_extra_connected_context() -> None:
+def test_evidence_normalization_drops_only_declared_ce_metadata() -> None:
+    resolver = IdentityResolver((ALICE, BOB, TARGET))
+    evidence = normalize_evidence(
+        {
+            "entities": [ALICE.object_id, BOB.object_id, TARGET.object_id],
+            "edges": [
+                {
+                    "source_id": ALICE.object_id,
+                    "relationship": "GenericAll",
+                    "target_id": BOB.object_id,
+                    "properties": {
+                        "isacl": True,
+                        "lastseen": "2026-07-26T13:31:34Z",
+                        "semantic_weight": 7,
+                    },
+                },
+                {
+                    "source_id": BOB.object_id,
+                    "relationship": "MemberOf",
+                    "target_id": TARGET.object_id,
+                },
+            ],
+            "observed_properties": [
+                {
+                    "entity_id": ALICE.object_id,
+                    "key": "isTierZero",
+                    "value": True,
+                },
+                {
+                    "entity_id": ALICE.object_id,
+                    "key": "system_tags",
+                    "value": "admin_tier_0",
+                },
+                {
+                    "entity_id": ALICE.object_id,
+                    "key": "enabled",
+                    "value": True,
+                },
+            ],
+            "path_status": "found",
+        },
+        resolver=resolver,
+        task_id="normalized-ce-metadata",
+    )
+
+    assert evidence.edges[0].properties == (
+        PropertyFact(key="semantic_weight", value=7),
+    )
+    assert evidence.observed_properties == (
+        EntityPropertyFact(
+            entity_id=ALICE.object_id,
+            key="enabled",
+            value=True,
+        ),
+    )
+
+
+def test_exact_route_rejects_contradictory_status_but_accepts_truthful_auxiliary_evidence() -> None:
     oracle = _oracle(
         "exact-route",
         route_variants=(RouteVariant(variant_id="canonical", edges=CANONICAL),),
@@ -459,11 +546,119 @@ def test_exact_route_rejects_contradictory_status_and_extra_connected_context() 
 
     connected_extra = _edge(BOB, "MemberOf", EXTRA)
     extra = perfect.model_copy(
-        update={"supporting_edges": (CONTEXT, connected_extra)}
+        update={
+            "graph_fact_attestation": FP,
+            "supporting_edges": (CONTEXT, connected_extra),
+            "observed_properties": (
+                EntityPropertyFact(
+                    entity_id=BOB.object_id,
+                    key="enabled",
+                    value=True,
+                ),
+            ),
+        }
     )
     verdict = compare(policy, oracle, extra)
+    assert verdict.status is VerdictStatus.CORRECT
+
+    closed_policy = policy.model_copy(
+        update={
+            "forbid_extra_supporting_edges": True,
+            "forbid_extra_properties": True,
+        }
+    )
+    closed_verdict = compare(closed_policy, oracle, extra)
+    assert closed_verdict.status is VerdictStatus.INCORRECT
+    assert closed_verdict.reason == "ROUTE_EXTRA_OBSERVED_PROPERTY"
+
+
+def test_extra_route_evidence_requires_sealed_graph_fact_attestation() -> None:
+    connected_extra = _edge(BOB, "MemberOf", EXTRA)
+    disconnected_extra = _edge(DECOY, "MemberOf", EXTRA)
+    real_property = EntityPropertyFact(
+        entity_id=BOB.object_id,
+        key="enabled",
+        value=True,
+    )
+    disconnected_property = EntityPropertyFact(
+        entity_id=DECOY.object_id,
+        key="enabled",
+        value=True,
+    )
+    registry = _graph_registry(
+        edges=(
+            *CANONICAL,
+            CONTEXT,
+            connected_extra,
+            disconnected_extra,
+        ),
+        properties=(real_property, disconnected_property),
+    )
+    oracle = _oracle(
+        "attested-route",
+        route_variants=(RouteVariant(variant_id="canonical", edges=CANONICAL),),
+        required_context=(CONTEXT,),
+        source_id=ALICE.object_id,
+        target_id=TARGET.object_id,
+        graph_fact_registry_fingerprint=registry.registry_fingerprint,
+    )
+    evidence = _evidence(
+        "attested-route",
+        edges=CANONICAL,
+        supporting_edges=(CONTEXT, connected_extra),
+        observed_properties=(real_property,),
+        path_status=PathStatus.FOUND,
+    )
+
+    attested = attest_graph_facts(evidence, registry)
+    assert (
+        compare(ExactRoutePolicy(kind="exact_route"), oracle, attested).status
+        is VerdictStatus.CORRECT
+    )
+
+    fabricated = evidence.model_copy(
+        update={
+            "observed_properties": (
+                real_property.model_copy(update={"value": False}),
+            )
+        }
+    )
+    unverified = attest_graph_facts(fabricated, registry)
+    assert unverified.graph_fact_attestation is None
+    verdict = compare(ExactRoutePolicy(kind="exact_route"), oracle, unverified)
     assert verdict.status is VerdictStatus.INCORRECT
-    assert verdict.reason == "ROUTE_EXTRA_SUPPORTING_EDGE"
+    assert verdict.reason == "ROUTE_UNSEALED_OBSERVED_PROPERTY"
+
+    disconnected = attest_graph_facts(
+        evidence.model_copy(
+            update={
+                "supporting_edges": (CONTEXT, disconnected_extra),
+                "observed_properties": (),
+            }
+        ),
+        registry,
+    )
+    disconnected_verdict = compare(
+        ExactRoutePolicy(kind="exact_route"),
+        oracle,
+        disconnected,
+    )
+    assert disconnected_verdict.status is VerdictStatus.INCORRECT
+    assert disconnected_verdict.reason == "ROUTE_DISCONNECTED_SUPPORTING_EDGE"
+
+    out_of_scope_property = attest_graph_facts(
+        evidence.model_copy(
+            update={"observed_properties": (disconnected_property,)}
+        ),
+        registry,
+    )
+    property_verdict = compare(
+        ExactRoutePolicy(kind="exact_route"),
+        oracle,
+        out_of_scope_property,
+    )
+    assert property_verdict.status is VerdictStatus.INCORRECT
+    assert property_verdict.reason == "ROUTE_PROPERTY_OUTSIDE_EVIDENCE"
 
 
 def test_decision_requires_sealed_entities_edges_and_properties() -> None:
@@ -499,7 +694,74 @@ def test_decision_requires_sealed_entities_edges_and_properties() -> None:
     assert supported.status is VerdictStatus.CORRECT
 
 
-def test_bounded_negative_requires_exact_reason_property_and_entity_coverage() -> None:
+def test_decision_accepts_only_attested_extra_graph_evidence() -> None:
+    connected_extra = _edge(TARGET, "MemberOf", EXTRA)
+    disconnected_extra = _edge(DECOY, "MemberOf", EXTRA)
+    registry = _graph_registry(
+        edges=(CONTEXT, connected_extra, disconnected_extra),
+        properties=(),
+    )
+    oracle = _oracle(
+        "decision-extra",
+        expected_decision=True,
+        expected_entities=(TARGET,),
+        graph_edge_registry=(CONTEXT,),
+        required_context=(CONTEXT,),
+        graph_fact_registry_fingerprint=registry.registry_fingerprint,
+    )
+    evidence = _evidence(
+        "decision-extra",
+        decision=True,
+        entities=(TARGET,),
+        supporting_edges=(CONTEXT, connected_extra),
+    )
+    policy = DecisionPolicy(kind="decision")
+
+    assert compare(policy, oracle, evidence).status is VerdictStatus.INCORRECT
+    attested = attest_graph_facts(evidence, registry)
+    assert compare(policy, oracle, attested).status is VerdictStatus.CORRECT
+
+    disconnected = attest_graph_facts(
+        evidence.model_copy(
+            update={"supporting_edges": (CONTEXT, disconnected_extra)}
+        ),
+        registry,
+    )
+    verdict = compare(policy, oracle, disconnected)
+    assert verdict.status is VerdictStatus.INCORRECT
+    assert verdict.reason == "DECISION_DISCONNECTED_DECISION_SUPPORTING_EDGE"
+
+
+def test_decision_entity_closure_is_independent_from_required_entities() -> None:
+    oracle = _oracle(
+        "decision-closure",
+        expected_decision=True,
+        expected_entities=(TARGET,),
+        graph_edge_registry=(CONTEXT,),
+        required_context=(CONTEXT,),
+    )
+    evidence = _evidence(
+        "decision-closure",
+        decision=True,
+        entities=(EXTRA,),
+        supporting_edges=(CONTEXT,),
+    )
+    closed = DecisionPolicy(
+        kind="decision",
+        require_evidence_entities=False,
+        forbid_unrelated_entities=True,
+    )
+    open_policy = closed.model_copy(
+        update={"forbid_unrelated_entities": False}
+    )
+
+    closed_verdict = compare(closed, oracle, evidence)
+    assert closed_verdict.status is VerdictStatus.INCORRECT
+    assert closed_verdict.reason == "DECISION_UNRELATED_DECISION_ENTITY"
+    assert compare(open_policy, oracle, evidence).status is VerdictStatus.CORRECT
+
+
+def test_bounded_negative_grades_public_proof_without_hidden_witness_equality() -> None:
     property_fact = EntityPropertyFact(
         entity_id=TARGET.object_id,
         key="authentication_enabled",
@@ -513,7 +775,11 @@ def test_bounded_negative_requires_exact_reason_property_and_entity_coverage() -
         max_hops=4,
         witness_absent=True,
     )
-    oracle = _oracle("negative", negative_witnesses=(witness,))
+    oracle = _oracle(
+        "negative",
+        negative_witnesses=(witness,),
+        required_properties=(property_fact,),
+    )
     policy = BoundedNegativePolicy(kind="bounded_negative")
     perfect = _evidence(
         "negative",
@@ -521,6 +787,7 @@ def test_bounded_negative_requires_exact_reason_property_and_entity_coverage() -
         path_status=PathStatus.NO_PATH,
         supporting_edges=(CONTEXT,),
         observed_properties=(property_fact,),
+        graph_fact_attestation=FP,
         negative_reason_codes=(
             NegativeReasonCode.TEMPLATE_AUTHENTICATION_DISABLED,
         ),
@@ -528,10 +795,15 @@ def test_bounded_negative_requires_exact_reason_property_and_entity_coverage() -
 
     assert compare(policy, oracle, perfect).status is VerdictStatus.CORRECT
 
-    missing_checked_edge = perfect.model_copy(update={"supporting_edges": ()})
+    public_only_proof = perfect.model_copy(
+        update={
+            "entities": (),
+            "supporting_edges": (),
+        }
+    )
     assert (
-        compare(policy, oracle, missing_checked_edge).status
-        is VerdictStatus.INCORRECT
+        compare(policy, oracle, public_only_proof).status
+        is VerdictStatus.CORRECT
     )
 
     missing_property = perfect.model_copy(update={"observed_properties": ()})
@@ -550,6 +822,39 @@ def test_bounded_negative_requires_exact_reason_property_and_entity_coverage() -
     )
     assert compare(policy, oracle, extra_reason).status is VerdictStatus.INCORRECT
 
+    extra_truthful_evidence = perfect.model_copy(
+        update={
+            "entities": (ALICE, TARGET, EXTRA),
+            "supporting_edges": (
+                CONTEXT,
+                _edge(ALICE, "MemberOf", EXTRA),
+            ),
+            "observed_properties": (
+                property_fact,
+                EntityPropertyFact(
+                    entity_id=EXTRA.object_id,
+                    key="enabled",
+                    value=True,
+                ),
+            ),
+        }
+    )
+    assert (
+        compare(policy, oracle, extra_truthful_evidence).status
+        is VerdictStatus.CORRECT
+    )
+
+    closed_policy = policy.model_copy(
+        update={
+            "forbid_extra_supporting_edges": True,
+            "forbid_extra_properties": True,
+        }
+    )
+    assert (
+        compare(closed_policy, oracle, extra_truthful_evidence).status
+        is VerdictStatus.INCORRECT
+    )
+
     witness_present = witness.model_copy(update={"witness_absent": False})
     flipped_oracle = oracle.model_copy(
         update={"negative_witnesses": (witness_present,)}
@@ -566,6 +871,32 @@ def test_task_mismatch_and_truncation_are_never_gradeable_as_correct() -> None:
 
     assert compare(policy, oracle, mismatch).reason == "TASK_ID_MISMATCH"
     assert compare(policy, oracle, truncated).reason == "TRUNCATED_EVIDENCE"
+
+
+def test_identity_catalog_miss_remains_a_typed_evidence_failure() -> None:
+    resolver = IdentityResolver((ALICE,))
+    answer_schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "entities": {
+                "type": "array",
+                "items": {"type": "string"},
+            }
+        },
+        "required": ["entities"],
+    }
+
+    with pytest.raises(EvidenceIdentityCatalogError) as exc_info:
+        validate_and_normalize_evidence(
+            {"entities": ["UNKNOWN-LIVE-OBJECT"]},
+            answer_schema=answer_schema,
+            resolver=resolver,
+            task_id="identity-catalog",
+        )
+
+    assert exc_info.value.code == "IDENTITY_NOT_IN_CATALOG"
+    assert exc_info.value.token == "UNKNOWN-LIVE-OBJECT"
 
 
 def test_comparator_api_has_no_task_template_or_metadata_parameter() -> None:

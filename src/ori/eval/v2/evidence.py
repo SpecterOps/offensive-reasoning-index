@@ -14,13 +14,26 @@ from jsonschema.exceptions import SchemaError, ValidationError
 
 from ori.relationships import canonical_relationship_kind
 
-from .identity import IdentityResolver
+from .graph import (
+    NORMALIZED_EDGE_METADATA_KEYS,
+    NORMALIZED_ENTITY_METADATA_KEYS,
+    edge_fact_key,
+    edge_property_fact_key,
+    entity_property_fact_key,
+)
+from .identity import (
+    AmbiguousIdentityError,
+    IdentityResolutionError,
+    IdentityResolver,
+    UnknownIdentityError,
+)
 from .schema import (
     EdgeDirection,
     EdgeWitness,
     EntityPropertyFact,
     EntityRef,
     EvidenceIR,
+    GraphFactRegistry,
     NegativeReasonCode,
     PathStatus,
     PropertyFact,
@@ -29,6 +42,36 @@ from .schema import (
 
 class EvidenceNormalizationError(ValueError):
     """Raised when structured answer evidence violates the public contract."""
+
+
+class EvidenceIdentityCatalogError(EvidenceNormalizationError):
+    """Raised when otherwise structured evidence cannot bind to the graph catalog.
+
+    This remains distinct from malformed structured output so runtimes can
+    classify a live identity missing from the sealed catalog as a harness or
+    certification defect instead of blaming the model's JSON shape.
+    """
+
+    def __init__(
+        self,
+        *,
+        token: str,
+        identity_error: IdentityResolutionError,
+    ) -> None:
+        self.token = token
+        self.identity_error = identity_error
+        self.code = (
+            "IDENTITY_NOT_IN_CATALOG"
+            if isinstance(identity_error, UnknownIdentityError)
+            else "IDENTITY_AMBIGUOUS"
+        )
+        super().__init__(f"{self.code}: {identity_error}")
+
+
+_GRAPH_FACT_LOOKUP_CACHE: dict[
+    str,
+    tuple[frozenset[str], frozenset[str], frozenset[str]],
+] = {}
 
 
 FORBIDDEN_ORACLE_FIELDS = frozenset(
@@ -43,6 +86,9 @@ FORBIDDEN_ORACLE_FIELDS = frozenset(
         "forbidden_entity_ids",
         "graph_fingerprint",
         "graph_edge_registry",
+        "graph_fact_attestation",
+        "graph_fact_registry",
+        "graph_fact_registry_fingerprint",
         "negative_witnesses",
         "oracle_bundle",
         "oracle_fingerprint",
@@ -57,6 +103,44 @@ FORBIDDEN_ORACLE_FIELDS = frozenset(
         "valid_node_names",
     }
 )
+
+
+def attest_graph_facts(
+    evidence: EvidenceIR,
+    registry: GraphFactRegistry,
+) -> EvidenceIR:
+    """Attest evidence only when every asserted graph fact is in the sealed graph."""
+
+    lookups = _GRAPH_FACT_LOOKUP_CACHE.get(registry.registry_fingerprint)
+    if lookups is None:
+        lookups = (
+            frozenset(registry.edge_keys),
+            frozenset(registry.edge_property_facts),
+            frozenset(registry.entity_property_facts),
+        )
+        _GRAPH_FACT_LOOKUP_CACHE[registry.registry_fingerprint] = lookups
+    edge_keys, edge_property_facts, entity_property_facts = lookups
+
+    for edge in (*evidence.edges, *evidence.supporting_edges):
+        if edge_fact_key(edge) not in edge_keys:
+            return evidence.model_copy(update={"graph_fact_attestation": None})
+        if any(
+            edge_property_fact_key(edge, fact)
+            not in edge_property_facts
+            for fact in edge.properties
+        ):
+            return evidence.model_copy(update={"graph_fact_attestation": None})
+
+    if any(
+        entity_property_fact_key(fact.entity_id, fact.key, fact.value)
+        not in entity_property_facts
+        for fact in evidence.observed_properties
+    ):
+        return evidence.model_copy(update={"graph_fact_attestation": None})
+
+    return evidence.model_copy(
+        update={"graph_fact_attestation": registry.registry_fingerprint}
+    )
 
 _KNOWN_TOP_LEVEL_FIELDS = frozenset(
     {
@@ -207,14 +291,38 @@ def _identity_token(value: Any) -> str:
 
 def _resolve_identity(value: Any, resolver: IdentityResolver | None) -> str:
     token = _identity_token(value)
-    return resolver.resolve(token) if resolver is not None else token
+    if resolver is None:
+        return token
+    try:
+        return resolver.resolve(token)
+    except (UnknownIdentityError, AmbiguousIdentityError) as exc:
+        raise EvidenceIdentityCatalogError(
+            token=token,
+            identity_error=exc,
+        ) from exc
 
 
 def _resolve_entity(value: Any, resolver: IdentityResolver | None) -> EntityRef:
     if isinstance(value, EntityRef):
-        return resolver.entity_for(value.object_id) if resolver is not None else value
+        if resolver is None:
+            return value
+        token = value.object_id
+        try:
+            return resolver.entity_for(token)
+        except (UnknownIdentityError, AmbiguousIdentityError) as exc:
+            raise EvidenceIdentityCatalogError(
+                token=token,
+                identity_error=exc,
+            ) from exc
     if resolver is not None:
-        return resolver.entity_for(_identity_token(value))
+        token = _identity_token(value)
+        try:
+            return resolver.entity_for(token)
+        except (UnknownIdentityError, AmbiguousIdentityError) as exc:
+            raise EvidenceIdentityCatalogError(
+                token=token,
+                identity_error=exc,
+            ) from exc
     if isinstance(value, Mapping):
         try:
             return EntityRef(**value)
@@ -285,11 +393,18 @@ def _make_edge(value: Any, resolver: IdentityResolver | None) -> EdgeWitness:
         property_facts = tuple(
             PropertyFact(key=str(key), value=item)
             for key, item in sorted(properties.items(), key=lambda pair: str(pair[0]))
+            if str(key).casefold() not in NORMALIZED_EDGE_METADATA_KEYS
         )
     elif isinstance(properties, Iterable) and not isinstance(properties, (str, bytes)):
         property_facts = tuple(
             item if isinstance(item, PropertyFact) else PropertyFact(**item)
             for item in properties
+            if str(
+                item.key
+                if isinstance(item, PropertyFact)
+                else item.get("key", "")
+            ).casefold()
+            not in NORMALIZED_EDGE_METADATA_KEYS
         )
     else:
         raise EvidenceNormalizationError("Edge properties must be a mapping or PropertyFact list")
@@ -399,8 +514,12 @@ def normalize_evidence(
         )
     )
     observed_properties = tuple(
-        _make_entity_property(item, resolver)
+        fact
         for item in _sequence(_value(raw, "observed_properties", default=()))
+        if (
+            fact := _make_entity_property(item, resolver)
+        ).key.casefold()
+        not in NORMALIZED_ENTITY_METADATA_KEYS
     )
     observed_property_keys = {
         (fact.entity_id.casefold(), fact.key.casefold(), repr(fact.value))
@@ -533,10 +652,7 @@ def validate_and_normalize_evidence(
             resolver=resolver,
             task_id=task_id,
         )
-    except (
-        EvidenceNormalizationError,
-        SchemaError,
-        ValidationError,
-        ValueError,
-    ) as exc:
+    except EvidenceNormalizationError:
+        raise
+    except (SchemaError, ValidationError, ValueError) as exc:
         raise EvidenceNormalizationError(str(exc)) from exc

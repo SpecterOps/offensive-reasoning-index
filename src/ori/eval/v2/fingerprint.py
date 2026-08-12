@@ -13,7 +13,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
-CERTIFIER_VERSION = "ori-live-certifier-v3"
+CERTIFIER_VERSION = "ori-live-certifier-v23"
 
 
 def _json_value(value: Any) -> Any:
@@ -103,6 +103,7 @@ def certifier_fingerprint() -> str:
         "mcp.py",
         "mcp_adapter.py",
         "model_runtime.py",
+        "query_contract.py",
         "schema.py",
     )
     source_digests = {

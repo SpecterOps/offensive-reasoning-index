@@ -4,14 +4,19 @@ from __future__ import annotations
 
 import time
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import Any, Literal
 
 from ori.eval.direct_query_safety import query_fingerprint
 
 from .comparator import compare
-from .evidence import EvidenceNormalizationError, normalize_direct_evidence
+from .evidence import (
+    EvidenceIdentityCatalogError,
+    EvidenceNormalizationError,
+    normalize_direct_evidence,
+)
 from .fingerprint import canonical_sha256
 from .identity import IdentityResolutionError, IdentityResolver
+from .query_contract import negative_query_scope_mode
 from .schema import (
     DIRECT_QUERY_POLICY_VERSION,
     CircuitState,
@@ -62,6 +67,10 @@ class DirectAdapterError(ValueError):
     """Raised when a successful direct result cannot become trustworthy evidence."""
 
 
+class DirectProofInsufficient(DirectAdapterError):
+    """Raised when a successful result cannot prove or disprove the public claim."""
+
+
 class DirectV2Outcome:
     """Execution, evidence, and verdict kept as independent result dimensions."""
 
@@ -73,12 +82,14 @@ class DirectV2Outcome:
         verdict: Verdict | None,
         error: str | None,
         harness_error: bool = False,
+        proof_insufficient: bool = False,
     ) -> None:
         self.receipt = receipt
         self.evidence = evidence
         self.verdict = verdict
         self.error = error
         self.harness_error = harness_error
+        self.proof_insufficient = proof_insufficient
 
 
 def _execution_class(result: Any) -> ExecutionClass:
@@ -650,6 +661,7 @@ def project_direct_evidence(
     oracle: OracleBundle,
     resolver: IdentityResolver,
     answer_payload: Mapping[str, Any] | None = None,
+    absence_scope_mode: Literal["exact", "broader"] = "exact",
 ) -> EvidenceIR:
     """Project a successful CypherResult without consulting the query text."""
 
@@ -678,6 +690,11 @@ def project_direct_evidence(
             )
     elif task.claim_kind == "count":
         payload["count"] = _project_scalar_count(result, raw)
+    elif task.claim_kind == "absence":
+        bounded_count = _project_scalar_count(result, raw)
+        # The graph result is authoritative over the model's assertion. A
+        # non-zero count is gradeable contradictory evidence, not malformed
+        # output; force FOUND after assertions are merged below.
     else:
         required_property_fields = _required_property_fields(oracle)
         payload["entities"] = _claim_entity_projection(
@@ -703,12 +720,37 @@ def project_direct_evidence(
                 )
             payload[key] = value
 
+    if task.claim_kind == "absence":
+        if bounded_count == 0:
+            payload["path_status"] = "no_path"
+        elif absence_scope_mode == "exact":
+            payload["path_status"] = "found"
+        else:
+            raise DirectProofInsufficient(
+                "broader bounded-negative query returned an out-of-scope-capable "
+                "witness and cannot prove or disprove the directed public claim"
+            )
+
     if task.claim_kind == "route" and not route_edges and nodes:
         raise DirectAdapterError(
             "path result contains no ordered edge witness; nodes alone are insufficient"
         )
     try:
-        return normalize_direct_evidence(payload, resolver=resolver)
+        evidence = normalize_direct_evidence(payload, resolver=resolver)
+        # Every edge/property on this surface was projected from the successful
+        # BloodHound response; model assertions cannot override graph facts.
+        return evidence.model_copy(
+            update={
+                "graph_fact_attestation": (
+                    oracle.graph_fact_registry_fingerprint
+                )
+            }
+        )
+    except EvidenceIdentityCatalogError:
+        # Direct graph identities come from BloodHound's successful response,
+        # not from a model-authored assertion. A live node absent from the
+        # sealed catalog is therefore a harness/certification defect.
+        raise
     except (EvidenceNormalizationError, ValueError) as exc:
         raise DirectAdapterError(str(exc)) from exc
 
@@ -728,6 +770,34 @@ async def execute_direct_v2(
     if not config.enabled or config.policy_version != DIRECT_QUERY_POLICY_VERSION:
         raise DirectAdapterError(
             "certified v2 direct execution requires enabled direct-query policy v3"
+        )
+    absence_scope_mode = (
+        negative_query_scope_mode(task, query)
+        if task.claim_kind == "absence"
+        else None
+    )
+    if task.claim_kind == "absence" and absence_scope_mode is None:
+        receipt = DirectExecutionReceipt(
+            execution_class=ExecutionClass.MODEL_FAILURE,
+            failure_type="query_error",
+            failure_subtype="negative_scope_invalid",
+            query_executed=False,
+            attempts=0,
+            query_fingerprint=query_fingerprint(query),
+            policy_version=config.policy_version,
+            policy_rule=None,
+            elapsed_seconds=0.0,
+            post_query_health=HealthState.NOT_CHECKED,
+            circuit_state=CircuitState.CLOSED,
+        )
+        return DirectV2Outcome(
+            receipt=receipt,
+            evidence=None,
+            verdict=None,
+            error=(
+                "bounded-negative query does not prove the declared public "
+                "source-to-objective scope"
+            ),
         )
     started = time.monotonic()
     try:
@@ -775,8 +845,17 @@ async def execute_direct_v2(
             oracle=oracle,
             resolver=resolver,
             answer_payload=answer_payload,
+            absence_scope_mode=absence_scope_mode or "exact",
         )
         verdict = compare(task.answer_policy, oracle, evidence)
+    except DirectProofInsufficient as exc:
+        return DirectV2Outcome(
+            receipt=receipt,
+            evidence=None,
+            verdict=None,
+            error=str(exc),
+            proof_insufficient=True,
+        )
     except DirectAdapterError as exc:
         return DirectV2Outcome(
             receipt=receipt,

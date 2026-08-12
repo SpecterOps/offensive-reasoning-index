@@ -8,7 +8,6 @@ legacy ``Task`` or ``template_id``.
 from __future__ import annotations
 
 import hashlib
-import math
 import re
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
@@ -22,15 +21,18 @@ from ori.eval.tasks import Task, generate_mcp_tasks, generate_tasks
 from ori.relationships import canonical_relationship_kind
 
 from .fingerprint import canonical_sha256
-from .graph import GraphSnapshot
+from .graph import GraphSnapshot, build_graph_fact_registry
 from .schema import (
     DIRECT_QUERY_POLICY_VERSION,
     MANIFEST_SCHEMA_VERSION,
     PROTOCOL_VERSION,
     AbsenceClaim,
+    AcceptanceSpec,
     AnswerPolicy,
     BoundedNegativePolicy,
     ClaimSpec,
+    ClosedRouteVariantsPolicy,
+    CompletenessContract,
     CountClaim,
     DecisionClaim,
     DecisionPolicy,
@@ -42,7 +44,11 @@ from .schema import (
     ExactRoutePolicy,
     ExactSetPolicy,
     ExecutionBounds,
+    ExtraEvidencePolicy,
+    ExtraEvidenceRule,
+    GraphFactRegistry,
     MCPBindingMode,
+    MCPClaimEvidenceContract,
     MechanismValidRoutePolicy,
     NegativeReasonCode,
     NegativeWitness,
@@ -52,6 +58,7 @@ from .schema import (
     PropertyPredicate,
     RelationshipPattern,
     RelationshipSemantics,
+    RouteAcceptanceKind,
     RouteClaim,
     RouteVariant,
     SelectionExpression,
@@ -63,12 +70,12 @@ from .schema import (
 )
 from .selection import evaluate_selection
 
-COMPILER_VERSION = "ori-claim-compiler-v2.0.0"
-DIRECT_RESULT_CONTRACT_VERSION = "ori-direct-result-contract-v1"
-DIRECT_CAPABILITY_PROFILE = (
-    f"ori-direct-policy-v3-bhce-9.1-{DIRECT_RESULT_CONTRACT_VERSION}"
-)
-MCP_CAPABILITY_PROFILE = "ori-mcp-009c88f-bhce-9.1-cypher-v1"
+COMPILER_VERSION = "ori-claim-compiler-v2.10.0"
+DIRECT_RESULT_CONTRACT_VERSION = "ori-direct-result-contract-v13"
+DIRECT_CAPABILITY_PROFILE = f"ori-direct-policy-v3-bhce-9.1-{DIRECT_RESULT_CONTRACT_VERSION}"
+MCP_CAPABILITY_PROFILE = "ori-mcp-009c88f-bhce-9.1-cypher-v6"
+COMPLETE_SET_RESULT_CAPACITY = 1000
+MCP_SET_PAGE_SIZE = 500
 MCP_SERVER_REVISION = "009c88f41fae302becad4b00777a3749a0f6f0fa"
 
 _FORBIDDEN_PUBLIC_KEYS = frozenset(
@@ -141,6 +148,7 @@ class CompiledTask(StrictModel):
             raise ValueError("public task and oracle fingerprints differ")
         if self.public.claim_fingerprint != self.oracle.claim_fingerprint:
             raise ValueError("public task and oracle claim fingerprints differ")
+        _validate_acceptance_matches_oracle(self.public, self.oracle)
         return self
 
 
@@ -153,6 +161,7 @@ class CompiledCorpus(StrictModel):
     source_manifest_fingerprint: str
     graph_fingerprint: str
     graph_object_count: int = Field(strict=True, gt=0)
+    graph_fact_registry: GraphFactRegistry
     compiler_fingerprint: str
     tasks: tuple[CompiledTask, ...]
     catalog_fingerprint: str
@@ -165,6 +174,7 @@ class CompiledCorpus(StrictModel):
                 "catalog fingerprint mismatch: "
                 f"declared={self.catalog_fingerprint} computed={expected}"
             )
+        _validate_no_contradictory_oracles(self.tasks)
         return self
 
 
@@ -189,9 +199,7 @@ class MigrationInventoryEntry(StrictModel):
 
 
 class MigrationInventoryArtifact(StrictModel):
-    schema_version: Literal["ori-eval-migration-inventory-v2"] = (
-        "ori-eval-migration-inventory-v2"
-    )
+    schema_version: Literal["ori-eval-migration-inventory-v2"] = "ori-eval-migration-inventory-v2"
     protocol_version: Literal["ori-eval-protocol-v2"] = PROTOCOL_VERSION
     product: str
     track: Track
@@ -430,8 +438,7 @@ def _route_registry_for_sequence(
         backward[index] = {
             edge.source_id
             for edge in snapshot.relationships
-            if edge.relationship == relationship
-            and edge.target_id in backward[index + 1]
+            if edge.relationship == relationship and edge.target_id in backward[index + 1]
         }
 
     registry: dict[tuple[str, str, str], EdgeWitness] = {}
@@ -558,7 +565,10 @@ def _route_draft(
             )
         )
         required_properties.append(_property_fact(snapshot, service_id, "hasspn", expected=True))
-    exact_route = len(path_edges) == 1 or task.id == "t2_nested_groups-02"
+    # Exact routes may constrain resolved intermediate identities. That is safe only
+    # for a single public source-to-target edge. Longer routes use the public
+    # mechanism language and accept any graph-valid witness satisfying it.
+    exact_route = len(path_edges) == 1
     policy: AnswerPolicy = (
         ExactRoutePolicy(kind="exact_route")
         if exact_route
@@ -851,7 +861,10 @@ def _selection_recipe(
         return (
             selection,
             (domain_admins,),
-            "computers with sessions from transitive Domain Admin members",
+            (
+                "computers with sessions from Domain Admin members reached within "
+                f"{da_depth} MemberOf hops"
+            ),
             RelationshipSemantics.TRANSITIVE,
         )
 
@@ -878,7 +891,11 @@ def _selection_recipe(
         return (
             selection,
             (domain_admins,),
-            "direct members of the Domain Admins group",
+            (
+                "direct User members of the Domain Admins group"
+                if result_type == "User"
+                else "direct Principal members of the Domain Admins group"
+            ),
             RelationshipSemantics.DIRECT,
         )
 
@@ -901,7 +918,7 @@ def _selection_recipe(
         return (
             selection,
             (domain_admins,),
-            "users with bounded transitive membership in Domain Admins",
+            f"users with membership in Domain Admins within {da_depth} MemberOf hops",
             RelationshipSemantics.TRANSITIVE,
         )
 
@@ -967,9 +984,15 @@ def _selection_recipe(
             projection_type="Group",
         )
         description = (
-            "high-value groups reached by bounded transitive membership from the subject user"
+            (
+                "high-value groups reached from the subject user within "
+                f"{membership_depth} MemberOf hops"
+            )
             if predicates
-            else "groups reached by bounded transitive membership from the subject user"
+            else (
+                "groups reached from the subject user within "
+                f"{membership_depth} MemberOf hops"
+            )
         )
         return (
             selection,
@@ -1155,7 +1178,7 @@ def _selection_recipe(
                 projection_type="User",
             ),
             (unconstrained_computer,),
-            "users with direct sessions on the unconstrained-delegation computer",
+            "users with direct sessions on the declared subject computer",
             RelationshipSemantics.DIRECT,
         )
 
@@ -1385,23 +1408,12 @@ def _negative_draft(
         for entity in resolved_roles
     )
     roles_by_id[template_id] = "certificate_template"
-    property_predicate = PropertyPredicate(
-        role="certificate_template",
-        property_name="authenticationenabled",
-        operator=PredicateOperator.EQUALS,
-        value=False,
-    )
-    property_fact = _property_fact(
-        snapshot,
-        template_id,
-        "authenticationenabled",
-        expected=False,
-    )
-    reasons = (
-        NegativeReasonCode.TEMPLATE_AUTHENTICATION_DISABLED,
-        NegativeReasonCode.MISSING_PUBLISHED_TO,
-        NegativeReasonCode.MISSING_PRIVILEGED_IDENTITY_TRANSITION,
-    )
+    # The negative contract is deliberately one mechanically provable claim:
+    # a bounded count of complete routes is zero. Earlier revisions required a
+    # count-only MCP receipt while simultaneously grading hidden partial edges,
+    # properties, and three exact explanations. That contract was impossible
+    # to satisfy from the declared proof operation.
+    reasons = (NegativeReasonCode.OBJECTIVE_UNREACHABLE,)
     claim = AbsenceClaim(
         kind="absence",
         claim_id=f"claim:{task.id}",
@@ -1414,7 +1426,6 @@ def _negative_draft(
             object_type=snapshot.entity(str(path["target_node"])).object_type,
         ),
         relationships=("MemberOf", "Enroll", "PublishedTo"),
-        blocking_properties=(property_predicate,),
         reason_codes=reasons,
         max_hops=12,
         semantics=RelationshipSemantics.DIRECT,
@@ -1424,22 +1435,11 @@ def _negative_draft(
     resolved_roles = (*resolved_roles, target_entity)
     witnesses = (
         NegativeWitness(
-            reason_code=NegativeReasonCode.TEMPLATE_AUTHENTICATION_DISABLED,
-            checked_entity_ids=(template_id,),
-            checked_edges=partial_edges,
-            checked_properties=(property_fact,),
-            max_hops=12,
-            witness_absent=True,
-        ),
-        NegativeWitness(
-            reason_code=NegativeReasonCode.MISSING_PUBLISHED_TO,
-            checked_entity_ids=(template_id,),
-            max_hops=12,
-            witness_absent=True,
-        ),
-        NegativeWitness(
-            reason_code=NegativeReasonCode.MISSING_PRIVILEGED_IDENTITY_TRANSITION,
-            checked_entity_ids=(template_id, target_entity.object_id),
+            reason_code=NegativeReasonCode.OBJECTIVE_UNREACHABLE,
+            checked_entity_ids=(
+                partial_edges[0].source_id,
+                target_entity.object_id,
+            ),
             max_hops=12,
             witness_absent=True,
         ),
@@ -1450,13 +1450,13 @@ def _negative_draft(
         policy=BoundedNegativePolicy(kind="bounded_negative"),
         question_template=(
             "Determine whether the declared certificate-enrollment branch can reach "
-            "the privileged objective within 12 hops. If it cannot, return no_path, "
-            "the decisive property evidence, and all applicable structured reason codes."
+            "the privileged objective within 12 hops. If the complete bounded route "
+            "count is zero, return no_path and the objective_unreachable reason code."
         ),
         resolved_roles=tuple(resolved_roles),
-        graph_edge_registry=partial_edges,
-        required_context=partial_edges,
-        required_properties=(property_fact,),
+        graph_edge_registry=(),
+        required_context=(),
+        required_properties=(),
         source_id=partial_edges[0].source_id,
         target_id=target_entity.object_id,
         negative_witnesses=witnesses,
@@ -1577,7 +1577,6 @@ def _answer_schema(claim: ClaimSpec) -> dict[str, Any]:
     elif claim.kind == "absence":
         base["properties"] = {
             "path_status": {"const": "no_path"},
-            "entities": entity_schema,
             "negative_reason_codes": {
                 "type": "array",
                 "items": {
@@ -1585,18 +1584,10 @@ def _answer_schema(claim: ClaimSpec) -> dict[str, Any]:
                 },
                 "uniqueItems": True,
             },
-            "observed_properties": {
-                "type": "array",
-                "items": property_schema,
-            },
-            "supporting_edges": {"type": "array", "items": edge_schema},
         }
         base["required"] = [
             "path_status",
-            "entities",
             "negative_reason_codes",
-            "observed_properties",
-            "supporting_edges",
         ]
     return base
 
@@ -1624,12 +1615,527 @@ def _validate_public_question(question: str, claim: ClaimSpec) -> None:
         )
 
 
+def _validate_binding_matches_claim(
+    claim: ClaimSpec,
+    binding: TrackBinding,
+) -> None:
+    """Reject hidden execution semantics that contradict the typed claim."""
+
+    if not isinstance(claim, (SetClaim, CountClaim)):
+        if binding.bounds.result_offset != 0:
+            raise V2CompileError("non-selection claims require result_offset=0")
+        return
+    selection = claim.selection
+    bounds = binding.bounds
+    if bounds.result_offset != selection.offset:
+        raise V2CompileError("binding result_offset does not match claim selection")
+    if selection.limit is not None:
+        if bounds.page_size != selection.limit or bounds.max_pages != 1:
+            raise V2CompileError("bounded selection must compile to one matching execution page")
+        if binding.track is Track.MCP and claim.kind == "set" and bounds.require_total_count:
+            raise V2CompileError("bounded MCP set windows cannot require a hidden global total")
+    elif bounds.result_offset != 0:
+        raise V2CompileError("unbounded selections must start at result_offset=0")
+
+
+def _extra_evidence_policy(policy: AnswerPolicy) -> ExtraEvidencePolicy:
+    """Compile all additional-evidence behavior into a solver-visible rule."""
+
+    supporting_edges = (
+        ExtraEvidenceRule.FORBID
+        if getattr(policy, "forbid_extra_supporting_edges", False)
+        else ExtraEvidenceRule.ALLOW_IF_GRAPH_VALID
+    )
+    properties = (
+        ExtraEvidenceRule.FORBID
+        if getattr(policy, "forbid_extra_properties", False)
+        else ExtraEvidenceRule.ALLOW_IF_GRAPH_VALID
+    )
+    if isinstance(policy, ExactSetPolicy):
+        return ExtraEvidencePolicy(
+            entities=ExtraEvidenceRule.REQUIRE_EXACT_SET,
+            supporting_edges=ExtraEvidenceRule.NOT_APPLICABLE,
+            properties=ExtraEvidenceRule.NOT_APPLICABLE,
+        )
+    if isinstance(policy, ExactCountPolicy):
+        return ExtraEvidencePolicy(
+            supporting_edges=ExtraEvidenceRule.NOT_APPLICABLE,
+            properties=ExtraEvidenceRule.NOT_APPLICABLE,
+        )
+    if isinstance(policy, ExactRoutePolicy):
+        route_edges = ExtraEvidenceRule.FORBID
+    elif isinstance(policy, MechanismValidRoutePolicy):
+        route_edges = (
+            ExtraEvidenceRule.FORBID
+            if policy.forbid_extra_edges
+            else ExtraEvidenceRule.ALLOW_IF_GRAPH_VALID
+        )
+    elif isinstance(policy, ClosedRouteVariantsPolicy):
+        route_edges = ExtraEvidenceRule.FORBID
+    elif isinstance(policy, DecisionPolicy):
+        return ExtraEvidencePolicy(
+            entities=(
+                ExtraEvidenceRule.REQUIRE_EVIDENCE_CLOSURE
+                if policy.forbid_unrelated_entities
+                else ExtraEvidenceRule.ALLOW_TRUTHFUL
+            ),
+            supporting_edges=supporting_edges,
+            properties=properties,
+        )
+    elif isinstance(policy, BoundedNegativePolicy):
+        return ExtraEvidencePolicy(
+            supporting_edges=ExtraEvidenceRule.NOT_APPLICABLE,
+            properties=ExtraEvidenceRule.NOT_APPLICABLE,
+        )
+    else:
+        return ExtraEvidencePolicy(
+            entities=ExtraEvidenceRule.REQUIRE_EVIDENCE_CLOSURE,
+            supporting_edges=supporting_edges,
+            properties=properties,
+        )
+    return ExtraEvidencePolicy(
+        route_edges=route_edges,
+        supporting_edges=supporting_edges,
+        properties=properties,
+    )
+
+
+def _route_acceptance_kind(
+    claim: ClaimSpec,
+    policy: AnswerPolicy,
+) -> RouteAcceptanceKind:
+    if not isinstance(claim, RouteClaim):
+        return RouteAcceptanceKind.NOT_APPLICABLE
+    if isinstance(policy, ExactRoutePolicy):
+        return RouteAcceptanceKind.EXACT_MECHANISM_SEQUENCE
+    if isinstance(policy, ClosedRouteVariantsPolicy):
+        return RouteAcceptanceKind.CLOSED_MECHANISM_VARIANTS
+    if not (
+        claim.required_mechanisms
+        or claim.required_context
+        or claim.required_properties
+        or claim.excluded_relationships
+        or claim.excluded_mechanisms
+    ):
+        return RouteAcceptanceKind.ANY_GRAPH_VALID
+    return RouteAcceptanceKind.MECHANISM_CONSTRAINED
+
+
+def _completeness_contract(
+    claim: ClaimSpec,
+    policy: AnswerPolicy,
+    bounds: ExecutionBounds,
+) -> CompletenessContract:
+    if isinstance(claim, (SetClaim, CountClaim)):
+        scope: Literal[
+            "entire_population",
+            "declared_window",
+            "single_witness",
+            "bounded_negative",
+        ] = "declared_window" if claim.selection.limit is not None else "entire_population"
+        complete_proof = claim.selection.require_complete
+    elif isinstance(claim, AbsenceClaim):
+        scope = "bounded_negative"
+        complete_proof = (
+            policy.require_complete_proof if isinstance(policy, BoundedNegativePolicy) else True
+        )
+    else:
+        scope = "single_witness"
+        complete_proof = True
+    return CompletenessContract(
+        scope=scope,
+        require_complete_answer=True,
+        require_complete_proof=complete_proof,
+        require_total_count=bounds.require_total_count,
+        require_stable_ordering=bounds.require_stable_ordering,
+    )
+
+
+def compile_acceptance_spec(
+    claim: ClaimSpec,
+    policy: AnswerPolicy,
+    binding: TrackBinding,
+) -> AcceptanceSpec:
+    """Compile the complete public grading contract without resolved witnesses."""
+
+    _validate_binding_matches_claim(claim, binding)
+    if isinstance(policy, ClosedRouteVariantsPolicy):
+        raise V2CompileError(
+            "closed route variants require public non-identity mechanism variants; "
+            "resolved oracle witnesses cannot define solver-visible acceptance"
+        )
+    selection = claim.selection if isinstance(claim, (SetClaim, CountClaim)) else None
+    return AcceptanceSpec(
+        claim_kind=claim.kind,
+        answer_policy=policy,
+        semantics=claim.semantics,
+        population_scope=claim.population_scope,
+        source_role=(
+            claim.source.role if isinstance(claim, (RouteClaim, AbsenceClaim)) else None
+        ),
+        target_role=(
+            claim.target.role if isinstance(claim, (RouteClaim, AbsenceClaim)) else None
+        ),
+        selection=selection,
+        route_acceptance=_route_acceptance_kind(claim, policy),
+        required_mechanisms=(claim.required_mechanisms if isinstance(claim, RouteClaim) else ()),
+        mechanisms_are_ordered=(
+            claim.mechanisms_are_ordered if isinstance(claim, RouteClaim) else False
+        ),
+        allowed_mechanisms=(claim.relationships if isinstance(claim, AbsenceClaim) else ()),
+        required_context=(
+            claim.required_context if isinstance(claim, (RouteClaim, AbsenceClaim)) else ()
+        ),
+        required_properties=(
+            claim.required_properties
+            if isinstance(claim, (RouteClaim, DecisionClaim))
+            else claim.blocking_properties
+            if isinstance(claim, AbsenceClaim)
+            else ()
+        ),
+        required_relationships=(
+            claim.required_relationships if isinstance(claim, DecisionClaim) else ()
+        ),
+        required_route=(claim.required_route if isinstance(claim, DecisionClaim) else ()),
+        excluded_relationships=(
+            claim.excluded_relationships if isinstance(claim, RouteClaim) else ()
+        ),
+        excluded_mechanisms=(claim.excluded_mechanisms if isinstance(claim, RouteClaim) else ()),
+        negative_reason_codes=(claim.reason_codes if isinstance(claim, AbsenceClaim) else ()),
+        extra_evidence=_extra_evidence_policy(policy),
+        completeness=_completeness_contract(claim, policy, binding.bounds),
+        bounds=binding.bounds,
+    )
+
+
+def _pattern_text(pattern: RelationshipPattern) -> str:
+    direction = "->" if pattern.direction.value == "outbound" else "<-"
+    hops = (
+        ""
+        if pattern.min_hops == pattern.max_hops == 1
+        else f" ({pattern.min_hops}..{pattern.max_hops} hops)"
+    )
+    return f"{pattern.source_role} -[{pattern.relationship}]{direction} {pattern.target_role}{hops}"
+
+
+def _predicate_text(predicate: PropertyPredicate) -> str:
+    value = "" if predicate.value is None else f" {predicate.value!r}"
+    return f"{predicate.role}.{predicate.property_name} {predicate.operator.value}{value}"
+
+
+def _question_with_acceptance_contract(
+    question: str,
+    acceptance: AcceptanceSpec,
+) -> str:
+    """Render scorer-enforced semantics in concise, model-neutral language."""
+
+    clauses: list[str] = []
+    if acceptance.claim_kind == "route":
+        mechanisms = " -> ".join(acceptance.required_mechanisms)
+        if acceptance.route_acceptance is RouteAcceptanceKind.ANY_GRAPH_VALID:
+            clauses.append("any graph-valid route within the declared bounds is accepted")
+        elif acceptance.extra_evidence.route_edges is ExtraEvidenceRule.FORBID:
+            clauses.append(
+                f"the traversed relationship sequence must be exactly {mechanisms or '[none]'}"
+            )
+        else:
+            clauses.append(
+                "the traversed route must contain the ordered relationship sequence "
+                f"{mechanisms or '[none]'}"
+            )
+    if acceptance.required_relationships:
+        clauses.append(
+            "required relationships are "
+            + "; ".join(_pattern_text(item) for item in acceptance.required_relationships)
+        )
+    if acceptance.required_route:
+        clauses.append(
+            "required route patterns are "
+            + "; ".join(_pattern_text(item) for item in acceptance.required_route)
+        )
+    if acceptance.required_context:
+        clauses.append(
+            "required supporting context is "
+            + "; ".join(_pattern_text(item) for item in acceptance.required_context)
+        )
+    if acceptance.required_properties:
+        clauses.append(
+            "required property predicates are "
+            + "; ".join(_predicate_text(item) for item in acceptance.required_properties)
+        )
+    if acceptance.excluded_relationships or acceptance.excluded_mechanisms:
+        exclusions = [
+            *(_pattern_text(item) for item in acceptance.excluded_relationships),
+            *acceptance.excluded_mechanisms,
+        ]
+        clauses.append("excluded route evidence is " + "; ".join(exclusions))
+    if acceptance.allowed_mechanisms:
+        clauses.append(
+            "the bounded negative search covers " + ", ".join(acceptance.allowed_mechanisms)
+        )
+    if acceptance.negative_reason_codes:
+        clauses.append(
+            "report every applicable reason code from "
+            + ", ".join(item.value for item in acceptance.negative_reason_codes)
+        )
+    if acceptance.extra_evidence.supporting_edges is ExtraEvidenceRule.ALLOW_IF_GRAPH_VALID:
+        clauses.append(
+            "additional supporting edges are allowed only when connected to the "
+            "required evidence and graph-valid"
+        )
+    if acceptance.extra_evidence.properties is ExtraEvidenceRule.ALLOW_IF_GRAPH_VALID:
+        clauses.append(
+            "additional observed properties are allowed only on evidence entities "
+            "and when graph-valid"
+        )
+    if not clauses:
+        return question
+    return f"{question} Acceptance: {'; '.join(clauses)}."
+
+
+def _resolved_role_ids(oracle: OracleBundle) -> dict[str, str]:
+    roles: dict[str, str] = {}
+    for entity in oracle.resolved_roles:
+        existing = roles.get(entity.role)
+        if existing is not None and existing != entity.object_id:
+            raise ValueError(f"oracle role {entity.role!r} resolves to multiple graph identities")
+        roles[entity.role] = entity.object_id
+    return roles
+
+
+def _resolve_public_patterns(
+    patterns: Sequence[RelationshipPattern],
+    *,
+    oracle: OracleBundle,
+) -> tuple[EdgeWitness, ...]:
+    roles = _resolved_role_ids(oracle)
+    resolved: list[EdgeWitness] = []
+    for pattern in patterns:
+        if pattern.semantics is not RelationshipSemantics.DIRECT or (
+            pattern.min_hops != 1 or pattern.max_hops != 1
+        ):
+            raise ValueError(
+                "scorer-required resolved context must derive from direct public patterns"
+            )
+        try:
+            source_id = roles[pattern.source_role]
+            target_id = roles[pattern.target_role]
+        except KeyError as exc:
+            raise ValueError(
+                f"public relationship pattern references unresolved role {exc.args[0]!r}"
+            ) from exc
+        resolved.append(
+            EdgeWitness(
+                source_id=source_id,
+                relationship=pattern.relationship,
+                target_id=target_id,
+                direction=pattern.direction,
+            )
+        )
+    return tuple(resolved)
+
+
+def _resolve_public_predicates(
+    predicates: Sequence[PropertyPredicate],
+    *,
+    oracle: OracleBundle,
+) -> tuple[EntityPropertyFact, ...]:
+    roles = _resolved_role_ids(oracle)
+    resolved: list[EntityPropertyFact] = []
+    for predicate in predicates:
+        if predicate.operator is not PredicateOperator.EQUALS or isinstance(predicate.value, tuple):
+            raise ValueError(
+                "scorer-required resolved properties must derive from public equality predicates"
+            )
+        try:
+            entity_id = roles[predicate.role]
+        except KeyError as exc:
+            raise ValueError(
+                f"public property predicate references unresolved role {exc.args[0]!r}"
+            ) from exc
+        resolved.append(
+            EntityPropertyFact(
+                entity_id=entity_id,
+                key=predicate.property_name,
+                value=predicate.value,
+            )
+        )
+    return tuple(resolved)
+
+
+def _validate_acceptance_matches_oracle(
+    public: TaskBundle,
+    oracle: OracleBundle,
+) -> None:
+    """Prove every scorer-required semantic constraint has a public origin."""
+
+    expected = compile_acceptance_spec(
+        oracle.claim,
+        public.answer_policy,
+        public.binding,
+    )
+    if public.acceptance_spec != expected:
+        raise ValueError("solver-visible acceptance does not derive from the sealed claim")
+    if tuple(oracle.required_mechanisms) != expected.required_mechanisms:
+        raise ValueError("oracle mechanisms are not declared by public acceptance")
+    if isinstance(public.answer_policy, ExactRoutePolicy):
+        if (
+            not isinstance(oracle.claim, RouteClaim)
+            or oracle.claim.max_hops != 1
+            or not oracle.route_variants
+            or any(len(variant.edges) != 1 for variant in oracle.route_variants)
+            or any(
+                {variant.edges[0].source_id, variant.edges[0].target_id}
+                != {oracle.source_id, oracle.target_id}
+                for variant in oracle.route_variants
+            )
+        ):
+            raise ValueError("exact route would impose non-public intermediate graph identities")
+
+    context_patterns = (
+        oracle.claim.required_context
+        if isinstance(oracle.claim, (RouteClaim, AbsenceClaim))
+        else (
+            *oracle.claim.required_relationships,
+            *oracle.claim.required_route,
+        )
+        if isinstance(oracle.claim, DecisionClaim)
+        else ()
+    )
+    expected_context = _resolve_public_patterns(context_patterns, oracle=oracle)
+    if tuple(oracle.required_context) != expected_context:
+        raise ValueError("oracle context is not resolved from public acceptance patterns")
+
+    property_predicates = (
+        oracle.claim.required_properties
+        if isinstance(oracle.claim, (RouteClaim, DecisionClaim))
+        else oracle.claim.blocking_properties
+        if isinstance(oracle.claim, AbsenceClaim)
+        else ()
+    )
+    expected_properties = _resolve_public_predicates(
+        property_predicates,
+        oracle=oracle,
+    )
+    if tuple(oracle.required_properties) != expected_properties:
+        raise ValueError("oracle properties are not resolved from public acceptance predicates")
+
+    excluded_patterns = (
+        oracle.claim.excluded_relationships if isinstance(oracle.claim, RouteClaim) else ()
+    )
+    expected_forbidden = _resolve_public_patterns(excluded_patterns, oracle=oracle)
+    if tuple(oracle.forbidden_edges) != expected_forbidden:
+        raise ValueError("oracle exclusions are not resolved from public acceptance")
+
+    expected_reasons = (
+        set(oracle.claim.reason_codes) if isinstance(oracle.claim, AbsenceClaim) else set()
+    )
+    oracle_reasons = {witness.reason_code for witness in oracle.negative_witnesses}
+    if oracle_reasons != expected_reasons:
+        raise ValueError("oracle negative reasons are not declared by public acceptance")
+
+
+def _solver_contract_fingerprint(task: TaskBundle) -> str:
+    return canonical_sha256(
+        {
+            "track": task.binding.track,
+            "capability_profile_id": task.binding.capability_profile_id,
+            "input_entities": task.input_entities,
+            "question": task.question,
+            "acceptance_spec": task.acceptance_spec,
+            "answer_schema": task.answer_schema,
+            "generic_instructions": task.generic_instructions,
+        }
+    )
+
+
+def _oracle_outcome_fingerprint(oracle: OracleBundle) -> str:
+    return canonical_sha256(
+        {
+            "expected_entities": oracle.expected_entities,
+            "expected_count": oracle.expected_count,
+            "expected_decision": oracle.expected_decision,
+            "route_variants": oracle.route_variants,
+            "graph_edge_registry": oracle.graph_edge_registry,
+            "graph_fact_registry_fingerprint": (
+                oracle.graph_fact_registry_fingerprint
+            ),
+            "required_mechanisms": oracle.required_mechanisms,
+            "required_context": oracle.required_context,
+            "required_properties": oracle.required_properties,
+            "source_id": oracle.source_id,
+            "target_id": oracle.target_id,
+            "forbidden_entity_ids": oracle.forbidden_entity_ids,
+            "forbidden_edges": oracle.forbidden_edges,
+            "negative_witnesses": oracle.negative_witnesses,
+        }
+    )
+
+
+def _validate_no_contradictory_oracles(
+    tasks: Sequence[CompiledTask],
+) -> None:
+    """Reject indistinguishable public tasks whose sealed outcomes disagree."""
+
+    seen: dict[str, tuple[str, str]] = {}
+    for task in tasks:
+        contract = _solver_contract_fingerprint(task.public)
+        outcome = _oracle_outcome_fingerprint(task.oracle)
+        previous = seen.get(contract)
+        if previous is not None and previous[0] != outcome:
+            raise ValueError(
+                "identical solver-visible contracts bind contradictory oracles: "
+                f"{previous[1]} and {task.public.task_id}"
+            )
+        seen.setdefault(contract, (outcome, task.public.task_id))
+
+
+def _unique(values: Sequence[str]) -> tuple[str, ...]:
+    return tuple(dict.fromkeys(value for value in values if value))
+
+
+def _mcp_claim_evidence_contract(
+    claim: ClaimSpec,
+) -> MCPClaimEvidenceContract:
+    """Compile the public claim facts required for an MCP proof operation."""
+
+    if isinstance(claim, (SetClaim, CountClaim)):
+        return MCPClaimEvidenceContract(
+            result_kind=("scalar_count" if isinstance(claim, CountClaim) else "entities"),
+            required_input_roles=_unique(selector.role for selector in claim.selection.anchors),
+            projection_types=(claim.selection.projection_type,),
+        )
+    if isinstance(claim, RouteClaim):
+        return MCPClaimEvidenceContract(
+            result_kind="path",
+            required_input_roles=(claim.source.role, claim.target.role),
+        )
+    if isinstance(claim, AbsenceClaim):
+        return MCPClaimEvidenceContract(
+            result_kind="scalar_count",
+            required_input_roles=(claim.source.role, claim.target.role),
+        )
+    public_subject_roles = {
+        subject.role for subject in claim.subjects if subject.role in {"source", "target"}
+    }
+    return MCPClaimEvidenceContract(
+        result_kind="path",
+        required_input_roles=tuple(
+            role for role in ("source", "target") if role in public_subject_roles
+        ),
+    )
+
+
 def _binding(
     track: Track,
     *,
     claim: ClaimSpec,
     expected_cardinality: int,
 ) -> TrackBinding:
+    selection = claim.selection if isinstance(claim, (SetClaim, CountClaim)) else None
+    result_offset = selection.offset if selection is not None else 0
+    result_limit = selection.limit if selection is not None else None
+    is_bounded_window = result_limit is not None
     max_hops = (
         claim.max_hops
         if isinstance(claim, (RouteClaim, AbsenceClaim))
@@ -1650,17 +2156,35 @@ def _binding(
         )
     )
     if track is Track.DIRECT:
-        page_size = min(1000, max(expected_cardinality, 1))
+        if result_limit is not None:
+            max_result_cardinality = result_limit
+            page_size = result_limit
+        elif claim.kind == "set":
+            max_result_cardinality = COMPLETE_SET_RESULT_CAPACITY
+            page_size = COMPLETE_SET_RESULT_CAPACITY
+        else:
+            max_result_cardinality = 1
+            page_size = 1
+        if claim.kind == "set" and expected_cardinality > max_result_cardinality:
+            raise V2CompileError(
+                "direct exact set exceeds the public fixed result capacity; "
+                "compile a deterministic window instead"
+            )
         bounds = ExecutionBounds(
             max_hops=max_hops,
-            max_result_cardinality=min(1000, max(expected_cardinality, 1)),
+            max_result_cardinality=max_result_cardinality,
             page_size=page_size,
+            result_offset=result_offset,
             max_pages=1,
             # Direct set results are one bounded BloodHound response, not a
             # paginated tool surface. Exact completeness is established by the
             # sealed set comparator and certified cardinality/output bounds.
             require_total_count=claim.kind == "count",
-            require_stable_ordering=True,
+            # Ordering is part of correctness only for a declared deterministic
+            # set window. Full exact sets are compared as identities and routes
+            # preserve edge order inside the returned path; imposing a global
+            # ORDER BY on either merely encourages unsupported CySQL.
+            require_stable_ordering=claim.kind == "set" and is_bounded_window,
             max_output_bytes=524_288,
             max_transcript_bytes=1_048_576,
             max_tool_calls=0,
@@ -1674,19 +2198,52 @@ def _binding(
             direct_query_policy_version=DIRECT_QUERY_POLICY_VERSION,
         )
 
-    page_size = 100
-    max_pages = max(1, math.ceil(max(expected_cardinality, 1) / page_size))
+    if is_bounded_window:
+        page_size = result_limit
+        max_pages = 1
+        max_result_cardinality = result_limit
+        require_total_count = claim.kind == "count"
+        require_stable_ordering = claim.kind == "set"
+    elif claim.kind == "set":
+        page_size = MCP_SET_PAGE_SIZE
+        max_pages = COMPLETE_SET_RESULT_CAPACITY // MCP_SET_PAGE_SIZE
+        max_result_cardinality = COMPLETE_SET_RESULT_CAPACITY
+        require_total_count = True
+        require_stable_ordering = True
+        if expected_cardinality > max_result_cardinality:
+            raise V2CompileError(
+                "MCP exact set exceeds the public fixed result capacity; "
+                "compile a deterministic window instead"
+            )
+    else:
+        page_size = 1
+        max_pages = 1
+        max_result_cardinality = 1
+        require_total_count = claim.kind == "count"
+        require_stable_ordering = False
+    max_tool_calls = max(12, max_pages + 4)
+    result_serialization_seconds = max_result_cardinality * 0.75 if claim.kind == "set" else 0.0
     bounds = ExecutionBounds(
         max_hops=max_hops,
-        max_result_cardinality=max(expected_cardinality, 1),
+        max_result_cardinality=max_result_cardinality,
         page_size=page_size,
+        result_offset=result_offset,
         max_pages=max_pages,
-        require_total_count=claim.kind in {"set", "count"},
-        require_stable_ordering=True,
+        require_total_count=require_total_count,
+        require_stable_ordering=require_stable_ordering,
         max_output_bytes=524_288,
         max_transcript_bytes=2_097_152,
-        max_tool_calls=max(12, max_pages + 4),
-        timeout_seconds=120.0,
+        max_tool_calls=max_tool_calls,
+        timeout_seconds=max(
+            180.0,
+            min(
+                600.0,
+                max(
+                    max_tool_calls * 25.0,
+                    180.0 + result_serialization_seconds,
+                ),
+            ),
+        ),
     )
     return TrackBinding(
         track=track,
@@ -1696,6 +2253,7 @@ def _binding(
         mcp_tool_loop="native-openai-compatible",
         mcp_resource_mode="off",
         mcp_binding_mode=MCPBindingMode.CYPHER_ENABLED,
+        mcp_evidence_contract=_mcp_claim_evidence_contract(claim),
     )
 
 
@@ -1709,6 +2267,9 @@ def _fingerprinted_task_bundle(
     input_entities: tuple[EntityRef, ...],
     question: str,
 ) -> TaskBundle:
+    _validate_binding_matches_claim(claim, binding)
+    acceptance_spec = compile_acceptance_spec(claim, policy, binding)
+    question = _question_with_acceptance_contract(question, acceptance_spec)
     _validate_public_question(question, claim)
     answer_schema = _answer_schema(claim)
     generic_instructions = (
@@ -1721,6 +2282,7 @@ def _fingerprinted_task_bundle(
         {
             "question": question,
             "input_entities": input_entities,
+            "acceptance_spec": acceptance_spec,
             "answer_schema": answer_schema,
             "generic_instructions": generic_instructions,
         }
@@ -1731,6 +2293,7 @@ def _fingerprinted_task_bundle(
         "product": product,
         "claim_kind": claim.kind,
         "answer_policy": policy,
+        "acceptance_spec": acceptance_spec,
         "binding": binding,
         "input_entities": input_entities,
         "question": question,
@@ -1770,11 +2333,7 @@ def _public_input_entities(draft: _ClaimDraft) -> tuple[EntityRef, ...]:
                 draft.claim.target.role,
                 *(predicate.role for predicate in draft.claim.blocking_properties),
             }
-        candidates = tuple(
-            entity
-            for entity in draft.resolved_roles
-            if entity.role in public_roles
-        )
+        candidates = tuple(entity for entity in draft.resolved_roles if entity.role in public_roles)
     by_id: dict[str, EntityRef] = {}
     for entity in candidates:
         by_id.setdefault(entity.object_id, entity)
@@ -1788,8 +2347,7 @@ def _question_with_public_inputs(
     if not input_entities:
         return question
     rendered = "; ".join(
-        f"{entity.role}={entity.canonical_name or entity.object_id}"
-        for entity in input_entities
+        f"{entity.role}={entity.canonical_name or entity.object_id}" for entity in input_entities
     )
     return f"Inputs: {rendered}. {question}"
 
@@ -1799,6 +2357,7 @@ def _fingerprinted_oracle(
     draft: _ClaimDraft,
     public: TaskBundle,
     snapshot: GraphSnapshot,
+    graph_fact_registry_fingerprint: str,
 ) -> OracleBundle:
     payload = {
         "oracle_id": f"oracle:{canonical_sha256({'task_id': public.task_id})[:24]}",
@@ -1813,6 +2372,7 @@ def _fingerprinted_oracle(
         "expected_decision": draft.expected_decision,
         "route_variants": draft.route_variants,
         "graph_edge_registry": draft.graph_edge_registry,
+        "graph_fact_registry_fingerprint": graph_fact_registry_fingerprint,
         "required_mechanisms": (
             draft.claim.required_mechanisms if isinstance(draft.claim, RouteClaim) else ()
         ),
@@ -1849,17 +2409,9 @@ def _candidate_id(
 
 def _cost_band(binding: TrackBinding) -> Literal["low", "medium", "high"]:
     bounds = binding.bounds
-    if (
-        bounds.max_hops <= 1
-        and bounds.max_result_cardinality <= 100
-        and bounds.max_pages == 1
-    ):
+    if bounds.max_hops <= 1 and bounds.max_result_cardinality <= 100 and bounds.max_pages == 1:
         return "low"
-    if (
-        bounds.max_hops <= 4
-        and bounds.max_result_cardinality <= 500
-        and bounds.max_pages <= 5
-    ):
+    if bounds.max_hops <= 4 and bounds.max_result_cardinality <= 500 and bounds.max_pages <= 5:
         return "medium"
     return "high"
 
@@ -1904,6 +2456,7 @@ def compile_legacy_product(
         if track is Track.DIRECT
         else generate_mcp_tasks(dict(manifest))
     )
+    graph_fact_registry = build_graph_fact_registry(snapshot)
 
     compiled: list[CompiledTask] = []
     for legacy in legacy_tasks:
@@ -1943,6 +2496,9 @@ def compile_legacy_product(
                 draft=draft,
                 public=public,
                 snapshot=snapshot,
+                graph_fact_registry_fingerprint=(
+                    graph_fact_registry.registry_fingerprint
+                ),
             )
             migration = MigrationRecord(
                 product=product,
@@ -1972,6 +2528,7 @@ def compile_legacy_product(
         "source_manifest_fingerprint": source_manifest_fingerprint,
         "graph_fingerprint": snapshot.graph_fingerprint,
         "graph_object_count": len(snapshot.objects),
+        "graph_fact_registry": graph_fact_registry,
         "compiler_fingerprint": compiler_digest,
         "tasks": tuple(compiled),
         "catalog_fingerprint": "0" * 64,

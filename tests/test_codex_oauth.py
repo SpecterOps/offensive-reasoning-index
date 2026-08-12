@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import asyncio
+import sys
 from types import SimpleNamespace
 
 import pytest
 
+from ori.eval.adapter import call_provider_text
 from ori.eval.codex_oauth import (
     CodexResponseStreamError,
     chat_request_to_codex_responses_params,
@@ -118,6 +121,79 @@ def test_codex_chat_translation_omits_unsupported_optional_params_by_default() -
 
     assert "max_output_tokens" not in params
     assert "temperature" not in params
+    assert "reasoning" not in params
+
+
+def test_codex_chat_translation_sets_explicit_reasoning_effort() -> None:
+    params = chat_request_to_codex_responses_params(
+        {
+            "model": "gpt-5.6-sol",
+            "messages": [{"role": "user", "content": "question"}],
+            "options": {"reasoning_effort": "high"},
+        }
+    )
+
+    assert params["reasoning"] == {"effort": "high"}
+
+
+def test_codex_chat_translation_rejects_unknown_reasoning_effort() -> None:
+    with pytest.raises(ValueError, match="unsupported Codex reasoning effort"):
+        chat_request_to_codex_responses_params(
+            {
+                "model": "gpt-5.6-sol",
+                "messages": [{"role": "user", "content": "question"}],
+                "options": {"reasoning_effort": "extreme"},
+            }
+        )
+
+
+def test_codex_provider_sends_reasoning_effort_to_responses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class EventStream:
+        def __aiter__(self):
+            async def events():
+                yield SimpleNamespace(type="response.output_text.delta", delta="answer")
+                yield SimpleNamespace(
+                    type="response.completed",
+                    response=SimpleNamespace(
+                        usage=SimpleNamespace(
+                            input_tokens=10,
+                            output_tokens=2,
+                            total_tokens=12,
+                        )
+                    ),
+                )
+
+            return events()
+
+    class Responses:
+        async def create(self, **kwargs):
+            captured.update(kwargs)
+            return EventStream()
+
+    class Client:
+        def __init__(self, **_kwargs):
+            self.responses = Responses()
+
+        async def close(self) -> None:
+            return None
+
+    monkeypatch.setitem(sys.modules, "openai", SimpleNamespace(AsyncOpenAI=Client))
+    monkeypatch.setenv("CODEX_API_KEY", "test-token")
+    response = asyncio.run(
+        call_provider_text(
+            model="codex/gpt-5.6-sol",
+            messages=[{"role": "user", "content": "question"}],
+            system="system",
+            ollama_options={"reasoning_effort": "high"},
+        )
+    )
+
+    assert captured["reasoning"] == {"effort": "high"}
+    assert response.provider_metrics["reasoning_effort"] == "high"
 
 
 def test_codex_chat_translation_can_opt_into_optional_params(

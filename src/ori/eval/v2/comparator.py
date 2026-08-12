@@ -12,6 +12,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from .fingerprint import canonical_sha256
+from .graph import normalized_property_value
 from .schema import (
     AnswerPolicy,
     BoundedNegativePolicy,
@@ -32,7 +33,7 @@ from .schema import (
     VerdictStatus,
 )
 
-COMPARATOR_VERSION = "ori-v2-comparator-3"
+COMPARATOR_VERSION = "ori-v2-comparator-8"
 COMPARATOR_FINGERPRINT = canonical_sha256(
     {
         "component": "ori-v2-policy-comparator",
@@ -47,7 +48,10 @@ def _fold(value: str) -> str:
 
 
 def _property_map(edge: EdgeWitness) -> dict[str, object]:
-    return {fact.key: fact.value for fact in edge.properties}
+    return {
+        _fold(fact.key): normalized_property_value(fact.key, fact.value)
+        for fact in edge.properties
+    }
 
 
 def _edge_key(
@@ -64,7 +68,13 @@ def _edge_key(
     if not include_properties:
         return base
     properties = tuple(
-        sorted((_fold(fact.key), repr(fact.value)) for fact in edge.properties)
+        sorted(
+            (
+                _fold(fact.key),
+                repr(normalized_property_value(fact.key, fact.value)),
+            )
+            for fact in edge.properties
+        )
     )
     return (*base, properties)
 
@@ -82,7 +92,11 @@ def _edge_satisfies(actual: EdgeWitness, required: EdgeWitness) -> bool:
 
 
 def _property_key(fact: EntityPropertyFact) -> tuple[object, ...]:
-    return (_fold(fact.entity_id), _fold(fact.key), repr(fact.value))
+    return (
+        _fold(fact.entity_id),
+        _fold(fact.key),
+        repr(normalized_property_value(fact.key, fact.value)),
+    )
 
 
 def _properties_cover(
@@ -91,6 +105,77 @@ def _properties_cover(
 ) -> bool:
     actual_keys = {_property_key(fact) for fact in actual}
     return all(_property_key(fact) in actual_keys for fact in required)
+
+
+def _has_extra_properties(
+    actual: Sequence[EntityPropertyFact],
+    required: Sequence[EntityPropertyFact],
+) -> bool:
+    required_keys = {_property_key(fact) for fact in required}
+    return any(_property_key(fact) not in required_keys for fact in actual)
+
+
+def _has_extra_edges(
+    actual: Sequence[EdgeWitness],
+    required: Sequence[EdgeWitness],
+) -> bool:
+    return bool(_extra_edges(actual, required))
+
+
+def _extra_edges(
+    actual: Sequence[EdgeWitness],
+    required: Sequence[EdgeWitness],
+) -> tuple[EdgeWitness, ...]:
+    return tuple(
+        observed
+        for observed in actual
+        if not any(_edge_satisfies(observed, expected) for expected in required)
+    )
+
+
+def _edges_connect_to_evidence(
+    edges: Sequence[EdgeWitness],
+    *,
+    seed_ids: set[str],
+) -> bool:
+    """Require every supporting-edge component to touch the claimed evidence."""
+
+    connected = {_fold(entity_id) for entity_id in seed_ids}
+    pending = list(edges)
+    while pending:
+        next_pending: list[EdgeWitness] = []
+        progressed = False
+        for edge in pending:
+            source = _fold(edge.source_id)
+            target = _fold(edge.target_id)
+            if source in connected or target in connected:
+                connected.update((source, target))
+                progressed = True
+            else:
+                next_pending.append(edge)
+        if not progressed:
+            return False
+        pending = next_pending
+    return True
+
+
+def _properties_belong_to_evidence(
+    properties: Sequence[EntityPropertyFact],
+    *,
+    evidence_ids: set[str],
+) -> bool:
+    permitted = {_fold(entity_id) for entity_id in evidence_ids}
+    return all(_fold(fact.entity_id) in permitted for fact in properties)
+
+
+def _extras_are_graph_attested(
+    oracle: OracleBundle,
+    evidence: EvidenceIR,
+) -> bool:
+    return (
+        evidence.graph_fact_attestation
+        == oracle.graph_fact_registry_fingerprint
+    )
 
 
 def _traversal_endpoints(edge: EdgeWitness) -> tuple[str, str]:
@@ -308,14 +393,26 @@ def _compare_decision(
             or evidence.observed_properties
         ):
             evidence_errors.append("missing_decision_evidence")
+        observed_edges = (*evidence.edges, *evidence.supporting_edges)
         expected_ids = {
             _fold(entity.object_id) for entity in oracle.expected_entities
         }
         actual_ids = {_fold(entity.object_id) for entity in evidence.entities}
-        if expected_ids != actual_ids:
-            evidence_errors.append("missing_decision_entities")
+        if policy.require_evidence_entities:
+            if not expected_ids.issubset(actual_ids):
+                evidence_errors.append("missing_decision_entities")
+        if policy.forbid_unrelated_entities:
+            related_ids = {
+                *expected_ids,
+                *(
+                    _fold(endpoint)
+                    for edge in observed_edges
+                    for endpoint in (edge.source_id, edge.target_id)
+                ),
+            }
+            if actual_ids - related_ids:
+                evidence_errors.append("unrelated_decision_entity")
 
-        observed_edges = (*evidence.edges, *evidence.supporting_edges)
         if any(
             not any(_edge_satisfies(actual, required) for actual in observed_edges)
             for required in oracle.required_context
@@ -326,14 +423,53 @@ def _compare_decision(
             oracle.required_properties,
         ):
             evidence_errors.append("missing_decision_properties")
-        if any(
-            not any(
-                _edge_satisfies(actual, registered)
-                for registered in oracle.graph_edge_registry
-            )
-            for actual in observed_edges
+        extra_decision_edge_values = _extra_edges(
+            observed_edges,
+            oracle.required_context,
+        )
+        extra_decision_edges = bool(extra_decision_edge_values)
+        if policy.forbid_extra_supporting_edges and extra_decision_edges:
+            evidence_errors.append("extra_decision_supporting_edge")
+        elif extra_decision_edges and not _extras_are_graph_attested(
+            oracle,
+            evidence,
         ):
-            evidence_errors.append("unsealed_decision_edge")
+            evidence_errors.append("unsealed_decision_supporting_edge")
+        elif extra_decision_edges and not _edges_connect_to_evidence(
+            extra_decision_edge_values,
+            seed_ids={
+                *(entity.object_id for entity in oracle.expected_entities),
+                *(
+                    endpoint
+                    for edge in oracle.required_context
+                    for endpoint in (edge.source_id, edge.target_id)
+                ),
+            },
+        ):
+            evidence_errors.append("disconnected_decision_supporting_edge")
+        extra_decision_properties = _has_extra_properties(
+            evidence.observed_properties,
+            oracle.required_properties,
+        )
+        if policy.forbid_extra_properties and extra_decision_properties:
+            evidence_errors.append("extra_decision_property")
+        elif extra_decision_properties and not _extras_are_graph_attested(
+            oracle,
+            evidence,
+        ):
+            evidence_errors.append("unsealed_decision_property")
+        elif extra_decision_properties and not _properties_belong_to_evidence(
+            evidence.observed_properties,
+            evidence_ids={
+                *(entity.object_id for entity in evidence.entities),
+                *(
+                    endpoint
+                    for edge in observed_edges
+                    for endpoint in (edge.source_id, edge.target_id)
+                ),
+            },
+        ):
+            evidence_errors.append("decision_property_outside_evidence")
 
     correct = decision_matches and not evidence_errors
     return _verdict(
@@ -411,34 +547,10 @@ def _compare_route(
         policy_match = bool(matching_variants) and matching_variants[0] == 0
         if not policy_match:
             constraint_errors.append("not_exact_route")
-        if any(
-            not any(
-                _edge_satisfies(actual, expected)
-                for expected in oracle.required_context
-            )
-            for actual in evidence.supporting_edges
-        ):
-            constraint_errors.append("extra_supporting_edge")
-        expected_properties = {
-            _property_key(fact) for fact in oracle.required_properties
-        }
-        actual_properties = {
-            _property_key(fact) for fact in evidence.observed_properties
-        }
-        if actual_properties - expected_properties:
-            constraint_errors.append("extra_observed_property")
     elif isinstance(policy, ClosedRouteVariantsPolicy):
         policy_match = bool(matching_variants)
         if not policy_match:
             constraint_errors.append("not_closed_variant")
-        if any(
-            not any(
-                _edge_satisfies(actual, expected)
-                for expected in oracle.required_context
-            )
-            for actual in evidence.supporting_edges
-        ):
-            constraint_errors.append("extra_supporting_edge")
     else:
         required = oracle.required_mechanisms
         observed = tuple(edge.relationship for edge in evidence.edges)
@@ -448,22 +560,61 @@ def _compare_route(
             policy_match = _ordered_subsequence(required, observed)
         if not policy_match:
             constraint_errors.append("wrong_mechanism_sequence")
-        if policy.forbid_extra_edges and any(
-            not any(
-                _edge_satisfies(actual, expected)
-                for expected in oracle.required_context
-            )
-            for actual in evidence.supporting_edges
-        ):
-            constraint_errors.append("extra_supporting_edge")
         if any(
             not any(
                 _edge_satisfies(actual, registered)
                 for registered in oracle.graph_edge_registry
             )
-            for actual in (*evidence.edges, *evidence.supporting_edges)
+            for actual in evidence.edges
         ):
             constraint_errors.append("unsealed_graph_edge")
+
+    extra_supporting_edge_values = _extra_edges(
+        evidence.supporting_edges,
+        oracle.required_context,
+    )
+    extra_supporting_edges = bool(extra_supporting_edge_values)
+    if policy.forbid_extra_supporting_edges and extra_supporting_edges:
+        constraint_errors.append("extra_supporting_edge")
+    elif extra_supporting_edges and not _extras_are_graph_attested(
+        oracle,
+        evidence,
+    ):
+        constraint_errors.append("unsealed_supporting_edge")
+    elif extra_supporting_edges and not _edges_connect_to_evidence(
+        extra_supporting_edge_values,
+        seed_ids={
+            *(
+                endpoint
+                for edge in (*evidence.edges, *oracle.required_context)
+                for endpoint in (edge.source_id, edge.target_id)
+            ),
+        },
+    ):
+        constraint_errors.append("disconnected_supporting_edge")
+    extra_properties = _has_extra_properties(
+        evidence.observed_properties,
+        oracle.required_properties,
+    )
+    if policy.forbid_extra_properties and extra_properties:
+        constraint_errors.append("extra_observed_property")
+    elif extra_properties and not _extras_are_graph_attested(
+        oracle,
+        evidence,
+    ):
+        constraint_errors.append("unsealed_observed_property")
+    elif extra_properties and not _properties_belong_to_evidence(
+        evidence.observed_properties,
+        evidence_ids={
+            *(entity.object_id for entity in evidence.entities),
+            *(
+                endpoint
+                for edge in (*evidence.edges, *evidence.supporting_edges)
+                for endpoint in (edge.source_id, edge.target_id)
+            ),
+        },
+    ):
+        constraint_errors.append("property_outside_evidence")
 
     correct = policy_match and not constraint_errors
     expected_edges = (
@@ -497,52 +648,89 @@ def _compare_bounded_negative(
     reported_absent = (
         evidence.path_status is PathStatus.NO_PATH or evidence.decision is False
     )
-    required_reason_codes = {
-        witness.reason_code for witness in oracle.negative_witnesses
-    }
+    required_reason_codes = set(oracle.claim.reason_codes)
     actual_reason_codes = set(evidence.negative_reason_codes)
-    required_properties = tuple(
-        {
-            _property_key(fact): fact
-            for fact in (
-                *oracle.required_properties,
-                *(
-                    fact
-                    for witness in oracle.negative_witnesses
-                    for fact in witness.checked_properties
-                ),
-            )
-        }.values()
-    )
     property_keys = {_property_key(fact) for fact in evidence.observed_properties}
-    required_property_keys = {_property_key(fact) for fact in required_properties}
-    checked_ids = {
-        _fold(entity_id)
-        for witness in oracle.negative_witnesses
-        for entity_id in witness.checked_entity_ids
+    required_property_keys = {
+        _property_key(fact) for fact in oracle.required_properties
     }
-    evidence_ids = {_fold(entity.object_id) for entity in evidence.entities}
-    checked_edges = tuple(
-        edge
-        for witness in oracle.negative_witnesses
-        for edge in witness.checked_edges
+    reason_coverage = (
+        actual_reason_codes == required_reason_codes
+        if policy.require_reason_codes
+        else True
     )
-    observed_proof_edges = (*evidence.edges, *evidence.supporting_edges)
-    exact_reason_coverage = actual_reason_codes == required_reason_codes
-    exact_property_coverage = property_keys == required_property_keys
-    entity_coverage = checked_ids == evidence_ids
-    checked_edge_coverage = all(
-        any(_edge_satisfies(actual, required) for actual in observed_proof_edges)
-        for required in checked_edges
+    property_coverage = required_property_keys.issubset(property_keys)
+    context_coverage = all(
+        any(
+            _edge_satisfies(actual, required)
+            for actual in evidence.supporting_edges
+        )
+        for required in oracle.required_context
+    )
+    closed_context = not (
+        policy.forbid_extra_supporting_edges
+        and _has_extra_edges(evidence.supporting_edges, oracle.required_context)
+    )
+    closed_properties = not (
+        policy.forbid_extra_properties
+        and _has_extra_properties(
+            evidence.observed_properties,
+            oracle.required_properties,
+        )
+    )
+    extra_context_edges = _extra_edges(
+        evidence.supporting_edges,
+        oracle.required_context,
+    )
+    has_extra_context = bool(extra_context_edges)
+    has_extra_properties = _has_extra_properties(
+        evidence.observed_properties,
+        oracle.required_properties,
+    )
+    graph_valid_extras = not (
+        (has_extra_context or has_extra_properties)
+        and not _extras_are_graph_attested(oracle, evidence)
+    )
+    checked_ids = {
+        *(
+            entity_id
+            for witness in oracle.negative_witnesses
+            for entity_id in witness.checked_entity_ids
+        ),
+        *(
+            endpoint
+            for edge in oracle.required_context
+            for endpoint in (edge.source_id, edge.target_id)
+        ),
+    }
+    connected_extras = not has_extra_context or _edges_connect_to_evidence(
+        extra_context_edges,
+        seed_ids=checked_ids,
+    )
+    property_scope = not has_extra_properties or _properties_belong_to_evidence(
+        evidence.observed_properties,
+        evidence_ids={
+            *checked_ids,
+            *(entity.object_id for entity in evidence.entities),
+            *(
+                endpoint
+                for edge in evidence.supporting_edges
+                for endpoint in (edge.source_id, edge.target_id)
+            ),
+        },
     )
     correct = (
         oracle_proves_absence
         and reported_absent
         and not evidence.edges
-        and exact_reason_coverage
-        and exact_property_coverage
-        and entity_coverage
-        and checked_edge_coverage
+        and reason_coverage
+        and property_coverage
+        and context_coverage
+        and closed_context
+        and closed_properties
+        and graph_valid_extras
+        and connected_extras
+        and property_scope
     )
     reason = "BOUNDED_NEGATIVE_VALID" if correct else "BOUNDED_NEGATIVE_INVALID"
     return _verdict(

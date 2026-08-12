@@ -64,9 +64,7 @@ def resolve_bhce_target(bhce_url: str | None) -> dict[str, str | int]:
     explicit = parse_bhce_url(bhce_url)
     return {
         "scheme": str(explicit.get("scheme", "https")).lower(),
-        "domain": str(
-            explicit.get("domain") or os.environ.get("BLOODHOUND_DOMAIN", "")
-        ).lower(),
+        "domain": str(explicit.get("domain") or os.environ.get("BLOODHOUND_DOMAIN", "")).lower(),
         "port": int(explicit.get("port", 443)),
     }
 
@@ -251,6 +249,7 @@ class BHCEClient:
         self,
         query: str,
         *,
+        include_properties: bool = True,
         server_timeout_seconds: float | None = None,
         client_timeout_seconds: float | None = None,
     ) -> CypherResult:
@@ -259,7 +258,12 @@ class BHCEClient:
 
         path = "/api/v2/graphs/cypher"
         query = self._normalize_cypher(query)
-        body = json.dumps({"query": query, "include_properties": True}).encode()
+        body = json.dumps(
+            {
+                "query": query,
+                "include_properties": include_properties,
+            }
+        ).encode()
         headers = self._sign("POST", path, body)
         if server_timeout_seconds is not None:
             wait_seconds = max(1, int(server_timeout_seconds))
@@ -283,12 +287,20 @@ class BHCEClient:
                 execution_attempts=1,
             )
         except httpx.RequestError as e:
+            request_may_have_reached_server = not isinstance(
+                e,
+                (
+                    httpx.ConnectError,
+                    httpx.ConnectTimeout,
+                    httpx.PoolTimeout,
+                ),
+            )
             return CypherResult(
                 success=False,
                 error=f"Request failed: {e}",
                 failure_type="transport_error",
                 failure_subtype="request_transport_error",
-                query_executed=True,
+                query_executed=request_may_have_reached_server,
                 execution_attempts=1,
             )
 
@@ -379,7 +391,20 @@ class BHCEClient:
         result = await self.run_cypher(query)
         if result.success:
             return result
-        classification = self.classify_error(result.error)
+        classification = (
+            "infra"
+            if result.failure_type
+            in {
+                "auth_error",
+                "client_timeout",
+                "rate_limited",
+                "response_error",
+                "server_error",
+                "server_unavailable",
+                "transport_error",
+            }
+            else self.classify_error(result.error)
+        )
         if classification != "infra":
             return result
 

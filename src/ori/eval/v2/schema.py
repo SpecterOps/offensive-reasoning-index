@@ -116,6 +116,7 @@ class NegativeReasonCode(StrEnum):
 class ExecutionClass(StrEnum):
     SUCCESS = "success"
     MODEL_FAILURE = "model_failure"
+    PROOF_FAILURE = "proof_failure"
     INFRA_FAILURE = "infra_failure"
     HARNESS_FAILURE = "harness_failure"
     UNEXECUTED = "unexecuted"
@@ -314,6 +315,7 @@ class AbsenceClaim(StrictModel):
     source: EntitySelector
     target: EntitySelector
     relationships: tuple[NonEmptyStr, ...]
+    required_context: tuple[RelationshipPattern, ...] = ()
     blocking_properties: tuple[PropertyPredicate, ...] = ()
     reason_codes: tuple[NegativeReasonCode, ...]
     max_hops: int = Field(strict=True, gt=0)
@@ -339,6 +341,8 @@ class ExactRoutePolicy(StrictModel):
     kind: Literal["exact_route"]
     require_ordered_edges: bool = True
     forbid_cycles: bool = True
+    forbid_extra_supporting_edges: bool = False
+    forbid_extra_properties: bool = False
 
 
 class MechanismValidRoutePolicy(StrictModel):
@@ -346,22 +350,33 @@ class MechanismValidRoutePolicy(StrictModel):
     require_ordered_edges: bool = True
     forbid_cycles: bool = True
     forbid_extra_edges: bool = True
+    forbid_extra_supporting_edges: bool = False
+    forbid_extra_properties: bool = False
 
 
 class ClosedRouteVariantsPolicy(StrictModel):
     kind: Literal["closed_route_variants"]
     require_ordered_edges: bool = True
     forbid_cycles: bool = True
+    forbid_extra_supporting_edges: bool = False
+    forbid_extra_properties: bool = False
 
 
 class BoundedNegativePolicy(StrictModel):
     kind: Literal["bounded_negative"]
     require_complete_proof: bool = True
+    require_reason_codes: bool = True
+    forbid_extra_supporting_edges: bool = False
+    forbid_extra_properties: bool = False
 
 
 class DecisionPolicy(StrictModel):
     kind: Literal["decision"]
     require_supporting_evidence: bool = True
+    require_evidence_entities: bool = True
+    forbid_unrelated_entities: bool = True
+    forbid_extra_supporting_edges: bool = False
+    forbid_extra_properties: bool = False
 
 
 AnswerPolicy = Annotated[
@@ -380,6 +395,7 @@ class ExecutionBounds(StrictModel):
     max_hops: int = Field(strict=True, ge=0)
     max_result_cardinality: int = Field(strict=True, gt=0)
     page_size: int = Field(strict=True, gt=0)
+    result_offset: int = Field(default=0, strict=True, ge=0)
     max_pages: int = Field(strict=True, gt=0)
     require_total_count: bool
     require_stable_ordering: bool
@@ -387,6 +403,162 @@ class ExecutionBounds(StrictModel):
     max_transcript_bytes: int = Field(strict=True, gt=0)
     max_tool_calls: int = Field(strict=True, ge=0)
     timeout_seconds: float = Field(strict=True, gt=0)
+
+
+class RouteAcceptanceKind(StrEnum):
+    """Public route language; never identifies a reference witness."""
+
+    NOT_APPLICABLE = "not_applicable"
+    ANY_GRAPH_VALID = "any_graph_valid"
+    EXACT_MECHANISM_SEQUENCE = "exact_mechanism_sequence"
+    MECHANISM_CONSTRAINED = "mechanism_constrained"
+    CLOSED_MECHANISM_VARIANTS = "closed_mechanism_variants"
+
+
+class ExtraEvidenceRule(StrEnum):
+    """How truthful evidence outside the minimum answer is treated."""
+
+    NOT_APPLICABLE = "not_applicable"
+    FORBID = "forbid"
+    REQUIRE_EXACT_SET = "require_exact_set"
+    REQUIRE_EVIDENCE_CLOSURE = "require_evidence_closure"
+    ALLOW_TRUTHFUL = "allow_truthful"
+    ALLOW_IF_GRAPH_VALID = "allow_if_graph_valid"
+
+
+class ExtraEvidencePolicy(StrictModel):
+    """Public rules for additional identities, edges, and properties."""
+
+    entities: ExtraEvidenceRule = ExtraEvidenceRule.NOT_APPLICABLE
+    route_edges: ExtraEvidenceRule = ExtraEvidenceRule.NOT_APPLICABLE
+    supporting_edges: ExtraEvidenceRule = ExtraEvidenceRule.ALLOW_IF_GRAPH_VALID
+    properties: ExtraEvidenceRule = ExtraEvidenceRule.ALLOW_IF_GRAPH_VALID
+
+
+class CompletenessContract(StrictModel):
+    """Public completeness proof required for the declared answer scope."""
+
+    scope: Literal[
+        "entire_population",
+        "declared_window",
+        "single_witness",
+        "bounded_negative",
+    ]
+    require_complete_answer: bool
+    require_complete_proof: bool
+    require_total_count: bool
+    require_stable_ordering: bool
+
+
+class AcceptanceSpec(StrictModel):
+    """Solver-visible semantic contract compiled from the same typed claim as scoring."""
+
+    claim_kind: Literal["route", "set", "count", "decision", "absence"]
+    answer_policy: AnswerPolicy
+    semantics: RelationshipSemantics
+    population_scope: PopulationScope
+    source_role: NonEmptyStr | None = None
+    target_role: NonEmptyStr | None = None
+    selection: SelectionExpression | None = None
+    route_acceptance: RouteAcceptanceKind = RouteAcceptanceKind.NOT_APPLICABLE
+    required_mechanisms: tuple[NonEmptyStr, ...] = ()
+    required_mechanism_categories: tuple[NonEmptyStr, ...] = ()
+    allowed_mechanisms: tuple[NonEmptyStr, ...] = ()
+    mechanisms_are_ordered: bool = False
+    required_context: tuple[RelationshipPattern, ...] = ()
+    required_properties: tuple[PropertyPredicate, ...] = ()
+    required_relationships: tuple[RelationshipPattern, ...] = ()
+    required_route: tuple[RelationshipPattern, ...] = ()
+    excluded_relationships: tuple[RelationshipPattern, ...] = ()
+    excluded_mechanisms: tuple[NonEmptyStr, ...] = ()
+    negative_reason_codes: tuple[NegativeReasonCode, ...] = ()
+    extra_evidence: ExtraEvidencePolicy
+    completeness: CompletenessContract
+    bounds: ExecutionBounds
+
+    @model_validator(mode="after")
+    def fields_match_claim_and_policy(self) -> AcceptanceSpec:
+        allowed_policies = {
+            "route": {"exact_route", "mechanism_valid_route", "closed_route_variants"},
+            "set": {"exact_set"},
+            "count": {"exact_count"},
+            "decision": {"decision"},
+            "absence": {"bounded_negative", "decision"},
+        }
+        if self.answer_policy.kind not in allowed_policies[self.claim_kind]:
+            raise ValueError(
+                f"{self.answer_policy.kind} is not valid for {self.claim_kind} acceptance"
+            )
+        if self.claim_kind in {"route", "absence"}:
+            if self.source_role is None or self.target_role is None:
+                raise ValueError("route/absence acceptance requires source and target roles")
+            if self.source_role == self.target_role:
+                raise ValueError("source and target roles must differ")
+        elif self.source_role is not None or self.target_role is not None:
+            raise ValueError("only route/absence acceptance may declare endpoint roles")
+        if self.claim_kind == "route":
+            if self.route_acceptance is RouteAcceptanceKind.NOT_APPLICABLE:
+                raise ValueError("route acceptance must declare its accepted route language")
+            if self.selection is not None:
+                raise ValueError("route acceptance cannot declare a set selection")
+        elif self.route_acceptance is not RouteAcceptanceKind.NOT_APPLICABLE:
+            raise ValueError("only route claims may declare route_acceptance")
+        if self.claim_kind in {"set", "count"}:
+            if self.selection is None:
+                raise ValueError("set/count acceptance requires its public selection")
+        elif self.selection is not None:
+            raise ValueError("only set/count acceptance may declare a selection")
+        route_only = (
+            self.required_mechanisms,
+            self.required_mechanism_categories,
+            self.mechanisms_are_ordered,
+            self.excluded_relationships,
+            self.excluded_mechanisms,
+        )
+        if self.claim_kind != "route" and any(route_only):
+            raise ValueError("route-only acceptance fields reached a non-route claim")
+        if self.claim_kind != "absence" and (self.allowed_mechanisms or self.negative_reason_codes):
+            raise ValueError("absence-only acceptance fields reached another claim kind")
+        for field_name in (
+            "required_mechanism_categories",
+            "allowed_mechanisms",
+            "excluded_mechanisms",
+            "negative_reason_codes",
+        ):
+            values = getattr(self, field_name)
+            if len(values) != len(set(values)):
+                raise ValueError(f"{field_name} must be unique")
+        if self.route_acceptance is RouteAcceptanceKind.ANY_GRAPH_VALID and (
+            self.required_mechanisms
+            or self.required_mechanism_categories
+            or self.required_context
+            or self.required_properties
+            or self.excluded_relationships
+            or self.excluded_mechanisms
+        ):
+            raise ValueError("any_graph_valid cannot carry hidden route constraints")
+        return self
+
+
+class MCPClaimEvidenceContract(StrictModel):
+    """Public, model-blind contract for evidence that may unlock MCP grading."""
+
+    tool_name: Literal["cypher_query"] = "cypher_query"
+    operation: Literal["run"] = "run"
+    result_kind: Literal["entities", "scalar_count", "path"]
+    required_input_roles: tuple[NonEmptyStr, ...] = ()
+    projection_types: tuple[NonEmptyStr, ...] = ()
+
+    @model_validator(mode="after")
+    def fields_are_unique(self) -> MCPClaimEvidenceContract:
+        for field_name in (
+            "required_input_roles",
+            "projection_types",
+        ):
+            values = getattr(self, field_name)
+            if len(values) != len(set(values)):
+                raise ValueError(f"{field_name} must be unique")
+        return self
 
 
 class TrackBinding(StrictModel):
@@ -398,6 +570,7 @@ class TrackBinding(StrictModel):
     mcp_tool_loop: NonEmptyStr | None = None
     mcp_resource_mode: NonEmptyStr | None = None
     mcp_binding_mode: MCPBindingMode | None = None
+    mcp_evidence_contract: MCPClaimEvidenceContract | None = None
 
     @model_validator(mode="after")
     def track_fields_match(self) -> TrackBinding:
@@ -408,6 +581,8 @@ class TrackBinding(StrictModel):
                 raise ValueError("direct bindings cannot declare MCP loop or resource settings")
             if self.mcp_binding_mode is not None:
                 raise ValueError("direct bindings cannot declare an MCP binding mode")
+            if self.mcp_evidence_contract is not None:
+                raise ValueError("direct bindings cannot declare an MCP evidence contract")
             if self.bounds.max_tool_calls != 0:
                 raise ValueError("direct bindings must use a zero tool-call budget")
         else:
@@ -417,6 +592,8 @@ class TrackBinding(StrictModel):
                 raise ValueError("MCP bindings require explicit loop and resource settings")
             if self.mcp_binding_mode is None:
                 raise ValueError("MCP bindings require an explicit binding mode")
+            if self.mcp_evidence_contract is None:
+                raise ValueError("MCP bindings require a public claim evidence contract")
             if self.mcp_binding_mode is MCPBindingMode.BLOCKED:
                 raise ValueError("blocked MCP bindings cannot produce TaskBundles")
             if self.bounds.max_tool_calls == 0:
@@ -432,6 +609,7 @@ class TaskBundle(StrictModel):
     product: NonEmptyStr
     claim_kind: Literal["route", "set", "count", "decision", "absence"]
     answer_policy: AnswerPolicy
+    acceptance_spec: AcceptanceSpec
     binding: TrackBinding
     input_entities: tuple[EntityRef, ...] = ()
     question: NonEmptyStr
@@ -486,12 +664,27 @@ class TaskBundle(StrictModel):
         }
         if self.answer_policy.kind not in allowed[self.claim_kind]:
             raise ValueError(f"{self.answer_policy.kind} is not valid for {self.claim_kind} claims")
+        if self.acceptance_spec.claim_kind != self.claim_kind:
+            raise ValueError("acceptance claim kind does not match task claim kind")
+        if self.acceptance_spec.answer_policy != self.answer_policy:
+            raise ValueError("acceptance policy does not match task answer policy")
+        if self.acceptance_spec.semantics is not self.binding.semantics:
+            raise ValueError("acceptance semantics do not match track binding semantics")
+        if self.acceptance_spec.bounds != self.binding.bounds:
+            raise ValueError("acceptance bounds do not match track binding bounds")
         input_ids = [entity.object_id for entity in self.input_entities]
         if len(input_ids) != len(set(input_ids)):
             raise ValueError("public input entities must have unique object IDs")
         input_roles = [entity.role for entity in self.input_entities]
         if len(input_roles) != len(set(input_roles)):
             raise ValueError("public input entities must have unique logical roles")
+        evidence_contract = self.binding.mcp_evidence_contract
+        if evidence_contract is not None:
+            unknown_roles = sorted(set(evidence_contract.required_input_roles) - set(input_roles))
+            if unknown_roles:
+                raise ValueError(
+                    f"MCP evidence contract references non-public input roles: {unknown_roles}"
+                )
         return self
 
 
@@ -504,6 +697,35 @@ class EntityPropertyFact(StrictModel):
     entity_id: NonEmptyStr
     key: NonEmptyStr
     value: JsonScalar
+
+
+class GraphFactRegistry(StrictModel):
+    """One sealed, corpus-wide truth registry shared by every task oracle."""
+
+    edge_keys: tuple[NonEmptyStr, ...]
+    edge_property_facts: tuple[NonEmptyStr, ...]
+    entity_property_facts: tuple[NonEmptyStr, ...]
+    registry_fingerprint: Fingerprint
+
+    @model_validator(mode="after")
+    def fingerprint_matches(self) -> GraphFactRegistry:
+        for field_name in (
+            "edge_keys",
+            "edge_property_facts",
+            "entity_property_facts",
+        ):
+            values = getattr(self, field_name)
+            if values != tuple(sorted(set(values))):
+                raise ValueError(
+                    f"graph fact registry {field_name} must be sorted and unique"
+                )
+        expected = canonical_sha256(
+            self,
+            exclude_fields=("registry_fingerprint",),
+        )
+        if self.registry_fingerprint != expected:
+            raise ValueError("graph fact registry fingerprint mismatch")
+        return self
 
 
 class NegativeWitness(StrictModel):
@@ -529,6 +751,7 @@ class OracleBundle(StrictModel):
     expected_decision: bool | None = Field(default=None, strict=True)
     route_variants: tuple[RouteVariant, ...] = ()
     graph_edge_registry: tuple[EdgeWitness, ...] = ()
+    graph_fact_registry_fingerprint: Fingerprint
     required_mechanisms: tuple[NonEmptyStr, ...] = ()
     required_context: tuple[EdgeWitness, ...] = ()
     required_properties: tuple[EntityPropertyFact, ...] = ()
@@ -552,6 +775,7 @@ class EvidenceIR(StrictModel):
     negative_reason_codes: tuple[NegativeReasonCode, ...] = ()
     rejected_decoy_ids: tuple[NonEmptyStr, ...] = ()
     truncated: bool = False
+    graph_fact_attestation: Fingerprint | None = None
     raw_digest: Fingerprint
     normalization_warnings: tuple[NonEmptyStr, ...] = ()
 

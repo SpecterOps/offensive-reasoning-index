@@ -103,10 +103,7 @@ def test_greedy_open_ended_recursive_query_is_rejected() -> None:
             "MATCH p=shortestPath((u:User)-[*1..]->(g:Group)) "
             "WHERE g.name = 'DOMAIN ADMINS@TEST.LOCAL' RETURN p"
         ),
-        (
-            "MATCH p=(u:User)-[:MemberOf*1..]->"
-            "(g:Group {name: 'DOMAIN ADMINS@TEST.LOCAL'}) RETURN p"
-        ),
+        ("MATCH p=(u:User)-[:MemberOf*1..]->(g:Group {name: 'DOMAIN ADMINS@TEST.LOCAL'}) RETURN p"),
         "MATCH (u:User {hasspn: true}) RETURN u",
         "MATCH (u:User) WHERE u.hasspn = true RETURN u",
         (
@@ -133,14 +130,8 @@ def test_documented_selective_cysql_shapes_are_admitted(query: str) -> None:
     [
         "MATCH (u:User {hasspn: true}) RETURN u",
         "MATCH (u:User) WHERE u.hasspn = true RETURN u",
-        (
-            "MATCH (c:Computer {unconstraineddelegation: true}) "
-            "WHERE NOT c.isdc = true RETURN c"
-        ),
-        (
-            "MATCH (c:Computer) WHERE c.unconstraineddelegation = true "
-            "AND c.isdc = false RETURN c"
-        ),
+        ("MATCH (c:Computer {unconstraineddelegation: true}) WHERE NOT c.isdc = true RETURN c"),
+        ("MATCH (c:Computer) WHERE c.unconstraineddelegation = true AND c.isdc = false RETURN c"),
     ],
 )
 def test_inline_and_where_scalar_filters_admit_standalone_node_sets(
@@ -218,13 +209,11 @@ def test_inline_and_where_scalar_filters_admit_standalone_node_sets(
             "unselective_node_enumeration",
         ),
         (
-            "MATCH (u:User)-[r]->(g:Group) "
-            "RETURN u.name = 'A@TEST.LOCAL', r",
+            "MATCH (u:User)-[r]->(g:Group) RETURN u.name = 'A@TEST.LOCAL', r",
             "unselective_relationship_enumeration",
         ),
         (
-            "MATCH p=(u:User)-[:MemberOf*1..]->(g:Group) "
-            "RETURN u.name = 'A@TEST.LOCAL', p",
+            "MATCH p=(u:User)-[:MemberOf*1..]->(g:Group) RETURN u.name = 'A@TEST.LOCAL', p",
             "unselective_recursive_expansion",
         ),
         (
@@ -238,8 +227,7 @@ def test_inline_and_where_scalar_filters_admit_standalone_node_sets(
             "unselective_recursive_expansion",
         ),
         (
-            "MATCH (u:User {hasspn:true}) WITH 1 AS ignored "
-            "MATCH (u:User) RETURN u",
+            "MATCH (u:User {hasspn:true}) WITH 1 AS ignored MATCH (u:User) RETURN u",
             "unselective_node_enumeration",
         ),
         (
@@ -320,10 +308,7 @@ def test_aggregate_only_counts_are_admitted(query: str) -> None:
 
 
 def test_keywords_inside_literals_and_comments_do_not_trigger_mutation_rule() -> None:
-    query = (
-        "MATCH (u:User {name: 'CREATE DELETE CALL'}) "
-        "/* DELETE everything */ RETURN u"
-    )
+    query = "MATCH (u:User {name: 'CREATE DELETE CALL'}) /* DELETE everything */ RETURN u"
     assert _policy().evaluate(query).allowed is True
 
 
@@ -339,18 +324,13 @@ def test_string_with_predicates_do_not_create_query_stages(query: str) -> None:
 
 
 def test_fingerprint_ignores_comments_keyword_case_and_formatting() -> None:
-    first = (
-        "MATCH (u:User {name: 'Alice@TEST.LOCAL'}) "
-        "WHERE u.enabled = true RETURN u"
-    )
+    first = "MATCH (u:User {name: 'Alice@TEST.LOCAL'}) WHERE u.enabled = true RETURN u"
     second = (
         "match/* same query */(u:User{name:'Alice@TEST.LOCAL'})"
         "where u.enabled=true return u // trailing comment"
     )
 
-    assert normalize_query_for_fingerprint(first) == normalize_query_for_fingerprint(
-        second
-    )
+    assert normalize_query_for_fingerprint(first) == normalize_query_for_fingerprint(second)
     assert query_fingerprint(first) == query_fingerprint(second)
 
 
@@ -374,9 +354,7 @@ def test_config_requires_client_timeout_longer_than_server_timeout() -> None:
 
 def test_config_requires_positive_recursive_expansion_complexity() -> None:
     with pytest.raises(ValueError, match="must be at least 1"):
-        DirectQuerySafetyConfig.from_mapping(
-            {"max_recursive_expansion_complexity": 0}
-        )
+        DirectQuerySafetyConfig.from_mapping({"max_recursive_expansion_complexity": 0})
 
 
 class FakeBHCE:
@@ -389,16 +367,19 @@ class FakeBHCE:
         self.results = list(results)
         self.health_ok = health_ok
         self.queries: list[tuple[str, float | None, float | None]] = []
+        self.include_properties: list[bool] = []
         self.health_calls = 0
 
     async def run_cypher(
         self,
         query: str,
         *,
+        include_properties: bool = True,
         server_timeout_seconds: float | None = None,
         client_timeout_seconds: float | None = None,
     ) -> CypherResult:
         self.queries.append((query, server_timeout_seconds, client_timeout_seconds))
+        self.include_properties.append(include_properties)
         return self.results.pop(0)
 
     async def check_health(self) -> BHHealthResult:
@@ -427,9 +408,7 @@ def _coordinator(tmp_path, bhce: FakeBHCE) -> DirectQueryCoordinator:
 def test_policy_rejection_never_calls_bloodhound(tmp_path) -> None:
     bhce = FakeBHCE([])
     coordinator = _coordinator(tmp_path, bhce)
-    result = asyncio.run(
-        coordinator.execute("MATCH p=(a)-[*1..]->(b) RETURN p")
-    )
+    result = asyncio.run(coordinator.execute("MATCH p=(a)-[*1..]->(b) RETURN p"))
     assert result.success is False
     assert result.failure_type == "policy_rejected"
     assert result.query_executed is False
@@ -450,6 +429,21 @@ def test_admitted_query_executes_once_with_bloodhound_timeout(tmp_path) -> None:
     cache = json.loads((tmp_path / "deny.json").read_text())
     assert cache["entries"] == {}
     assert cache["manifest_fingerprint"] == "manifest-sha256"
+
+
+def test_admitted_mcp_projection_can_omit_properties_without_changing_policy(
+    tmp_path,
+) -> None:
+    bhce = FakeBHCE([CypherResult(success=True, nodes=[], node_names=set())])
+    coordinator = _coordinator(tmp_path, bhce)
+    query = "MATCH (u:User {name: 'A@TEST.LOCAL'}) RETURN u"
+
+    result = asyncio.run(coordinator.execute(query, include_properties=False))
+
+    assert result.success is True
+    assert bhce.queries == [(query, 10.0, 15.0)]
+    assert bhce.include_properties == [False]
+    assert result.safety_rule == "allowed"
 
 
 def test_server_timeout_quarantines_query_and_does_not_repeat_it(tmp_path) -> None:
@@ -493,9 +487,7 @@ def test_timeout_quarantine_matches_comment_case_and_format_variants(tmp_path) -
     )
     coordinator = _coordinator(tmp_path, bhce)
     first_query = "MATCH (u:User {name: 'A@TEST.LOCAL'}) RETURN u"
-    equivalent_query = (
-        "match/* retry */(u:User{name:'A@TEST.LOCAL'})return u"
-    )
+    equivalent_query = "match/* retry */(u:User{name:'A@TEST.LOCAL'})return u"
 
     first = asyncio.run(coordinator.execute(first_query))
     second = asyncio.run(coordinator.execute(equivalent_query))
@@ -549,9 +541,7 @@ def test_unhealthy_post_failure_opens_circuit_and_skips_later_queries(tmp_path) 
         health_ok=False,
     )
     coordinator = _coordinator(tmp_path, bhce)
-    first = asyncio.run(
-        coordinator.execute("MATCH (u:User {name: 'A@TEST.LOCAL'}) RETURN u")
-    )
+    first = asyncio.run(coordinator.execute("MATCH (u:User {name: 'A@TEST.LOCAL'}) RETURN u"))
     second = coordinator.skipped_result()
 
     assert first.failure_type == "transport_error"
@@ -562,7 +552,7 @@ def test_unhealthy_post_failure_opens_circuit_and_skips_later_queries(tmp_path) 
     assert len(bhce.queries) == 1
 
 
-def test_infra_quarantine_prevents_repeat_without_blaming_model(tmp_path) -> None:
+def test_transient_infra_failure_does_not_poison_shared_query_cache(tmp_path) -> None:
     bhce = FakeBHCE(
         [
             CypherResult(
@@ -570,7 +560,8 @@ def test_infra_quarantine_prevents_repeat_without_blaming_model(tmp_path) -> Non
                 error="Request failed: server disconnected",
                 failure_type="transport_error",
                 failure_subtype="request_transport_error",
-            )
+            ),
+            CypherResult(success=True, nodes=[], node_names=set()),
         ],
         health_ok=False,
     )
@@ -582,8 +573,7 @@ def test_infra_quarantine_prevents_repeat_without_blaming_model(tmp_path) -> Non
     second = asyncio.run(coordinator.execute(query))
 
     assert first.failure_type == "transport_error"
-    assert second.failure_type == "server_unavailable"
-    assert second.failure_subtype == "quarantined_after_infra_failure"
-    assert second.query_executed is False
-    assert second.safety_rule == "destabilizing_query"
-    assert len(bhce.queries) == 1
+    assert second.success is True
+    assert len(bhce.queries) == 2
+    cache = json.loads((tmp_path / "deny.json").read_text())
+    assert cache["entries"] == {}

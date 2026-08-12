@@ -11,6 +11,7 @@ from pydantic import model_validator
 from .fingerprint import canonical_sha256
 from .schema import (
     PROTOCOL_VERSION,
+    AcceptanceSpec,
     ExecutionBounds,
     Fingerprint,
     RelationshipSemantics,
@@ -48,9 +49,6 @@ FORBIDDEN_SOLVER_KEYS = frozenset(
         "reference_nodes",
         "reference_results",
         "ref_result",
-        "required_context",
-        "required_mechanisms",
-        "required_properties",
         "route_variants",
         "valid_node_names",
     }
@@ -67,6 +65,7 @@ class SolverVisibleEnvelope(StrictModel):
     track: Track
     semantics: RelationshipSemantics
     execution_bounds: ExecutionBounds
+    acceptance_spec: AcceptanceSpec
     question: str
     answer_schema: dict[str, Any]
     generic_instructions: tuple[str, ...]
@@ -74,6 +73,10 @@ class SolverVisibleEnvelope(StrictModel):
 
     @model_validator(mode="after")
     def envelope_is_redacted(self) -> SolverVisibleEnvelope:
+        if self.acceptance_spec.bounds != self.execution_bounds:
+            raise ValueError("solver-visible acceptance bounds mismatch")
+        if self.acceptance_spec.semantics is not self.semantics:
+            raise ValueError("solver-visible acceptance semantics mismatch")
         payload = self.model_dump(
             mode="json",
             exclude={"envelope_fingerprint"},
@@ -133,6 +136,7 @@ def build_solver_visible_envelope(
         "track": task.binding.track,
         "semantics": task.binding.semantics,
         "execution_bounds": task.binding.bounds,
+        "acceptance_spec": task.acceptance_spec,
         "question": task.question,
         "answer_schema": task.answer_schema,
         "generic_instructions": task.generic_instructions,
@@ -148,7 +152,4 @@ def build_all_solver_visible_envelopes(
 ) -> tuple[SolverVisibleEnvelope, ...]:
     """Build provider, Inspect, transcript, CSV, telemetry, and export views."""
 
-    return tuple(
-        build_solver_visible_envelope(task, surface=surface)
-        for surface in PublicSurface
-    )
+    return tuple(build_solver_visible_envelope(task, surface=surface) for surface in PublicSurface)

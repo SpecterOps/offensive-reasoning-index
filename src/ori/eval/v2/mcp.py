@@ -8,6 +8,7 @@ those values to the same immutable reducer.
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Sequence
 from enum import StrEnum
 from pathlib import Path
 from typing import Literal
@@ -28,19 +29,23 @@ from .schema import (
     Track,
 )
 
-MCP_CAPABILITY_PROFILE_VERSION = "1"
-MCP_CAPABILITY_PROFILE_ID = "ori-mcp-009c88f-bhce-9.1-cypher-v1"
+MCP_CAPABILITY_PROFILE_VERSION = "4"
+MCP_CAPABILITY_PROFILE_ID = "ori-mcp-009c88f-bhce-9.1-cypher-v6"
 MCP_BLOODHOUND_CE_VERSION = "9.1.0"
 MCP_SERVER_REVISION = "009c88f41fae302becad4b00777a3749a0f6f0fa"
-MCP_CAPABILITY_MAX_OUTPUT_BYTES = 65_536
-MCP_EVIDENCE_STATE_MACHINE_VERSION = "ori-mcp-evidence-v2"
+MCP_CAPABILITY_MAX_OUTPUT_BYTES = 524_288
+MCP_EVIDENCE_STATE_MACHINE_VERSION = "ori-mcp-evidence-v21"
 _MCP_FINALIZATION_SOURCES = {
+    "bhce": Path(__file__).parent.parent / "bhce.py",
+    "direct_query_safety": Path(__file__).parent.parent / "direct_query_safety.py",
     "evidence": Path(__file__).with_name("evidence.py"),
     "identity": Path(__file__).with_name("identity.py"),
     "mcp_state_machine": Path(__file__),
     "mcp_adapter": Path(__file__).with_name("mcp_adapter.py"),
     "model_runtime": Path(__file__).with_name("model_runtime.py"),
     "provider_loops": Path(__file__).parent.parent / "mcp_runtime.py",
+    "query_contract": Path(__file__).with_name("query_contract.py"),
+    "relationships": Path(__file__).parent.parent.parent / "relationships.py",
     "schema": Path(__file__).with_name("schema.py"),
 }
 MCP_FINALIZATION_POLICY_FINGERPRINT = canonical_sha256(
@@ -89,6 +94,9 @@ class EvidenceEventKind(StrEnum):
     TRUNCATED = "truncated"
     INVALID_ARGUMENTS = "invalid_arguments"
     POLICY_REJECTION = "policy_rejection"
+    QUERY_TIMEOUT = "query_timeout"
+    QUERY_ERROR = "query_error"
+    TASK_TIMEOUT = "task_timeout"
     INFRASTRUCTURE_FAILURE = "infrastructure_failure"
     HARNESS_FAILURE = "harness_failure"
     IRRELEVANT = "irrelevant"
@@ -102,6 +110,18 @@ FINALIZATION_UNLOCKING_EVENT_KINDS = frozenset(
         EvidenceEventKind.CONCLUSIVE_EMPTY,
     }
 )
+
+
+def _events_unlock_finalization(events: Sequence[EvidenceEvent]) -> bool:
+    """Return readiness from the latest complete-proof/truncation boundary."""
+
+    unlocked = False
+    for event in events:
+        if event.kind is EvidenceEventKind.TRUNCATED:
+            unlocked = False
+        elif event.unlocks_finalization:
+            unlocked = True
+    return unlocked
 
 
 class EvidenceEvent(StrictModel):
@@ -129,6 +149,7 @@ class EvidenceEvent(StrictModel):
         elif (
             self.kind
             not in {
+                EvidenceEventKind.TASK_TIMEOUT,
                 EvidenceEventKind.INFRASTRUCTURE_FAILURE,
                 EvidenceEventKind.HARNESS_FAILURE,
             }
@@ -153,8 +174,11 @@ class ToolObservation(StrictModel):
     tool_name: NonEmptyStr
     operation: NonEmptyStr
     succeeded: bool
+    claim_relevant: bool
     arguments_valid: bool = True
     policy_rejected: bool = False
+    query_timeout: bool = False
+    query_error: bool = False
     infrastructure_failure: bool = False
     result_count: int | None = Field(default=None, strict=True, ge=0)
     total_count: int | None = Field(default=None, strict=True, ge=0)
@@ -169,6 +193,8 @@ class ToolObservation(StrictModel):
         failure_flags = (
             not self.arguments_valid,
             self.policy_rejected,
+            self.query_timeout,
+            self.query_error,
             self.infrastructure_failure,
         )
         if sum(failure_flags) > 1:
@@ -188,14 +214,9 @@ class ToolObservation(StrictModel):
         ):
             raise ValueError("result_count cannot exceed total_count")
         if self.negative_proof and (
-            not self.succeeded
-            or not self.complete
-            or self.truncated
-            or self.result_count != 0
+            not self.succeeded or not self.complete or self.truncated or self.result_count != 0
         ):
-            raise ValueError(
-                "negative proof requires a successful, complete, empty observation"
-            )
+            raise ValueError("negative proof requires a successful, complete, empty observation")
         return self
 
 
@@ -223,7 +244,9 @@ class FinalizationPhase(StrEnum):
     READY = "ready"
     RETRY_SCHEMA_ONLY = "retry_schema_only"
     FINALIZED = "finalized"
+    EVIDENCE_INSUFFICIENT = "evidence_insufficient"
     OUTPUT_INVALID = "output_invalid"
+    TASK_TIMEOUT = "task_timeout"
     INFRASTRUCTURE_FAILURE = "infrastructure_failure"
     HARNESS_FAILURE = "harness_failure"
 
@@ -231,7 +254,9 @@ class FinalizationPhase(StrEnum):
 TERMINAL_FINALIZATION_PHASES = frozenset(
     {
         FinalizationPhase.FINALIZED,
+        FinalizationPhase.EVIDENCE_INSUFFICIENT,
         FinalizationPhase.OUTPUT_INVALID,
+        FinalizationPhase.TASK_TIMEOUT,
         FinalizationPhase.INFRASTRUCTURE_FAILURE,
         FinalizationPhase.HARNESS_FAILURE,
     }
@@ -241,7 +266,7 @@ TERMINAL_FINALIZATION_PHASES = frozenset(
 class FinalizationState(StrictModel):
     """Immutable evidence/finalization state shared by every certified loop."""
 
-    state_machine_version: Literal["ori-mcp-evidence-v2"] = MCP_EVIDENCE_STATE_MACHINE_VERSION
+    state_machine_version: Literal["ori-mcp-evidence-v21"] = MCP_EVIDENCE_STATE_MACHINE_VERSION
     task_fingerprint: Fingerprint
     capability_profile_fingerprint: Fingerprint
     tool_loop: MCPToolLoop
@@ -256,7 +281,7 @@ class FinalizationState(StrictModel):
 
     @model_validator(mode="after")
     def state_is_coherent(self) -> FinalizationState:
-        expected_unlocked = any(event.unlocks_finalization for event in self.events)
+        expected_unlocked = _events_unlock_finalization(self.events)
         if self.finalization_unlocked != expected_unlocked:
             raise ValueError("finalization_unlocked must be derived from evidence events")
         if self.certified and self.tool_loop not in CERTIFIED_MCP_TOOL_LOOPS:
@@ -486,9 +511,14 @@ def _pinned_tool_capabilities() -> tuple[ToolCapability, ...]:
                     operation=operation,
                     semantics=_operation_semantics(operation),
                     supports_pagination=True,
-                    # The pinned server exposes skip/limit but does not promise a
-                    # stable sort, total count, or explicit truncation signal.
+                    # The pinned server returns a mechanical total count together
+                    # with skip, limit, and the current result page. That proves a
+                    # complete single-page population when count <= limit. It does
+                    # not promise stable ordering across multiple pages.
                     stable_ordering=False,
+                    reports_truncation=True,
+                    reports_total_count=True,
+                    proof_strength=ProofStrength.COMPLETE_ENUMERATION,
                 )
             )
     tools.extend(
@@ -659,7 +689,7 @@ def _base_capability_supports_task(
         return False
     if task.binding.semantics not in capability.semantics:
         return False
-    if capability.max_output_bytes > task.binding.bounds.max_output_bytes:
+    if task.binding.bounds.max_output_bytes > capability.max_output_bytes:
         return False
     if (
         task.binding.mcp_binding_mode is MCPBindingMode.TOOL_ONLY
@@ -774,6 +804,7 @@ def classify_evidence_event(
         tool_name = None
         operation = None
     elif kind not in {
+        EvidenceEventKind.TASK_TIMEOUT,
         EvidenceEventKind.INFRASTRUCTURE_FAILURE,
         EvidenceEventKind.HARNESS_FAILURE,
     }:
@@ -856,6 +887,22 @@ def classify_tool_observation(
             reason="tool policy rejection",
             **event_args,
         )
+    if observation.query_timeout:
+        return classify_evidence_event(
+            task,
+            profile,
+            kind=EvidenceEventKind.QUERY_TIMEOUT,
+            reason="model-authored CySQL query timed out",
+            **event_args,
+        )
+    if observation.query_error:
+        return classify_evidence_event(
+            task,
+            profile,
+            kind=EvidenceEventKind.QUERY_ERROR,
+            reason="model-authored CySQL query failed",
+            **event_args,
+        )
     if not observation.arguments_valid:
         return classify_evidence_event(
             task,
@@ -872,6 +919,14 @@ def classify_tool_observation(
             reason="unsuccessful tool result without an infrastructure classification",
             **event_args,
         )
+    if not observation.claim_relevant:
+        return classify_evidence_event(
+            task,
+            profile,
+            kind=EvidenceEventKind.IRRELEVANT,
+            reason="operation or selectors do not match the public claim contract",
+            **event_args,
+        )
     if capability is None or not capability_supports_task(task, profile, capability):
         return classify_evidence_event(
             task,
@@ -886,18 +941,22 @@ def classify_tool_observation(
     exceeds_bounds = (
         observation.output_bytes > min(bounds.max_output_bytes, capability.max_output_bytes)
         or observation.pages_received > bounds.max_pages
-        or (count is not None and count > bounds.max_result_cardinality)
+        # For set evidence, ``count`` is the number of returned identities and
+        # must fit the public result capacity. For count/absence claims it is
+        # the scalar answer value, not the cardinality of the one-row result.
+        or (
+            task.claim_kind == "set"
+            and count is not None
+            and count > bounds.max_result_cardinality
+        )
     )
     witness_claim = task.claim_kind in {"route", "decision"}
     incomplete_total = (
-        capability.reports_total_count
+        (bounds.require_total_count or task.claim_kind == "absence")
+        and capability.reports_total_count
         and not witness_claim
         and observation.complete
-        and (
-            observation.total_count is None
-            or count is None
-            or observation.total_count != count
-        )
+        and (observation.total_count is None or count is None or observation.total_count != count)
     )
     if observation.truncated or exceeds_bounds or incomplete_total:
         return classify_evidence_event(
@@ -908,12 +967,15 @@ def classify_tool_observation(
             **event_args,
         )
 
-    if (
-        count is not None
-        and count > 0
-        and not observation.complete
-        and not witness_claim
-    ):
+    if count is not None and count > 0 and not observation.complete and not witness_claim:
+        if observation.pages_received < bounds.max_pages:
+            return classify_evidence_event(
+                task,
+                profile,
+                kind=EvidenceEventKind.INCONCLUSIVE_EMPTY,
+                reason="bounded page is partial and awaits the remaining pages",
+                **event_args,
+            )
         return classify_evidence_event(
             task,
             profile,
@@ -1018,7 +1080,7 @@ def _reduce_evidence_event(
                 }
             )
     events = (*state.events, event)
-    unlocked = any(item.unlocks_finalization for item in events)
+    unlocked = _events_unlock_finalization(events)
     if event.kind is EvidenceEventKind.INFRASTRUCTURE_FAILURE:
         return state.model_copy(
             update={
@@ -1026,6 +1088,15 @@ def _reduce_evidence_event(
                 "finalization_unlocked": unlocked,
                 "phase": FinalizationPhase.INFRASTRUCTURE_FAILURE,
                 "terminal_reason": "INFRASTRUCTURE_FAILURE",
+            }
+        )
+    if event.kind is EvidenceEventKind.TASK_TIMEOUT:
+        return state.model_copy(
+            update={
+                "events": events,
+                "finalization_unlocked": unlocked,
+                "phase": FinalizationPhase.TASK_TIMEOUT,
+                "terminal_reason": "TASK_TIMEOUT",
             }
         )
     if event.kind is EvidenceEventKind.HARNESS_FAILURE:
@@ -1057,10 +1128,10 @@ def _reduce_finalization_attempt(
         if not state.finalization_unlocked:
             return state.model_copy(
                 update={
-                    "phase": FinalizationPhase.OUTPUT_INVALID,
+                    "phase": FinalizationPhase.EVIDENCE_INSUFFICIENT,
                     "final_output_attempts": attempts,
                     "output_digest": attempt.output_digest,
-                    "terminal_reason": "NO_CLAIM_RELEVANT_EVIDENCE",
+                    "terminal_reason": "EVIDENCE_INSUFFICIENT",
                 }
             )
         return state.model_copy(
@@ -1126,6 +1197,7 @@ def build_mcp_loop_conformance_matrix(
         EvidenceEventKind.INCONCLUSIVE_EMPTY,
         EvidenceEventKind.TRUNCATED,
         EvidenceEventKind.POLICY_REJECTION,
+        EvidenceEventKind.QUERY_TIMEOUT,
         EvidenceEventKind.INVALID_ARGUMENTS,
     )
     results: list[LoopConformanceResult] = []

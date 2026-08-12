@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
+import json
+import subprocess
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-from ori.eval.v2 import runtime
+from ori.eval.v2 import campaign_runner, runtime
+from ori.eval.v2.campaign_config import V2ModelEntry
 from ori.eval.v2.campaign_runner import _RUNNER_IMPLEMENTATION_SOURCES
 from ori.eval.v2.direct_adapter import DirectV2Outcome
 from ori.eval.v2.mcp import EvidenceEventKind, classify_evidence_event
@@ -53,8 +59,11 @@ def _receipt(
 
 def test_runner_fingerprint_covers_shared_runtime_contracts() -> None:
     assert {
+        "adapter",
         "campaign",
+        "campaign_config",
         "campaign_runner",
+        "codex_oauth",
         "direct_adapter",
         "evidence",
         "identity",
@@ -66,6 +75,165 @@ def test_runner_fingerprint_covers_shared_runtime_contracts() -> None:
         "schema",
         "scoring",
     } <= set(_RUNNER_IMPLEMENTATION_SOURCES)
+
+
+def test_one_reasoning_effort_is_propagated_to_both_campaign_tracks() -> None:
+    model = V2ModelEntry(
+        name="gpt-test",
+        provider="codex",
+        model="gpt-test",
+        options={"existing": 1},
+    )
+
+    assert campaign_runner._provider_options(model, "high") == {
+        "existing": 1,
+        "reasoning_effort": "high",
+    }
+    assert model.options == {"existing": 1}
+    assert inspect.getsource(campaign_runner._run_model).count(
+        "ollama_options=provider_options"
+    ) == 2
+
+
+def test_codex_readiness_requires_and_records_requested_effort(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tmp_path / ".codex").mkdir()
+    (tmp_path / ".codex" / "models_cache.json").write_text(
+        json.dumps(
+            {
+                "models": [
+                    {
+                        "slug": "gpt-test",
+                        "supported_reasoning_levels": [
+                            {"effort": "medium"},
+                            {"effort": "high"},
+                        ],
+                    }
+                ]
+            }
+        )
+    )
+    monkeypatch.setattr(campaign_runner.Path, "home", classmethod(lambda cls: tmp_path))
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(stdout="Logged in", stderr=""),
+    )
+    resolved = SimpleNamespace(
+        config=SimpleNamespace(
+            models=[V2ModelEntry(name="gpt-test", provider="codex", model="gpt-test")],
+            defaults=SimpleNamespace(reasoning_effort="high"),
+        )
+    )
+
+    receipts = campaign_runner._model_readiness(resolved)
+
+    assert receipts[0].reasoning_effort == "high"
+    assert receipts[0].capability_check == "codex-model-cache+reasoning-effort"
+
+    resolved.config.defaults.reasoning_effort = "xhigh"
+    with pytest.raises(campaign_runner.V2CampaignRunError, match="does not advertise"):
+        campaign_runner._model_readiness(resolved)
+
+
+def test_v11_campaign_schemas_cannot_accept_prior_run_state() -> None:
+    provenance_schema = campaign_runner.ModelRunProvenanceV2.model_json_schema()
+    state_schema = campaign_runner.PrivateRunStateV2.model_json_schema()
+    readiness_schema = campaign_runner.CampaignReadinessV2.model_json_schema()
+    runner_source = inspect.getsource(campaign_runner._run_model)
+
+    assert provenance_schema["properties"]["schema_version"]["const"] == (
+        "ori-v2-model-campaign-v11"
+    )
+    assert state_schema["properties"]["schema_version"]["const"] == (
+        "ori-v2-private-run-state-v5"
+    )
+    assert readiness_schema["properties"]["schema_version"]["const"] == (
+        "ori-v2-run-readiness-v8"
+    )
+    assert "run-state-v5.private.json" in runner_source
+    assert "run-state-v4.private.json" not in runner_source
+
+
+def test_no_model_readiness_reuses_one_exact_graph_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+    observed = object()
+    receipt = object()
+
+    async def fake_health_and_graph(*_args: object) -> tuple[object, object]:
+        nonlocal calls
+        calls += 1
+        return observed, receipt
+
+    monkeypatch.setattr(
+        campaign_runner,
+        "_health_and_graph",
+        fake_health_and_graph,
+    )
+    first_observed, first_receipt, first_reused = asyncio.run(
+        campaign_runner._graph_before_track(
+            object(),
+            object(),
+            object(),
+            preflight_only=True,
+            shared_preflight=None,
+        )
+    )
+    second_observed, second_receipt, second_reused = asyncio.run(
+        campaign_runner._graph_before_track(
+            object(),
+            object(),
+            object(),
+            preflight_only=True,
+            shared_preflight=(first_observed, first_receipt),
+        )
+    )
+
+    assert calls == 1
+    assert (first_observed, first_receipt, first_reused) == (
+        observed,
+        receipt,
+        False,
+    )
+    assert (second_observed, second_receipt, second_reused) == (
+        observed,
+        receipt,
+        True,
+    )
+
+
+def test_executable_campaign_never_reuses_graph_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+    fresh = (object(), object())
+
+    async def fake_health_and_graph(*_args: object) -> tuple[object, object]:
+        nonlocal calls
+        calls += 1
+        return fresh
+
+    monkeypatch.setattr(
+        campaign_runner,
+        "_health_and_graph",
+        fake_health_and_graph,
+    )
+    observed, receipt, reused = asyncio.run(
+        campaign_runner._graph_before_track(
+            object(),
+            object(),
+            object(),
+            preflight_only=False,
+            shared_preflight=(object(), object()),
+        )
+    )
+
+    assert calls == 1
+    assert (observed, receipt, reused) == (*fresh, False)
 
 
 @pytest.mark.parametrize(

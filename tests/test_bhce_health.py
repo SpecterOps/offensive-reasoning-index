@@ -49,6 +49,75 @@ def test_run_cypher_resilient_returns_query_error_without_retry() -> None:
     assert result.error == "HTTP 400: bad query"
 
 
+def test_run_cypher_resilient_recovers_one_transient_timeout() -> None:
+    client = FakeHealthClient(
+        [
+            CypherResult(
+                success=False,
+                error="Client timed out waiting for BloodHound",
+                failure_type="client_timeout",
+            ),
+            CypherResult(success=True),
+            CypherResult(success=True),
+        ]
+    )
+
+    result = asyncio.run(
+        client.run_cypher_resilient(
+            "MATCH (n) RETURN n",
+            recovery_timeout_seconds=0.1,
+            recovery_poll_interval=0.01,
+        )
+    )
+
+    assert result.success is True
+    assert result.execution_attempts == 2
+
+
+def test_run_cypher_resilient_uses_structured_server_failure_type() -> None:
+    client = FakeHealthClient(
+        [
+            CypherResult(
+                success=False,
+                error="opaque upstream failure",
+                failure_type="server_error",
+            ),
+            CypherResult(success=True),
+            CypherResult(success=True),
+        ]
+    )
+
+    result = asyncio.run(
+        client.run_cypher_resilient(
+            "MATCH (n) RETURN n",
+            recovery_timeout_seconds=0.1,
+            recovery_poll_interval=0.01,
+        )
+    )
+
+    assert result.success is True
+    assert result.execution_attempts == 2
+
+
+def test_connect_failure_does_not_claim_query_execution() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("DNS lookup failed", request=request)
+
+    client = BHCEClient(
+        domain="bloodhound.test",
+        token_id="token-id",
+        token_key="token-key",
+    )
+    asyncio.run(client._client.aclose())
+    client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+    result = asyncio.run(client.run_cypher("MATCH (n:Domain) RETURN n LIMIT 1"))
+    asyncio.run(client.close())
+
+    assert result.failure_type == "transport_error"
+    assert result.query_executed is False
+
+
 def test_get_all_node_names_includes_adcs_labels() -> None:
     seen_queries: list[str] = []
 
