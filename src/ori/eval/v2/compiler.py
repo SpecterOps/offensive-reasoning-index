@@ -73,10 +73,10 @@ from .selection import evaluate_selection
 COMPILER_VERSION = "ori-claim-compiler-v2.10.0"
 DIRECT_RESULT_CONTRACT_VERSION = "ori-direct-result-contract-v13"
 DIRECT_CAPABILITY_PROFILE = f"ori-direct-policy-v3-bhce-9.1-{DIRECT_RESULT_CONTRACT_VERSION}"
-MCP_CAPABILITY_PROFILE = "ori-mcp-009c88f-bhce-9.1-cypher-v6"
+MCP_CAPABILITY_PROFILE = "ori-mcp-92a37dd-bhce-9.1-cypher-v7"
 COMPLETE_SET_RESULT_CAPACITY = 1000
 MCP_SET_PAGE_SIZE = 500
-MCP_SERVER_REVISION = "009c88f41fae302becad4b00777a3749a0f6f0fa"
+MCP_SERVER_REVISION = "92a37dd481ce675fe552f14c9957a31dbbcd212e"
 
 _FORBIDDEN_PUBLIC_KEYS = frozenset(
     {
