@@ -419,7 +419,7 @@ def negative_query_scope_mode(
 
     normalized = " ".join(_strip_comments(query).split())
     assignment = re.search(
-        rf"\bMATCH\s+(?P<path>{_IDENTIFIER})\s*=\s*",
+        rf"\b(?P<optional>OPTIONAL\s+)?MATCH\s+(?P<path>{_IDENTIFIER})\s*=\s*",
         normalized,
         flags=re.IGNORECASE,
     )
@@ -431,6 +431,13 @@ def negative_query_scope_mode(
         target=target,
     )
     if prefix_roles is None:
+        return None
+    if assignment.group("optional") and set(prefix_roles.values()) != {
+        "source",
+        "target",
+    }:
+        # OPTIONAL MATCH is the standard zero-preserving form, but it is safe
+        # proof only after exact singleton endpoints have already been bound.
         return None
     path_variable = _identifier(assignment.group("path"))
     boundary = re.search(

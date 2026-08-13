@@ -42,6 +42,7 @@ from .public_surfaces import (
     assert_solver_visible,
     build_all_solver_visible_envelopes,
     build_solver_visible_envelope,
+    public_semantic_fingerprint,
 )
 from .schema import (
     CONTAINMENT_BASE_COMMIT,
@@ -192,6 +193,7 @@ __all__ = [
     "build_mcp_loop_conformance_matrix",
     "build_all_solver_visible_envelopes",
     "build_solver_visible_envelope",
+    "public_semantic_fingerprint",
     "capability_for_operation",
     "capability_supports_task",
     "canonical_json_bytes",

@@ -31,6 +31,7 @@ from ori.eval.v2.certification import (
     live_certify_task,
     promote_candidate,
 )
+from ori.eval.v2.comparator import COMPARATOR_FINGERPRINT
 from ori.eval.v2.compiler import (
     CompiledTask,
     V2CompileError,
@@ -42,7 +43,7 @@ from ori.eval.v2.compiler import (
 )
 from ori.eval.v2.determinism import corpus_contract_shape_fingerprint
 from ori.eval.v2.evidence import _KNOWN_TOP_LEVEL_FIELDS
-from ori.eval.v2.fingerprint import canonical_sha256
+from ori.eval.v2.fingerprint import canonical_sha256, certifier_fingerprint
 from ori.eval.v2.fixtures import REQUIRED_FIXTURES, offline_certify
 from ori.eval.v2.graph import LiveGraphVerification, build_archive_snapshot
 from ori.eval.v2.mcp import build_mcp_capability_profile, classify_mcp_binding
@@ -63,9 +64,11 @@ from ori.eval.v2.public_surfaces import (
     PublicSurface,
     assert_solver_visible,
     build_all_solver_visible_envelopes,
+    public_semantic_fingerprint,
 )
 from ori.eval.v2.schema import (
     AbsenceClaim,
+    CertificationState,
     DecisionClaim,
     DecisionPolicy,
     ExecutionClass,
@@ -75,6 +78,7 @@ from ori.eval.v2.schema import (
     RouteAcceptanceKind,
     RouteClaim,
     SetClaim,
+    TaskCertification,
     Track,
     VerdictStatus,
 )
@@ -83,6 +87,7 @@ from ori.eval.v2.scoring import (
     V2ScoringError,
     build_answers_artifact,
     score_answers_v2,
+    summarize_results,
 )
 from ori.generator.attack_paths import plant_all_paths
 from ori.generator.benchmark_profiles import build_benchmark_generation_profile
@@ -178,6 +183,33 @@ def _by_legacy(corpus, legacy_task_id: str):
     return [task for task in corpus.tasks if task.migration.legacy_task_id == legacy_task_id]
 
 
+def _candidate_certifications(corpus, profile):
+    candidates = {}
+    for task in corpus.tasks:
+        payload = {
+            "task_id": task.public.task_id,
+            "state": CertificationState.CANDIDATE,
+            "task_fingerprint": task.public.task_fingerprint,
+            "oracle_fingerprint": task.oracle.oracle_fingerprint,
+            "graph_fingerprint": corpus.graph_fingerprint,
+            "compiler_fingerprint": corpus.compiler_fingerprint,
+            "comparator_fingerprint": COMPARATOR_FINGERPRINT,
+            "certifier_fingerprint": certifier_fingerprint(),
+            "capability_profile_fingerprint": profile.profile_fingerprint,
+            "bounds_fingerprint": canonical_sha256(task.public.binding.bounds),
+            "certified_profile_id": profile.profile_id,
+            "live_proof_fingerprint": "a" * 64,
+            "failures": (),
+            "certification_fingerprint": "0" * 64,
+        }
+        payload["certification_fingerprint"] = canonical_sha256(
+            payload,
+            exclude_fields=("certification_fingerprint",),
+        )
+        candidates[task.public.task_id] = TaskCertification.model_validate(payload)
+    return candidates
+
+
 def test_simple_corpus_is_completely_migrated(simple_compiled) -> None:
     _, _, direct, mcp = simple_compiled
 
@@ -230,6 +262,96 @@ def test_complex_corpus_replaces_oversized_enumerations(complex_compiled) -> Non
     )
     with pytest.raises(V2CompileError, match="one matching execution page"):
         _validate_binding_matches_claim(page.oracle.claim, mismatched_binding)
+
+
+@pytest.mark.parametrize(
+    ("track", "expected_candidates"),
+    ((Track.DIRECT, 42), (Track.MCP, 55)),
+)
+def test_complex_candidate_release_groups_exact_public_semantic_duplicates(
+    complex_compiled,
+    track: Track,
+    expected_candidates: int,
+) -> None:
+    corpus = complex_compiled[2 if track is Track.DIRECT else 3]
+    profile = capability_profile_for_track(track)
+    candidates = _candidate_certifications(corpus, profile)
+    release = build_catalog_release(
+        corpus,
+        candidates,
+        profile,
+    )
+
+    assert len(corpus.tasks) == (46 if track is Track.DIRECT else 70)
+    assert len(release.entries) == expected_candidates
+    assert len({entry.public_semantic_fingerprint for entry in release.entries}) == len(
+        release.entries
+    )
+    candidate_schema = json.loads(
+        (
+            Path(__file__).resolve().parents[1]
+            / "docs"
+            / "schemas"
+            / "ori-v2-candidate-catalog.schema.json"
+        ).read_text()
+    )
+    validate_json_schema(
+        instance=release.model_dump(mode="json"),
+        schema=candidate_schema,
+    )
+
+    tasks_by_id = {task.public.task_id: task for task in corpus.tasks}
+    released_ids = []
+    for entry in release.entries:
+        assert entry.task_id == min(entry.equivalent_task_ids)
+        assert entry.public_semantic_fingerprint == public_semantic_fingerprint(
+            tasks_by_id[entry.task_id].public
+        )
+        assert {
+            public_semantic_fingerprint(tasks_by_id[task_id].public)
+            for task_id in entry.equivalent_task_ids
+        } == {entry.public_semantic_fingerprint}
+        released_ids.extend(entry.equivalent_task_ids)
+
+    assert sorted(released_ids) == sorted(tasks_by_id)
+    assert len(released_ids) == len(set(released_ids))
+
+    duplicate_entry = next(
+        entry for entry in release.entries if len(entry.equivalent_task_ids) > 1
+    )
+    alias_id = duplicate_entry.equivalent_task_ids[1]
+    stale_candidates = {
+        **candidates,
+        alias_id: candidates[alias_id].model_copy(
+            update={"task_fingerprint": "f" * 64}
+        ),
+    }
+    with pytest.raises(CertificationError, match=f"task {alias_id} certification is stale"):
+        build_catalog_release(corpus, stale_candidates, profile)
+
+    contradictory_tasks = tuple(
+        task.model_copy(
+            update={
+                "oracle": task.oracle.model_copy(
+                    update={
+                        "forbidden_entity_ids": (
+                            *task.oracle.forbidden_entity_ids,
+                            "contradictory-identity",
+                        )
+                    }
+                )
+            }
+        )
+        if task.public.task_id == alias_id
+        else task
+        for task in corpus.tasks
+    )
+    contradictory_corpus = corpus.model_copy(update={"tasks": contradictory_tasks})
+    with pytest.raises(
+        CertificationError,
+        match="identical public semantics bind contradictory candidate oracles",
+    ):
+        build_catalog_release(contradictory_corpus, candidates, profile)
 
 
 def test_changed_seed_preserves_task_contract_shape_and_resolves_new_identity(
@@ -761,6 +883,51 @@ def test_v1_v2_dispatch_and_sealed_oracle_registry(simple_compiled, tmp_path) ->
     assert pair.private == written_private
 
 
+def test_public_semantic_fingerprint_excludes_provenance_but_binds_contract(
+    simple_compiled,
+) -> None:
+    task = simple_compiled[2].tasks[0].public
+    baseline = public_semantic_fingerprint(task)
+    provenance_changed = task.model_copy(
+        update={
+            "task_id": "renamed@2",
+            "revision": task.revision + 1,
+            "product": "renamed-product",
+            "input_entities": tuple(
+                entity.model_copy(
+                    update={
+                        "object_id": f"resolved-{index}",
+                        "domain": "RESOLVED.INVALID",
+                        "canonical_name": f"resolved-{index}",
+                        "aliases": (),
+                    }
+                )
+                for index, entity in enumerate(task.input_entities)
+            ),
+            "claim_fingerprint": "a" * 64,
+            "prompt_fingerprint": "b" * 64,
+            "task_fingerprint": "c" * 64,
+        }
+    )
+
+    assert public_semantic_fingerprint(provenance_changed) == baseline
+    assert public_semantic_fingerprint(
+        task.model_copy(update={"question": f"{task.question} changed"})
+    ) != baseline
+    assert public_semantic_fingerprint(
+        task.model_copy(update={"generic_instructions": (*task.generic_instructions, "changed")})
+    ) != baseline
+    assert public_semantic_fingerprint(
+        task.model_copy(
+            update={
+                "binding": task.binding.model_copy(
+                    update={"capability_profile_id": "changed-profile"}
+                )
+            }
+        )
+    ) != baseline
+
+
 def test_v2_pair_rejects_wrong_track_and_incomplete_identity_catalog(
     simple_compiled,
 ) -> None:
@@ -1072,7 +1239,9 @@ def test_candidate_promotion_and_catalog_bind_every_certification_dimension(
         )
 
     release = build_catalog_release(direct, candidates, profile)
-    assert len(release.entries) == len(direct.tasks)
+    assert len(release.entries) == len(
+        {public_semantic_fingerprint(task.public) for task in direct.tasks}
+    )
     assert {entry.cost_band for entry in release.entries} <= {
         "low",
         "medium",
@@ -1175,7 +1344,9 @@ def test_live_catalog_promotion_requires_exact_receipts_and_task_accounting(
 
     assert len(catalog.proofs) == len(direct.tasks)
     assert len(catalog.certifications) == len(direct.tasks)
-    assert len(catalog.candidate_catalog.entries) == len(direct.tasks)
+    assert len(catalog.candidate_catalog.entries) == len(
+        {public_semantic_fingerprint(task.public) for task in direct.tasks}
+    )
     assert all(certification.state.value == "candidate" for certification in catalog.certifications)
     legacy_offline = offline.model_dump(mode="python")
     legacy_offline["schema_version"] = "ori-eval-offline-certification-v3"
@@ -1248,6 +1419,17 @@ def test_v2_checkpoint_output_guard_and_public_report_are_exact_and_redacted(
     assert "oracle_artifact_fingerprint" not in serialized
     assert "evidence" not in serialized
     assert len(report.rows) == len(public.tasks)
+
+    subset_ids = tuple(result.task_id for result in scoring.results[:2])
+    subset_results = scoring.results[:2]
+    subset_report = build_public_report(
+        pair,
+        profile,
+        subset_results,
+        summarize_results(subset_ids, subset_results),
+        scheduled_task_ids=subset_ids,
+    )
+    assert tuple(row.task_id for row in subset_report.rows) == tuple(sorted(subset_ids))
 
     provenance = build_run_provenance(pair, profile)
     output_dir = tmp_path / "campaign"

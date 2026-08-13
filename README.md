@@ -822,8 +822,9 @@ score is not a baseline for raw numerical comparison with V2: the frozen
 historical V1 complex campaign had 62 tasks, and its regression ledger records
 recall-oriented set behavior, count tolerances, and route node coverage without
 the exact relationship proof now required. The
-current V2 complex catalog has 70 MCP tasks, exact typed answer policies, and
-claim-bound execution proof. Use a fresh V2-versus-V2 run for model comparison.
+current V29 complex proof inventory has 70 MCP tasks and its semantic release
+schedules 55, with exact typed answer policies and claim-bound execution proof.
+Use a fresh V29-versus-V29 run for model comparison.
 Replaying old final answers can diagnose scorer regressions, but it is not an
 official rescore because the model saw a different prompt and execution
 contract.
@@ -983,6 +984,25 @@ the schema boundary between unresolved
 `output_dir`; never resume a campaign created by an older runner or
 finalization fingerprint.
 
+V29 also records campaign-level durability, not only task checkpoints. The
+output root is protected by one exclusive process lock; each JSON replacement
+is flushed to the file and parent directory; and
+`campaign-lifecycle-v2.private.json` records running, interrupted, failed, and
+completed states. SIGINT, SIGTERM, SIGHUP, task cancellation, and an unclean
+prior process remain distinguishable. A completed track publishes its reports
+and a fingerprinted `track-completion-v2.private.json` immediately after its
+post-track graph gate, so a later interruption cannot erase the earlier
+track's proven completion.
+
+For direct supporting evidence, return both endpoint node variables whenever
+a relationship is projected separately from `p`; BloodHound may otherwise
+omit a non-path endpoint. For bounded negative counts, the zero-preserving
+form is exact singleton endpoint bindings followed by
+`OPTIONAL MATCH p=... RETURN count(p)`. Do not add every pairwise node
+inequality merely to prove a returned path is simple. The comparator rejects
+an actually cyclic witness, while O(n-squared) inequality filters can make an
+otherwise bounded BloodHound query planner-hostile.
+
 During execution, the terminal reports graph gates, model/run transitions, each
 public task ID and claim/policy type, retry decisions, and the checkpointed
 outcome with timing, token, running-score, and MCP tool/Cypher counts. It never
@@ -1035,16 +1055,36 @@ so model comparisons stay tied to one graph, seed, domain, and path corpus.
 
 The current generated complex corpus does not yet enforce the final 100-task
 selector per track. Task counts also depend on the protocol: the legacy V1
-development surface contains 42 direct and 62 MCP tasks, while the current V28
-compiler produces 46 direct and 70 MCP candidates after typed claim expansion
-and deterministic MCP windows. At the time of this README update:
+development surface contains 42 direct and 62 MCP tasks, while the V29 compiler
+retains 46 direct and 70 MCP certification tasks after typed claim expansion
+and deterministic MCP windows. The candidate release schedules one
+representative per unique solver-visible semantic contract: 42 direct and 55
+MCP. At the time of this README update:
 
 ```text
 planted paths: 30
 V1 direct/MCP development tasks: 42 / 62
-V28 direct/MCP candidates:       46 / 70
+V29 direct/MCP certified tasks:  46 / 70
+V29 direct/MCP scheduled tasks:  42 / 55
 Tier 6 paths/tasks: 19
 ```
+
+Equivalent task IDs are not discarded. Each remains compiled, oracle-bound,
+and fixture-certified, while `equivalent_task_ids` records its public-semantic
+class in the candidate catalog. ORI refuses to group two public-equivalent
+tasks when their sealed scorer outcomes differ. Reports and denominators use
+the scheduled release, not the larger proof inventory.
+
+The current V29 complex live boundary is graph
+`fb0b6785e524d40abcc9033ea2c7887eaa88e13bb6cb1f329636a4ce4b74b1c4`
+with 17,088 canonical objects and 60,342 relationships at all three gates.
+Direct releases 42 representatives from 46 certified tasks; MCP releases 55
+from 70. The pinned MCP capability is
+`ori-mcp-92a37dd-bhce-9.1-cypher-v7`. Seven-model `high`-effort no-model
+readiness passed with zero provider calls using
+`results/v2/complex-seed-4401/models-v2-seven-models-high-v29-2026-08-12.yaml`.
+Use that file only after reviewing its machine-local paths, and add `--execute`
+only when intentionally launching a fresh paid V29 campaign.
 
 Complex generation now validates the completed SharpHound ZIP against every
 declared planted relationship before writing it. The current corpus must pass all

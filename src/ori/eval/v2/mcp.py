@@ -30,11 +30,11 @@ from .schema import (
 )
 
 MCP_CAPABILITY_PROFILE_VERSION = "4"
-MCP_CAPABILITY_PROFILE_ID = "ori-mcp-009c88f-bhce-9.1-cypher-v6"
+MCP_CAPABILITY_PROFILE_ID = "ori-mcp-92a37dd-bhce-9.1-cypher-v7"
 MCP_BLOODHOUND_CE_VERSION = "9.1.0"
-MCP_SERVER_REVISION = "009c88f41fae302becad4b00777a3749a0f6f0fa"
+MCP_SERVER_REVISION = "92a37dd481ce675fe552f14c9957a31dbbcd212e"
 MCP_CAPABILITY_MAX_OUTPUT_BYTES = 524_288
-MCP_EVIDENCE_STATE_MACHINE_VERSION = "ori-mcp-evidence-v21"
+MCP_EVIDENCE_STATE_MACHINE_VERSION = "ori-mcp-evidence-v22"
 _MCP_FINALIZATION_SOURCES = {
     "bhce": Path(__file__).parent.parent / "bhce.py",
     "direct_query_safety": Path(__file__).parent.parent / "direct_query_safety.py",
@@ -266,7 +266,7 @@ TERMINAL_FINALIZATION_PHASES = frozenset(
 class FinalizationState(StrictModel):
     """Immutable evidence/finalization state shared by every certified loop."""
 
-    state_machine_version: Literal["ori-mcp-evidence-v21"] = MCP_EVIDENCE_STATE_MACHINE_VERSION
+    state_machine_version: Literal["ori-mcp-evidence-v22"] = MCP_EVIDENCE_STATE_MACHINE_VERSION
     task_fingerprint: Fingerprint
     capability_profile_fingerprint: Fingerprint
     tool_loop: MCPToolLoop

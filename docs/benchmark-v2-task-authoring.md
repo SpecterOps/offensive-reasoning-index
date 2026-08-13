@@ -73,9 +73,15 @@ For direct:
 - return answer nodes only for set claims, a scalar for count claims, and an
   actual `RETURN p` path for route claims;
 - ensure a returned path can include ordered edge witnesses;
+- when returning a supporting relationship separately from `p`, also return
+  both endpoint node variables so BloodHound cannot omit a non-path endpoint;
+- make cycle rejection a comparator responsibility over the returned witness;
+  do not require every pairwise node-inequality predicate in the query;
 - do not impose a global ordering on paths or complete exact sets; require
   stable ordering only for a deterministic set window;
-- use one scalar route count for a bounded-negative direct claim;
+- use one scalar route count for a bounded-negative direct claim; exact
+  singleton endpoint bindings followed by `OPTIONAL MATCH p=...` are the
+  preferred zero-preserving form;
 - keep JSON maps/list construction out of Cypher;
 - never rely on query text to prove an answer.
 
@@ -115,9 +121,9 @@ For MCP:
   identity/count variable instead of emitting or requiring `:Principal`;
 - preserve positive route/decision graph witnesses when the pinned MCP response
   also contains endpoint scalar literals;
-- require the ordered route witness itself to begin and end at the public claim
-  selectors; selectors elsewhere in the query or response do not bind the
-  returned path;
+- require an ordered route witness itself to begin and end at the public claim
+  selectors; for decision claims, require both public subjects to occur on the
+  same returned path but permit them to be interior nodes;
 - require the returned path variable to preserve lineage through `WITH`
   projections and the BloodHound receipt to contain actual nodes and edges;
   node-only results and rebound path variables are not route proof;
@@ -132,6 +138,10 @@ For MCP:
   template-specific comparator exception;
 - ensure a later complete proof can supersede an earlier truncated attempt,
   while a later truncation revokes readiness;
+- bind the final set to mechanically complete identity pages and bind final
+  witness edges/properties to the latest complete claim-relevant receipt;
+  a schema-only retry cannot erase a complete 500-identity receipt or invent
+  unsupported graph facts;
 - for a bounded-negative scalar, count one source-to-objective path variable
   over the complete public hop bound; a broader wildcard/undirected search can
   prove zero but its non-zero result cannot contradict the narrower claim; the
@@ -296,11 +306,17 @@ claim_kind
 semantics
 cost_band
 path_concentration_key
+public_semantic_fingerprint
+equivalent_task_ids
 task_fingerprint
 oracle_fingerprint
 certification_fingerprint
 ```
 
+The release contains one deterministic representative per unique public
+semantic fingerprint. Every equivalent task ID remains compiled,
+oracle-bound, and certified and is recorded in `equivalent_task_ids`. Promotion
+fails if two public-equivalent tasks have different sealed scorer outcomes.
 The selector may consume only candidate-certified entries and must preserve all
 bound fingerprints. Selection policy, quotas, new attack paths, and official
 100/100 suites are intentionally separate from task correctness.

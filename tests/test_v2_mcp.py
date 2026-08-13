@@ -161,7 +161,7 @@ def test_pinned_profile_is_fingerprinted_and_declares_exact_revision() -> None:
     assert profile.bloodhound_ce_version == MCP_BLOODHOUND_CE_VERSION == "9.1.0"
     assert profile.mcp_server_revision == MCP_SERVER_REVISION
     assert profile.finalization_policy_fingerprint == MCP_FINALIZATION_POLICY_FINGERPRINT
-    assert MCP_SERVER_REVISION == "009c88f41fae302becad4b00777a3749a0f6f0fa"
+    assert MCP_SERVER_REVISION == "92a37dd481ce675fe552f14c9957a31dbbcd212e"
     assert profile.profile_fingerprint == MCP_CAPABILITY_PROFILE_FINGERPRINT
     assert profile.profile_fingerprint == canonical_sha256(
         profile,

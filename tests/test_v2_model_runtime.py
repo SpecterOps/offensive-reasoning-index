@@ -25,6 +25,8 @@ from ori.eval.mcp_runtime import (
 )
 from ori.eval.v2 import campaign_runner, model_runtime
 from ori.eval.v2.compiler import compile_acceptance_spec
+from ori.eval.v2.graph import entity_property_fact_key
+from ori.eval.v2.identity import IdentityResolver
 from ori.eval.v2.live_projection import _mcp_fixture_query
 from ori.eval.v2.mcp import (
     EvidenceEventKind,
@@ -45,6 +47,7 @@ from ori.eval.v2.schema import (
     AbsenceClaim,
     BoundedNegativePolicy,
     DecisionPolicy,
+    EntityRef,
     EntitySelector,
     ExactCountPolicy,
     ExactSetPolicy,
@@ -56,6 +59,7 @@ from ori.eval.v2.schema import (
     PropertyPredicate,
     RelationshipPattern,
     RelationshipSemantics,
+    RouteAcceptanceKind,
     SelectionExpression,
     SetClaim,
     Track,
@@ -204,17 +208,21 @@ def test_direct_public_request_includes_bounds_without_oracle_material() -> None
     }
 
 
-def test_direct_prompt_preserves_v1_cysql_contract_and_separates_answer_schema() -> None:
+def test_direct_prompt_preserves_v1_cysql_contract_and_separates_answer_schema() -> (
+    None
+):
     route_prompt = direct_system_prompt(DIRECT_TASK)
     set_prompt = direct_system_prompt(DIRECT_SET_TASK)
 
     assert "Use RETURN p for path queries" in route_prompt
     assert "list comprehensions" in route_prompt
     assert "after the final RETURN projection" in route_prompt
-    assert '"version": "ori-direct-result-contract-v13"' in route_prompt
+    assert '"version": "ori-direct-result-contract-v14"' in route_prompt
     assert "toString() on a Path" in route_prompt
     assert "reduce()" in route_prompt
     assert "globally sort Path values" in route_prompt
+    assert "both endpoint node variables" in route_prompt
+    assert "quadratic pairwise node-inequality" in route_prompt
     assert "For set queries return only the answer nodes" in set_prompt
     assert "RETURN entity ORDER BY entity.objectid" in set_prompt
 
@@ -314,6 +322,15 @@ def test_mcp_negative_proof_query_must_cover_public_route_scope() -> None:
         (
             f"{prefix}-[:MemberOf|Enroll|PublishedTo*1..12]->"
             f"{target} RETURN count(p) AS count"
+        ),
+        is_count=True,
+    )
+    assert model_runtime._query_matches_public_claim(
+        task,
+        (
+            "MATCH (a {objectid:'USER-A'}), (b {objectid:'GROUP-B'}) "
+            "OPTIONAL MATCH p=(a)-[:MemberOf|Enroll|PublishedTo*1..12]->(b) "
+            "RETURN count(p) AS count"
         ),
         is_count=True,
     )
@@ -3124,9 +3141,17 @@ def test_mcp_prompt_declares_mechanical_result_contract() -> None:
     prompt = mcp_system_prompt(MCP_TASK)
     request = json.loads(prompt.split("\n\n", maxsplit=1)[1])
 
-    assert '"version": "ori-mcp-result-contract-v21"' in prompt
+    assert '"version": "ori-mcp-result-contract-v22"' in prompt
     assert "evidence_result_contract" in prompt
     assert "include_properties=false" in prompt
+    assert "mechanically materializes the final entities" in mcp_system_prompt(
+        MCP_TASK.model_copy(update={"claim_kind": "set"})
+    )
+    assert "OPTIONAL MATCH" in mcp_system_prompt(
+        MCP_TASK.model_copy(update={"claim_kind": "absence"})
+    )
+    assert "list comprehensions" in prompt
+    assert "quadratic pairwise node-inequality" in prompt
     assert MCP_ORACLE.oracle_id not in prompt
     assert MCP_TASK.question not in prompt
     assert "task_fingerprint" not in json.dumps(request)
@@ -4511,3 +4536,359 @@ def test_v2_run_model_emits_task_retry_completion_and_resume_progress(
     assert contained_results[0].reasoning_correct is None
     assert contained_results[0].detail == ("AttributeError: future adapter schema drift")
     assert any("HARNESS_ERROR" in message for message in contained_progress)
+
+
+@pytest.mark.parametrize(
+    "query",
+    (
+        (
+            "MATCH p=(a {objectid:'USER-A'})-[:MemberOf]->"
+            "(b {objectid:'GROUP-B'})-[:Enroll]->(t:CertTemplate)"
+            "-[:PublishedTo]->(ca:EnterpriseCA) RETURN p"
+        ),
+        (
+            "MATCH p=(ca:EnterpriseCA)<-[:PublishedTo]-(t:CertTemplate)"
+            "<-[:Enroll]-(b {objectid:'GROUP-B'})<-[:MemberOf]-"
+            "(a {objectid:'USER-A'})-[:GenericWrite]->(u:User)"
+            "-[:AllowedToDelegate]->(c:Computer) RETURN p"
+        ),
+    ),
+)
+def test_decision_claim_accepts_public_roles_inside_returned_path(query: str) -> None:
+    source = MCP_TASK.input_entities[0].model_copy(update={"role": "source"})
+    target = MCP_TASK.input_entities[1].model_copy(update={"role": "target"})
+    decision_contract = MCP_TASK.binding.mcp_evidence_contract.model_copy(
+        update={"required_input_roles": ("source", "target")}
+    )
+    task = MCP_TASK.model_copy(
+        update={
+            "claim_kind": "decision",
+            "answer_policy": DecisionPolicy(kind="decision"),
+            "binding": MCP_TASK.binding.model_copy(
+                update={"mcp_evidence_contract": decision_contract}
+            ),
+            "input_entities": (source, target),
+            "acceptance_spec": MCP_TASK.acceptance_spec.model_copy(
+                update={
+                    "claim_kind": "decision",
+                    "answer_policy": DecisionPolicy(kind="decision"),
+                    "source_role": None,
+                    "target_role": None,
+                    "route_acceptance": RouteAcceptanceKind.NOT_APPLICABLE,
+                    "required_mechanisms": (),
+                }
+            ),
+        }
+    )
+    projector = MCPTranscriptProjector(task, PROFILE)
+
+    ready = projector.observe(
+        "cypher_query",
+        {"info_type": "run", "query": query},
+        json.dumps(
+            {
+                "success": True,
+                "data": {
+                    "nodes": {
+                        "0": {"objectid": "CA-A"},
+                        "1": {"objectid": "TEMPLATE-A"},
+                        "2": {"objectid": "GROUP-B"},
+                        "3": {"objectid": "USER-A"},
+                        "4": {"objectid": "USER-C"},
+                        "5": {"objectid": "COMPUTER-D"},
+                    },
+                    "edges": [
+                        {"source": "3", "target": "2", "kind": "MemberOf"},
+                        {"source": "2", "target": "1", "kind": "Enroll"},
+                        {"source": "1", "target": "0", "kind": "PublishedTo"},
+                    ],
+                },
+                "node_count": 6,
+                "edge_count": 3,
+            }
+        ),
+        None,
+    )
+
+    assert ready is True
+    assert projector.events[-1].kind is EvidenceEventKind.USEFUL_POSITIVE
+
+
+def test_decision_claim_rejects_public_role_detached_from_returned_path() -> None:
+    source = MCP_TASK.input_entities[0].model_copy(update={"role": "source"})
+    target = MCP_TASK.input_entities[1].model_copy(update={"role": "target"})
+    decision_contract = MCP_TASK.binding.mcp_evidence_contract.model_copy(
+        update={"required_input_roles": ("source", "target")}
+    )
+    task = MCP_TASK.model_copy(
+        update={
+            "claim_kind": "decision",
+            "answer_policy": DecisionPolicy(kind="decision"),
+            "binding": MCP_TASK.binding.model_copy(
+                update={"mcp_evidence_contract": decision_contract}
+            ),
+            "input_entities": (source, target),
+            "acceptance_spec": MCP_TASK.acceptance_spec.model_copy(
+                update={
+                    "claim_kind": "decision",
+                    "answer_policy": DecisionPolicy(kind="decision"),
+                    "source_role": None,
+                    "target_role": None,
+                    "route_acceptance": RouteAcceptanceKind.NOT_APPLICABLE,
+                    "required_mechanisms": (),
+                }
+            ),
+        }
+    )
+    projector = MCPTranscriptProjector(task, PROFILE)
+
+    ready = projector.observe(
+        "cypher_query",
+        {
+            "info_type": "run",
+            "query": (
+                "MATCH p=(a {objectid:'USER-A'})-[:GenericWrite]->(u:User), "
+                "(b {objectid:'GROUP-B'}) RETURN p, b"
+            ),
+        },
+        json.dumps(
+            {
+                "success": True,
+                "data": {
+                    "nodes": {
+                        "0": {"objectid": "USER-A"},
+                        "1": {"objectid": "USER-C"},
+                        "2": {"objectid": "GROUP-B"},
+                    },
+                    "edges": [
+                        {"source": "0", "target": "1", "kind": "GenericWrite"},
+                    ],
+                },
+                "node_count": 3,
+                "edge_count": 1,
+            }
+        ),
+        None,
+    )
+
+    assert ready is False
+    assert projector.events[-1].kind is EvidenceEventKind.IRRELEVANT
+
+
+def test_final_route_facts_are_projected_from_claim_bound_receipt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_loop(**kwargs: Any):
+        kwargs["tool_result_observer"](
+            "cypher_query",
+            {
+                "info_type": "run",
+                "query": (
+                    "MATCH p=(a {objectid:'USER-A'})-[:AdminTo]->(b {objectid:'GROUP-B'}) RETURN p"
+                ),
+            },
+            json.dumps(
+                {
+                    "success": True,
+                    "data": {
+                        "nodes": {
+                            "0": {"objectid": "USER-A"},
+                            "1": {"objectid": "GROUP-B"},
+                        },
+                        "edges": [
+                            {
+                                "source": "0",
+                                "target": "1",
+                                "kind": "AdminTo",
+                            }
+                        ],
+                    },
+                    "node_count": 2,
+                    "edge_count": 1,
+                }
+            ),
+            None,
+        )
+        # The final answer hallucinates the oracle edge instead of reporting
+        # the different relationship actually returned by BloodHound.
+        return _response(json.dumps(_answer())), object(), []
+
+    monkeypatch.setattr(model_runtime, "_run_openai_compat_mcp_loop", fake_loop)
+    outcome, _record = asyncio.run(
+        run_mcp_model_task_v2(
+            task=MCP_TASK,
+            oracle=MCP_ORACLE,
+            resolver=MCP_RESOLVER,
+            profile=PROFILE,
+            bundle=MCPServerBundle(tools=[]),
+            model="codex/gpt-test",
+            model_base_url=None,
+            tool_loop=MCPToolLoop.NATIVE_OPENAI_COMPATIBLE,
+            max_steps=4,
+        )
+    )
+
+    assert outcome.sample.reasoning_correct is False
+    assert outcome.sample.outcome is SampleOutcomeCode.OUTPUT_INVALID
+    assert outcome.sample.verdict is None
+    assert outcome.sample.evidence is None
+
+
+def test_receipt_property_facts_use_canonical_case_insensitive_keys() -> None:
+    predicate = PropertyPredicate(
+        role="source",
+        property_name="hasspn",
+        operator=PredicateOperator.EQUALS,
+        value=True,
+    )
+    task = MCP_TASK.model_copy(
+        update={
+            "acceptance_spec": MCP_TASK.acceptance_spec.model_copy(
+                update={"required_properties": (predicate,)}
+            )
+        }
+    )
+
+    _identities, _edges, properties = model_runtime._receipt_graph_facts(
+        task,
+        {
+            "data": {
+                "nodes": {
+                    "0": {
+                        "objectid": "USER-A",
+                        "properties": {"hasSPN": True},
+                    }
+                },
+                "edges": [],
+            }
+        },
+    )
+
+    assert properties == frozenset(
+        {entity_property_fact_key("USER-A", "hasspn", True)}
+    )
+
+
+def test_complete_500_identity_receipt_materializes_set_after_empty_schema_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bounds = MCP_TASK.binding.bounds.model_copy(
+        update={
+            "max_result_cardinality": 500,
+            "page_size": 500,
+            "max_pages": 1,
+            "require_total_count": False,
+            "require_stable_ordering": True,
+            "max_output_bytes": 524_288,
+        }
+    )
+    policy = ExactSetPolicy(kind="exact_set")
+    binding = _cypher_set_binding(bounds=bounds, projection_type="User")
+    claim = SetClaim(
+        kind="set",
+        claim_id="claim:500-identity-window",
+        selection=SelectionExpression(
+            projection_role="result",
+            projection_type="User",
+            limit=500,
+        ),
+        semantics=RelationshipSemantics.DIRECT,
+        population_scope=PopulationScope.BENCHMARK_NAMESPACE,
+    )
+    task = MCP_TASK.model_copy(
+        update={
+            "task_id": "complex.mcp.500-identity-window@2",
+            "claim_kind": "set",
+            "answer_policy": policy,
+            "binding": binding,
+            "answer_schema": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "entities": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    }
+                },
+                "required": ["entities"],
+            },
+            "acceptance_spec": compile_acceptance_spec(claim, policy, binding),
+        }
+    )
+    expected = tuple(
+        EntityRef(
+            object_id=f"USER-{index:04d}",
+            object_type="User",
+            domain="EXAMPLE.LOCAL",
+            role=f"result_{index:04d}",
+            canonical_name=f"USER-{index:04d}@EXAMPLE.LOCAL",
+        )
+        for index in range(500)
+    )
+    resolver = IdentityResolver(expected)
+    oracle = MCP_ORACLE.model_copy(
+        update={
+            "task_id": task.task_id,
+            "expected_entities": expected,
+            "route_variants": (),
+            "required_mechanisms": (),
+            "source_id": None,
+            "target_id": None,
+        }
+    )
+
+    async def fake_loop(**kwargs: Any):
+        kwargs["tool_result_observer"](
+            "cypher_query",
+            {
+                "info_type": "run",
+                "include_properties": False,
+                "query": (
+                    "MATCH (u:User) RETURN u.objectid AS object_id "
+                    "ORDER BY u.objectid SKIP 0 LIMIT 500"
+                ),
+            },
+            json.dumps(
+                {
+                    "success": True,
+                    "data": {
+                        "nodes": {},
+                        "edges": [],
+                        "literals": [
+                            {"key": "object_id", "value": entity.object_id}
+                            for entity in expected
+                        ],
+                    },
+                    "node_count": 0,
+                    "edge_count": 0,
+                }
+            ),
+            None,
+        )
+        return _response('{"entities":["USER-0000"'), object(), []
+
+    async def empty_retry(**_kwargs: Any) -> ModelResponse:
+        return _response('{"entities":[]}')
+
+    monkeypatch.setattr(model_runtime, "_run_openai_compat_mcp_loop", fake_loop)
+    outcome, record = asyncio.run(
+        run_mcp_model_task_v2(
+            task=task,
+            oracle=oracle,
+            resolver=resolver,
+            profile=PROFILE,
+            bundle=MCPServerBundle(tools=[]),
+            model="codex/gpt-test",
+            model_base_url=None,
+            tool_loop=MCPToolLoop.NATIVE_OPENAI_COMPATIBLE,
+            max_steps=4,
+            transport=empty_retry,
+        )
+    )
+
+    assert outcome.sample.execution_class is ExecutionClass.SUCCESS
+    assert outcome.sample.reasoning_correct is True
+    assert outcome.sample.evidence is not None
+    assert len(outcome.sample.evidence.entities) == 500
+    assert record.mcp_finalization is not None
+    assert record.mcp_finalization["schema_retry_count"] == 1

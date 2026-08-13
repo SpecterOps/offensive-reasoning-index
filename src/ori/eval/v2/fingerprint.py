@@ -13,7 +13,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
-CERTIFIER_VERSION = "ori-live-certifier-v23"
+CERTIFIER_VERSION = "ori-live-certifier-v24"
 
 
 def _json_value(value: Any) -> Any:

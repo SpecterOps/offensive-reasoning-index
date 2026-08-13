@@ -1204,7 +1204,8 @@ development boundaries and must not be executed or resumed.
   later PR-preparation task.
 - [x] Record the final V28 result in both vaults.
 
-V28 is the only current executable complex boundary. It binds:
+At the V28 completion point, that was the only executable complex boundary. It
+bound:
 
 - compiler `ori-claim-compiler-v2.10.0`;
 - direct result contract `ori-direct-result-contract-v13`;
@@ -1285,3 +1286,140 @@ externally pending.
   operator-authorized validation campaign is recorded in the incident section.
 - [x] Treat reconciliation and final PR-diff verification as post-goal
   integration work after the containment PR merges.
+
+## Seven-model high-effort campaign audit and V29 closure
+
+The operator-authorized V28 campaign on 2026-08-11 was the first broad run
+across GPT-5.6 Sol, Terra, Luna, Daybreak Blue, Daybreak Red, Waluigi, and
+GPT-5.5 at one explicit `high` reasoning effort. It produced useful diagnostic
+evidence, but it is not publishable and must not be resumed under V29. The run
+checkpointed 407 of 812 scheduled samples before external termination:
+
+```text
+completion = 407 / 812 = 50.12%
+old schedule = 7 models * (46 direct + 70 MCP) = 812 samples
+```
+
+The direct track completed all 322 samples and preserved the graph exactly.
+Its observed 246/322 correct result (76.40%) contained both genuine model
+errors and benchmark-induced false negatives. The audit separated them before
+changing code:
+
+- 14 contextual-path answers returned the requested path and supporting
+  relationship, but BloodHound omitted a separately projected relationship's
+  non-path endpoint unless that node was also returned. The public contract had
+  never required that endpoint projection, so these were benchmark false
+  negatives.
+- two bounded-negative answers used the standard zero-preserving
+  `OPTIONAL MATCH p=... RETURN count(p)` form. BloodHound returned zero, but the
+  proof parser recognized only `MATCH p=`. These were benchmark false
+  negatives.
+- one Terra response returned relationships without the required path and with
+  unresolved internal endpoints. That is model-attributable invalid output,
+  not a harness crash.
+- one stale-session answer returned explicitly forbidden decoy edges. It is a
+  gradeable `ROUTE_FORBIDDEN_EDGE`, not generic invalid output.
+- 40 first queries timed out as too complex and 14 token-equivalent retries
+  were then stopped correctly by the deny cache. Every one contained 21 to 45
+  pairwise node-inequality clauses, averaging 27.7, because the public cycle
+  wording encouraged an O(n-squared) query construction. The same bounded
+  representative route executed immediately when those inequalities were
+  removed; the returned witness still remained subject to comparator cycle
+  rejection.
+
+The maximum diagnostic correction from the 14 contextual and two negative
+false negatives is:
+
+```text
+observed direct correctness = 246 / 322 = 76.40%
+diagnostic ceiling          = 262 / 322 = 81.37%
+maximum false-negative gap  = 16 / 322  = 4.97 percentage points
+cycle-induced failures      = 54 / 322  = 16.77% of direct samples
+```
+
+The 262/322 value is not a published rescore. The models saw V28 wording, and
+several failures occurred before a valid graph witness existed. Only a fresh
+V29-versus-V29 campaign can produce official scores.
+
+The partial MCP run exposed three additional correctness boundaries:
+
+- a complete 500-identity receipt could be discarded when a schema-only retry
+  returned an empty list;
+- decision claims could legitimately bind their public subjects to interior
+  nodes on one returned path, while route claims still require directional
+  endpoints; and
+- final edge/property assertions needed mechanical binding to the latest
+  complete claim-relevant BloodHound receipt.
+
+The run also scheduled multiple task IDs with identical solver-visible
+semantics. V29 keeps every compiled task and certification proof but releases
+one deterministic representative per public-semantic equivalence class. It
+fails closed when equivalent public tasks have different sealed scorer
+outcomes. The resulting schedule math is:
+
+```text
+direct release: 46 compiled -> 42 scheduled (4 fewer, 8.70%)
+MCP release:    70 compiled -> 55 scheduled (15 fewer, 21.43%)
+seven models:   812 old -> 679 new samples (133 fewer, 16.38%)
+```
+
+This is deduplication, not task deletion: every alias remains compiled,
+oracle-bound, fixture-certified, and listed in `equivalent_task_ids`.
+
+### V29 implementation checklist
+
+- [x] Require both endpoint node variables for separately returned supporting
+  relationships and classify unresolved BloodHound internal endpoints as
+  model-attributable invalid output.
+- [x] Partition one unique acyclic public source-to-target route structurally,
+  pass connected supplemental evidence to the comparator, and preserve
+  gradeable forbidden-edge verdicts.
+- [x] Accept an exact zero-preserving `OPTIONAL MATCH` absence proof only after
+  both public singleton endpoints have been bound; reject unbound,
+  contradictory, or extra-filtered variants.
+- [x] Make cycle simplicity a comparator responsibility and tell models not to
+  generate quadratic pairwise inequality filters; continue rejecting an
+  actually cyclic returned witness.
+- [x] Materialize complete MCP set answers from mechanically proven receipt
+  pages, including a complete 500-identity page followed by an empty
+  schema-only retry.
+- [x] Permit decision-role selectors anywhere on the one returned path while
+  preserving route endpoint direction and rejecting detached selectors.
+- [x] Bind MCP final edges and public properties to the latest complete
+  claim-relevant receipt and reject unsupported assertions as `OUTPUT_INVALID`.
+- [x] Retain all 46 direct and 70 MCP compiled/certified tasks while releasing
+  42 and 55 unique public-semantic representatives.
+- [x] Reject public-semantic equivalence classes whose sealed scorer outcomes
+  disagree.
+- [x] Derive campaign reports and denominators from the candidate release, not
+  the larger certification inventory.
+- [x] Add an exclusive campaign-output lock, unique atomic temporary files,
+  file and directory `fsync`, a fingerprinted lifecycle receipt, durable signal
+  and cancellation state, and per-track report/completion publication.
+- [x] Preserve interrupted provider attempts without charging the original
+  infrastructure-retry budget on resume.
+- [x] Fix archive graph construction from repeated identity-set rebuilding to
+  one linear-time identity set per graph.
+- [x] Fail readiness on the stale Bloodhound-MCP revision, audit the local
+  `009c88f` to `92a37dd` delta, advance the capability profile to
+  `ori-mcp-92a37dd-bhce-9.1-cypher-v7`, and recertify instead of bypassing the
+  pin. The delta adds bounded credential preflight and byte-upload tools while
+  preserving the certified read-only Cypher callable.
+- [x] Pass the combined direct/MCP/campaign regression suite.
+- [x] Pass the complete repository suite (759 tests), Ruff, diff validation,
+  and independent review on the final V29 diff.
+- [x] Recompile and offline-certify complex seed 4401 under V29.
+- [x] Re-run read-only live certification against the unchanged controlled
+  complex graph and prove all three graph gates.
+- [x] Create a fresh seven-model `high`-effort V29 config and pass no-model
+  readiness without provider calls.
+- [x] Pass the final publishable-source secret scan: Gitleaks scanned 3.31 MB
+  with zero findings; TruffleHog 3.96.0 scanned 417 chunks / 4,067,728 bytes
+  with zero verified or unverified secrets.
+- [x] Record final V29 fingerprints and evidence in the README, design
+  rationale, certification evidence, AgentVault, and Personal Vault.
+
+V28 artifacts and checkpoints remain immutable incident evidence. Every
+compiler, result-contract, finalization, certifier, runner, catalog, and
+readiness fingerprint changed, so V29 uses a new artifact root and a new
+campaign output directory.

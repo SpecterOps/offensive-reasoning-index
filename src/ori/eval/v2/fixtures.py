@@ -311,7 +311,12 @@ def _perfect_payload(
     return payload
 
 
-def _known_extra_id(task: CompiledTask, snapshot: GraphSnapshot) -> str:
+def _known_extra_ids(
+    task: CompiledTask,
+    snapshot: GraphSnapshot,
+    *,
+    count: int,
+) -> tuple[str, ...]:
     used = (
         {entity.object_id for entity in task.oracle.expected_entities}
         | {
@@ -328,10 +333,20 @@ def _known_extra_id(task: CompiledTask, snapshot: GraphSnapshot) -> str:
             for entity_id in witness.checked_entity_ids
         }
     )
-    for entity in snapshot.entities:
-        if entity.object_id not in used:
-            return entity.object_id
-    raise ValueError("graph contains no extra entity for adversarial fixture")
+    extras = tuple(
+        entity.object_id
+        for entity in snapshot.entities
+        if entity.object_id not in used
+    )[:count]
+    if len(extras) != count:
+        raise ValueError(
+            f"graph contains fewer than {count} extra entities for adversarial fixture"
+        )
+    return extras
+
+
+def _known_extra_id(task: CompiledTask, snapshot: GraphSnapshot) -> str:
+    return _known_extra_ids(task, snapshot, count=1)[0]
 
 
 def _wrong_payload(task: CompiledTask, snapshot: GraphSnapshot) -> dict[str, Any]:
@@ -637,12 +652,12 @@ def build_fixture_manifest(
         )
 
         disconnected = _perfect_payload(task, snapshot)
-        extra_id = _known_extra_id(task, snapshot)
+        extra_source, extra_target = _known_extra_ids(task, snapshot, count=2)
         disconnected["edges"].append(
             {
-                "source_id": extra_id,
+                "source_id": extra_source,
                 "relationship": "MemberOf",
-                "target_id": task.oracle.target_id,
+                "target_id": extra_target,
             }
         )
         cases.append(
@@ -686,7 +701,7 @@ def build_fixture_manifest(
         )
 
         source_mismatch = _perfect_payload(task, snapshot)
-        source_mismatch["edges"][0]["source_id"] = extra_id
+        source_mismatch["edges"][0]["source_id"] = extra_source
         cases.append(
             _case_from_payload(
                 name="source_mismatch",
