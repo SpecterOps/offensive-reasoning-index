@@ -337,7 +337,14 @@ def _endpoint_token(
         if value is None:
             continue
         token = str(value)
-        return node_keys.get(token, token)
+        identity = node_keys.get(token)
+        if identity is None:
+            raise DirectAdapterError(
+                "BloodHound edge endpoint is not present in the returned node "
+                "projection; return both endpoint nodes for every relationship "
+                f"(missing endpoint {token!r})"
+            )
+        return identity
     raise DirectAdapterError(f"BloodHound edge has no endpoint field {names}: {edge!r}")
 
 
@@ -361,9 +368,13 @@ def _project_edges(
     if isinstance(raw_nodes, Mapping):
         for key, node in raw_nodes.items():
             if isinstance(node, Mapping):
-                node_keys[str(key)] = _node_identity(node)
+                identity = _node_identity(node)
+                node_keys[str(key)] = identity
+                node_keys.setdefault(identity, identity)
     for index, node in enumerate(nodes):
-        node_keys.setdefault(str(index), _node_identity(node))
+        identity = _node_identity(node)
+        node_keys.setdefault(str(index), identity)
+        node_keys.setdefault(identity, identity)
 
     _, edges = _raw_graph(raw)
     projected: list[dict[str, Any]] = []
@@ -612,6 +623,14 @@ def _edge_key(edge: Mapping[str, Any] | EdgeWitness) -> tuple[str, str, str]:
     )
 
 
+def _projected_traversal_endpoints(edge: Mapping[str, Any]) -> tuple[str, str]:
+    source = str(edge["source_id"])
+    target = str(edge["target_id"])
+    if str(edge.get("direction") or "outbound").casefold() == "inbound":
+        return target, source
+    return source, target
+
+
 def _partition_and_order_edges(
     projected_edges: Sequence[dict[str, Any]],
     oracle: OracleBundle,
@@ -620,38 +639,59 @@ def _partition_and_order_edges(
     supporting = tuple(
         edge for edge in projected_edges if _edge_key(edge) in context_keys
     )
-    route = tuple(
+    route_candidates = tuple(
         edge for edge in projected_edges if _edge_key(edge) not in context_keys
     )
-    if not route:
+    if not route_candidates:
         return (), supporting
     if all(
-        route[index]["target_id"] == route[index + 1]["source_id"]
-        for index in range(len(route) - 1)
+        _projected_traversal_endpoints(route_candidates[index])[1]
+        == _projected_traversal_endpoints(route_candidates[index + 1])[0]
+        for index in range(len(route_candidates) - 1)
     ):
-        return route, supporting
+        return route_candidates, supporting
 
     if oracle.source_id is None:
         raise DirectAdapterError("unordered route has no sealed source binding")
-    outgoing: dict[str, list[dict[str, Any]]] = {}
-    for edge in route:
-        outgoing.setdefault(str(edge["source_id"]), []).append(edge)
-    ordered: list[dict[str, Any]] = []
-    current = oracle.source_id
-    unused = list(route)
-    while unused:
-        choices = [edge for edge in outgoing.get(current, ()) if edge in unused]
-        if len(choices) != 1:
-            raise DirectAdapterError(
-                "BloodHound route edges are unordered or branch ambiguously"
-            )
-        selected = choices[0]
-        ordered.append(selected)
-        unused.remove(selected)
-        current = str(selected["target_id"])
-    if oracle.target_id is not None and current != oracle.target_id:
-        raise DirectAdapterError("ordered BloodHound route ends at the wrong target")
-    return tuple(ordered), supporting
+    if oracle.target_id is None:
+        raise DirectAdapterError("unordered route has no sealed target binding")
+
+    # A returned path plus separately projected context is flattened by the
+    # BloodHound API into one edge collection. Recover the one source-to-target
+    # path structurally, leaving other returned edges for comparator validation
+    # as supporting evidence. This never uses query text or a reference route.
+    outgoing: dict[str, list[tuple[int, dict[str, Any]]]] = {}
+    for index, edge in enumerate(route_candidates):
+        start, _end = _projected_traversal_endpoints(edge)
+        outgoing.setdefault(start, []).append((index, edge))
+
+    paths: list[tuple[int, ...]] = []
+
+    def visit(current: str, used_edges: tuple[int, ...], seen_nodes: frozenset[str]) -> None:
+        if len(paths) > 1:
+            return
+        if current == oracle.target_id:
+            paths.append(used_edges)
+            return
+        for index, edge in outgoing.get(current, ()):
+            _start, target = _projected_traversal_endpoints(edge)
+            if index in used_edges or target in seen_nodes:
+                continue
+            visit(target, (*used_edges, index), seen_nodes | {target})
+
+    visit(oracle.source_id, (), frozenset({oracle.source_id}))
+    if len(paths) != 1:
+        raise DirectAdapterError(
+            "BloodHound route edges do not contain one unambiguous source-to-target path"
+        )
+    selected_indices = set(paths[0])
+    route = tuple(route_candidates[index] for index in paths[0])
+    extra_supporting = tuple(
+        edge
+        for index, edge in enumerate(route_candidates)
+        if index not in selected_indices
+    )
+    return route, (*supporting, *extra_supporting)
 
 
 def project_direct_evidence(

@@ -28,6 +28,7 @@ from ori.eval.v2.profiles import (
     build_direct_capability_profile,
     validate_direct_capability_profile,
 )
+from ori.eval.v2.query_contract import negative_query_scope_mode
 from ori.eval.v2.runtime import sample_from_direct_outcome
 from ori.eval.v2.schema import (
     DIRECT_QUERY_POLICY_VERSION,
@@ -314,6 +315,102 @@ def test_direct_adapter_executes_once_and_scores_returned_edge_evidence() -> Non
     assert outcome.evidence.edges == (EDGE,)
     assert outcome.verdict is not None
     assert outcome.verdict.status is VerdictStatus.CORRECT
+
+
+def test_direct_missing_returned_edge_endpoint_is_model_output_invalid() -> None:
+    raw = _raw_route()
+    raw["data"]["edges"][0]["target"] = "internal-node-not-returned"
+    outcome = asyncio.run(
+        execute_direct_v2(
+            FakeCoordinator(
+                CypherResult(
+                    success=True,
+                    raw=raw,
+                    status_code=200,
+                    query_executed=True,
+                    execution_attempts=1,
+                    safety_policy_version=DIRECT_QUERY_POLICY_VERSION,
+                )
+            ),
+            query="MATCH p=(a)-[:MemberOf]->(b) RETURN p LIMIT 1",
+            task=TASK,
+            oracle=ORACLE,
+            resolver=RESOLVER,
+        )
+    )
+    sample = sample_from_direct_outcome(TASK, ORACLE, outcome)
+
+    assert outcome.harness_error is False
+    assert outcome.evidence is None
+    assert sample.outcome is SampleOutcomeCode.OUTPUT_INVALID
+    assert "endpoint is not present" in (sample.detail or "")
+
+
+@pytest.mark.parametrize("supporting_edge_count", (1, 2))
+def test_direct_separately_returned_supporting_edges_require_all_endpoint_nodes(
+    supporting_edge_count: int,
+) -> None:
+    raw = _raw_route()
+    raw["data"]["edges"].extend(
+        {
+            "source": "0",
+            "target": f"omitted-supporting-node-{index}",
+            "kind": "AdminTo",
+        }
+        for index in range(supporting_edge_count)
+    )
+    outcome = asyncio.run(
+        execute_direct_v2(
+            FakeCoordinator(CypherResult(success=True, raw=raw)),
+            query="MATCH p=(a)-[:MemberOf]->(b) RETURN p, r LIMIT 1",
+            task=TASK,
+            oracle=ORACLE,
+            resolver=RESOLVER,
+        )
+    )
+    sample = sample_from_direct_outcome(TASK, ORACLE, outcome)
+
+    assert outcome.harness_error is False
+    assert sample.outcome is SampleOutcomeCode.OUTPUT_INVALID
+    assert "endpoint is not present" in (sample.detail or "")
+
+
+def test_direct_route_separates_connected_non_path_edges_for_comparator() -> None:
+    extra_edge = EdgeWitness(
+        source_id=ALICE.object_id,
+        relationship="AdminTo",
+        target_id=BOB.object_id,
+    )
+    raw = _raw_route()
+    raw["data"]["nodes"]["2"] = {
+        "objectId": BOB.object_id,
+        "label": BOB.canonical_name,
+        "kind": BOB.object_type,
+        "properties": {"name": BOB.canonical_name},
+    }
+    raw["data"]["edges"].append(
+        {"source": "0", "target": "2", "kind": "AdminTo"}
+    )
+    oracle = ORACLE.model_copy(
+        update={"graph_edge_registry": (EDGE, extra_edge)}
+    )
+
+    evidence = project_direct_evidence(
+        CypherResult(success=True, raw=raw),
+        task=TASK,
+        oracle=oracle,
+        resolver=IdentityResolver((ALICE, TARGET, BOB)),
+    )
+
+    assert evidence.edges == (EDGE,)
+    assert evidence.supporting_edges == (extra_edge,)
+
+    forbidden_oracle = oracle.model_copy(
+        update={"forbidden_edges": (extra_edge,)}
+    )
+    verdict = compare(POLICY, forbidden_oracle, evidence)
+    assert verdict.status is VerdictStatus.INCORRECT
+    assert verdict.reason == "ROUTE_FORBIDDEN_EDGE"
 
 
 def test_direct_route_projects_required_property_predicate_by_property_name() -> None:
@@ -641,6 +738,116 @@ def test_direct_absence_rejects_unrelated_zero_count_before_execution() -> None:
     assert outcome.verdict is None
 
 
+def test_direct_absence_accepts_exact_optional_match_zero_proof() -> None:
+    claim = AbsenceClaim(
+        kind="absence",
+        claim_id="claim:absence-optional",
+        source=EntitySelector(role="source", object_type="User"),
+        target=EntitySelector(role="target", object_type="Group"),
+        relationships=("MemberOf",),
+        reason_codes=(NegativeReasonCode.OBJECTIVE_UNREACHABLE,),
+        max_hops=1,
+        semantics=RelationshipSemantics.DIRECT,
+        population_scope=PopulationScope.BENCHMARK_NAMESPACE,
+    )
+    policy = BoundedNegativePolicy(kind="bounded_negative")
+    binding = TASK.binding.model_copy(
+        update={"bounds": TASK.binding.bounds.model_copy(update={"max_hops": 1})}
+    )
+    task = TASK.model_copy(
+        update={
+            "task_id": "simple.direct.absence-optional@2",
+            "claim_kind": "absence",
+            "answer_policy": policy,
+            "binding": binding,
+            "acceptance_spec": compile_acceptance_spec(claim, policy, binding),
+            "input_entities": (
+                ALICE.model_copy(update={"role": "source"}),
+                TARGET.model_copy(update={"role": "target"}),
+            ),
+        }
+    )
+    query = (
+        "MATCH (s:User {objectid:'USER-A'}), "
+        "(t:Group {objectid:'GROUP-B'}) "
+        "OPTIONAL MATCH p=(s)-[:MemberOf*1..1]->(t) "
+        "RETURN count(p) AS count"
+    )
+    oracle = ORACLE.model_copy(
+        update={
+            "task_id": task.task_id,
+            "claim": claim,
+            "route_variants": (),
+            "required_context": (),
+            "required_properties": (),
+            "negative_witnesses": (
+                NegativeWitness(
+                    reason_code=NegativeReasonCode.OBJECTIVE_UNREACHABLE,
+                    checked_entity_ids=(ALICE.object_id, TARGET.object_id),
+                    max_hops=1,
+                    witness_absent=True,
+                ),
+            ),
+        }
+    )
+    coordinator = FakeCoordinator(
+        CypherResult(
+            success=True,
+            raw={
+                "data": {
+                    "nodes": {},
+                    "edges": [],
+                    "literals": [{"key": "count", "value": 0}],
+                }
+            },
+        )
+    )
+
+    assert negative_query_scope_mode(task, query) == "exact"
+    outcome = asyncio.run(
+        execute_direct_v2(
+            coordinator,
+            query=query,
+            task=task,
+            oracle=oracle,
+            resolver=RESOLVER,
+            answer_payload={
+                "path_status": "no_path",
+                "negative_reason_codes": ["objective_unreachable"],
+            },
+        )
+    )
+    assert coordinator.queries == [query]
+    assert outcome.verdict is not None
+    assert outcome.verdict.status is VerdictStatus.CORRECT
+    assert (
+        negative_query_scope_mode(
+            task,
+            "OPTIONAL MATCH p=(s {objectid:'USER-A'})-[:MemberOf*1..1]->"
+            "(t {objectid:'GROUP-B'}) RETURN count(p) AS count",
+        )
+        is None
+    )
+    assert (
+        negative_query_scope_mode(
+            task,
+            "MATCH (s {objectid:'USER-A'}), (t {objectid:'GROUP-B'}) "
+            "OPTIONAL MATCH p=(s {objectid:'OTHER'})-[:MemberOf*1..1]->(t) "
+            "RETURN count(p) AS count",
+        )
+        is None
+    )
+    assert (
+        negative_query_scope_mode(
+            task,
+            "MATCH (s {objectid:'USER-A'}), (t {objectid:'GROUP-B'}) "
+            "OPTIONAL MATCH p=(s)-[r:MemberOf*1..1]->(t) "
+            "WHERE r.enabled = true RETURN count(p) AS count",
+        )
+        is None
+    )
+
+
 def test_direct_broader_nonzero_absence_is_proof_insufficient() -> None:
     claim = AbsenceClaim(
         kind="absence",
@@ -877,7 +1084,7 @@ def test_direct_capability_profile_binds_result_contract() -> None:
     assert (
         profile.direct_result_contract_version
         == DIRECT_RESULT_CONTRACT_VERSION
-        == "ori-direct-result-contract-v13"
+        == "ori-direct-result-contract-v14"
     )
     assert profile.profile_fingerprint == DIRECT_CAPABILITY_PROFILE_FINGERPRINT
     assert profile.profile_fingerprint == canonical_sha256(

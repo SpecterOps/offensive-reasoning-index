@@ -1,9 +1,9 @@
 # ORI V2 design rationale
 
-Status: current design explanation for the V28 development boundary
+Status: current design explanation for the V29 development boundary
 Audience: operators, benchmark authors, reviewers, and anyone who needs to
 explain why an ORI score is trustworthy
-Last updated: 2026-07-31
+Last updated: 2026-08-12
 
 This guide starts with a non-technical explanation and progressively exposes
 the architecture, decisions, evidence, and mathematics. Read through
@@ -55,12 +55,12 @@ finalization. Those results were useful development evidence, but they could
 not support a defensible model ranking.
 
 V2 replaces those implicit assumptions with compiled contracts and executable
-certification. The current V28 complex catalog contains 46 direct candidates
-and 70 MCP candidates. It is offline- and live-certified against complex seed
-4401. The simple catalog contains 20 direct and 40 MCP candidates and is
-offline-certified; its current V28 live certification still requires an
-operator-approved graph swap and restoration. V28 has not launched a new paid
-model campaign.
+certification. V29 retains the complete 46-task direct and 70-task MCP
+certification inventories, then schedules one representative for each unique
+solver-visible claim: 42 direct and 55 MCP. Complex seed 4401 is the controlled
+live graph. The V28 seven-model campaign is preserved as diagnostic incident
+evidence; its partial results are not publishable and cannot be resumed under
+the V29 fingerprints.
 
 ### A presentation-ready talk track
 
@@ -364,7 +364,7 @@ route_overlap = |expected_edges intersection actual_edges|
 It explains a failure; it does not replace the binary route policy.
 
 `ClosedRouteVariants` is implemented in the schema and comparator but is not
-emitted by the current V28 compiler. A finite route list containing sealed
+emitted by the current V29 compiler. A finite route list containing sealed
 identity alternatives cannot become a hidden acceptance rule; compilation
 blocks until those alternatives can be expressed through a solver-visible
 contract without leaking the answer.
@@ -666,7 +666,7 @@ Each semantic change invalidated the previous certification and produced a
 fresh artifact boundary. V21 through V27 were intermediate review boundaries
 and are intentionally stale.
 
-### V28: current scorer and communication boundary
+### V28: historical scorer and communication boundary
 
 V28 closes the current prompt/scorer review: one authoritative prompt, one
 question, public material acceptance clauses, exact hop and case-sensitive
@@ -680,6 +680,65 @@ direct and 420 MCP offline fixtures, then all three live graph gates with 46/46
 direct and 70/70 MCP candidates. Simple seed 1234 has 20/20 direct and 40/40 MCP
 offline-certified candidates; its V28 live gate remains pending the explicitly
 approved graph replacement and restoration.
+
+### V29: evidence binding, query-shape, catalog, and durability closure
+
+The first seven-model high-effort V28 run made one distinction especially
+important: strict grading is trustworthy only when the public instructions,
+BloodHound's real result shape, and the projector agree. A strict scorer cannot
+repair an undeclared return-shape requirement after the model has answered.
+
+Four V29 changes follow directly from that principle:
+
+1. A direct query that returns a supporting relationship must also return both
+   endpoint node variables. BloodHound can otherwise omit the non-path node,
+   leaving an internal numeric endpoint that no public identity resolver can
+   safely recover. The prompt now says this explicitly; the projector rejects
+   the omission as model-attributable invalid output instead of crashing.
+2. Bounded negative tasks accept the standard zero-preserving
+   `OPTIONAL MATCH p=... RETURN count(p)` form only after exact public source and
+   target singletons are bound. This accepts a valid zero proof without opening
+   the door to unbound, contradictory, or silently filtered absence claims.
+3. Query construction no longer asks the model to prove path simplicity with
+   every pairwise node inequality. That produces O(n-squared) predicates:
+   `n(n-1)/2` comparisons for `n` nodes. The comparator already observes the
+   returned ordered witness and rejects an actual repeated-node cycle, so the
+   public contract tells the model to return a bounded witness without those
+   planner-hostile filters.
+4. MCP graph facts are bound to complete claim-relevant receipts. Complete set
+   pages can materialize the answer directly, while final edges and properties
+   that do not appear in the authoritative receipt fail closed.
+
+V29 also separates the *certification inventory* from the *scoring unit*. Two
+task IDs that present the same public question, acceptance rules, schema,
+execution bounds, and track binding are not two independent trials. The public
+semantic fingerprint groups them, the lexicographically first ID is scheduled,
+and `equivalent_task_ids` preserves the complete class. Before grouping, ORI
+requires the sealed scorer outcomes to be equal; disagreement blocks release.
+
+For complex seed 4401:
+
+```text
+direct: 46 certified tasks / 42 unique public semantics = 91.30%
+MCP:    70 certified tasks / 55 unique public semantics = 78.57%
+saved seven-model attempts = 7 * ((46 + 70) - (42 + 55)) = 133
+relative campaign reduction = 133 / 812 = 16.38%
+```
+
+Finally, an externally terminated run proved that task-level atomic state was
+not enough for operator confidence. V29 adds one exclusive output-directory
+lock, file and directory `fsync`, a fingerprinted campaign lifecycle receipt,
+durable interruption state, and per-track report publication after each track's
+post-graph gate. An interrupted attempt remains auditable but does not consume
+the next process's original infrastructure-retry allowance.
+
+No-model readiness then found that the local Bloodhound-MCP checkout had moved
+from `009c88f` to `92a37dd`. V29 did not relax the revision check. Review showed
+that the newer revision adds startup credential preflight and byte-upload tool
+variants while preserving the read-only Cypher callable. ORI advanced the
+capability profile to `ori-mcp-92a37dd-bhce-9.1-cypher-v7` and repeated compile
+and live certification so the larger callable/startup surface is bound
+explicitly.
 
 ## Certification and adversarial fixtures
 
@@ -764,36 +823,41 @@ defined downstream composite is intentionally introduced.
 
 As of this document's date:
 
-- V28 is the only current executable complex V2 boundary.
-- Complex seed 4401 is offline- and live-certified: 46 direct and 70 MCP
-  candidates.
-- Simple seed 1234 is offline- and live-certified: 20 direct and 40 MCP
-  candidates on graph fingerprint
-  `e964390638310fc94f4b4b3fe4a50a2f3e0006510626af6b12f829f8631549ae`.
+- V29 is the current executable complex V2 boundary.
+- Complex seed 4401 retains 46 direct and 70 MCP certified tasks and schedules
+  42 direct and 55 MCP unique public-semantic representatives.
+- Simple seed 1234's 20-direct/40-MCP V28 proof remains historical. V29 changed
+  compiler, adapter, finalization, certifier, and MCP capability fingerprints,
+  so a future simple V29 run requires the same operator-approved graph swap and
+  fresh live certification.
 - The operator-approved temporary simple upload and three-gate certification
   completed, after which the exact complex seed-4401 archive was restored.
   Complex again passes health, exact node counts, all 30/30 planted paths, and
-  V28 no-model readiness on its original fingerprint.
+  the V29 graph fingerprint.
 - The feature branch still awaits final reconciliation after the direct-query
   containment PR reaches `master`; this is PR integration work, not part of the
   completed benchmark-correctness goal.
-- No paid V28 model campaign has run. Historical V10 results and corrected
-  answer replay remain diagnostic evidence only.
+- The partial paid V28 seven-model campaign is diagnostic incident evidence,
+  not a publishable ranking. It cannot be resumed under V29.
 - The later Task Selector Suite and final official 100-task selection per track
   are separate future work.
 
 The exact current complex boundary is:
 
-| Boundary | V28 value |
+| Boundary | V29 value |
 |---|---|
-| Compiler | `ori-claim-compiler-v2.10.0` |
+| Compiler | `ori-claim-compiler-v2.11.0` |
 | Comparator | `ori-v2-comparator-8` |
-| Direct result contract | `ori-direct-result-contract-v13` |
-| MCP result contract | `ori-mcp-result-contract-v21` |
-| MCP evidence/finalization | `ori-mcp-evidence-v21` |
-| Live certifier | `ori-live-certifier-v23` |
+| Direct result contract | `ori-direct-result-contract-v14` |
+| MCP result contract | `ori-mcp-result-contract-v22` |
+| MCP evidence/finalization | `ori-mcp-evidence-v22` |
+| MCP capability profile | `ori-mcp-92a37dd-bhce-9.1-cypher-v7` |
+| Campaign runner | `ori-v2-model-campaign-v12` |
+| Live certifier | `ori-live-certifier-v24` |
 | Complex graph fingerprint | `fb0b6785e524d40abcc9033ea2c7887eaa88e13bb6cb1f329636a4ce4b74b1c4` |
-| Readiness config | `results/v2/complex-seed-4401/models-v2-benchmark-correctness-v28.yaml` |
+| Certified/scheduled direct | 46 / 42 |
+| Certified/scheduled MCP | 70 / 55 |
+| Readiness config | `results/v2/complex-seed-4401/models-v2-seven-models-high-v29-2026-08-12.yaml` |
 
 These limits are part of the result, not footnotes to hide. A trustworthy
 benchmark says exactly what has and has not been proven.

@@ -28,7 +28,7 @@ from ori.eval.mcp_runtime import (
     _run_ollama_mcp_loop,
     _run_openai_compat_mcp_loop,
 )
-from ori.relationships import relationship_contract
+from ori.relationships import canonical_relationship_kind, relationship_contract
 
 from .compiler import DIRECT_RESULT_CONTRACT_VERSION
 from .direct_adapter import DirectV2Outcome, _literal_node_collections
@@ -38,6 +38,7 @@ from .evidence import (
     validate_and_normalize_evidence,
 )
 from .fingerprint import canonical_sha256
+from .graph import entity_property_fact_key
 from .identity import IdentityResolver
 from .mcp import (
     SCHEMA_ONLY_RETRY_INSTRUCTION,
@@ -75,7 +76,7 @@ class V2ModelRuntimeError(ValueError):
     """Raised when a model-facing v2 contract is mixed, stale, or unsupported."""
 
 
-MCP_RESULT_CONTRACT_VERSION = "ori-mcp-result-contract-v21"
+MCP_RESULT_CONTRACT_VERSION = "ori-mcp-result-contract-v22"
 QuerySelector = tuple[Literal["objectid", "name"], str]
 
 
@@ -516,8 +517,10 @@ def _direct_query_result_contract(task: TaskBundle) -> dict[str, Any]:
                 "acceptance_spec.target_role over the complete public hop bound, "
                 "using either the exact allowed outbound mechanisms or a wildcard/"
                 "undirected stronger zero proof. Use only exact public endpoint "
-                "selectors and no other filters. Return exactly one non-negative "
-                "scalar AS count; the bounded-negative route count must be zero."
+                "selectors and no other filters. Bind those exact endpoints first, "
+                "then use OPTIONAL MATCH for the named path so an absent path still "
+                "returns a scalar row. Return exactly one non-negative scalar AS "
+                "count; the bounded-negative route count must be zero."
                 if task.claim_kind == "absence"
                 else "Return exactly one non-negative scalar AS count."
             ),
@@ -528,7 +531,12 @@ def _direct_query_result_contract(task: TaskBundle) -> dict[str, Any]:
                 "Return an actual BloodHound path variable, for example "
                 "RETURN p LIMIT 1. The path value itself preserves ordered edges; "
                 "route tasks do not require globally sorting Path values. Return "
-                "required supporting relationship variables separately; never "
+                "required supporting relationship variables separately and also "
+                "return both endpoint node variables for every separately returned "
+                "relationship; BloodHound otherwise omits endpoints needed to "
+                "interpret that edge. Return a bounded path witness and let ORI "
+                "validate that it is acyclic; do not add quadratic pairwise node-"
+                "inequality predicates merely to prove path simplicity. Never "
                 "construct JSON in Cypher."
             ),
             "recursive_limit_position": "after the final RETURN projection",
@@ -551,8 +559,11 @@ def direct_system_prompt(task: TaskBundle) -> str:
         "graph evidence itself. "
         "Use RETURN p for path queries so BloodHound returns ordered nodes and edges. "
         "That path value already preserves edge order; do not globally sort Path "
-        "values or call toString() on a Path. BloodHound CySQL also does not support "
-        "reduce(). "
+        "values or call toString() on a Path. Return both endpoint node variables "
+        "with every supporting relationship projected separately. ORI validates "
+        "whether the returned path is acyclic, so do not add quadratic pairwise "
+        "node-inequality filters merely to prove simplicity. BloodHound CySQL also "
+        "does not support reduce(). "
         "For set queries return only the answer nodes, not source or context nodes. "
         "Use exact case-sensitive BloodHound label, relationship, and property "
         "identifiers, and use the public canonical name or objectid in query "
@@ -586,6 +597,18 @@ def _mcp_evidence_result_contract(task: TaskBundle) -> dict[str, Any]:
             "case-sensitive property key. Display aliases are accepted in the final "
             "answer only; they are not alternate live graph property values."
         ),
+        "unsupported_cysql": [
+            "CALL",
+            "UNION",
+            "UNWIND",
+            "CASE",
+            "reduce()",
+            "map literals",
+            "list comprehensions",
+            "labels()",
+            "toString(Path)",
+            "XOR",
+        ],
     }
     if task.claim_kind == "set":
         if bounds.require_total_count:
@@ -617,7 +640,10 @@ def _mcp_evidence_result_contract(task: TaskBundle) -> dict[str, Any]:
                 "Return one row per answer entity using entity.objectid AS object_id "
                 "and optionally entity.name AS name. ORDER BY entity.objectid or an "
                 "alias directly bound to entity.objectid is equivalent. BloodHound "
-                "label, relationship, and property identifiers are case-sensitive."
+                "label, relationship, and property identifiers are case-sensitive. "
+                "Once this complete claim-bound window is proven, ORI mechanically "
+                "materializes the final entities from the tool receipt instead of "
+                "depending on a second model-authored copy of every identity."
             ),
         }
     elif task.claim_kind in {"count", "absence"}:
@@ -627,8 +653,10 @@ def _mcp_evidence_result_contract(task: TaskBundle) -> dict[str, Any]:
                 "acceptance_spec.target_role over the complete public hop bound, "
                 "using either the exact allowed outbound mechanisms or a wildcard/"
                 "undirected stronger zero proof. Use only exact public endpoint "
-                "selectors and no other filters. Return exactly one non-negative "
-                "scalar literal; zero is the bounded negative proof."
+                "selectors and no other filters. Bind those exact endpoints first, "
+                "then use OPTIONAL MATCH for the named path so an absent path still "
+                "returns a scalar row. Return exactly one non-negative scalar "
+                "literal; zero is the bounded negative proof."
                 if task.claim_kind == "absence"
                 else "Use one count-only Cypher query returning exactly one "
                 "non-negative scalar literal."
@@ -640,7 +668,9 @@ def _mcp_evidence_result_contract(task: TaskBundle) -> dict[str, Any]:
                 "Use one bounded claim-relevant Cypher query returning an actual "
                 "ordered BloodHound path with the requested relationship witnesses. "
                 "The Path value preserves edge order; do not sort Path values or call "
-                "toString() on a Path, and do not use reduce()."
+                "toString() on a Path, and do not use reduce(). ORI validates whether "
+                "the returned witness is acyclic, so do not add quadratic pairwise "
+                "node-inequality predicates merely to prove path simplicity."
             )
         }
     return {
@@ -663,8 +693,10 @@ def mcp_system_prompt(task: TaskBundle) -> str:
         "result is not proof; obtain a later independently complete proof before "
         "finalizing. Use exact case-sensitive BloodHound label, relationship, and "
         "property identifiers. Use only the public canonical name or objectid in "
-        "query predicates; display aliases are only for the final answer. Finish with "
-        "only one JSON object matching submission_schema. "
+        "query predicates; display aliases are only for the final answer. "
+        "Do not use CALL, UNION, UNWIND, CASE expressions, reduce(), map literals, "
+        "list comprehensions, labels(), toString(Path), or XOR. "
+        "Finish with only one JSON object matching submission_schema. "
         "Use stable object IDs when available and include ordered edge witnesses for "
         "routes. Do not include commentary or markdown.\n\n" + json.dumps(request, sort_keys=True)
     )
@@ -1657,10 +1689,10 @@ def _is_count_query(query: str) -> bool:
     )
 
 
-def _returned_path_endpoint_nodes(
+def _returned_path_nodes(
     query: str,
-) -> tuple[re.Match[str], re.Match[str], int, int, int] | None:
-    """Return the endpoint node patterns of the path actually returned.
+) -> tuple[tuple[re.Match[str], ...], int, int, int] | None:
+    """Return every node pattern of the path actually returned.
 
     Merely mentioning the public selectors elsewhere in a Cypher statement is
     not a claim-bound proof. This parser deliberately accepts only a named path
@@ -1705,9 +1737,7 @@ def _returned_path_endpoint_nodes(
             continue
         contiguous = [nodes[0]]
         for candidate in nodes[1:]:
-            connector = path_expression[
-                contiguous[-1].end() : candidate.start()
-            ]
+            connector = path_expression[contiguous[-1].end() : candidate.start()]
             if relationship_connector.fullmatch(connector) is None:
                 break
             contiguous.append(candidate)
@@ -1725,9 +1755,7 @@ def _returned_path_endpoint_nodes(
             flags=re.IGNORECASE | re.DOTALL,
         ):
             projected_aliases: set[str] = set()
-            for raw_term in _split_projection_terms(
-                with_projection.group("body")
-            ):
+            for raw_term in _split_projection_terms(with_projection.group("body")):
                 term = re.sub(
                     r"^\s*DISTINCT\s+",
                     "",
@@ -1747,16 +1775,12 @@ def _returned_path_endpoint_nodes(
                 )
                 if alias_match is None:
                     continue
-                source = _strip_cypher_identifier(
-                    alias_match.group("source")
-                )
+                source = _strip_cypher_identifier(alias_match.group("source"))
                 if source not in aliases:
                     continue
                 alias = alias_match.group("alias")
                 projected_aliases.add(
-                    _strip_cypher_identifier(alias)
-                    if alias is not None
-                    else source
+                    _strip_cypher_identifier(alias) if alias is not None else source
                 )
             aliases = projected_aliases
             if not aliases:
@@ -1764,9 +1788,7 @@ def _returned_path_endpoint_nodes(
         if not aliases:
             continue
         returned_path = False
-        for raw_term in _split_projection_terms(
-            return_projection.group("body")
-        ):
+        for raw_term in _split_projection_terms(return_projection.group("body")):
             term = re.sub(
                 r"^\s*DISTINCT\s+",
                 "",
@@ -1783,8 +1805,7 @@ def _returned_path_endpoint_nodes(
             )
             if (
                 return_match is not None
-                and _strip_cypher_identifier(return_match.group("source"))
-                in aliases
+                and _strip_cypher_identifier(return_match.group("source")) in aliases
             ):
                 returned_path = True
                 break
@@ -1792,8 +1813,7 @@ def _returned_path_endpoint_nodes(
             continue
         path_end = assignment.end() + boundary.start()
         return (
-            contiguous[0],
-            contiguous[-1],
+            tuple(contiguous),
             assignment.start(),
             path_end,
             return_projection.start(),
@@ -1892,13 +1912,12 @@ def _query_matches_public_claim(
         if entity is None:
             return False
         selectors = _entity_query_selectors(entity)
-        if not any(_query_has_public_selector(normalized, selector) for selector in selectors):
+        if not any(
+            _query_has_public_selector(normalized, selector) for selector in selectors
+        ):
             return False
         public_selectors.extend(selectors)
-    if (
-        task.claim_kind == "absence"
-        and _negative_query_scope_mode(task, query) is None
-    ):
+    if task.claim_kind == "absence" and _negative_query_scope_mode(task, query) is None:
         return False
     selector_variables = _query_public_selector_variables(
         normalized,
@@ -1969,27 +1988,47 @@ def _query_matches_public_claim(
     if contract.result_kind == "path":
         if len(contract.required_input_roles) != 2:
             return False
-        endpoints = _returned_path_endpoint_nodes(normalized)
-        if endpoints is None:
+        returned_path = _returned_path_nodes(normalized)
+        if returned_path is None:
             return False
+        path_nodes, assignment_start, path_end, return_position = returned_path
         source_role, target_role = contract.required_input_roles
         source = entities_by_role[source_role]
         target = entities_by_role[target_role]
-        if not _path_endpoint_matches_public_role(
-            endpoints[0],
+        if task.claim_kind == "decision":
+            # Decision/supporting-evidence claims may describe a composite
+            # witness whose declared subjects are interior nodes. They still
+            # must both belong to the one named path actually returned; a
+            # selector on a detached MATCH cannot authorize that witness.
+            for entity in (source, target):
+                if not any(
+                    _path_endpoint_matches_public_role(
+                        node,
+                        entity=entity,
+                        query=normalized,
+                        assignment_start=assignment_start,
+                        path_end=path_end,
+                        return_position=return_position,
+                    )
+                    for node in path_nodes
+                ):
+                    return False
+        elif not _path_endpoint_matches_public_role(
+            path_nodes[0],
             entity=source,
             query=normalized,
-            assignment_start=endpoints[2],
-            path_end=endpoints[3],
-            return_position=endpoints[4],
+            assignment_start=assignment_start,
+            path_end=path_end,
+            return_position=return_position,
         ) or not _path_endpoint_matches_public_role(
-            endpoints[1],
+            path_nodes[-1],
             entity=target,
             query=normalized,
-            assignment_start=endpoints[2],
-            path_end=endpoints[3],
-            return_position=endpoints[4],
+            assignment_start=assignment_start,
+            path_end=path_end,
+            return_position=return_position,
         ):
+            # Route claims retain their directional endpoint contract.
             return False
     elif contract.result_kind == "entities" and not companion_count:
         if re.search(r"\breturn\b", normalized, flags=re.IGNORECASE) is None:
@@ -3229,20 +3268,14 @@ def _successful_cypher_identity_ids(payload: Mapping[str, Any]) -> frozenset[str
 
     identities: set[str] = set()
     for node in node_values:
-        if not isinstance(node, Mapping):
-            continue
-        containers = [node]
-        properties = node.get("properties")
-        if isinstance(properties, Mapping):
-            containers.append(properties)
-        for container in containers:
-            for key, value in container.items():
-                if (
-                    str(key).replace("_", "").casefold() == "objectid"
-                    and isinstance(value, str)
-                    and value.strip()
-                ):
-                    identities.add(value.strip())
+        identity = _receipt_node_identity(node)
+        if identity is not None:
+            identities.add(identity)
+    for _key, collection in _literal_node_collections(payload):
+        for node in collection:
+            identity = _receipt_node_identity(node)
+            if identity is not None:
+                identities.add(identity)
     for literal in _scalar_literals(payload):
         key = literal.get("key")
         value = literal.get("value")
@@ -3255,6 +3288,317 @@ def _successful_cypher_identity_ids(payload: Mapping[str, Any]) -> frozenset[str
             identities.add(value.strip())
     return frozenset(identities)
 
+
+def _receipt_node_identity(node: Any) -> str | None:
+    if not isinstance(node, Mapping):
+        return None
+    containers = [node]
+    for property_key in ("properties", "Props", "props"):
+        properties = node.get(property_key)
+        if isinstance(properties, Mapping):
+            containers.append(properties)
+    for container in containers:
+        for key, value in container.items():
+            if (
+                str(key).replace("_", "").casefold() in {"objectid", "objectidentifier"}
+                and isinstance(value, str)
+                and value.strip()
+            ):
+                return value.strip()
+    return None
+
+
+def _successful_cypher_graph(
+    payload: Mapping[str, Any],
+) -> tuple[dict[str, Mapping[str, Any]], tuple[Mapping[str, Any], ...]]:
+    """Return the pinned node map and edge rows from one successful receipt."""
+
+    current: Any = payload
+    for _depth in range(4):
+        if not isinstance(current, Mapping):
+            break
+        raw_nodes = current.get("nodes")
+        raw_edges = current.get("edges")
+        if isinstance(raw_nodes, (Mapping, list)) and isinstance(raw_edges, list):
+            if isinstance(raw_nodes, Mapping):
+                nodes = {
+                    str(key): value
+                    for key, value in raw_nodes.items()
+                    if isinstance(value, Mapping)
+                }
+            else:
+                nodes = {
+                    str(index): value
+                    for index, value in enumerate(raw_nodes)
+                    if isinstance(value, Mapping)
+                }
+            return nodes, tuple(edge for edge in raw_edges if isinstance(edge, Mapping))
+        current = current.get("data")
+    return {}, ()
+
+
+def _receipt_graph_facts(
+    task: TaskBundle,
+    payload: Mapping[str, Any],
+) -> tuple[
+    tuple[str, ...],
+    frozenset[tuple[str, str, str]],
+    frozenset[str],
+]:
+    """Project only public-answer graph facts mechanically present in a receipt."""
+
+    nodes, edges = _successful_cypher_graph(payload)
+    identities_by_key = {
+        key: identity
+        for key, node in nodes.items()
+        if (identity := _receipt_node_identity(node)) is not None
+    }
+    identities = tuple(dict.fromkeys(identities_by_key.values()))
+    identity_lookup = {
+        **identities_by_key,
+        **{identity: identity for identity in identities},
+    }
+    edge_facts: set[tuple[str, str, str]] = set()
+    for edge in edges:
+        source = next(
+            (
+                identity_lookup.get(str(edge[key]))
+                for key in (
+                    "source_id",
+                    "source",
+                    "start_id",
+                    "start",
+                    "sourceNodeId",
+                    "source_node_id",
+                )
+                if edge.get(key) is not None
+            ),
+            None,
+        )
+        target = next(
+            (
+                identity_lookup.get(str(edge[key]))
+                for key in (
+                    "target_id",
+                    "target",
+                    "end_id",
+                    "end",
+                    "targetNodeId",
+                    "target_node_id",
+                )
+                if edge.get(key) is not None
+            ),
+            None,
+        )
+        relationship = next(
+            (
+                str(edge[key]).strip()
+                for key in ("relationship", "kind", "label", "type", "edge", "name")
+                if edge.get(key) is not None and str(edge[key]).strip()
+            ),
+            None,
+        )
+        if source is None or target is None or relationship is None:
+            continue
+        try:
+            relationship = canonical_relationship_kind(relationship)
+        except ValueError:
+            pass
+        edge_facts.add((source.casefold(), relationship, target.casefold()))
+
+    required_property_keys = {
+        predicate.property_name.casefold(): predicate.property_name
+        for predicate in task.acceptance_spec.required_properties
+    }
+    property_facts: set[str] = set()
+    for key, node in nodes.items():
+        identity = identities_by_key.get(key)
+        if identity is None:
+            continue
+        properties = node.get("properties")
+        if not isinstance(properties, Mapping):
+            properties = node.get("Props")
+        if not isinstance(properties, Mapping):
+            properties = node.get("props")
+        if not isinstance(properties, Mapping):
+            properties = node
+        for raw_key, value in properties.items():
+            property_key = required_property_keys.get(str(raw_key).casefold())
+            if property_key is not None:
+                property_facts.add(
+                    entity_property_fact_key(identity, property_key, value)
+                )
+    return identities, frozenset(edge_facts), frozenset(property_facts)
+
+
+def _answer_identity_token(value: Any) -> str | None:
+    if isinstance(value, str):
+        return value
+    if not isinstance(value, Mapping):
+        return None
+    for key in ("object_id", "objectid", "entity_id", "id", "name"):
+        token = value.get(key)
+        if isinstance(token, str) and token.strip():
+            return token.strip()
+    return None
+
+
+def _bind_final_answer_to_receipts(
+    task: TaskBundle,
+    answer: Mapping[str, Any] | None,
+    *,
+    projector: MCPTranscriptProjector,
+    resolver: IdentityResolver,
+) -> Mapping[str, Any] | None:
+    """Bind model JSON facts to the latest complete claim-bound receipt.
+
+    Set identities are projected directly from a mechanically complete page
+    sequence. Witness entities are projected from the receipt, while asserted
+    edges and properties absent from that receipt fail the answer before the
+    shared EvidenceIR/comparator boundary.
+    """
+
+    if answer is None or not projector.finalization_ready:
+        return answer
+    bound = dict(answer)
+    if task.claim_kind == "set":
+        page_ids = (
+            set().union(*projector.page_identity_ids.values())
+            if (projector.page_identity_ids)
+            else set()
+        )
+        row_count = sum(projector.page_counts.values())
+        if row_count == len(page_ids) and row_count > 0:
+            bound["entities"] = sorted(page_ids)
+        elif row_count == 0 and any(
+            event.unlocks_finalization for event in projector.events
+        ):
+            bound["entities"] = []
+        return bound
+
+    # Preserve the existing schema/identity failure taxonomy for witness
+    # answers. Receipt binding is an additional truth boundary, not a repair
+    # mechanism for malformed edge/property shapes or unknown identities.
+    try:
+        Draft202012Validator(task.answer_schema).validate(bound)
+    except ValidationError:
+        return answer
+
+    receipt = next(
+        (
+            item
+            for item in reversed(projector.receipts)
+            if item.event.unlocks_finalization
+            and item.observation.claim_relevant
+            and not item.observation.truncated
+        ),
+        None,
+    )
+    if receipt is None:
+        return bound
+    identities, edge_facts, property_facts = _receipt_graph_facts(
+        task,
+        _tool_payload(receipt.result_text),
+    )
+    schema_properties = task.answer_schema.get("properties", {})
+
+    def resolved(token: Any) -> str | None:
+        raw = _answer_identity_token(token)
+        if raw is None:
+            return None
+        try:
+            return resolver.resolve(raw)
+        except Exception:
+            return None
+
+    claimed_identity_tokens = tuple(
+        token
+        for token in (
+            *(
+                _answer_identity_token(item)
+                for item in bound.get("entities", ())
+                if isinstance(bound.get("entities"), list)
+            ),
+            *(
+                token
+                for field in ("edges", "supporting_edges")
+                for edge in (
+                    bound.get(field, ()) if isinstance(bound.get(field), list) else ()
+                )
+                if isinstance(edge, Mapping)
+                for token in (
+                    _answer_identity_token(edge.get("source_id") or edge.get("source")),
+                    _answer_identity_token(edge.get("target_id") or edge.get("target")),
+                )
+            ),
+            *(
+                _answer_identity_token(fact.get("entity_id") or fact.get("object_id"))
+                for fact in (
+                    bound.get("observed_properties", ())
+                    if isinstance(bound.get("observed_properties"), list)
+                    else ()
+                )
+                if isinstance(fact, Mapping)
+            ),
+        )
+        if token is not None
+    )
+    if any(resolved(token) is None for token in claimed_identity_tokens):
+        return answer
+    if "entities" in schema_properties or "entities" in bound:
+        bound["entities"] = list(identities)
+
+    for field in ("edges", "supporting_edges"):
+        if (field not in schema_properties and field not in bound) or not isinstance(
+            bound.get(field), list
+        ):
+            continue
+        retained: list[Any] = []
+        for edge in bound[field]:
+            if not isinstance(edge, Mapping):
+                continue
+            source = resolved(edge.get("source_id") or edge.get("source"))
+            target = resolved(edge.get("target_id") or edge.get("target"))
+            relationship = (
+                edge.get("relationship") or edge.get("kind") or edge.get("type")
+            )
+            if source is None or target is None or not isinstance(relationship, str):
+                return None
+            try:
+                relationship = canonical_relationship_kind(relationship)
+            except ValueError:
+                relationship = relationship.strip()
+            if (source.casefold(), relationship, target.casefold()) in edge_facts:
+                retained.append(edge)
+            else:
+                return None
+        bound[field] = retained
+
+    if (
+        "observed_properties" in schema_properties or "observed_properties" in bound
+    ) and isinstance(bound.get("observed_properties"), list):
+        retained_properties: list[Any] = []
+        for fact in bound["observed_properties"]:
+            if not isinstance(fact, Mapping):
+                continue
+            entity = resolved(fact.get("entity_id") or fact.get("object_id"))
+            key = fact.get("key") or fact.get("property")
+            if entity is None or not isinstance(key, str):
+                return None
+            try:
+                value_key = entity_property_fact_key(
+                    entity,
+                    key,
+                    fact.get("value"),
+                )
+            except (TypeError, ValueError):
+                return None
+            if value_key in property_facts:
+                retained_properties.append(fact)
+            else:
+                return None
+        bound["observed_properties"] = retained_properties
+    return bound
 
 class MCPTranscriptProjector:
     """Convert live tool outcomes into public-contract-derived evidence events."""
@@ -4139,6 +4483,23 @@ async def run_mcp_model_task_v2(
                 ),
             )
         projector.events = list(diagnostics)
+
+    # Claim-bound BloodHound receipts are authoritative for graph facts. Set
+    # answers can be materialized from complete identity pages so a 500-row
+    # proof does not depend on the model echoing every ID; witness assertions
+    # fail closed when unsupported edges or properties are asserted.
+    final_answer = _bind_final_answer_to_receipts(
+        task,
+        final_answer,
+        projector=projector,
+        resolver=resolver,
+    )
+    retry_answer = _bind_final_answer_to_receipts(
+        task,
+        retry_answer,
+        projector=projector,
+        resolver=resolver,
+    )
 
     outcome = run_mcp_task_v2(
         surface=surface,

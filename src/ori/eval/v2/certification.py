@@ -8,7 +8,12 @@ from typing import Literal
 from pydantic import model_validator
 
 from .comparator import COMPARATOR_FINGERPRINT, compare
-from .compiler import CompiledCorpus, CompiledTask, compiler_fingerprint
+from .compiler import (
+    CompiledCorpus,
+    CompiledTask,
+    _oracle_outcome_fingerprint,
+    compiler_fingerprint,
+)
 from .fingerprint import canonical_sha256, certifier_fingerprint
 from .fixtures import OfflineCertification, offline_certify
 from .graph import GraphSnapshot, LiveGraphVerification
@@ -20,6 +25,7 @@ from .live_projection import (
     semantic_evidence_fingerprint,
 )
 from .profiles import validate_capability_profile
+from .public_surfaces import public_semantic_fingerprint
 from .schema import (
     CapabilityProfile,
     CatalogEntry,
@@ -717,17 +723,20 @@ class LiveCertificationCatalog(StrictModel):
             certification.task_id for certification in self.certifications
         ]
         entry_ids = [entry.task_id for entry in self.candidate_catalog.entries]
-        if not (
-            len(proof_ids)
-            == len(set(proof_ids))
-            == len(certification_ids)
-            == len(set(certification_ids))
-            == len(entry_ids)
-            == len(set(entry_ids))
+        equivalent_ids = [
+            task_id
+            for entry in self.candidate_catalog.entries
+            for task_id in entry.equivalent_task_ids
+        ]
+        if (
+            len(proof_ids) != len(set(proof_ids))
+            or len(certification_ids) != len(set(certification_ids))
+            or len(entry_ids) != len(set(entry_ids))
+            or len(equivalent_ids) != len(set(equivalent_ids))
         ):
             raise ValueError("live certification catalog task accounting mismatch")
         if set(proof_ids) != set(certification_ids) or set(proof_ids) != set(
-            entry_ids
+            equivalent_ids
         ):
             raise ValueError("live certification catalog task sets differ")
         current_certifier = certifier_fingerprint()
@@ -916,7 +925,6 @@ def build_catalog_release(
             f"extra={sorted(set(certifications) - set(task_ids))}"
         )
 
-    entries: list[CatalogEntry] = []
     for task in corpus.tasks:
         certification = certifications[task.public.task_id]
         if certification.state is not CertificationState.CANDIDATE:
@@ -931,6 +939,32 @@ def build_catalog_release(
             raise CertificationError(
                 f"task {task.public.task_id} certifier is stale"
             )
+
+    tasks_by_semantics: dict[str, list[CompiledTask]] = {}
+    for task in corpus.tasks:
+        tasks_by_semantics.setdefault(
+            public_semantic_fingerprint(task.public), []
+        ).append(task)
+
+    entries: list[CatalogEntry] = []
+    for semantic_fingerprint, equivalent_tasks in sorted(
+        tasks_by_semantics.items(),
+        key=lambda item: min(task.public.task_id for task in item[1]),
+    ):
+        equivalent_tasks.sort(key=lambda task: task.public.task_id)
+        oracle_outcomes = {
+            _oracle_outcome_fingerprint(equivalent.oracle)
+            for equivalent in equivalent_tasks
+        }
+        if len(oracle_outcomes) != 1:
+            raise CertificationError(
+                "identical public semantics bind contradictory candidate oracles: "
+                + ", ".join(
+                    equivalent.public.task_id for equivalent in equivalent_tasks
+                )
+            )
+        task = equivalent_tasks[0]
+        certification = certifications[task.public.task_id]
         entries.append(
             CatalogEntry(
                 task_id=task.public.task_id,
@@ -943,13 +977,17 @@ def build_catalog_release(
                 semantics=task.public.binding.semantics,
                 cost_band=task.migration.cost_band,
                 path_concentration_key=task.migration.path_concentration_key,
+                public_semantic_fingerprint=semantic_fingerprint,
+                equivalent_task_ids=tuple(
+                    equivalent.public.task_id for equivalent in equivalent_tasks
+                ),
                 task_fingerprint=task.public.task_fingerprint,
                 oracle_fingerprint=task.oracle.oracle_fingerprint,
                 certification_fingerprint=certification.certification_fingerprint,
             )
         )
 
-    sorted_entries = tuple(sorted(entries, key=lambda entry: entry.task_id))
+    sorted_entries = tuple(entries)
     catalog_fingerprint = canonical_sha256(sorted_entries)
     payload = {
         "release_id": (

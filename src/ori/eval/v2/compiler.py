@@ -70,8 +70,8 @@ from .schema import (
 )
 from .selection import evaluate_selection
 
-COMPILER_VERSION = "ori-claim-compiler-v2.10.0"
-DIRECT_RESULT_CONTRACT_VERSION = "ori-direct-result-contract-v13"
+COMPILER_VERSION = "ori-claim-compiler-v2.11.0"
+DIRECT_RESULT_CONTRACT_VERSION = "ori-direct-result-contract-v14"
 DIRECT_CAPABILITY_PROFILE = f"ori-direct-policy-v3-bhce-9.1-{DIRECT_RESULT_CONTRACT_VERSION}"
 MCP_CAPABILITY_PROFILE = "ori-mcp-92a37dd-bhce-9.1-cypher-v7"
 COMPLETE_SET_RESULT_CAPACITY = 1000

@@ -329,12 +329,26 @@ def build_public_report(
     summary: CampaignSummary,
     *,
     certifications: Mapping[str, TaskCertification] | None = None,
+    scheduled_task_ids: Sequence[str] | None = None,
 ) -> PublicReportV2:
     """Redact scorer-only state while preserving exact public accounting."""
 
     validate_capability_profile(profile)
     task_by_id = {task.task_id: task for task in pair.public.tasks}
-    expected_summary = summarize_results(tuple(task_by_id), results)
+    scheduled = (
+        tuple(task_by_id)
+        if scheduled_task_ids is None
+        else tuple(scheduled_task_ids)
+    )
+    if len(scheduled) != len(set(scheduled)):
+        raise CampaignArtifactError("public report schedule contains duplicate task IDs")
+    unknown_scheduled = sorted(set(scheduled) - set(task_by_id))
+    if unknown_scheduled:
+        raise CampaignArtifactError(
+            "public report schedule contains unknown task IDs: "
+            + ", ".join(unknown_scheduled)
+        )
+    expected_summary = summarize_results(scheduled, results)
     if summary != expected_summary:
         raise CampaignArtifactError("public report summary does not match exact results")
     stale = sorted(

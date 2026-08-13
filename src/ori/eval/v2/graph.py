@@ -722,6 +722,7 @@ def build_archive_snapshot(
     duplicates = sorted(object_id for object_id, count in Counter(object_ids).items() if count > 1)
     if duplicates:
         raise ValueError(f"duplicate graph object identifiers: {duplicates}")
+    object_id_set = set(object_ids)
 
     raw_relationships = _relationships(records, include_ce_projection=False)
     relationships = _relationships(records)
@@ -730,7 +731,7 @@ def build_archive_snapshot(
             endpoint
             for edge in relationships
             for endpoint in (edge.source_id, edge.target_id)
-            if endpoint not in set(object_ids)
+            if endpoint not in object_id_set
         }
     )
     if dangling:

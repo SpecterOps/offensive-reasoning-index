@@ -245,14 +245,16 @@ allowed by that public claim kind. The query executes exactly once through
 `DirectQueryCoordinator.execute()`. Correctness comes from the returned graph
 evidence plus the restricted assertion, not the query text.
 
-The public request also carries `ori-direct-result-contract-v3`. It preserves
+The public request also carries the versioned direct result contract. V29 uses
+`ori-direct-result-contract-v14`. It preserves
 the working v1 BloodHound boundary without restoring the legacy grader:
 
 - set queries return only answer nodes as rows, or one
   `collect(node) AS entities` collection;
 - count queries return one non-negative scalar;
 - route queries return an actual path variable with `RETURN p`, plus any
-  required supporting relationship variables;
+  required supporting relationship variables and both endpoint node variables
+  for every separately projected supporting relationship;
 - Cypher must not construct the task's JSON answer schema with maps, list
   literals, or list comprehensions;
 - `CALL`, `UNION`, `UNWIND`, `CASE`, `labels()`, and `XOR` are outside the
@@ -261,8 +263,11 @@ the working v1 BloodHound boundary without restoring the legacy grader:
   converted with `toString(Path)`;
 - `reduce()` is outside BloodHound's certified query grammar;
 - when a bounded route needs `LIMIT`, it belongs after the final `RETURN`;
-- absence claims return one scalar route count, where zero is the bounded
-  negative proof.
+- absence claims return one scalar route count, where exact singleton endpoint
+  bindings plus a zero-preserving `OPTIONAL MATCH p=...` are the preferred
+  bounded negative proof;
+- path simplicity is checked on the returned witness; the query need not add
+  every pairwise node-inequality predicate.
 
 These are model-neutral API/result constraints, not graph or answer hints. The
 policy still evaluates the submitted query after generation and never rewrites
@@ -286,9 +291,10 @@ relationship—while oracle-declared edge properties are required predicates.
 Extra CE-generated properties such as `lastseen` do not make an otherwise exact
 route incorrect.
 
-For route, decision, and bounded-negative evidence, the ordered graph witness
-must begin and end at the public claim endpoints. A query that merely uses the
-selectors in another clause is not endpoint proof. Additional entities, edges,
+For route evidence, the ordered graph witness must begin and end at the public
+claim endpoints. A decision witness may contain both public subjects as
+interior nodes on that same returned path. A query that merely uses selectors
+in another detached clause is not proof. Additional entities, edges,
 and semantic properties remain usable when the sealed corpus-wide graph
 registry attests them and they are connected to the answer witness; unknown,
 fabricated, or disconnected additions remain incorrect. The registry includes
@@ -364,6 +370,13 @@ count-only projection whose tool response contains exactly one unambiguous
 non-negative scalar literal. A valid answer with insufficient certified tool
 evidence is public `PROOF_INSUFFICIENT`, not malformed output.
 
+The latest complete claim-relevant MCP receipt is authoritative for returned
+graph facts. Complete set-page identities can materialize the final set even
+when a schema-only retry fails to echo hundreds of IDs. Final route/decision
+edges and public property facts must appear mechanically in that receipt;
+unsupported assertions become model-attributable `OUTPUT_INVALID` rather than
+reaching the comparator as invented evidence.
+
 Run state is private and atomic. It binds the model/run identity, source
 manifest and archive, task/oracle/catalog/live-certification fingerprints,
 graph, capability profile, containment configuration, runtime configuration,
@@ -377,8 +390,15 @@ model-attributable samples are not replayed. Private attempts retain direct
 query provenance or MCP cumulative token usage, partial messages, tool
 arguments and raw results, mechanical observations, evidence events, and policy
 receipts even when cancellation interrupts the main loop or schema retry.
-Public reports omit those traces and are emitted only after all scheduled tasks
-are reconciled exactly once and the post-track graph gate passes.
+Public reports omit those traces. V29 protects the full output root with one
+exclusive process lock, flushes each atomic replacement to the file and parent
+directory, and maintains a fingerprinted campaign lifecycle receipt. Public
+reports and a track-completion receipt are emitted after that track's scheduled
+tasks reconcile exactly once and its post-track graph gate passes; they do not
+wait for a later track. SIGINT, SIGTERM, SIGHUP, task cancellation, and an
+unclean prior process remain distinguishable. An interrupted provider attempt
+stays durably numbered but does not consume the next process's original
+infrastructure-retry allowance.
 
 No-model `run-v2` readiness performs one exact bounded live-graph projection
 and reuses that immutable receipt across the prepared tracks. This is sound

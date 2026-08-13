@@ -909,6 +909,8 @@ class TaskCertification(StrictModel):
 
 
 class CatalogEntry(StrictModel):
+    """One scheduled representative and its complete public-semantic class."""
+
     task_id: NonEmptyStr
     revision: int = Field(strict=True, gt=0)
     product: NonEmptyStr
@@ -919,9 +921,21 @@ class CatalogEntry(StrictModel):
     semantics: RelationshipSemantics
     cost_band: NonEmptyStr
     path_concentration_key: NonEmptyStr
+    public_semantic_fingerprint: Fingerprint
+    equivalent_task_ids: tuple[NonEmptyStr, ...]
     task_fingerprint: Fingerprint
     oracle_fingerprint: Fingerprint
     certification_fingerprint: Fingerprint
+
+    @model_validator(mode="after")
+    def equivalence_class_is_canonical(self) -> CatalogEntry:
+        if self.equivalent_task_ids != tuple(sorted(set(self.equivalent_task_ids))):
+            raise ValueError("equivalent task IDs must be unique and sorted")
+        if not self.equivalent_task_ids or self.task_id != self.equivalent_task_ids[0]:
+            raise ValueError(
+                "catalog representative must be the first equivalent task ID"
+            )
+        return self
 
 
 class CatalogRelease(StrictModel):
@@ -939,6 +953,21 @@ class CatalogRelease(StrictModel):
 
     @model_validator(mode="after")
     def fingerprints_match(self) -> CatalogRelease:
+        task_ids = tuple(entry.task_id for entry in self.entries)
+        if task_ids != tuple(sorted(set(task_ids))):
+            raise ValueError("candidate catalog task IDs must be unique and sorted")
+        semantic_fingerprints = tuple(
+            entry.public_semantic_fingerprint for entry in self.entries
+        )
+        if len(semantic_fingerprints) != len(set(semantic_fingerprints)):
+            raise ValueError("candidate catalog has duplicate public semantics")
+        equivalent_ids = tuple(
+            task_id
+            for entry in self.entries
+            for task_id in entry.equivalent_task_ids
+        )
+        if len(equivalent_ids) != len(set(equivalent_ids)):
+            raise ValueError("candidate catalog equivalence classes overlap")
         if self.catalog_fingerprint != canonical_sha256(self.entries):
             raise ValueError("candidate catalog fingerprint mismatch")
         expected = canonical_sha256(

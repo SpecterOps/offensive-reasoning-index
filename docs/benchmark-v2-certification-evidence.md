@@ -1,6 +1,6 @@
 # ORI benchmark correctness v2 certification evidence
 
-Date: 2026-07-25 through 2026-07-31
+Date: 2026-07-25 through 2026-08-12
 Branch: `feat/benchmark-correctness-v2`
 Containment boundary: `0a56029471c5426be348c61c0969724eaee38599`
 Protocol: `ori-eval-protocol-v2`
@@ -496,6 +496,87 @@ without provider calls. The live snapshot contained 415 canonical objects and
 
 V21 through V27 are superseded development artifacts and must not be executed
 or resumed.
+
+## Seven-model campaign audit and V29 correction
+
+The operator-authorized V28 seven-model high-effort campaign scheduled 812
+samples: seven models times 46 direct plus 70 MCP tasks. It checkpointed 407
+samples (50.12%) before an external termination. All 322 direct samples
+completed, its pre/post graph receipts were identical, and the MCP pre-track
+graph receipt also matched. Because MCP had no post-track gate and the campaign
+did not finish, it is preserved as diagnostic evidence rather than a ranking.
+
+Direct forensic accounting was:
+
+| Outcome family | Count | Audit conclusion |
+| --- | ---: | --- |
+| Correct | 246 | Stable under observed V28 grading |
+| Gradeable incorrect | 4 | Genuine empty/wrong route witnesses |
+| Query timeout | 40 | Model-attributable execution failure, but public cycle wording induced planner-hostile O(n-squared) filters |
+| Deny-cache policy rejection | 14 | Correct containment of token-equivalent queries after the initial timeout |
+| Output invalid | 15 | Fourteen contract/projector false negatives; one forbidden decoy witness |
+| Query error | 2 | Valid exact `OPTIONAL MATCH` zero proofs rejected by the proof parser |
+| Harness error | 1 | Model-invalid incomplete graph projection misattributed as a harness crash |
+
+The 14 contextual and two bounded-negative false negatives define a diagnostic
+ceiling, not an official rescore:
+
+```text
+246 / 322 = 76.40% observed correct
+262 / 322 = 81.37% maximum corrected ceiling
+16 / 322  = 4.97 percentage-point false-negative gap
+54 / 322  = 16.77% timeout/cache samples with 21-45 pairwise inequalities
+```
+
+V29 corrects the public return contract and endpoint validation, exact
+zero-preserving optional proof, cycle-query guidance, route/supporting-edge
+partition, decision interior-role proof, complete MCP set materialization, and
+receipt binding for asserted edges/properties. It also makes campaign writes
+crash-durable and publishes completed tracks independently.
+
+The first V29 no-model readiness attempt stopped on an MCP revision mismatch:
+the prior profile pinned `009c88f`, while the clean local checkout was at
+`92a37dd`. The reviewed delta adds a bounded authenticated startup preflight
+and byte-upload tool variants; it does not remove or weaken the read-only
+Cypher callable. ORI advanced the explicit capability profile to
+`ori-mcp-92a37dd-bhce-9.1-cypher-v7` and repeated offline and live certification
+rather than ignoring the mismatch.
+
+Public-semantic release grouping retains all certification work while removing
+duplicate scoring units:
+
+| Track | Compiled/certified | Scheduled | Reduction |
+| --- | ---: | ---: | ---: |
+| direct | 46 | 42 | 8.70% |
+| MCP | 70 | 55 | 21.43% |
+| seven-model combined | 812 | 679 | 16.38% |
+
+Every equivalence class records all task IDs and is rejected if its sealed
+scorer outcomes differ. V28 checkpoints cannot be resumed because all relevant
+semantic and runtime fingerprints changed.
+
+Final V29 certification and readiness evidence:
+
+| Boundary | Direct | MCP |
+| --- | --- | --- |
+| Certified tasks | 46 | 70 |
+| Scheduled semantic representatives | 42 | 55 |
+| Live certificate | `8be026e2fc5ab6646309be7d683ff9940eec6e875b2c18b3bbbd0dc2d77c664e` | `7ceb5feb2a515cedd2d0e49d936d4d58b37f7ac41c9bbe0bed15603ce6db783c` |
+| Candidate release | `b26525d03bbc8763f904c52ee6fc3e2c5a76fa90fd225c111f5a904777b437f0` | `5a2c3f6019e857a3fa47904f750f76b81a477328f378ba48d72481277a7db9ad` |
+
+All pre/middle/post gates projected 17,088 objects and 60,342 relationships.
+Every gate matched graph
+`fb0b6785e524d40abcc9033ea2c7887eaa88e13bb6cb1f329636a4ce4b74b1c4`
+and verification fingerprint
+`2a73125a1a1cdee77b60b8d54d5b944ebdd12cb49984f9441b91890a72b9969a`.
+Seven-model high-effort readiness passed with fingerprint
+`30e9e6e980a56c133c9df688097ca0a4290d40db2d803aa48ea26cce04743f8b`,
+the exact `92a37dd` MCP revision, 42/55 schedules, and zero provider calls.
+The final repository suite passed 759 tests in 563.78 seconds.
+Ruff and `git diff --check` passed. An isolated publishable-source scan copied
+only tracked and non-ignored files: Gitleaks scanned 3.31 MB with zero findings,
+and TruffleHog 3.96.0 scanned 417 chunks / 4,067,728 bytes with zero verified or
+unverified secrets.
 
 ## Final repository gates
 

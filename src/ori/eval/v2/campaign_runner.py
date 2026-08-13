@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
+import asyncio
+import fcntl
 import hashlib
 import json
 import os
+import signal
 import subprocess
+import tempfile
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
@@ -71,10 +77,12 @@ from .schema import (
 )
 from .scoring import SampleResult, summarize_results
 
-RUNNER_VERSION = "ori-v2-model-campaign-v11"
+RUNNER_VERSION = "ori-v2-model-campaign-v12"
 RUN_STATE_SCHEMA_VERSION = "ori-v2-private-run-state-v5"
 MODEL_REPORT_SCHEMA_VERSION = "ori-v2-model-report-v2"
 READINESS_SCHEMA_VERSION = "ori-v2-run-readiness-v8"
+CAMPAIGN_LIFECYCLE_SCHEMA_VERSION = "ori-v2-campaign-lifecycle-v1"
+TRACK_COMPLETION_SCHEMA_VERSION = "ori-v2-track-completion-v1"
 _RUNNER_IMPLEMENTATION_SOURCES = {
     "adapter": Path(__file__).parent.parent / "adapter.py",
     "bhce": Path(__file__).parent.parent / "bhce.py",
@@ -198,7 +206,7 @@ def _infrastructure_attempt_progress(
 
 
 class ModelRunProvenanceV2(StrictModel):
-    schema_version: Literal["ori-v2-model-campaign-v11"] = RUNNER_VERSION
+    schema_version: Literal["ori-v2-model-campaign-v12"] = RUNNER_VERSION
     protocol_version: Literal["ori-eval-protocol-v2"] = PROTOCOL_VERSION
     base: RunProvenanceV2
     run_identity: RunIdentity
@@ -320,7 +328,7 @@ class ModelReadinessV2(StrictModel):
 class CampaignReadinessV2(StrictModel):
     schema_version: Literal["ori-v2-run-readiness-v8"] = READINESS_SCHEMA_VERSION
     protocol_version: Literal["ori-eval-protocol-v2"] = PROTOCOL_VERSION
-    runner_version: Literal["ori-v2-model-campaign-v11"] = RUNNER_VERSION
+    runner_version: Literal["ori-v2-model-campaign-v12"] = RUNNER_VERSION
     source_config_fingerprint: str
     source_manifest_sha256: str
     archive_sha256: str
@@ -345,6 +353,104 @@ class CampaignReadinessV2(StrictModel):
         return self
 
 
+class CampaignInterruptionV2(StrictModel):
+    kind: Literal[
+        "task_cancelled",
+        "keyboard_interrupt",
+        "signal",
+        "unclean_previous_process",
+    ]
+    signal_name: str | None = None
+    recorded_at_utc: str
+
+
+class CampaignCompletedTrackV2(StrictModel):
+    track: Track
+    receipt_fingerprint: str
+
+
+class CampaignLifecycleV2(StrictModel):
+    schema_version: Literal["ori-v2-campaign-lifecycle-v1"] = CAMPAIGN_LIFECYCLE_SCHEMA_VERSION
+    protocol_version: Literal["ori-eval-protocol-v2"] = PROTOCOL_VERSION
+    runner_version: Literal["ori-v2-model-campaign-v12"] = RUNNER_VERSION
+    source_config_fingerprint: str
+    mode: Literal["readiness", "execution"]
+    status: Literal["running", "interrupted", "failed", "completed"]
+    started_at_utc: str
+    updated_at_utc: str
+    pid: int = Field(strict=True, gt=0)
+    resume_count: int = Field(strict=True, ge=0)
+    checkpointed_results: int = Field(strict=True, ge=0)
+    active_track: Track | None = None
+    active_model: str | None = None
+    active_run_index: int | None = Field(default=None, strict=True, ge=1)
+    completed_tracks: tuple[CampaignCompletedTrackV2, ...] = ()
+    interruptions: tuple[CampaignInterruptionV2, ...] = ()
+    failure_type: str | None = None
+    lifecycle_fingerprint: str
+
+    @model_validator(mode="after")
+    def lifecycle_is_exact(self) -> CampaignLifecycleV2:
+        completed = [entry.track for entry in self.completed_tracks]
+        if len(completed) != len(set(completed)):
+            raise ValueError("campaign lifecycle contains duplicate completed tracks")
+        expected = canonical_sha256(
+            self,
+            exclude_fields=("lifecycle_fingerprint",),
+        )
+        if self.lifecycle_fingerprint != expected:
+            raise ValueError("campaign lifecycle fingerprint mismatch")
+        return self
+
+
+class TrackRunCompletionV2(StrictModel):
+    provider: str
+    model: str
+    run_index: int = Field(strict=True, ge=1)
+    result_count: int = Field(strict=True, ge=0)
+    public_report_fingerprint: str
+    campaign_valid: bool
+    invalid_reasons: tuple[str, ...] = ()
+
+
+class TrackCompletionV2(StrictModel):
+    schema_version: Literal["ori-v2-track-completion-v1"] = TRACK_COMPLETION_SCHEMA_VERSION
+    protocol_version: Literal["ori-eval-protocol-v2"] = PROTOCOL_VERSION
+    runner_version: Literal["ori-v2-model-campaign-v12"] = RUNNER_VERSION
+    source_config_fingerprint: str
+    track: Track
+    candidate_release_fingerprint: str
+    live_certification_fingerprint: str
+    graph_verification_before_fingerprint: str
+    graph_verification_after_fingerprint: str
+    expected_task_count_per_run: int = Field(strict=True, gt=0)
+    run_count: int = Field(strict=True, gt=0)
+    result_count: int = Field(strict=True, ge=0)
+    campaign_valid: bool
+    runs: tuple[TrackRunCompletionV2, ...]
+    completed_at_utc: str
+    receipt_fingerprint: str
+
+    @model_validator(mode="after")
+    def receipt_is_exact(self) -> TrackCompletionV2:
+        if self.run_count != len(self.runs):
+            raise ValueError("track completion run count does not match run receipts")
+        if self.result_count != sum(run.result_count for run in self.runs):
+            raise ValueError("track completion result count does not match run receipts")
+        identities = [(run.provider, run.model, run.run_index) for run in self.runs]
+        if len(identities) != len(set(identities)):
+            raise ValueError("track completion contains duplicate run identities")
+        if self.campaign_valid != all(run.campaign_valid for run in self.runs):
+            raise ValueError("track completion validity does not match run receipts")
+        expected = canonical_sha256(
+            self,
+            exclude_fields=("receipt_fingerprint",),
+        )
+        if self.receipt_fingerprint != expected:
+            raise ValueError("track completion fingerprint mismatch")
+        return self
+
+
 @dataclass(frozen=True)
 class PreparedTrack:
     track: Track
@@ -365,9 +471,303 @@ def _sha256(path: Path) -> str:
 
 def _atomic_write(path: Path, payload: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.tmp")
-    temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
-    temporary.replace(path)
+    serialized = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode()
+    file_descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=path.parent,
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(file_descriptor, "wb") as handle:
+            handle.write(serialized)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        directory_descriptor = os.open(path.parent, directory_flags)
+        try:
+            os.fsync(directory_descriptor)
+        finally:
+            os.close(directory_descriptor)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _utc_now() -> str:
+    return datetime.now(UTC).isoformat()
+
+
+@contextmanager
+def _exclusive_output_dir_lock(output_dir: Path) -> Iterator[None]:
+    """Hold one process-scoped advisory lock for every write to an output root."""
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = output_dir / ".ori-v2-campaign.lock"
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    file_descriptor = os.open(lock_path, flags, 0o600)
+    handle = os.fdopen(file_descriptor, "r+", encoding="utf-8")
+    try:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            handle.seek(0)
+            owner = handle.read().strip()
+            detail = f"; owner={owner}" if owner else ""
+            raise V2CampaignRunError(
+                f"{output_dir} is already locked by another v2 campaign{detail}"
+            ) from exc
+        handle.seek(0)
+        handle.truncate()
+        json.dump(
+            {
+                "pid": os.getpid(),
+                "acquired_at_utc": _utc_now(),
+            },
+            handle,
+            sort_keys=True,
+        )
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+        yield
+    finally:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            handle.close()
+
+
+def _campaign_lifecycle(payload: Mapping[str, Any]) -> CampaignLifecycleV2:
+    document = {
+        "schema_version": CAMPAIGN_LIFECYCLE_SCHEMA_VERSION,
+        "protocol_version": PROTOCOL_VERSION,
+        "runner_version": RUNNER_VERSION,
+        **payload,
+        "lifecycle_fingerprint": "0" * 64,
+    }
+    document["lifecycle_fingerprint"] = canonical_sha256(
+        document,
+        exclude_fields=("lifecycle_fingerprint",),
+    )
+    return CampaignLifecycleV2.model_validate(document)
+
+
+def _checkpoint_counts(output_dir: Path) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for state_path in output_dir.glob("*/*/run-*/run-state-v5.private.json"):
+        try:
+            payload = json.loads(state_path.read_text())
+            results = payload["checkpoint"]["results"]
+            if not isinstance(results, list):
+                continue
+            relative = state_path.relative_to(output_dir)
+            counts["/".join(relative.parts[:3])] = len(results)
+        except (KeyError, OSError, TypeError, ValueError):
+            # The authoritative run-state validator reports corruption later.
+            # Lifecycle accounting must not turn an unreadable checkpoint into
+            # an invented completed sample.
+            continue
+    return counts
+
+
+@dataclass
+class _CampaignLifecycleController:
+    path: Path
+    receipt: CampaignLifecycleV2
+    _run_counts: dict[str, int]
+
+    @classmethod
+    def start(
+        cls,
+        *,
+        output_dir: Path,
+        source_config_fingerprint: str,
+        preflight_only: bool,
+    ) -> _CampaignLifecycleController:
+        path = output_dir / "campaign-lifecycle-v2.private.json"
+        previous: CampaignLifecycleV2 | None = None
+        if path.exists():
+            previous = CampaignLifecycleV2.model_validate_json(path.read_text())
+            if previous.source_config_fingerprint != source_config_fingerprint:
+                raise V2CampaignRunError("campaign lifecycle belongs to a different source config")
+        now = _utc_now()
+        interruptions = list(previous.interruptions if previous is not None else ())
+        if previous is not None and previous.status == "running":
+            interruptions.append(
+                CampaignInterruptionV2(
+                    kind="unclean_previous_process",
+                    recorded_at_utc=now,
+                )
+            )
+        run_counts = _checkpoint_counts(output_dir)
+        if (
+            not run_counts
+            and previous is not None
+            and previous.active_track is not None
+            and previous.active_model is not None
+            and previous.active_run_index is not None
+        ):
+            key = (
+                f"{previous.active_track.value}/{previous.active_model}/"
+                f"run-{previous.active_run_index:03d}"
+            )
+            run_counts[key] = previous.checkpointed_results
+        receipt = _campaign_lifecycle(
+            {
+                "source_config_fingerprint": source_config_fingerprint,
+                "mode": "readiness" if preflight_only else "execution",
+                "status": "running",
+                "started_at_utc": (previous.started_at_utc if previous is not None else now),
+                "updated_at_utc": now,
+                "pid": os.getpid(),
+                "resume_count": (previous.resume_count + 1 if previous is not None else 0),
+                "checkpointed_results": (
+                    sum(run_counts.values())
+                    if run_counts
+                    else previous.checkpointed_results
+                    if previous is not None
+                    else 0
+                ),
+                "active_track": previous.active_track if previous is not None else None,
+                "active_model": previous.active_model if previous is not None else None,
+                "active_run_index": (previous.active_run_index if previous is not None else None),
+                "completed_tracks": (previous.completed_tracks if previous is not None else ()),
+                "interruptions": tuple(interruptions),
+                "failure_type": None,
+            }
+        )
+        controller = cls(path=path, receipt=receipt, _run_counts=run_counts)
+        controller._persist()
+        return controller
+
+    def _update(self, **updates: Any) -> None:
+        payload = self.receipt.model_dump(
+            mode="python",
+            exclude={
+                "schema_version",
+                "protocol_version",
+                "runner_version",
+                "lifecycle_fingerprint",
+            },
+        )
+        payload.update(updates)
+        payload["updated_at_utc"] = _utc_now()
+        self.receipt = _campaign_lifecycle(payload)
+        self._persist()
+
+    def _persist(self) -> None:
+        _write_model(self.path, self.receipt)
+
+    def activate_track(self, track: Track) -> None:
+        self._update(
+            status="running",
+            active_track=track,
+            active_model=None,
+            active_run_index=None,
+            failure_type=None,
+        )
+
+    def record_checkpoint(
+        self,
+        *,
+        track: Track,
+        model_name: str,
+        run_index: int,
+        result_count: int,
+    ) -> None:
+        key = f"{track.value}/{model_name}/run-{run_index:03d}"
+        self._run_counts[key] = result_count
+        self._update(
+            status="running",
+            checkpointed_results=sum(self._run_counts.values()),
+            active_track=track,
+            active_model=model_name,
+            active_run_index=run_index,
+            failure_type=None,
+        )
+
+    def record_track(self, receipt: TrackCompletionV2) -> None:
+        completed = {entry.track: entry for entry in self.receipt.completed_tracks}
+        completed[receipt.track] = CampaignCompletedTrackV2(
+            track=receipt.track,
+            receipt_fingerprint=receipt.receipt_fingerprint,
+        )
+        self._update(
+            status="running",
+            completed_tracks=tuple(completed.values()),
+            active_track=None,
+            active_model=None,
+            active_run_index=None,
+            failure_type=None,
+        )
+
+    def interrupt(
+        self,
+        *,
+        kind: Literal["task_cancelled", "keyboard_interrupt", "signal"],
+        signal_name: str | None,
+    ) -> None:
+        interruption = CampaignInterruptionV2(
+            kind=kind,
+            signal_name=signal_name,
+            recorded_at_utc=_utc_now(),
+        )
+        self._update(
+            status="interrupted",
+            interruptions=(*self.receipt.interruptions, interruption),
+            failure_type=None,
+        )
+
+    def fail(self, failure_type: str) -> None:
+        self._update(status="failed", failure_type=failure_type)
+
+    def complete(self) -> None:
+        self._update(
+            status="completed",
+            active_track=None,
+            active_model=None,
+            active_run_index=None,
+            failure_type=None,
+        )
+
+
+@dataclass
+class _SignalCancellation:
+    task: asyncio.Task[Any]
+    installed: tuple[signal.Signals, ...]
+    received_signal: str | None = None
+
+    @classmethod
+    def install(cls) -> _SignalCancellation:
+        loop = asyncio.get_running_loop()
+        task = asyncio.current_task()
+        if task is None:
+            raise RuntimeError("campaign signal handling requires an asyncio task")
+        controller = cls(task=task, installed=())
+        installed: list[signal.Signals] = []
+        for candidate in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+            try:
+                loop.add_signal_handler(candidate, controller._cancel, candidate)
+            except (NotImplementedError, RuntimeError):
+                continue
+            installed.append(candidate)
+        controller.installed = tuple(installed)
+        return controller
+
+    def _cancel(self, received: signal.Signals) -> None:
+        if self.received_signal is None:
+            self.received_signal = received.name
+        self.task.cancel(f"received {received.name}")
+
+    def close(self) -> None:
+        loop = asyncio.get_running_loop()
+        for installed in self.installed:
+            loop.remove_signal_handler(installed)
 
 
 def _write_model(path: Path, model: Any) -> None:
@@ -426,12 +826,12 @@ def _prepare_track(
     entry_ids = [entry.task_id for entry in release.entries]
     if len(entry_ids) != len(set(entry_ids)):
         mismatches.append("duplicate candidate IDs")
-    if set(entry_ids) != set(task_by_id):
-        mismatches.append("candidate/public task set")
-    if set(entry_ids) != set(oracle_by_id):
-        mismatches.append("candidate/oracle task set")
-    if set(entry_ids) != set(certification_by_id):
-        mismatches.append("candidate/certification task set")
+    if not set(entry_ids).issubset(task_by_id):
+        mismatches.append("candidate/public task subset")
+    if not set(entry_ids).issubset(oracle_by_id):
+        mismatches.append("candidate/oracle task subset")
+    if not set(entry_ids).issubset(certification_by_id):
+        mismatches.append("candidate/certification task subset")
     for entry in release.entries:
         task = task_by_id.get(entry.task_id)
         oracle = oracle_by_id.get(entry.task_id)
@@ -799,36 +1199,9 @@ def _readiness(
 
 
 async def preflight_v2_campaign(config_path: Path) -> CampaignReadinessV2:
-    """Perform exact artifact, capability, health, and live-graph gates only."""
+    """Perform exact no-model gates through the same locked campaign path."""
 
-    (
-        resolved,
-        snapshot,
-        prepared,
-        mcp_revision,
-        model_readiness,
-    ) = prepare_v2_campaign(config_path)
-    receipts: dict[Track, LiveGraphVerification] = {}
-    async with BHCEClient(**parse_bhce_url(resolved.config.defaults.bhce_url)) as bhce:
-        for track in resolved.config.track_modes:
-            _observed, receipts[track] = await _health_and_graph(
-                resolved,
-                snapshot,
-                bhce,
-            )
-    readiness = _readiness(
-        resolved=resolved,
-        snapshot=snapshot,
-        prepared=prepared,
-        receipts=receipts,
-        mcp_revision=mcp_revision,
-        model_readiness=model_readiness,
-    )
-    _write_model(
-        resolved.output_dir / "v2-run-readiness.private.json",
-        readiness,
-    )
-    return readiness
+    return await run_v2_campaign(config_path, preflight_only=True)
 
 
 def _provenance(
@@ -912,6 +1285,24 @@ def _attempt(
     return ProviderAttemptV2.model_validate(payload)
 
 
+def _attempt_consumes_retry_budget(attempt: ProviderAttemptV2) -> bool:
+    """Do not charge an operator interruption as an infrastructure retry.
+
+    The partial attempt remains durably numbered and auditable, but a later
+    process must still be allowed to execute the task's original retry budget.
+    """
+
+    sample = getattr(attempt, "sample", None)
+    provider = getattr(attempt, "provider", None)
+    metrics = getattr(provider, "provider_metrics", {})
+    outcome = getattr(getattr(sample, "outcome", None), "value", None)
+    return not (
+        outcome == "INTERRUPTED"
+        and metrics.get("infra_scope") == "operator"
+        and metrics.get("infra_error_subtype") == "INTERRUPTED"
+    )
+
+
 def _state(
     *,
     provenance: ModelRunProvenanceV2,
@@ -970,6 +1361,7 @@ def _model_report(
         results,
         summary,
         certifications=prepared.certifications,
+        scheduled_task_ids=prepared.task_ids,
     )
     payload = {
         "run_identity": provenance.run_identity,
@@ -989,6 +1381,94 @@ def _model_report(
         exclude_fields=("artifact_fingerprint",),
     )
     return ModelPublicReportV2.model_validate(payload)
+
+
+def _track_completion(
+    *,
+    resolved: ResolvedV2CampaignConfig,
+    prepared: PreparedTrack,
+    runs: Sequence[TrackRunCompletionV2],
+    before: LiveGraphVerification,
+    after: LiveGraphVerification,
+) -> TrackCompletionV2:
+    payload = {
+        "source_config_fingerprint": resolved.source_config_fingerprint,
+        "track": prepared.track,
+        "candidate_release_fingerprint": prepared.release.release_fingerprint,
+        "live_certification_fingerprint": prepared.live.artifact_fingerprint,
+        "graph_verification_before_fingerprint": before.verification_fingerprint,
+        "graph_verification_after_fingerprint": after.verification_fingerprint,
+        "expected_task_count_per_run": len(prepared.task_ids),
+        "run_count": len(runs),
+        "result_count": sum(run.result_count for run in runs),
+        "campaign_valid": all(run.campaign_valid for run in runs),
+        "runs": tuple(runs),
+        "completed_at_utc": _utc_now(),
+        "receipt_fingerprint": "0" * 64,
+    }
+    payload["receipt_fingerprint"] = canonical_sha256(
+        {
+            "schema_version": TRACK_COMPLETION_SCHEMA_VERSION,
+            "protocol_version": PROTOCOL_VERSION,
+            "runner_version": RUNNER_VERSION,
+            **payload,
+        },
+        exclude_fields=("receipt_fingerprint",),
+    )
+    return TrackCompletionV2.model_validate(payload)
+
+
+def _publish_track_completion(
+    *,
+    resolved: ResolvedV2CampaignConfig,
+    prepared: PreparedTrack,
+    completed_runs: Sequence[tuple[ModelRunProvenanceV2, Sequence[SampleResult], Path]],
+    before: LiveGraphVerification,
+    after: LiveGraphVerification,
+) -> tuple[TrackCompletionV2, tuple[str, ...]]:
+    """Publish one track after its post-graph gate, independent of later tracks."""
+
+    run_receipts: list[TrackRunCompletionV2] = []
+    invalid_campaigns: list[str] = []
+    for provenance, results, run_dir in completed_runs:
+        report = _model_report(
+            provenance=provenance,
+            prepared=prepared,
+            results=results,
+            before=before,
+            after=after,
+        )
+        _write_model(run_dir / "public-report-v2.json", report)
+        summary = report.report.summary
+        invalid_reasons = tuple(summary.invalid_reasons)
+        run_receipts.append(
+            TrackRunCompletionV2(
+                provider=provenance.run_identity.provider,
+                model=provenance.run_identity.model,
+                run_index=provenance.run_identity.run_index,
+                result_count=len(results),
+                public_report_fingerprint=report.artifact_fingerprint,
+                campaign_valid=summary.campaign_valid,
+                invalid_reasons=invalid_reasons,
+            )
+        )
+        if not summary.campaign_valid:
+            invalid_campaigns.append(
+                f"{prepared.track.value}/{provenance.run_identity.model}/"
+                f"run-{provenance.run_identity.run_index:03d}:" + ",".join(invalid_reasons)
+            )
+    receipt = _track_completion(
+        resolved=resolved,
+        prepared=prepared,
+        runs=run_receipts,
+        before=before,
+        after=after,
+    )
+    _write_model(
+        resolved.output_dir / prepared.track.value / "track-completion-v2.private.json",
+        receipt,
+    )
+    return receipt, tuple(invalid_campaigns)
 
 
 def _infrastructure_retry_policy(
@@ -1028,6 +1508,7 @@ async def _run_model(
     loop: MCPToolLoop | None,
     runs_total: int,
     progress: ProgressReporter | None = None,
+    lifecycle: _CampaignLifecycleController | None = None,
 ) -> tuple[ModelRunProvenanceV2, tuple[SampleResult, ...]]:
     provenance = _provenance(
         resolved=resolved,
@@ -1046,6 +1527,13 @@ async def _run_model(
     )
     results = list(state.checkpoint.results if state is not None else ())
     attempts = list(state.attempts if state is not None else ())
+    if lifecycle is not None:
+        lifecycle.record_checkpoint(
+            track=prepared.track,
+            model_name=model.name,
+            run_index=run_index,
+            result_count=len(results),
+        )
     retryable_execution_classes = {
         ExecutionClass.INFRA_FAILURE,
         ExecutionClass.UNEXECUTED,
@@ -1089,12 +1577,19 @@ async def _run_model(
             (result for result in results if result.task_id == task_id),
             None,
         )
+        prior_task_attempts = tuple(
+            attempt for attempt in attempts if attempt.task_id == task_id
+        )
         previous_attempt_number = max(
-            (attempt.attempt for attempt in attempts if attempt.task_id == task_id),
+            (attempt.attempt for attempt in prior_task_attempts),
             default=0,
         )
+        consumed_attempts = sum(
+            _attempt_consumes_retry_budget(attempt)
+            for attempt in prior_task_attempts
+        )
         max_attempts = resolved.config.defaults.max_infra_retries + 1
-        if previous_attempt_number >= max_attempts:
+        if consumed_attempts >= max_attempts:
             if existing_result is None:
                 raise V2CampaignRunError(
                     f"{task_id} exhausted its lifetime retry budget without a result"
@@ -1118,7 +1613,7 @@ async def _run_model(
         )
         last_sample: SampleResult | None = None
         last_provider: ProviderRunRecord | None = None
-        remaining_attempts = max_attempts - previous_attempt_number
+        remaining_attempts = max_attempts - consumed_attempts
         for attempt_index in range(1, remaining_attempts + 1):
             attempt_number = previous_attempt_number + attempt_index
             sample: SampleResult
@@ -1211,6 +1706,13 @@ async def _run_model(
                 attempts=attempts,
             )
             _write_model(state_path, current_state)
+            if lifecycle is not None:
+                lifecycle.record_checkpoint(
+                    track=prepared.track,
+                    model_name=model.name,
+                    run_index=run_index,
+                    result_count=len(results),
+                )
             if cancellation is not None:
                 raise cancellation
 
@@ -1270,41 +1772,20 @@ async def _run_model(
     return provenance, tuple(results)
 
 
-async def run_v2_campaign(
-    config_path: Path,
+async def _run_prepared_v2_campaign(
     *,
-    preflight_only: bool = False,
-    progress: ProgressReporter | None = None,
+    resolved: ResolvedV2CampaignConfig,
+    snapshot: GraphSnapshot,
+    prepared: Mapping[Track, PreparedTrack],
+    mcp_revision: str,
+    model_readiness: tuple[ModelReadinessV2, ...],
+    preflight_only: bool,
+    progress: ProgressReporter | None,
+    lifecycle: _CampaignLifecycleController,
 ) -> CampaignReadinessV2:
-    """Run exact V2 candidate catalogs, or stop after readiness when requested."""
-
-    _emit_progress(progress, "V2 CAMPAIGN: validating sealed artifacts and capabilities")
-    (
-        resolved,
-        snapshot,
-        prepared,
-        mcp_revision,
-        model_readiness,
-    ) = prepare_v2_campaign(config_path)
-    _emit_progress(
-        progress,
-        (
-            "V2 CAMPAIGN: artifact readiness passed "
-            f"({len(resolved.config.models)} models, "
-            f"{len(resolved.config.track_modes)} tracks)"
-        ),
-    )
     receipts_before: dict[Track, LiveGraphVerification] = {}
-    receipts_after: dict[Track, LiveGraphVerification] = {}
-    pending_reports: list[
-        tuple[
-            ModelRunProvenanceV2,
-            PreparedTrack,
-            tuple[SampleResult, ...],
-            Path,
-        ]
-    ] = []
     shared_preflight: tuple[GraphSnapshot, LiveGraphVerification] | None = None
+    invalid_campaigns: list[str] = []
 
     async with BHCEClient(**parse_bhce_url(resolved.config.defaults.bhce_url)) as bhce:
         direct_config = DirectQuerySafetyConfig()
@@ -1318,6 +1799,7 @@ async def run_v2_campaign(
             ),
         )
         for track in resolved.config.track_modes:
+            lifecycle.activate_track(track)
             _emit_progress(
                 progress,
                 f"[{track.value}] verifying BloodHound graph before track",
@@ -1359,6 +1841,7 @@ async def run_v2_campaign(
                 # every prepared track; repeated post-track snapshots add no
                 # evidence and can turn readiness into an hours-long operation.
                 continue
+            completed_runs: list[tuple[ModelRunProvenanceV2, tuple[SampleResult, ...], Path]] = []
             for model in resolved.config.models:
                 loop = _model_loop(model, resolved) if track is Track.MCP else None
                 runs = (
@@ -1377,18 +1860,12 @@ async def run_v2_campaign(
                         loop=loop,
                         runs_total=runs,
                         progress=progress,
+                        lifecycle=lifecycle,
                     )
                     run_dir = (
                         resolved.output_dir / track.value / model.name / f"run-{run_index:03d}"
                     )
-                    pending_reports.append(
-                        (
-                            provenance,
-                            prepared[track],
-                            results,
-                            run_dir,
-                        )
-                    )
+                    completed_runs.append((provenance, results, run_dir))
             _emit_progress(
                 progress,
                 f"[{track.value}] verifying BloodHound graph after track",
@@ -1398,7 +1875,6 @@ async def run_v2_campaign(
                 snapshot,
                 bhce,
             )
-            receipts_after[track] = after
             _write_model(
                 track_dir / "graph-verification-after-v2.private.json",
                 after,
@@ -1409,6 +1885,22 @@ async def run_v2_campaign(
                     track=track,
                     stage="post",
                     receipt=after,
+                ),
+            )
+            completion, track_invalid = _publish_track_completion(
+                resolved=resolved,
+                prepared=prepared[track],
+                completed_runs=completed_runs,
+                before=before,
+                after=after,
+            )
+            lifecycle.record_track(completion)
+            invalid_campaigns.extend(track_invalid)
+            _emit_progress(
+                progress,
+                (
+                    f"[{track.value}] reports published and track completion "
+                    f"recorded ({completion.receipt_fingerprint[:12]})"
                 ),
             )
 
@@ -1428,22 +1920,6 @@ async def run_v2_campaign(
         _emit_progress(progress, "V2 CAMPAIGN: readiness checks complete")
         return readiness
 
-    invalid_campaigns: list[str] = []
-    for provenance, item, results, run_dir in pending_reports:
-        report = _model_report(
-            provenance=provenance,
-            prepared=item,
-            results=results,
-            before=receipts_before[item.track],
-            after=receipts_after[item.track],
-        )
-        _write_model(run_dir / "public-report-v2.json", report)
-        if not report.report.summary.campaign_valid:
-            invalid_campaigns.append(
-                f"{item.track.value}/{provenance.run_identity.model}/"
-                f"run-{provenance.run_identity.run_index:03d}:"
-                + ",".join(report.report.summary.invalid_reasons)
-            )
     if invalid_campaigns:
         raise V2CampaignRunError(
             "v2 campaign completed with invalid execution accounting: "
@@ -1451,3 +1927,80 @@ async def run_v2_campaign(
         )
     _emit_progress(progress, "V2 CAMPAIGN: all model runs and reports complete")
     return readiness
+
+
+async def run_v2_campaign(
+    config_path: Path,
+    *,
+    preflight_only: bool = False,
+    progress: ProgressReporter | None = None,
+) -> CampaignReadinessV2:
+    """Run exact V2 candidate catalogs, or stop after readiness when requested."""
+
+    _emit_progress(progress, "V2 CAMPAIGN: validating sealed artifacts and capabilities")
+    (
+        resolved,
+        snapshot,
+        prepared,
+        mcp_revision,
+        model_readiness,
+    ) = prepare_v2_campaign(config_path)
+    _emit_progress(
+        progress,
+        (
+            "V2 CAMPAIGN: artifact readiness passed "
+            f"({len(resolved.config.models)} models, "
+            f"{len(resolved.config.track_modes)} tracks)"
+        ),
+    )
+    with _exclusive_output_dir_lock(resolved.output_dir):
+        lifecycle = _CampaignLifecycleController.start(
+            output_dir=resolved.output_dir,
+            source_config_fingerprint=resolved.source_config_fingerprint,
+            preflight_only=preflight_only,
+        )
+        signals = _SignalCancellation.install()
+        try:
+            readiness = await _run_prepared_v2_campaign(
+                resolved=resolved,
+                snapshot=snapshot,
+                prepared=prepared,
+                mcp_revision=mcp_revision,
+                model_readiness=model_readiness,
+                preflight_only=preflight_only,
+                progress=progress,
+                lifecycle=lifecycle,
+            )
+        except asyncio.CancelledError:
+            lifecycle.interrupt(
+                kind="signal" if signals.received_signal is not None else "task_cancelled",
+                signal_name=signals.received_signal,
+            )
+            _emit_progress(
+                progress,
+                (
+                    "V2 CAMPAIGN: interruption checkpointed"
+                    + (
+                        f" ({signals.received_signal})"
+                        if signals.received_signal is not None
+                        else ""
+                    )
+                ),
+            )
+            if signals.received_signal is not None:
+                raise V2CampaignRunError(
+                    f"v2 campaign interrupted by {signals.received_signal}"
+                ) from None
+            raise
+        except KeyboardInterrupt:
+            lifecycle.interrupt(kind="keyboard_interrupt", signal_name="SIGINT")
+            _emit_progress(progress, "V2 CAMPAIGN: interruption checkpointed (SIGINT)")
+            raise
+        except BaseException as exc:
+            lifecycle.fail(type(exc).__name__)
+            raise
+        else:
+            lifecycle.complete()
+            return readiness
+        finally:
+            signals.close()

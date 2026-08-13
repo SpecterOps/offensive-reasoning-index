@@ -77,6 +77,15 @@
           "minLength": 1,
           "type": "string"
         },
+        "equivalent_task_ids": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
         "family": {
           "minLength": 1,
           "type": "string"
@@ -87,6 +96,9 @@
         "path_concentration_key": {
           "minLength": 1,
           "type": "string"
+        },
+        "public_semantic_fingerprint": {
+          "$ref": "#/$defs/fingerprint"
         },
         "product": {
           "minLength": 1,
@@ -132,6 +144,8 @@
         "semantics",
         "cost_band",
         "path_concentration_key",
+        "public_semantic_fingerprint",
+        "equivalent_task_ids",
         "task_fingerprint",
         "oracle_fingerprint",
         "certification_fingerprint"

@@ -119,6 +119,35 @@ def assert_solver_visible(
             raise ValueError(f"oracle sentinel reached public surface at {path}")
 
 
+def public_semantic_fingerprint(task: TaskBundle) -> Fingerprint:
+    """Fingerprint the complete task semantics that can affect one solver attempt.
+
+    Task/revision identifiers, artifact fingerprints, and graph-resolved identities
+    are provenance rather than semantic differences. Input role/type shapes remain
+    relevant, while the public question carries the exact selectors shown to the
+    solver.
+    """
+
+    return canonical_sha256(
+        {
+            "protocol_version": task.protocol_version,
+            "claim_kind": task.claim_kind,
+            "answer_policy": task.answer_policy,
+            "binding": task.binding,
+            "input_roles": tuple(
+                sorted(
+                    (entity.role, entity.object_type)
+                    for entity in task.input_entities
+                )
+            ),
+            "question": task.question,
+            "acceptance_spec": task.acceptance_spec,
+            "answer_schema": task.answer_schema,
+            "generic_instructions": task.generic_instructions,
+        }
+    )
+
+
 def build_solver_visible_envelope(
     task: TaskBundle,
     *,
