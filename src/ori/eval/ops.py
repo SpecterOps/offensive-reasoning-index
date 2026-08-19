@@ -6,6 +6,7 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ori.mcp_launcher import MCPLauncherConfig
 from ori.relationships import canonical_relationship_kind, live_relationship_kinds
 
 from .bhce import BHCEClient, parse_bhce_url
@@ -349,6 +350,7 @@ async def run_smoke_mcp_eval(
     output_dir: Path,
     bhce_url: str | None = None,
     mcp_dir: Path | None = None,
+    mcp_launcher: MCPLauncherConfig | None = None,
     max_steps: int = 12,
     resource_mode: str = RESOURCE_MODE_OFF,
 ) -> SmokeEvalResult:
@@ -367,6 +369,7 @@ async def run_smoke_mcp_eval(
             bhce_url=bhce_url,
             ollama_options=None,
             mcp_dir=mcp_dir,
+            mcp_launcher=mcp_launcher,
             max_steps=max_steps,
             resource_mode=resource_mode,
         )

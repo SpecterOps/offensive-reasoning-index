@@ -32,12 +32,22 @@ from .generator.serializer import (
     serialize_to_dir,
     serialize_to_zip,
 )
+from .mcp_launcher import (
+    MCPLauncherConfig,
+    detect_uv_version,
+    resolve_mcp_launcher_config,
+)
 from .relationships import (
     RELATIONSHIP_CONTRACT_VERSION,
     SHARPHOUND_PROFILE,
     canonical_relationship_kind,
 )
-from .run_config import RunConfigOverrides, list_run_profiles, load_run_profile
+from .run_config import (
+    RunConfigOverrides,
+    _normalize_resource_mode,
+    list_run_profiles,
+    load_run_profile,
+)
 
 
 @dataclass(frozen=True)
@@ -348,6 +358,7 @@ def _effective_run_config(
     openai_compat_telemetry_adapter: str | None = None,
     mcp_ollama_read_timeout_seconds: float | None = None,
     telemetry_enabled: bool | None = None,
+    mcp_launcher: MCPLauncherConfig | None = None,
     run_index: int | None = None,
     runs_per_model: int | None = None,
 ) -> dict[str, Any]:
@@ -375,6 +386,8 @@ def _effective_run_config(
         config["run_index"] = run_index
     if runs_per_model is not None:
         config["runs_per_model"] = runs_per_model
+    if mcp_launcher is not None:
+        config.update(mcp_launcher.provenance(uv_version=detect_uv_version()))
     return config
 
 
@@ -453,7 +466,8 @@ async def _run_baseline_mcp_with_specs(
     output_dir: Path,
     concurrency_override: int | None,
     bhce_url: str | None,
-    mcp_dir: Path,
+    mcp_dir: Path | None,
+    mcp_launcher: MCPLauncherConfig | None,
     max_steps: int,
     resource_mode: str,
     mcp_tool_loop: str,
@@ -470,6 +484,9 @@ async def _run_baseline_mcp_with_specs(
     from .eval.runner import run_eval_mcp_cli_bare
 
     output_dir.mkdir(parents=True, exist_ok=True)
+    resolved_mcp_launcher = mcp_launcher or MCPLauncherConfig.local_checkout(
+        (mcp_dir or (Path.cwd().parent / "bloodhound-mcp")).resolve()
+    )
     results = {}
     total_runs = sum(run_spec.runs_per_model for run_spec in run_specs)
     run_number = 0
@@ -522,7 +539,8 @@ async def _run_baseline_mcp_with_specs(
                 bhce_url=bhce_url,
                 ollama_options=run_spec.ollama_options,
                 max_model_reruns_on_infra=max_model_reruns_on_infra,
-                mcp_dir=mcp_dir,
+                mcp_dir=resolved_mcp_launcher.mcp_dir,
+                mcp_launcher=resolved_mcp_launcher,
                 max_steps=effective_max_steps,
                 resource_mode=resource_mode,
                 mcp_tool_loop=effective_mcp_tool_loop,
@@ -538,6 +556,7 @@ async def _run_baseline_mcp_with_specs(
                     openai_compat_telemetry_adapter=effective_openai_compat_telemetry_adapter,
                     mcp_ollama_read_timeout_seconds=effective_mcp_ollama_read_timeout_seconds,
                     telemetry_enabled=telemetry_enabled,
+                    mcp_launcher=resolved_mcp_launcher,
                     run_index=run_index,
                     runs_per_model=run_spec.runs_per_model,
                 ),
@@ -1074,6 +1093,7 @@ def eval_mcp(
     run_spec = _build_inline_run_spec(
         model=model, ollama_options=_parse_ollama_options(ollama_options_raw)
     )
+    mcp_launcher = MCPLauncherConfig.local_checkout(Path(mcp_dir))
 
     asyncio.run(
         run_eval_mcp_cli(
@@ -1082,7 +1102,8 @@ def eval_mcp(
             output_path=Path(output),
             concurrency=concurrency,
             bhce_url=bhce_url,
-            mcp_dir=Path(mcp_dir),
+            mcp_dir=mcp_launcher.mcp_dir,
+            mcp_launcher=mcp_launcher,
             max_steps=max_steps,
             resource_mode=resource_mode,
             mcp_tool_loop=mcp_tool_loop,
@@ -1097,6 +1118,8 @@ def eval_mcp(
                 mcp_tool_loop=mcp_tool_loop,
                 openai_compat_telemetry_adapter=openai_compat_telemetry_adapter,
                 mcp_ollama_read_timeout_seconds=mcp_ollama_read_timeout,
+                telemetry_enabled=telemetry_enabled,
+                mcp_launcher=mcp_launcher,
             ),
             telemetry_enabled=telemetry_enabled,
         )
@@ -1135,6 +1158,98 @@ def verify_bh_health(bhce_url: str | None, timeout: float, poll_interval: float)
         )
     )
     print_verify_bh_health(result)
+    if not result.ok:
+        raise SystemExit(1)
+
+
+@main.command(name="verify-mcp")
+@click.option(
+    "--config",
+    "config_path",
+    required=True,
+    type=click.Path(exists=True),
+    help="Run config containing the MCP launcher definition.",
+)
+@click.option("--profile", default=None, help="Profile name for a profile-based config.")
+@click.option(
+    "--manifest", "-m", required=True, type=click.Path(exists=True), help="Benchmark manifest."
+)
+@click.option(
+    "--output",
+    "-o",
+    required=True,
+    type=click.Path(),
+    help="New immutable MCP readiness JSON path.",
+)
+@click.option(
+    "--mcp-dir",
+    default=None,
+    type=click.Path(exists=True),
+    help="Explicit legacy local checkout override.",
+)
+def verify_mcp(
+    config_path: str,
+    profile: str | None,
+    manifest: str,
+    output: str,
+    mcp_dir: str | None,
+) -> None:
+    """Start MCP without a model and verify read-only launcher capabilities."""
+    import asyncio
+
+    from .eval.mcp_runtime import (
+        verify_mcp_launcher_readiness,
+        write_mcp_readiness_artifact,
+    )
+
+    config_file = Path(config_path).resolve()
+    try:
+        data = yaml.safe_load(config_file.read_text()) or {}
+        if not isinstance(data, dict):
+            raise ValueError("Run config root must be a mapping.")
+        if "profiles" in data:
+            resolved = load_run_profile(
+                config_file,
+                profile,
+                overrides=RunConfigOverrides(mcp_dir=mcp_dir),
+            )
+            launcher = resolved.mcp_launcher
+        else:
+            defaults = data.get("defaults") or {}
+            if not isinstance(defaults, dict):
+                raise ValueError("defaults must be a mapping when present.")
+            mcp_section = defaults.get("mcp") or {}
+            if not isinstance(mcp_section, dict):
+                raise ValueError("defaults.mcp must be a mapping when present.")
+            launcher = resolve_mcp_launcher_config(
+                mcp_section,
+                config_dir=config_file.parent,
+                mcp_dir_override=mcp_dir,
+            )
+        manifest_data = json.loads(Path(manifest).read_text())
+        domain_query = manifest_data.get("domain")
+        if not isinstance(domain_query, str) or not domain_query.strip():
+            raise ValueError("Manifest must define a non-empty domain for MCP readiness.")
+        result = asyncio.run(
+            verify_mcp_launcher_readiness(launcher, domain_query=domain_query)
+        )
+        artifact = write_mcp_readiness_artifact(result, Path(output))
+    except (OSError, ValueError, RuntimeError, json.JSONDecodeError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    except Exception as exc:
+        raise click.ClickException(
+            f"MCP readiness startup failed ({exc.__class__.__name__})."
+        ) from None
+
+    provenance = artifact["provenance"]
+    click.echo(f"MCP launcher: {provenance['mcp_launcher']}")
+    click.echo(f"MCP revision: {provenance.get('mcp_revision') or 'local checkout'}")
+    click.echo(f"Prompt discovery: {artifact['prompt_discovery']['status']}")
+    click.echo(f"Resource discovery: {artifact['resource_discovery']['status']}")
+    click.echo(f"Read-only tools: {len(artifact['read_only_tools'])}")
+    click.echo(f"Readiness fingerprint: {artifact['readiness_fingerprint']}")
+    click.echo(f"Readiness artifact: {Path(output).resolve()}")
+    click.echo(f"MCP READINESS: {'PASS' if result.ok else 'FAIL'}")
     if not result.ok:
         raise SystemExit(1)
 
@@ -1224,12 +1339,15 @@ def smoke_mcp(
 
     from .eval.ops import print_smoke_eval, run_smoke_mcp_eval
 
+    mcp_launcher = MCPLauncherConfig.local_checkout(Path(mcp_dir))
+
     result = asyncio.run(
         run_smoke_mcp_eval(
             manifest_path=Path(manifest),
             output_dir=Path(output_dir),
             bhce_url=bhce_url,
-            mcp_dir=Path(mcp_dir),
+            mcp_dir=mcp_launcher.mcp_dir,
+            mcp_launcher=mcp_launcher,
             max_steps=max_steps,
             resource_mode=resource_mode,
         )
@@ -1445,6 +1563,8 @@ def run_from_config(
             root_output_dir = (config_dir / root_output_dir).resolve()
 
         mcp_defaults = defaults.get("mcp") or {}
+        if not isinstance(mcp_defaults, dict):
+            raise click.UsageError("defaults.mcp must be a mapping when present.")
         health_defaults = defaults.get("health") or {}
         telemetry_defaults = defaults.get("telemetry") or {}
         effective_bhce_url = bhce_url if bhce_url is not None else defaults.get("bhce_url")
@@ -1495,10 +1615,19 @@ def run_from_config(
             click.echo(f"Direct benchmark results written to {direct_dir}")
 
         if "mcp" in modes:
-            raw_mcp_dir = mcp_dir or mcp_defaults.get("mcp_dir", "../bloodhound-mcp")
-            effective_mcp_dir = Path(raw_mcp_dir)
-            if not effective_mcp_dir.is_absolute():
-                effective_mcp_dir = (config_dir / effective_mcp_dir).resolve()
+            try:
+                effective_mcp_launcher = resolve_mcp_launcher_config(
+                    mcp_defaults,
+                    config_dir=config_dir,
+                    mcp_dir_override=mcp_dir,
+                )
+                effective_resource_mode = _normalize_resource_mode(
+                    resource_mode
+                    if resource_mode is not None
+                    else mcp_defaults.get("resource_mode", "off")
+                )
+            except ValueError as exc:
+                raise click.UsageError(str(exc)) from exc
             mcp_dir_out = root_output_dir / "mcp"
             mcp_dir_out.mkdir(parents=True, exist_ok=True)
             effective_max_steps = int(
@@ -1511,9 +1640,10 @@ def run_from_config(
                     output_dir=mcp_dir_out,
                     concurrency_override=concurrency,
                     bhce_url=effective_bhce_url,
-                    mcp_dir=effective_mcp_dir,
+                    mcp_dir=effective_mcp_launcher.mcp_dir,
+                    mcp_launcher=effective_mcp_launcher,
                     max_steps=effective_max_steps,
-                    resource_mode=resource_mode or mcp_defaults.get("resource_mode", "off"),
+                    resource_mode=effective_resource_mode,
                     mcp_tool_loop=mcp_tool_loop or mcp_defaults.get("tool_loop", "auto"),
                     openai_compat_telemetry_adapter=(
                         openai_compat_telemetry_adapter
@@ -1634,7 +1764,8 @@ def run_from_config(
                         output_dir=repeated_output_dir,
                         concurrency_override=concurrency,
                         bhce_url=resolved.bhce_url,
-                        mcp_dir=Path(resolved.mcp_dir),
+                        mcp_dir=resolved.mcp_launcher.mcp_dir,
+                        mcp_launcher=resolved.mcp_launcher,
                         max_steps=effective_max_steps,
                         resource_mode=resolved.resource_mode,
                         mcp_tool_loop=resolved.mcp_tool_loop,
@@ -1660,7 +1791,8 @@ def run_from_config(
                     concurrency=concurrency if concurrency is not None else run_spec.concurrency,
                     bhce_url=resolved.bhce_url,
                     max_model_reruns_on_infra=resolved.max_model_reruns_on_infra,
-                    mcp_dir=Path(resolved.mcp_dir),
+                    mcp_dir=resolved.mcp_launcher.mcp_dir,
+                    mcp_launcher=resolved.mcp_launcher,
                     max_steps=effective_max_steps,
                     resource_mode=resolved.resource_mode,
                     mcp_tool_loop=run_spec.mcp_tool_loop or resolved.mcp_tool_loop,
@@ -1683,6 +1815,7 @@ def run_from_config(
                         ),
                         mcp_ollama_read_timeout_seconds=resolved.mcp_ollama_read_timeout_seconds,
                         telemetry_enabled=resolved.telemetry_enabled,
+                        mcp_launcher=resolved.mcp_launcher,
                     ),
                     model_base_url=effective_model_base_url,
                     health_timeout_seconds=resolved.health_timeout_seconds,
@@ -1746,7 +1879,8 @@ def run_from_config(
                     output_dir=Path(resolved.output_dir),
                     concurrency_override=concurrency,
                     bhce_url=resolved.bhce_url,
-                    mcp_dir=Path(resolved.mcp_dir),
+                    mcp_dir=resolved.mcp_launcher.mcp_dir,
+                    mcp_launcher=resolved.mcp_launcher,
                     max_steps=resolved.max_steps,
                     resource_mode=resolved.resource_mode,
                     mcp_tool_loop=resolved.mcp_tool_loop,
@@ -1790,7 +1924,8 @@ def run_from_config(
                     manifest_path=Path(resolved.manifest),
                     output_dir=Path(resolved.output_dir),
                     bhce_url=resolved.bhce_url,
-                    mcp_dir=Path(resolved.mcp_dir),
+                    mcp_dir=resolved.mcp_launcher.mcp_dir,
+                    mcp_launcher=resolved.mcp_launcher,
                     max_steps=resolved.max_steps,
                     resource_mode=resolved.resource_mode,
                 )
@@ -2008,6 +2143,7 @@ def _run_baseline_mcp(
             concurrency_override=concurrency,
             bhce_url=bhce_url,
             mcp_dir=Path(mcp_dir),
+            mcp_launcher=MCPLauncherConfig.local_checkout(Path(mcp_dir)),
             max_steps=max_steps,
             resource_mode=resource_mode,
             mcp_tool_loop=mcp_tool_loop,

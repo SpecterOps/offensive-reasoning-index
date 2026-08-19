@@ -14,7 +14,9 @@ defaults:
   concurrency: 1
   max_model_reruns_on_infra: 1
   mcp:
-    mcp_dir: ../bloodhound-mcp
+    launcher: uvx_git
+    source: git+https://github.com/mwnickerson/bloodhound_mcp@cdb17097e761c8a8622cb93bc3ba49a9e150bb6e
+    executable: bloodhound-mcp
     max_steps: 16
     resource_mode: on-demand
     ollama_read_timeout_seconds: 1800
@@ -143,4 +145,3 @@ profiles:
       openai_compat_telemetry_adapter: generic
       options:
         temperature: 0
-

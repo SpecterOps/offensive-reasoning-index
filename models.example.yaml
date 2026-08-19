@@ -15,7 +15,10 @@ defaults:
     timeout_seconds: 60
     poll_interval: 5
   mcp:
-    mcp_dir: ../bloodhound-mcp
+    # Benchmark default: immutable upstream source plus the packaged console entry point.
+    launcher: uvx_git
+    source: git+https://github.com/mwnickerson/bloodhound_mcp@cdb17097e761c8a8622cb93bc3ba49a9e150bb6e
+    executable: bloodhound-mcp
     max_steps: 16
     resource_mode: "off"
     tool_loop: auto

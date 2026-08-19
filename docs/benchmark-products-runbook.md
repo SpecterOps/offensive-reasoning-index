@@ -47,7 +47,8 @@ uv run pytest
 uv run ruff check src scripts tests
 ```
 
-For live MCP runs, configure BloodHound CE credentials in `.env` or the shell:
+For live MCP runs, keep BloodHound CE credentials in a protected file outside
+the repository (mode `0600`) or in the shell:
 
 ```bash
 BLOODHOUND_DOMAIN=<host>
@@ -56,6 +57,16 @@ BLOODHOUND_TOKEN_KEY=<token key>
 ```
 
 Do not commit `.env`, tokens, auth files, generated private results, or local operator logs.
+
+ORI forwards only `BLOODHOUND_DOMAIN`, `BLOODHOUND_PORT`,
+`BLOODHOUND_SCHEME`, `BLOODHOUND_TOKEN_ID`, `BLOODHOUND_TOKEN_KEY`, and
+`BLOODHOUND_VERIFY_TLS` to the MCP child. It never copies the full parent
+environment. Load a protected file explicitly:
+
+```bash
+uv run --env-file /absolute/private/path/bloodhound.env \
+  ori verify-bh-health
+```
 
 Check BloodHound CE before grading:
 
@@ -191,7 +202,9 @@ defaults:
   concurrency: 1
   runs_per_model: 3
   mcp:
-    mcp_dir: ../bloodhound-mcp
+    launcher: uvx_git
+    source: git+https://github.com/mwnickerson/bloodhound_mcp@cdb17097e761c8a8622cb93bc3ba49a9e150bb6e
+    executable: bloodhound-mcp
     max_steps: 16
     resource_mode: "off"
     tool_loop: auto
@@ -228,6 +241,34 @@ ORI can use the Codex auth file at:
 ```
 
 Never print or commit the auth file. A safe readiness check is to report only whether a token exists and its length, not the token value.
+
+Before model grading, start the exact pinned MCP package and exercise prompt,
+resource, tool, and credential startup paths without calling a model:
+
+```bash
+uv run --env-file /absolute/private/path/bloodhound.env \
+  ori verify-mcp \
+  --config models.local.yaml \
+  --manifest datasets/benchmarks/complex-v1-seed-4401_manifest.json \
+  --output results/readiness/cdb17097/mcp-readiness.json
+```
+
+The output is an immutable readiness receipt. Use a new output root when the
+MCP revision changes. It records the launcher, canonical source, full revision,
+executable, `uv` version, prompt/resource discovery, read-only tool inventory,
+and hashed response evidence; it never records credential values or tool
+response bodies.
+
+For local MCP development only, retain the legacy launcher:
+
+```yaml
+mcp:
+  launcher: local_checkout
+  mcp_dir: ../bloodhound-mcp
+```
+
+That mode preserves `uv --directory <mcp_dir> run main.py`. Benchmark configs
+should use the pinned `uvx_git` form above.
 
 ## Run a Benchmark Campaign
 

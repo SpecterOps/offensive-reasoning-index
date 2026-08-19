@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ori.mcp_launcher import MCPLauncherConfig
+
 from ..telemetry import record_eval_telemetry
 from .adapter import ModelResponse, call_model
 from .bhce import BHCEClient, CypherResult, parse_bhce_url
@@ -137,6 +139,11 @@ def _missing_mcp_results(
                 mcp=MCPRunMetadata(
                     resource_mode=resource_mode,
                     infra_error_subtype="batch_interrupted_missing_result",
+                    mcp_launcher=str((run_config or {}).get("mcp_launcher") or ""),
+                    mcp_source=str((run_config or {}).get("mcp_source") or ""),
+                    mcp_revision=str((run_config or {}).get("mcp_revision") or ""),
+                    mcp_executable=str((run_config or {}).get("mcp_executable") or ""),
+                    uv_version=str((run_config or {}).get("uv_version") or ""),
                 ),
                 run_name=run_name or model,
                 requested_model=model,
@@ -152,6 +159,34 @@ def _missing_mcp_results(
         f"requested task result(s); marking {len(missing_results)} missing task(s) as INFRA_ERROR."
     )
     return missing_results
+
+
+def _mcp_runtime_run_config(
+    run_config: dict[str, Any] | None,
+    batch_results: list[EvalResult],
+) -> dict[str, Any] | None:
+    config = dict(run_config or {})
+    all_metadata = [result.mcp for result in batch_results if result.mcp]
+    metadata = next((item for item in all_metadata if item.mcp_launcher), None)
+    metadata = metadata or (all_metadata[0] if all_metadata else None)
+    if metadata is None:
+        return config or None
+    for key, value in {
+        "mcp_launcher": metadata.mcp_launcher,
+        "mcp_source": metadata.mcp_source,
+        "mcp_revision": metadata.mcp_revision,
+        "mcp_executable": metadata.mcp_executable,
+        "uv_version": metadata.uv_version,
+    }.items():
+        if value:
+            config[key] = value
+    if metadata.prompt_discovery_status:
+        config["prompt_discovery_status"] = metadata.prompt_discovery_status
+        config["prompt_discovery_succeeded"] = metadata.prompt_discovery_status == "selected"
+    if metadata.resource_discovery_status:
+        config["resource_discovery_status"] = metadata.resource_discovery_status
+        config["resource_discovery_succeeded"] = metadata.resource_discovery_status == "listed"
+    return config
 
 
 async def run_eval(
@@ -288,13 +323,14 @@ async def run_eval_cli_bare(
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     _validate_result_accounting(tasks, results)
+    telemetry_run_config = results[0].run_config if results else run_config
     record_eval_telemetry(
         results,
         output_path=output_path,
         model=model,
         run_name=run_name or model,
         requested_model=model,
-        run_config=run_config,
+        run_config=telemetry_run_config,
         model_base_url=model_base_url,
         enabled=telemetry_enabled,
     )
@@ -373,13 +409,14 @@ async def run_eval_cli(
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     _validate_result_accounting(tasks, results)
+    telemetry_run_config = results[0].run_config if results else run_config
     record_eval_telemetry(
         results,
         output_path=output_path,
         model=model,
         run_name=run_name or model,
         requested_model=model,
-        run_config=run_config,
+        run_config=telemetry_run_config,
         model_base_url=model_base_url,
         enabled=telemetry_enabled,
     )
@@ -397,6 +434,7 @@ async def run_eval_mcp_cli_bare(
     ollama_options: dict | None = None,
     max_model_reruns_on_infra: int = 1,
     mcp_dir: Path | None = None,
+    mcp_launcher: MCPLauncherConfig | None = None,
     max_steps: int = 12,
     resource_mode: str = RESOURCE_MODE_OFF,
     mcp_tool_loop: str = "auto",
@@ -440,16 +478,18 @@ async def run_eval_mcp_cli_bare(
                 ollama_options=ollama_options,
                 bhce_domain=domain,
                 mcp_dir=mcp_dir,
+                mcp_launcher=mcp_launcher,
                 max_steps=max_steps,
                 resource_mode=resource_mode,
                 mcp_tool_loop=mcp_tool_loop,
                 openai_compat_telemetry_adapter=openai_compat_telemetry_adapter,
                 ollama_read_timeout_seconds=mcp_ollama_read_timeout_seconds,
             )
+            effective_run_config = _mcp_runtime_run_config(run_config, batch_results)
             for result in batch_results:
                 result.run_name = run_name or model
                 result.requested_model = model
-                result.run_config = run_config
+                result.run_config = effective_run_config
                 result.attempt_number = attempt + 1
                 result.result_source = "first_pass" if attempt == 0 else "retry"
             missing_results = _missing_mcp_results(
@@ -457,7 +497,7 @@ async def run_eval_mcp_cli_bare(
                 batch_results,
                 model=model,
                 run_name=run_name,
-                run_config=run_config,
+                run_config=effective_run_config,
                 resource_mode=resource_mode,
                 attempt_number=attempt + 1,
                 result_source=(
@@ -481,13 +521,14 @@ async def run_eval_mcp_cli_bare(
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     _validate_result_accounting(tasks, results)
+    telemetry_run_config = results[0].run_config if results else run_config
     record_eval_telemetry(
         results,
         output_path=output_path,
         model=model,
         run_name=run_name or model,
         requested_model=model,
-        run_config=run_config,
+        run_config=telemetry_run_config,
         model_base_url=model_base_url,
         enabled=telemetry_enabled,
     )
@@ -504,6 +545,7 @@ async def run_eval_mcp_cli(
     bhce_url: str | None = None,
     max_model_reruns_on_infra: int = 1,
     mcp_dir: Path | None = None,
+    mcp_launcher: MCPLauncherConfig | None = None,
     max_steps: int = 12,
     ollama_options: dict | None = None,
     resource_mode: str = RESOURCE_MODE_OFF,
@@ -551,16 +593,18 @@ async def run_eval_mcp_cli(
                 ollama_options=ollama_options,
                 bhce_domain=domain,
                 mcp_dir=mcp_dir,
+                mcp_launcher=mcp_launcher,
                 max_steps=max_steps,
                 resource_mode=resource_mode,
                 mcp_tool_loop=mcp_tool_loop,
                 openai_compat_telemetry_adapter=openai_compat_telemetry_adapter,
                 ollama_read_timeout_seconds=mcp_ollama_read_timeout_seconds,
             )
+            effective_run_config = _mcp_runtime_run_config(run_config, batch_results)
             for result in batch_results:
                 result.run_name = run_name or model
                 result.requested_model = model
-                result.run_config = run_config
+                result.run_config = effective_run_config
                 result.attempt_number = attempt + 1
                 result.result_source = "first_pass" if attempt == 0 else "retry"
             missing_results = _missing_mcp_results(
@@ -568,7 +612,7 @@ async def run_eval_mcp_cli(
                 batch_results,
                 model=model,
                 run_name=run_name,
-                run_config=run_config,
+                run_config=effective_run_config,
                 resource_mode=resource_mode,
                 attempt_number=attempt + 1,
                 result_source=(
@@ -592,13 +636,14 @@ async def run_eval_mcp_cli(
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     _validate_result_accounting(tasks, results)
+    telemetry_run_config = results[0].run_config if results else run_config
     record_eval_telemetry(
         results,
         output_path=output_path,
         model=model,
         run_name=run_name or model,
         requested_model=model,
-        run_config=run_config,
+        run_config=telemetry_run_config,
         model_base_url=model_base_url,
         enabled=telemetry_enabled,
     )
