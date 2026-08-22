@@ -12,6 +12,17 @@ The current public benchmark products are:
 ```text
 simple   small, fast, seeded AD smoke/triage benchmark
 complex  large, enterprise-style seeded AD benchmark with multihop reasoning tasks
+src/ori/                         Python package and CLI
+docs/phase4-v1-runbook.md        Phase 4 v1 operator runbook
+docs/benchmark-hardening-runbook.md
+                                 Scoring/preflight/failure-taxonomy notes
+examples/inference/              Sanitized inference-provider config templates
+docs/openai-compatible-model-examples.yaml
+                                 Legacy disabled provider-profile examples
+run-config-phase4-v1.yaml        Current Phase 4 v1 config
+run-config-phase3-m4.yaml        Earlier M4 Phase 3 config
+models.yaml / models-m4.yaml     Local model lineups
+results/                         Local result artifacts; do not assume complete
 ```
 
 Use the product commands for normal benchmark work:
@@ -1166,9 +1177,14 @@ dataset.
   parity receipts.
 - [Phase 4 v1 Runbook](docs/phase4-v1-runbook.md): older Phase 4 v1 workflow for
   historical comparison and focused diagnostic profiles.
+- [Inference Config Examples](examples/inference/): sanitized templates for
+  Ollama, generic OpenAI-compatible endpoints, llama.cpp, vLLM, LM Studio,
+  OpenRouter, NVIDIA NIM, and BloodHound MCP environment wiring. Copy these to
+  local run configs and replace placeholders; keep real inference endpoints,
+  private model aliases, API keys, and local paths out of public commits.
 - [OpenAI-Compatible Model Examples](docs/openai-compatible-model-examples.yaml):
-  disabled profile examples for Ollama OpenAI compat, llama.cpp, MLX, vLLM,
-  LM Studio, OpenRouter, and NVIDIA NIM.
+  legacy disabled profile examples for Ollama OpenAI compat, llama.cpp, MLX,
+  vLLM, LM Studio, OpenRouter, and NVIDIA NIM.
 
 ## Common Commands
 
@@ -1271,3 +1287,9 @@ owner has explicitly approved the scope, credentials, and reporting destination.
 Generated datasets/results may be useful evidence, but review size and sensitivity
 before committing them. Never commit local `.env`, generated secrets, auth tokens,
 private result dumps, or machine-specific operator logs.
+Do not commit local `.env`, generated secrets, inference
+routing configs, or machine-specific operator logs. Keep real provider endpoints,
+private model aliases, and local output paths in untracked local configs. The
+sanitized templates under `examples/inference/` are safe starting points for
+public documentation and user setup. Generated datasets/results may be useful
+evidence, but review size and sensitivity before committing them.

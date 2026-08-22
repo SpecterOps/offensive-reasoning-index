@@ -1,0 +1,32 @@
+# vLLM OpenAI-compatible ORI inference template.
+#
+# vLLM commonly serves an OpenAI-compatible endpoint at http://127.0.0.1:8000/v1.
+# Use OPENAI_COMPAT_API_KEY if your vLLM gateway requires an API key.
+
+version: 1
+
+defaults:
+  bhce_url: ${ORI_BHCE_URL:-https://bloodhound.example.invalid}
+  concurrency: 1
+  max_model_reruns_on_infra: 1
+  mcp:
+    mcp_dir: ${ORI_BLOODHOUND_MCP_DIR:-../bloodhound-mcp}
+    max_steps: 16
+    resource_mode: off
+    tool_loop: native-openai-compatible
+    openai_compat_telemetry_adapter: vllm
+
+profiles:
+  eval_mcp_vllm:
+    enabled: false
+    kind: eval-mcp
+    manifest: ${ORI_MANIFEST:-datasets/phase4-v1_manifest.json}
+    output: ${ORI_OUTPUT:-results/vllm/example-model-mcp.csv}
+    model:
+      name: example-vllm-model
+      model: openai-compat/example-model
+      model_base_url: ${ORI_VLLM_BASE_URL:-http://127.0.0.1:8000/v1}
+      mcp_tool_loop: native-openai-compatible
+      openai_compat_telemetry_adapter: vllm
+      options:
+        temperature: 0
