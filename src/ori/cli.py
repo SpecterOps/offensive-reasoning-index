@@ -1210,7 +1210,7 @@ def verify_mcp(
         if "profiles" in data:
             resolved = load_run_profile(
                 config_file,
-                profile,
+                profile_name=profile,
                 overrides=RunConfigOverrides(mcp_dir=mcp_dir),
             )
             launcher = resolved.mcp_launcher

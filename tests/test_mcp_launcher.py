@@ -5,9 +5,11 @@ import json
 from pathlib import Path
 
 import pytest
+from click.testing import CliRunner
 from inspect_ai.tool import tool
 from mcp.types import TextContent
 
+from ori.cli import main
 from ori.eval.mcp_runtime import (
     MCPReadinessResult,
     MCPServerBundle,
@@ -93,6 +95,79 @@ def test_config_resolution_supports_pinned_uvx_and_legacy_local(tmp_path: Path) 
 
     assert uvx.revision == PIN
     assert local.mcp_dir == (tmp_path / "../Bloodhound-MCP").resolve()
+
+
+def test_verify_mcp_accepts_profile_based_config(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "run-config.yaml"
+    config_path.write_text(
+        """
+version: 1
+defaults:
+  mcp:
+    launcher: uvx_git
+    source: """ + SOURCE + """
+    executable: bloodhound-mcp
+profiles:
+  preflight:
+    kind: preflight
+    manifest: manifest.json
+    output_dir: results
+""",
+        encoding="utf-8",
+    )
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps({"domain": "CORP.LOCAL"}), encoding="utf-8")
+    readiness = MCPReadinessResult(
+        launcher_provenance=MCPLauncherConfig.uvx_git(
+            source=SOURCE,
+            executable="bloodhound-mcp",
+        ).provenance(uv_version="uv 0.test"),
+        prompt_discovery_status="selected",
+        available_prompt_names=["bloodhound_assistant"],
+        resource_discovery_status="listed",
+        available_resource_uris=["bloodhound://guides/ad"],
+        read_only_tools=[
+            "cypher_query",
+            "data_quality",
+            "domain_info",
+            "graph_analysis",
+            "list_bloodhound_resources",
+        ],
+        checks={
+            "startup_credential_preflight": {"status": "passed"},
+            "data_quality": {"status": "passed"},
+            "domain_info": {"status": "passed"},
+            "graph_analysis": {"status": "passed"},
+            "cypher_query": {"status": "passed"},
+            "list_bloodhound_resources": {"status": "passed"},
+        },
+        captured_at="2026-08-22T00:00:00+00:00",
+    )
+
+    async def fake_readiness(*args, **kwargs):
+        return readiness
+
+    monkeypatch.setattr("ori.eval.mcp_runtime.verify_mcp_launcher_readiness", fake_readiness)
+    result = CliRunner().invoke(
+        main,
+        [
+            "verify-mcp",
+            "--config",
+            str(config_path),
+            "--profile",
+            "preflight",
+            "--manifest",
+            str(manifest_path),
+            "--output",
+            str(tmp_path / "readiness.json"),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "MCP READINESS: PASS" in result.output
 
 
 @pytest.mark.parametrize("field", ["command", "args", "shell"])
