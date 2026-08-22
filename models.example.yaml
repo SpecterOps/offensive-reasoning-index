@@ -50,7 +50,10 @@ defaults:
     max_recursive_expansion_complexity: 256
 
   mcp:
-    mcp_dir: ../bloodhound-mcp
+    # Benchmark default: immutable upstream source plus the packaged console entry point.
+    launcher: uvx_git
+    source: git+https://github.com/mwnickerson/bloodhound_mcp@cdb17097e761c8a8622cb93bc3ba49a9e150bb6e
+    executable: bloodhound-mcp
     max_steps: 16
     # Supported values: "off", "on-demand". Quote "off" for YAML portability.
     resource_mode: "off"

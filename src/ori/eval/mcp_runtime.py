@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import builtins
+import hashlib
 import inspect
 import json
 import os
@@ -11,6 +12,7 @@ import re
 import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
+from datetime import UTC, datetime
 from functools import wraps
 from pathlib import Path
 from typing import Any
@@ -33,6 +35,12 @@ from inspect_ai.solver import Generate, TaskState, solver, use_tools
 from inspect_ai.tool import ToolCall, ToolCallError, ToolError, mcp_server_stdio, mcp_tools, tool
 from inspect_ai.tool._tool_info import parse_tool_info
 from mcp.types import EmbeddedResource, PromptMessage, ResourceLink, TextContent
+
+from ori.mcp_launcher import (
+    MCPLauncherConfig,
+    build_mcp_launch_spec,
+    detect_uv_version,
+)
 
 from .adapter import ModelResponse
 from .bhce import BHCEClient, CypherResult
@@ -299,6 +307,9 @@ class MCPServerBundle:
     server_prompt_name: str = ""
     available_prompt_names: list[str] = field(default_factory=list)
     prompt_discovery_status: str = "not_requested"
+    available_resource_uris: list[str] = field(default_factory=list)
+    resource_discovery_status: str = "not_requested"
+    launcher_provenance: dict[str, str | None] = field(default_factory=dict)
 
 
 @dataclass
@@ -318,6 +329,8 @@ class MCPRunMetadata:
     server_prompt_name: str = ""
     available_prompt_names: list[str] = field(default_factory=list)
     prompt_discovery_status: str = ""
+    available_resource_uris: list[str] = field(default_factory=list)
+    resource_discovery_status: str = ""
     resource_mode: str = RESOURCE_MODE_OFF
     tool_loop: str = MCP_TOOL_LOOP_AUTO
     resource_reads_total: int = 0
@@ -331,12 +344,122 @@ class MCPRunMetadata:
     minimum_evidence_satisfied: bool = False
     final_answer_diagnostics: dict[str, Any] = field(default_factory=dict)
     repair_turn_used: bool = False
+    mcp_launcher: str = ""
+    mcp_source: str = ""
+    mcp_revision: str = ""
+    mcp_executable: str = ""
+    uv_version: str = ""
 
     @property
     def final_answer_normalized_json(self) -> str:
         if self.final_answer_normalized is None:
             return ""
         return json.dumps(self.final_answer_normalized, sort_keys=True)
+
+
+def _apply_mcp_runtime_metadata(
+    metadata: MCPRunMetadata,
+    *,
+    available_resource_uris: list[str],
+    resource_discovery_status: str,
+    launcher_provenance: dict[str, str | None],
+) -> None:
+    metadata.available_resource_uris = sorted(available_resource_uris)
+    metadata.resource_discovery_status = resource_discovery_status
+    metadata.mcp_launcher = str(launcher_provenance.get("mcp_launcher") or "")
+    metadata.mcp_source = str(launcher_provenance.get("mcp_source") or "")
+    metadata.mcp_revision = str(launcher_provenance.get("mcp_revision") or "")
+    metadata.mcp_executable = str(launcher_provenance.get("mcp_executable") or "")
+    metadata.uv_version = str(launcher_provenance.get("uv_version") or "")
+
+
+@dataclass(frozen=True)
+class MCPReadinessResult:
+    """No-model evidence that a configured MCP launcher is usable and read-only."""
+
+    launcher_provenance: dict[str, str | None]
+    prompt_discovery_status: str
+    available_prompt_names: list[str]
+    resource_discovery_status: str
+    available_resource_uris: list[str]
+    read_only_tools: list[str]
+    checks: dict[str, dict[str, Any]]
+    captured_at: str
+
+    @property
+    def ok(self) -> bool:
+        required_checks = {
+            "startup_credential_preflight",
+            "data_quality",
+            "domain_info",
+            "graph_analysis",
+            "cypher_query",
+            RESOURCE_LIST_TOOL_NAME,
+        }
+        return (
+            self.prompt_discovery_status == "selected"
+            and self.resource_discovery_status == "listed"
+            and bool(self.available_resource_uris)
+            and required_checks.issubset(self.checks)
+            and all(self.checks[name].get("status") == "passed" for name in required_checks)
+        )
+
+    def artifact(self) -> dict[str, Any]:
+        core = {
+            "artifact_type": "ori.mcp_runtime_readiness",
+            "schema_version": 1,
+            "captured_at": self.captured_at,
+            "provenance": dict(self.launcher_provenance),
+            "prompt_discovery": {
+                "status": self.prompt_discovery_status,
+                "succeeded": self.prompt_discovery_status == "selected",
+                "available_prompt_names": sorted(self.available_prompt_names),
+            },
+            "resource_discovery": {
+                "status": self.resource_discovery_status,
+                "succeeded": self.resource_discovery_status == "listed",
+                "available_resource_uris": sorted(self.available_resource_uris),
+            },
+            "read_only_tools": sorted(self.read_only_tools),
+            "checks": self.checks,
+            "ready": self.ok,
+        }
+        capability_material = json.dumps(
+            {
+                "provenance": core["provenance"],
+                "read_only_tools": core["read_only_tools"],
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        capability_fingerprint = hashlib.sha256(capability_material).hexdigest()
+        revision = str(self.launcher_provenance.get("mcp_revision") or "local")
+        core["capability_identity"] = f"ori-mcp-{revision[:12]}-{capability_fingerprint[:12]}"
+        core["capability_fingerprint"] = capability_fingerprint
+        readiness_material = json.dumps(
+            core,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        core["readiness_fingerprint"] = hashlib.sha256(readiness_material).hexdigest()
+        return core
+
+
+def write_mcp_readiness_artifact(result: MCPReadinessResult, output_path: Path) -> dict[str, Any]:
+    """Create an immutable readiness receipt; never overwrite mismatched evidence."""
+
+    artifact = result.artifact()
+    serialized = json.dumps(artifact, indent=2, sort_keys=True) + "\n"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    if output_path.exists():
+        if output_path.read_text(encoding="utf-8") != serialized:
+            raise FileExistsError(
+                f"Refusing to overwrite mismatched MCP readiness artifact: {output_path}"
+            )
+        return artifact
+    with output_path.open("x", encoding="utf-8") as handle:
+        handle.write(serialized)
+    return artifact
 
 
 _READ_ONLY_MCP_INFO_TYPES: dict[str, set[str]] = {
@@ -425,12 +548,15 @@ def _canonical_tool_name(tool_obj: Any) -> str:
 
 
 def _mcp_subprocess_env() -> dict[str, str]:
-    env = dict(os.environ)
-    # Avoid noisy uv warnings when the parent ORI process is already inside a
-    # different virtualenv than the MCP project being launched via `uv run`.
-    env.pop("VIRTUAL_ENV", None)
-    env.setdefault("UV_CACHE_DIR", str(Path.cwd() / ".uv-cache"))
-    return env
+    allowed = {
+        "BLOODHOUND_DOMAIN",
+        "BLOODHOUND_PORT",
+        "BLOODHOUND_SCHEME",
+        "BLOODHOUND_TOKEN_ID",
+        "BLOODHOUND_TOKEN_KEY",
+        "BLOODHOUND_VERIFY_TLS",
+    }
+    return {name: os.environ[name] for name in sorted(allowed) if name in os.environ}
 
 
 def _tool_doc(tool_obj: Any, name: str, allowed: set[str]) -> str:
@@ -515,11 +641,12 @@ def _wrap_read_only_tool(
     return wrapped_tool()
 
 
-def _create_bloodhound_mcp_server(mcp_dir: Path) -> Any:
+def _create_bloodhound_mcp_server(launcher: MCPLauncherConfig) -> Any:
+    launch_spec = build_mcp_launch_spec(launcher)
     return mcp_server_stdio(
-        command="uv",
-        args=["--directory", str(mcp_dir), "run", "main.py"],
-        cwd=str(mcp_dir),
+        command=launch_spec.command,
+        args=list(launch_spec.args),
+        cwd=launch_spec.cwd,
         env=_mcp_subprocess_env(),
     )
 
@@ -603,8 +730,32 @@ async def _discover_bloodhound_mcp_prompt(server: Any) -> tuple[str, str, list[s
             return "", selected, names, "empty_selected_prompt"
         return text, selected, names, "selected"
     except Exception as exc:
-        print(f"  WARNING: MCP prompt discovery failed ({exc}); using built-in ORI MCP prompt.")
+        print(
+            "  WARNING: MCP prompt discovery failed "
+            f"({exc.__class__.__name__}); using built-in ORI MCP prompt."
+        )
         return "", "", [], "discovery_failed"
+
+
+async def _discover_bloodhound_mcp_resources(server: Any) -> tuple[list[str], str]:
+    """List resource URIs for capability provenance without exposing them to the model."""
+
+    session_handle = server._task_session()
+    try:
+        async with session_handle._client_session() as session:
+            listed = await session.list_resources()
+        resources = list(getattr(listed, "resources", listed) or [])
+        uris = sorted(
+            {
+                str(uri)
+                for resource in resources
+                if (uri := getattr(resource, "uri", None)) is not None
+            }
+        )
+        return uris, "listed"
+    except Exception as exc:
+        print(f"  WARNING: MCP resource discovery failed ({exc.__class__.__name__}).")
+        return [], "discovery_failed"
 
 
 def _format_resource_list(resources: list[Any]) -> str:
@@ -664,13 +815,14 @@ def _resource_tools(server: Any) -> list[Any]:
 
 
 async def _load_bloodhound_mcp_bundle(
-    mcp_dir: Path,
+    launcher: MCPLauncherConfig,
     *,
     include_resources: bool,
     include_prompt: bool,
     cypher_executor: Callable[..., Any] | None = None,
 ) -> MCPServerBundle:
-    server = _create_bloodhound_mcp_server(mcp_dir)
+    uv_version = detect_uv_version()
+    server = _create_bloodhound_mcp_server(launcher)
     raw_tools = await mcp_tools(server).tools()
     wrapped: list[Any] = []
     for raw_tool in raw_tools:
@@ -697,12 +849,120 @@ async def _load_bloodhound_mcp_bundle(
             prompt_discovery_status,
         ) = await _discover_bloodhound_mcp_prompt(server)
 
+    available_resource_uris, resource_discovery_status = await _discover_bloodhound_mcp_resources(
+        server
+    )
+
     return MCPServerBundle(
         tools=wrapped,
         server_prompt_text=prompt_text,
         server_prompt_name=prompt_name,
         available_prompt_names=available_prompt_names,
         prompt_discovery_status=prompt_discovery_status,
+        available_resource_uris=available_resource_uris,
+        resource_discovery_status=resource_discovery_status,
+        launcher_provenance=launcher.provenance(uv_version=uv_version),
+    )
+
+
+def _readiness_response_failed(response: Any) -> bool:
+    if isinstance(response, str):
+        try:
+            return _readiness_response_failed(json.loads(response))
+        except json.JSONDecodeError:
+            normalized = response.strip().lower()
+            return normalized.startswith("error") or bool(
+                re.search(r"[\"']error[\"']\s*:", normalized)
+            )
+    if isinstance(response, dict):
+        if response.get("success") is False or response.get("isError") is True:
+            return True
+        if response.get("error"):
+            return True
+        return any(
+            _readiness_response_failed(response[key])
+            for key in ("content", "text")
+            if key in response
+        )
+    if isinstance(response, list | tuple):
+        return any(_readiness_response_failed(item) for item in response)
+    for attribute in ("content", "text"):
+        value = getattr(response, attribute, None)
+        if value is not None and _readiness_response_failed(value):
+            return True
+    return False
+
+
+async def _invoke_readiness_tool(tool_obj: Any, **kwargs: Any) -> dict[str, Any]:
+    """Invoke one wrapped read-only tool and retain only non-sensitive evidence."""
+
+    try:
+        _, executor = _ollama_tool_spec(tool_obj)
+        response = executor(**kwargs)
+        if inspect.isawaitable(response):
+            response = await response
+        rendered = _tool_result_to_text(response)
+        if _readiness_response_failed(response):
+            return {
+                "status": "failed",
+                "error_type": "tool_error_response",
+                "response_bytes": len(rendered.encode()),
+                "response_sha256": hashlib.sha256(rendered.encode()).hexdigest(),
+            }
+        return {
+            "status": "passed",
+            "response_bytes": len(rendered.encode()),
+            "response_sha256": hashlib.sha256(rendered.encode()).hexdigest(),
+        }
+    except Exception as exc:
+        return {"status": "failed", "error_type": exc.__class__.__name__}
+
+
+async def verify_mcp_launcher_readiness(
+    launcher: MCPLauncherConfig,
+    *,
+    domain_query: str,
+) -> MCPReadinessResult:
+    """Start MCP without a model and exercise representative read-only operations."""
+
+    bundle = await _load_bloodhound_mcp_bundle(
+        launcher,
+        include_resources=True,
+        include_prompt=True,
+    )
+    tools_by_name = {_canonical_tool_name(tool_obj): tool_obj for tool_obj in bundle.tools}
+    checks: dict[str, dict[str, Any]] = {"startup_credential_preflight": {"status": "passed"}}
+    requested_checks: dict[str, dict[str, Any]] = {
+        "data_quality": {"info_type": "completeness"},
+        "domain_info": {"info_type": "list", "limit": 10, "skip": 0},
+        "graph_analysis": {
+            "info_type": "search",
+            "query": domain_query,
+            "search_type": "exact",
+        },
+        "cypher_query": {
+            "info_type": "run",
+            "query": "MATCH (n:Domain) RETURN n LIMIT 1",
+            "include_properties": False,
+        },
+        RESOURCE_LIST_TOOL_NAME: {},
+    }
+    for name, kwargs in requested_checks.items():
+        tool_obj = tools_by_name.get(name)
+        if tool_obj is None:
+            checks[name] = {"status": "failed", "error_type": "tool_not_exposed"}
+            continue
+        checks[name] = await _invoke_readiness_tool(tool_obj, **kwargs)
+
+    return MCPReadinessResult(
+        launcher_provenance=bundle.launcher_provenance,
+        prompt_discovery_status=bundle.prompt_discovery_status,
+        available_prompt_names=bundle.available_prompt_names,
+        resource_discovery_status=bundle.resource_discovery_status,
+        available_resource_uris=bundle.available_resource_uris,
+        read_only_tools=sorted(tools_by_name),
+        checks=checks,
+        captured_at=datetime.now(UTC).isoformat(),
     )
 
 
@@ -994,6 +1254,8 @@ def _mcp_metadata_from_dict(data: dict[str, Any]) -> MCPRunMetadata:
         resource_characters_total=int(data.get("resource_characters_total", 0)),
         available_prompt_names=list(data.get("available_prompt_names", [])),
         prompt_discovery_status=data.get("prompt_discovery_status", ""),
+        available_resource_uris=list(data.get("available_resource_uris", [])),
+        resource_discovery_status=data.get("resource_discovery_status", ""),
         infra_error_subtype=data.get("infra_error_subtype", ""),
         failure_subtype=data.get("failure_subtype", ""),
         successful_tool_results=int(data.get("successful_tool_results", 0)),
@@ -1002,6 +1264,11 @@ def _mcp_metadata_from_dict(data: dict[str, Any]) -> MCPRunMetadata:
         minimum_evidence_satisfied=bool(data.get("minimum_evidence_satisfied", False)),
         final_answer_diagnostics=dict(data.get("final_answer_diagnostics") or {}),
         repair_turn_used=bool(data.get("repair_turn_used", False)),
+        mcp_launcher=data.get("mcp_launcher", ""),
+        mcp_source=data.get("mcp_source", ""),
+        mcp_revision=data.get("mcp_revision", ""),
+        mcp_executable=data.get("mcp_executable", ""),
+        uv_version=data.get("uv_version", ""),
     )
 
 
@@ -2250,6 +2517,9 @@ def ori_mcp_solver(
     server_prompt_name: str = "",
     available_prompt_names: list[str] | None = None,
     prompt_discovery_status: str = "",
+    available_resource_uris: list[str] | None = None,
+    resource_discovery_status: str = "",
+    launcher_provenance: dict[str, str | None] | None = None,
     resource_mode: str = RESOURCE_MODE_OFF,
     mcp_tool_loop: str = MCP_TOOL_LOOP_AUTO,
     openai_compat_telemetry_adapter: str = OPENAI_COMPAT_TELEMETRY_AUTO,
@@ -2268,6 +2538,8 @@ def ori_mcp_solver(
         )
 
         prompt_names = sorted(available_prompt_names or [])
+        resource_uris = sorted(available_resource_uris or [])
+        provenance = dict(launcher_provenance or {})
         state.messages = _mcp_conversation_messages(
             task,
             server_prompt_text=server_prompt_text,
@@ -2333,6 +2605,12 @@ def ori_mcp_solver(
                     model=model_response.model,
                     content="",
                     error=model_response.error,
+                )
+                _apply_mcp_runtime_metadata(
+                    trajectory,
+                    available_resource_uris=resource_uris,
+                    resource_discovery_status=resource_discovery_status,
+                    launcher_provenance=provenance,
                 )
                 _persist_mcp_state(
                     state,
@@ -2446,6 +2724,12 @@ def ori_mcp_solver(
             trajectory.prompt_discovery_status = prompt_discovery_status
             trajectory.resource_mode = resource_mode
             trajectory.tool_loop = MCP_TOOL_LOOP_INSPECT
+        _apply_mcp_runtime_metadata(
+            trajectory,
+            available_resource_uris=resource_uris,
+            resource_discovery_status=resource_discovery_status,
+            launcher_provenance=provenance,
+        )
         trajectory.final_answer_normalized = normalized
         _persist_mcp_state(
             state,
@@ -2723,6 +3007,7 @@ async def run_mcp_eval_with_inspect(
     log_dir: Path | None = None,
     bhce_domain: str | None = None,
     mcp_dir: Path | None = None,
+    mcp_launcher: MCPLauncherConfig | None = None,
     max_steps: int = 12,
     resource_mode: str = RESOURCE_MODE_OFF,
     mcp_tool_loop: str = MCP_TOOL_LOOP_AUTO,
@@ -2780,12 +3065,17 @@ async def run_mcp_eval_with_inspect(
     server_prompt_name = ""
     available_prompt_names: list[str] = []
     prompt_discovery_status = "not_requested"
+    available_resource_uris: list[str] = []
+    resource_discovery_status = "not_requested"
+    launcher_provenance: dict[str, str | None] = {}
     if model.startswith("mock/mcp_"):
         tools: list[Any] = []
     else:
-        resolved_mcp_dir = (mcp_dir or (Path.cwd().parent / "bloodhound-mcp")).resolve()
+        resolved_launcher = mcp_launcher or MCPLauncherConfig.local_checkout(
+            (mcp_dir or (Path.cwd().parent / "bloodhound-mcp")).resolve()
+        )
         bundle = await _load_bloodhound_mcp_bundle(
-            resolved_mcp_dir,
+            resolved_launcher,
             include_resources=resource_mode == RESOURCE_MODE_ON_DEMAND,
             include_prompt=True,
         )
@@ -2794,6 +3084,9 @@ async def run_mcp_eval_with_inspect(
         server_prompt_name = bundle.server_prompt_name
         available_prompt_names = bundle.available_prompt_names
         prompt_discovery_status = bundle.prompt_discovery_status
+        available_resource_uris = bundle.available_resource_uris
+        resource_discovery_status = bundle.resource_discovery_status
+        launcher_provenance = bundle.launcher_provenance
         if server_prompt_name:
             print(
                 f"Loaded BloodHound MCP prompt: {server_prompt_name} "
@@ -2818,6 +3111,9 @@ async def run_mcp_eval_with_inspect(
             server_prompt_name=server_prompt_name,
             available_prompt_names=available_prompt_names,
             prompt_discovery_status=prompt_discovery_status,
+            available_resource_uris=available_resource_uris,
+            resource_discovery_status=resource_discovery_status,
+            launcher_provenance=launcher_provenance,
             resource_mode=resource_mode,
             mcp_tool_loop=mcp_tool_loop,
             openai_compat_telemetry_adapter=resolved_openai_compat_telemetry_adapter,

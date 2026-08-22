@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import yaml
 from click.testing import CliRunner
 
 from ori.cli import _build_run_specs, _validate_model_matrix_config, main
-from ori.eval.bhce import BHHealthResult, CypherResult
+from ori.eval.bhce import BHCEClient, BHHealthResult, CypherResult
+from ori.eval.mcp_runtime import MCPRunMetadata
 from ori.eval.ops import (
     SMOKE_EXPECTATIONS,
     PreflightResult,
@@ -20,7 +22,7 @@ from ori.eval.ops import (
     verify_bh_health,
     verify_ingest,
 )
-from ori.eval.runner import EvalResult
+from ori.eval.runner import EvalResult, _mcp_runtime_run_config
 from ori.eval.tasks import Task
 
 
@@ -69,6 +71,46 @@ class FakeBHCEClient:
             query=query,
             classification="ok",
         )
+
+
+def test_mcp_runtime_config_preserves_pin_when_mock_metadata_is_blank() -> None:
+    config = {
+        "mcp_launcher": "uvx_git",
+        "mcp_source": "git+https://github.com/mwnickerson/bloodhound_mcp@" + "a" * 40,
+        "mcp_revision": "a" * 40,
+        "mcp_executable": "bloodhound-mcp",
+        "uv_version": "uv 0.test",
+    }
+
+    merged = _mcp_runtime_run_config(
+        config,
+        [SimpleNamespace(mcp=MCPRunMetadata(prompt_discovery_status="not_requested"))],
+    )
+
+    assert merged is not None
+    assert merged["mcp_launcher"] == "uvx_git"
+    assert merged["mcp_revision"] == "a" * 40
+    assert merged["mcp_executable"] == "bloodhound-mcp"
+    assert merged["prompt_discovery_status"] == "not_requested"
+
+
+def test_bhce_client_honors_strict_boolean_tls_environment(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeAsyncClient:
+        def __init__(self, **kwargs) -> None:
+            captured.update(kwargs)
+
+    monkeypatch.setattr("ori.eval.bhce.httpx.AsyncClient", FakeAsyncClient)
+    monkeypatch.setenv("BLOODHOUND_DOMAIN", "bh.example")
+    monkeypatch.setenv("BLOODHOUND_TOKEN_ID", "id")
+    monkeypatch.setenv("BLOODHOUND_TOKEN_KEY", "key")
+    monkeypatch.setenv("BLOODHOUND_VERIFY_TLS", "false")
+
+    client = BHCEClient()
+
+    assert client.verify_tls is False
+    assert captured["verify"] is False
 
 
 def _manifest(tmp_path: Path) -> Path:
@@ -475,6 +517,7 @@ def test_cli_eval_mcp_parses_ollama_options(tmp_path: Path, monkeypatch) -> None
         captured.update(kwargs)
 
     monkeypatch.setattr("ori.eval.runner.run_eval_mcp_cli", fake_run_eval_mcp_cli)
+    monkeypatch.setattr("ori.cli.detect_uv_version", lambda: "uv 0.test")
     runner = CliRunner()
     result = runner.invoke(
         main,
@@ -509,6 +552,11 @@ def test_cli_eval_mcp_parses_ollama_options(tmp_path: Path, monkeypatch) -> None
         "mcp_tool_loop": "auto",
         "openai_compat_telemetry_adapter": "auto",
         "mcp_ollama_read_timeout_seconds": 900.0,
+        "mcp_launcher": "local_checkout",
+        "mcp_source": None,
+        "mcp_revision": None,
+        "mcp_executable": "main.py",
+        "uv_version": "uv 0.test",
         "model": "ollama/gemma4:e4b",
         "options": {"num_ctx": 16384, "temperature": 0.2},
         "resource_mode": "on-demand",
@@ -589,7 +637,9 @@ def test_models_example_documents_complete_model_matrix_surface() -> None:
         "max_recursive_expansion_complexity",
     }
     assert set(data["defaults"]["mcp"]) == {
-        "mcp_dir",
+        "launcher",
+        "source",
+        "executable",
         "max_steps",
         "resource_mode",
         "tool_loop",
@@ -624,8 +674,11 @@ defaults:
     client_timeout_seconds: 11
     max_result_rows: 250
   mcp:
-    mcp_dir: bloodhound-mcp
+    launcher: uvx_git
+    source: git+https://github.com/mwnickerson/bloodhound_mcp@cdb17097e761c8a8622cb93bc3ba49a9e150bb6e
+    executable: bloodhound-mcp
     max_steps: 9
+    resource_mode: "off"
     tool_loop: auto
 
 models:
@@ -639,7 +692,6 @@ models:
     model: claude-sonnet-4-5
 """
     )
-    (tmp_path / "bloodhound-mcp").mkdir()
     captured: dict[str, dict] = {}
 
     async def fake_direct(**kwargs):
@@ -678,22 +730,23 @@ models:
     assert safety.max_recursive_hops == 12
     assert captured["mcp"]["output_dir"] == tmp_path / "out" / "mcp"
     assert captured["mcp"]["manifest_path"] == manifest
-    assert captured["mcp"]["mcp_dir"] == tmp_path / "bloodhound-mcp"
+    assert captured["mcp"]["mcp_dir"] is None
+    assert captured["mcp"]["mcp_launcher"].launcher == "uvx_git"
+    assert captured["mcp"]["mcp_launcher"].revision == ("cdb17097e761c8a8622cb93bc3ba49a9e150bb6e")
+    assert captured["mcp"]["resource_mode"] == "off"
     assert captured["mcp"]["max_steps"] == 9
     assert (tmp_path / "out" / "campaign-config.source.yaml").read_text() == config.read_text()
-    runnable_snapshot = yaml.safe_load(
-        (tmp_path / "out" / "campaign-config.yaml").read_text()
-    )
+    runnable_snapshot = yaml.safe_load((tmp_path / "out" / "campaign-config.yaml").read_text())
     _validate_model_matrix_config(runnable_snapshot)
     assert runnable_snapshot["manifest"] == str(manifest)
     assert runnable_snapshot["output_dir"] == str(tmp_path / "out")
     assert runnable_snapshot["modes"] == ["direct", "mcp"]
-    assert runnable_snapshot["defaults"]["mcp"]["mcp_dir"] == str(
-        tmp_path / "bloodhound-mcp"
+    assert runnable_snapshot["defaults"]["mcp"]["launcher"] == "uvx_git"
+    assert runnable_snapshot["defaults"]["mcp"]["source"].endswith(
+        "@cdb17097e761c8a8622cb93bc3ba49a9e150bb6e"
     )
-    provenance = yaml.safe_load(
-        (tmp_path / "out" / "campaign-provenance.yaml").read_text()
-    )
+    assert runnable_snapshot["defaults"]["mcp"]["executable"] == "bloodhound-mcp"
+    provenance = yaml.safe_load((tmp_path / "out" / "campaign-provenance.yaml").read_text())
     assert provenance["manifest"] == str(manifest)
     assert provenance["cli_overrides"] == {}
 
@@ -708,9 +761,7 @@ models:
     assert "Choose a new output_dir" in rerun.output
 
 
-def test_model_matrix_cli_manifest_override_wins_over_config(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_model_matrix_cli_manifest_override_wins_over_config(tmp_path: Path, monkeypatch) -> None:
     config_manifest = _manifest(tmp_path)
     override_dir = tmp_path / "override"
     override_dir.mkdir()
@@ -748,13 +799,9 @@ models:
 
     assert result.exit_code == 0, result.output
     assert captured["manifest_path"] == override_manifest
-    runnable_snapshot = yaml.safe_load(
-        (tmp_path / "out" / "campaign-config.yaml").read_text()
-    )
+    runnable_snapshot = yaml.safe_load((tmp_path / "out" / "campaign-config.yaml").read_text())
     assert runnable_snapshot["manifest"] == str(override_manifest)
-    provenance = yaml.safe_load(
-        (tmp_path / "out" / "campaign-provenance.yaml").read_text()
-    )
+    provenance = yaml.safe_load((tmp_path / "out" / "campaign-provenance.yaml").read_text())
     assert provenance["manifest"] == str(override_manifest)
     assert provenance["cli_overrides"] == {
         "manifest": str(override_manifest),
@@ -819,16 +866,12 @@ models:
     assert run_config["mcp_tool_loop"] == "inspect"
     assert run_config["openai_compat_telemetry_adapter"] == "vllm"
     assert run_config["mcp_ollama_read_timeout_seconds"] == 60.0
-    runnable_snapshot = yaml.safe_load(
-        (tmp_path / "out" / "campaign-config.yaml").read_text()
-    )
+    runnable_snapshot = yaml.safe_load((tmp_path / "out" / "campaign-config.yaml").read_text())
     assert runnable_snapshot["models"][0]["mcp_tool_loop"] == "inspect"
-    assert (
-        runnable_snapshot["models"][0]["openai_compat_telemetry_adapter"] == "vllm"
-    )
+    assert runnable_snapshot["models"][0]["openai_compat_telemetry_adapter"] == "vllm"
     assert runnable_snapshot["models"][0]["mcp_ollama_read_timeout_seconds"] == 60.0
     assert runnable_snapshot["models"][0]["name"] == (
-        'openai-compat/qwen-fast [mcp_ollama_read_timeout_seconds=1200, '
+        "openai-compat/qwen-fast [mcp_ollama_read_timeout_seconds=1200, "
         'mcp_tool_loop="native-openai-compatible", '
         'openai_compat_telemetry_adapter="llama-cpp"]'
     )

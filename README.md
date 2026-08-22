@@ -103,18 +103,18 @@ direct   model produces a direct/Cypher answer that ORI executes and grades
 mcp      model uses read-only BloodHound MCP tools, then ORI grades its evidence
 ```
 
-Run the commands from the repository root. This workstation keeps the
-BloodHound MCP checkout and its credential file at:
+Run the commands from the repository root. MCP benchmark configs use an
+immutable `uvx_git` source pin. This workstation keeps the protected credential
+file outside the ORI repository at:
 
 ```text
-../Bloodhound-MCP
 ../Bloodhound-MCP/.env
 ```
 
 The `.env` file supplies the BloodHound host and API credentials. Do not print
 its token values, copy it into the repository, or commit it.
 
-### 1. Confirm the checkout and install dependencies
+### 1. Confirm ORI and install dependencies
 
 The current SharpHound/MCP grading fix is commit `7e9ed5d`. Confirm that the
 active branch contains it:
@@ -171,18 +171,11 @@ than assuming the cache never changes.
 
 ### 3. Confirm the dedicated BloodHound environment
 
-Check that the local MCP checkout and credential file exist:
+Check that the protected credential file exists and is not group/world readable:
 
 ```bash
-test -d ../Bloodhound-MCP
 test -f ../Bloodhound-MCP/.env
-```
-
-You may inspect only the non-secret connection fields to confirm the intended
-controlled ORI target:
-
-```bash
-rg '^BLOODHOUND_(DOMAIN|SCHEME|PORT)=' ../Bloodhound-MCP/.env
+test "$(stat -f '%Lp' ../Bloodhound-MCP/.env)" = "600"
 ```
 
 Then run the independent health gate:
@@ -307,8 +300,9 @@ defaults:
     max_recursive_patterns: 2
     max_recursive_expansion_complexity: 256
   mcp:
-    # Paths in a model-matrix config are resolved from the config directory.
-    mcp_dir: ../../Bloodhound-MCP
+    launcher: uvx_git
+    source: git+https://github.com/mwnickerson/bloodhound_mcp@cdb17097e761c8a8622cb93bc3ba49a9e150bb6e
+    executable: bloodhound-mcp
     max_steps: 16
     resource_mode: "off"
     tool_loop: native-openai-compatible
@@ -346,6 +340,22 @@ the model to repair it. A rejected greedy query receives
 executed once with BloodHound's documented `Prefer: wait=10` server timeout and
 a 15-second client deadline.
 
+Validate that exact launcher without spending model usage. The command starts
+MCP, performs its credential preflight, discovers prompts/resources/tools, and
+runs representative read-only calls. Use a new readiness path for a new MCP
+revision:
+
+```bash
+uv run --env-file ../Bloodhound-MCP/.env \
+  ori verify-mcp \
+  --config results/models-gpt56sol-vs-gpt55.yaml \
+  --manifest datasets/benchmarks/complex-v1-seed-4401_manifest.json \
+  --output results/benchmark-runs/complex-v1-seed-4401-gpt56sol-vs-gpt55/readiness/cdb17097/mcp-readiness.json
+```
+
+Require `MCP READINESS: PASS`. The receipt and telemetry record only safe
+launcher/discovery provenance and hashes, never BloodHound credential values or
+tool response bodies.
 ### 8. Run the campaign
 
 Re-run the health and ingest gates immediately before spending model usage:
@@ -443,7 +453,7 @@ Stop and fix the relevant layer before continuing when:
   ORI target;
 - either task preflight reports errors;
 - `verify-ingest` does not report 30/30 planted paths and `INGEST CHECK: PASS`;
-- the MCP checkout path is wrong or its server cannot start;
+- the pinned MCP source/executable is invalid or readiness does not pass;
 - a run reports `INFRA_ERROR`, authentication failures, systematic timeouts, or
   tool-loop failures that would make the two model scores incomparable.
 - the direct-query circuit opens because BloodHound fails its post-error health
@@ -477,10 +487,11 @@ Required for live MCP benchmark campaigns:
 
 - BloodHound CE instance dedicated to controlled benchmark data
 - BloodHound CE API credentials
-- local `bloodhound-mcp` checkout for MCP-mode evals
+- `uvx` (provided by `uv`) for pinned MCP benchmark launch; a local checkout is optional for development
 - provider credentials or local model server for real model runs
 
-BloodHound CE credentials are read from environment variables or `.env`:
+BloodHound CE credentials are read from environment variables or a protected
+environment file outside the repository:
 
 ```bash
 BLOODHOUND_DOMAIN=<host>
@@ -490,6 +501,9 @@ BLOODHOUND_TOKEN_KEY=<token key>
 
 Do not commit `.env`, API keys, Codex auth files, BloodHound tokens, private model
 configs, or generated private result dumps.
+
+ORI passes only the documented `BLOODHOUND_*` connection fields to the MCP
+child process. It does not forward the full parent environment.
 
 ## Model Configuration
 
@@ -522,7 +536,9 @@ defaults:
     max_recursive_patterns: 2
     max_recursive_expansion_complexity: 256
   mcp:
-    mcp_dir: ../bloodhound-mcp
+    launcher: uvx_git
+    source: git+https://github.com/mwnickerson/bloodhound_mcp@cdb17097e761c8a8622cb93bc3ba49a9e150bb6e
+    executable: bloodhound-mcp
     max_steps: 16
     resource_mode: "off"
     tool_loop: auto
@@ -574,6 +590,11 @@ settings. At launch it writes the directly runnable, absolute-path
 and hashes plus any CLI overrides in `campaign-provenance.yaml`. You can resume
 with the generated `campaign-config.yaml`; a later run with different provenance
 is rejected from the same output directory.
+
+For local MCP development, `launcher: local_checkout` with `mcp_dir` remains
+supported and preserves `uv --directory <mcp_dir> run main.py`. Use the pinned
+`uvx_git` launcher for benchmark profiles and a new output root whenever the
+revision changes.
 `runs_per_model` performs independent complete passes against the same manifest.
 The default applies to every model and a model entry can override it. Repeated
 outputs are isolated under `direct/<model>/run-001.csv` and

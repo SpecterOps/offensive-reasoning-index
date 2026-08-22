@@ -68,6 +68,15 @@ CSV_FIELDNAMES = [
     "server_prompt_name",
     "available_prompt_names",
     "prompt_discovery_status",
+    "prompt_discovery_succeeded",
+    "available_resource_uris",
+    "resource_discovery_status",
+    "resource_discovery_succeeded",
+    "mcp_launcher",
+    "mcp_source",
+    "mcp_revision",
+    "mcp_executable",
+    "uv_version",
     "resource_mode",
     "mcp_tool_loop",
     "resource_reads_total",
@@ -160,6 +169,21 @@ def _row_for_result(r: EvalResult) -> dict[str, object]:
     options_json = ""
     if run_config and isinstance(run_config.get("options"), dict):
         options_json = json.dumps(run_config["options"], sort_keys=True)
+
+    def mcp_value(attribute: str, config_key: str) -> object:
+        metadata_value = getattr(mcp_meta, attribute, None) if mcp_meta else None
+        return (
+            metadata_value
+            if metadata_value not in (None, "")
+            else (run_config or {}).get(config_key, "")
+        )
+
+    prompt_discovery_status = str(
+        mcp_value("prompt_discovery_status", "prompt_discovery_status") or ""
+    )
+    resource_discovery_status = str(
+        mcp_value("resource_discovery_status", "resource_discovery_status") or ""
+    )
     return {
         "run_name": run_name,
         "requested_model": requested_model,
@@ -176,16 +200,12 @@ def _row_for_result(r: EvalResult) -> dict[str, object]:
         "score": r.grade.score,
         "outcome": r.grade.outcome,
         "failure_subtype": (
-            mcp_meta.failure_subtype
-            if mcp_meta
-            else r.model_result.failure_subtype
+            mcp_meta.failure_subtype if mcp_meta else r.model_result.failure_subtype
         ),
         "query_executed": r.model_result.query_executed if not mcp_meta else "",
         "query_attempts": r.model_result.execution_attempts if not mcp_meta else "",
         "query_fingerprint": r.model_result.query_fingerprint if not mcp_meta else "",
-        "safety_policy_version": (
-            r.model_result.safety_policy_version if not mcp_meta else ""
-        ),
+        "safety_policy_version": (r.model_result.safety_policy_version if not mcp_meta else ""),
         "safety_rule": r.model_result.safety_rule if not mcp_meta else "",
         "bhce_health_after": r.model_result.bhce_health_after if not mcp_meta else "",
         "circuit_state": r.model_result.circuit_state if not mcp_meta else "",
@@ -243,7 +263,16 @@ def _row_for_result(r: EvalResult) -> dict[str, object]:
         "server_prompt_used": mcp_meta.server_prompt_used if mcp_meta else False,
         "server_prompt_name": mcp_meta.server_prompt_name if mcp_meta else "",
         "available_prompt_names": (",".join(mcp_meta.available_prompt_names) if mcp_meta else ""),
-        "prompt_discovery_status": mcp_meta.prompt_discovery_status if mcp_meta else "",
+        "prompt_discovery_status": prompt_discovery_status,
+        "prompt_discovery_succeeded": prompt_discovery_status == "selected",
+        "available_resource_uris": (",".join(mcp_meta.available_resource_uris) if mcp_meta else ""),
+        "resource_discovery_status": resource_discovery_status,
+        "resource_discovery_succeeded": resource_discovery_status == "listed",
+        "mcp_launcher": mcp_value("mcp_launcher", "mcp_launcher"),
+        "mcp_source": mcp_value("mcp_source", "mcp_source"),
+        "mcp_revision": mcp_value("mcp_revision", "mcp_revision"),
+        "mcp_executable": mcp_value("mcp_executable", "mcp_executable"),
+        "uv_version": mcp_value("uv_version", "uv_version"),
         "resource_mode": mcp_meta.resource_mode if mcp_meta else "",
         "mcp_tool_loop": mcp_meta.tool_loop if mcp_meta else "",
         "resource_reads_total": mcp_meta.resource_reads_total if mcp_meta else 0,
@@ -260,11 +289,7 @@ def _row_for_result(r: EvalResult) -> dict[str, object]:
         "infra_error_subtype": (
             mcp_meta.infra_error_subtype
             if mcp_meta
-            else (
-                r.model_result.failure_subtype
-                if r.grade.outcome == "INFRA_ERROR"
-                else ""
-            )
+            else (r.model_result.failure_subtype if r.grade.outcome == "INFRA_ERROR" else "")
         ),
         "failure_stage": diag.get("failure_stage", ""),
         "evidence_found": diag.get("evidence_found", False),
@@ -331,18 +356,12 @@ def _stats(results: list[EvalResult]) -> dict:
     hallucs = sum(1 for r in results if r.grade.hallucination)
     cypher_errors = sum(1 for r in results if r.grade.outcome == "CYPHER_ERROR")
     query_too_expensive = sum(1 for r in results if r.grade.outcome == "QUERY_TOO_EXPENSIVE")
-    policy_rejections = sum(
-        1 for r in results if r.model_result.failure_type == "policy_rejected"
-    )
+    policy_rejections = sum(1 for r in results if r.model_result.failure_type == "policy_rejected")
     server_query_timeouts = sum(
         1 for r in results if r.model_result.failure_type == "query_timeout"
     )
-    circuit_open_skips = sum(
-        1 for r in results if r.model_result.failure_type == "circuit_open"
-    )
-    executed_direct_queries = sum(
-        1 for r in results if not r.mcp and r.model_result.query_executed
-    )
+    circuit_open_skips = sum(1 for r in results if r.model_result.failure_type == "circuit_open")
+    executed_direct_queries = sum(1 for r in results if not r.mcp and r.model_result.query_executed)
     parse_fails = sum(1 for r in results if r.grade.outcome == "PARSE_FAIL")
     model_errors = sum(1 for r in results if r.grade.outcome == "MODEL_ERROR")
     loop_exhaustions = sum(1 for r in results if r.grade.outcome == "LOOP_EXHAUSTED")
@@ -497,6 +516,15 @@ def write_summary_csv(all_results: dict[str, list[EvalResult]], output_path: Pat
         "avg_resource_reads",
         "resource_characters_total",
         "server_prompt_used",
+        "prompt_discovery_status",
+        "prompt_discovery_succeeded",
+        "resource_discovery_status",
+        "resource_discovery_succeeded",
+        "mcp_launcher",
+        "mcp_source",
+        "mcp_revision",
+        "mcp_executable",
+        "uv_version",
         "avg_output_tokens_per_second",
         "ollama_version",
         "ollama_model_digest",
@@ -523,6 +551,35 @@ def write_summary_csv(all_results: dict[str, list[EvalResult]], output_path: Pat
                 options_json = json.dumps(first_run_config["options"], sort_keys=True)
             first_telemetry = getattr(first, "telemetry", None) if first else None
             first_telemetry = first_telemetry or {}
+            mcp_metadata = [result.mcp for result in results if result.mcp]
+            first_mcp = next(
+                (
+                    item
+                    for item in mcp_metadata
+                    if item.mcp_launcher
+                    and (item.prompt_discovery_status or item.resource_discovery_status)
+                ),
+                None,
+            )
+            first_mcp = first_mcp or next(
+                (item for item in mcp_metadata if item.mcp_launcher), None
+            )
+            first_mcp = first_mcp or (mcp_metadata[0] if mcp_metadata else None)
+
+            def summary_mcp_value(attribute: str, config_key: str) -> object:
+                metadata_value = getattr(first_mcp, attribute, None) if first_mcp else None
+                return (
+                    metadata_value
+                    if metadata_value not in (None, "")
+                    else (first_run_config or {}).get(config_key, "")
+                )
+
+            prompt_discovery_status = str(
+                summary_mcp_value("prompt_discovery_status", "prompt_discovery_status") or ""
+            )
+            resource_discovery_status = str(
+                summary_mcp_value("resource_discovery_status", "resource_discovery_status") or ""
+            )
 
             def tier_fields(tier: int) -> tuple[int, int, int]:
                 c, t = s["tiers"][tier]
@@ -602,6 +659,15 @@ def write_summary_csv(all_results: dict[str, list[EvalResult]], output_path: Pat
                 else 0.0,
                 "resource_characters_total": s["resource_characters_total"],
                 "server_prompt_used": s["prompt_used"],
+                "prompt_discovery_status": prompt_discovery_status,
+                "prompt_discovery_succeeded": prompt_discovery_status == "selected",
+                "resource_discovery_status": resource_discovery_status,
+                "resource_discovery_succeeded": resource_discovery_status == "listed",
+                "mcp_launcher": summary_mcp_value("mcp_launcher", "mcp_launcher"),
+                "mcp_source": summary_mcp_value("mcp_source", "mcp_source"),
+                "mcp_revision": summary_mcp_value("mcp_revision", "mcp_revision"),
+                "mcp_executable": summary_mcp_value("mcp_executable", "mcp_executable"),
+                "uv_version": summary_mcp_value("uv_version", "uv_version"),
                 "avg_output_tokens_per_second": (
                     round(s["avg_output_tokens_per_second"], 4)
                     if s["avg_output_tokens_per_second"] is not None

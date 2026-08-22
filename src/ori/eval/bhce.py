@@ -43,6 +43,18 @@ class BHHealthResult:
     classification: str = "ok"
 
 
+def _env_bool(name: str, *, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    normalized = raw.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be a boolean value when set.")
+
+
 def parse_bhce_url(bhce_url: str | None) -> dict[str, str | int]:
     """Resolve explicit non-secret BHCE connection settings from a URL."""
     if not bhce_url:
@@ -85,13 +97,19 @@ class BHCEClient:
         token_key: str | None = None,
         scheme: str = "https",
         port: int = 443,
+        verify_tls: bool | None = None,
     ) -> None:
         self.domain = domain or os.environ["BLOODHOUND_DOMAIN"]
         self.token_id = token_id or os.environ["BLOODHOUND_TOKEN_ID"]
         self.token_key = token_key or os.environ["BLOODHOUND_TOKEN_KEY"]
         self.scheme = scheme or os.getenv("BLOODHOUND_SCHEME", "https")
         self.port = port or int(os.getenv("BLOODHOUND_PORT", "443"))
-        self._client = httpx.AsyncClient(timeout=30.0)
+        self.verify_tls = (
+            verify_tls
+            if verify_tls is not None
+            else _env_bool("BLOODHOUND_VERIFY_TLS", default=True)
+        )
+        self._client = httpx.AsyncClient(timeout=30.0, verify=self.verify_tls)
 
     def _sign(self, method: str, path: str, body: bytes = b"") -> dict:
         """
