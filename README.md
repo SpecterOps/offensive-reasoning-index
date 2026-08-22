@@ -480,6 +480,27 @@ models:
     mcp_tool_loop: native-openai-compatible
 ```
 
+For OpenRouter, use the OpenAI-compatible provider and set the key in the
+environment. ORI reads `OPENROUTER_API_KEY` automatically (after
+`OPENAI_COMPAT_API_KEY` and before `OPENAI_API_KEY`), so the same key works for
+direct and MCP inference:
+
+```bash
+export OPENROUTER_API_KEY="<your OpenRouter key>"
+```
+
+```yaml
+models:
+  - name: openrouter-model
+    model: openai-compat/<openrouter-model-id>
+    model_base_url: https://openrouter.ai/api/v1
+    mcp_tool_loop: native-openai-compatible
+    openai_compat_telemetry_adapter: generic
+```
+
+Keep API keys out of model configuration files and replace
+`<openrouter-model-id>` with the exact model ID available from OpenRouter.
+
 `runs_per_model` performs independent complete passes against the same manifest.
 The default applies to every model and a model entry can override it. Repeated
 outputs are isolated under `direct/<model>/run-001.csv` and

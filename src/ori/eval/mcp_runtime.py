@@ -52,6 +52,7 @@ from .inspect_runtime import (
     _task_name_for_model,
     _task_to_dict,
 )
+from .provider_auth import openai_compat_api_key
 from .tasks import Task
 
 RESOURCE_MODE_OFF = "off"
@@ -945,7 +946,7 @@ def _openai_compat_chat_url(base_url: str | None, model_name: str) -> str:
 
 
 def _openai_compat_api_key() -> str:
-    return os.getenv("OPENAI_COMPAT_API_KEY") or os.getenv("OPENAI_API_KEY") or "not-needed"
+    return openai_compat_api_key() or "not-needed"
 
 
 def _normalize_openai_compat_telemetry_adapter(raw_adapter: str | None) -> str:

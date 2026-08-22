@@ -311,6 +311,9 @@ def test_openai_compat_chat_turn_posts_tool_payload(monkeypatch) -> None:
     import asyncio
 
     captured: dict[str, object] = {}
+    monkeypatch.delenv("OPENAI_COMPAT_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter-key")
 
     class FakeResponse:
         def raise_for_status(self) -> None:
@@ -371,7 +374,7 @@ def test_openai_compat_chat_turn_posts_tool_payload(monkeypatch) -> None:
     )
 
     assert captured["url"] == "http://127.0.0.1:8080/v1/chat/completions"
-    assert captured["headers"]["Authorization"].startswith("Bearer ")
+    assert captured["headers"]["Authorization"] == "Bearer openrouter-key"
     payload = captured["payload"]
     assert payload["model"] == "ori-test"
     assert payload["stream"] is False

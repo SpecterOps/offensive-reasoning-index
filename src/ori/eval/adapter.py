@@ -7,6 +7,7 @@ import re
 import time
 from dataclasses import dataclass, field
 
+from .provider_auth import openai_compat_api_key
 from .tasks import Task
 
 # BH CE Cypher constraints injected into system prompt
@@ -313,16 +314,16 @@ async def _call_provider(
         resolved_base = {
             "gemini": "https://generativelanguage.googleapis.com/v1beta/openai/",
         }.get(provider, base_url)
-        api_key = None
+        api_key = openai_compat_api_key() if provider == "openai-compat" else None
 
         # handle "modelname@http://custom-url" for openai-compat
         if "@" in name and provider == "openai-compat":
             name, resolved_base = name.split("@", 1)
 
-        client = openai.AsyncOpenAI(
-            base_url=resolved_base,
-            **({"api_key": api_key} if api_key else {}),
-        )
+        client_kwargs = {"base_url": resolved_base}
+        if api_key:
+            client_kwargs["api_key"] = api_key
+        client = openai.AsyncOpenAI(**client_kwargs)
         # Inject system prompt as first message for OpenAI-compat providers
         full_messages = [{"role": "system", "content": system}] + messages
         resp = await client.chat.completions.create(

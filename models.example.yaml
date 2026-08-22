@@ -35,6 +35,16 @@ models:
     options:
       temperature: 0
 
+  # OpenRouter uses the OPENROUTER_API_KEY environment variable.
+  # Replace the model ID with one currently available from OpenRouter.
+  - name: openrouter-model
+    model: openai-compat/<openrouter-model-id>
+    model_base_url: https://openrouter.ai/api/v1
+    mcp_tool_loop: native-openai-compatible
+    openai_compat_telemetry_adapter: generic
+    options:
+      temperature: 0
+
   - name: codex-gpt-5-5
     provider: codex
     model: gpt-5.5
