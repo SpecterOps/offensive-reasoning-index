@@ -21,6 +21,13 @@ DEFAULT_CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex"
 DEFAULT_CODEX_ORIGINATOR = "codex_cli_rs"
 DEFAULT_CODEX_VERSION = "0.133.0"
 DEFAULT_CODEX_MODEL = "gpt-5.5-codex"
+CODEX_REASONING_EFFORTS = frozenset(
+    {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
+)
+
+
+class CodexResponseStreamError(RuntimeError):
+    """Raised when a Codex Responses stream does not complete successfully."""
 
 
 def codex_auth_path() -> Path:
@@ -167,6 +174,14 @@ def chat_request_to_codex_responses_params(body: dict[str, Any]) -> dict[str, An
         params["instructions"] = "\n\n".join(instructions_parts)
     if body.get("tools"):
         params["tools"] = [_translate_tool(tool) for tool in body["tools"]]
+    options = body.get("options")
+    reasoning_effort = body.get("reasoning_effort")
+    if reasoning_effort is None and isinstance(options, dict):
+        reasoning_effort = options.get("reasoning_effort")
+    if reasoning_effort is not None:
+        if reasoning_effort not in CODEX_REASONING_EFFORTS:
+            raise ValueError(f"unsupported Codex reasoning effort: {reasoning_effort!r}")
+        params["reasoning"] = {"effort": reasoning_effort}
     # The ChatGPT Codex backend used by Codex OAuth currently rejects some
     # optional Responses parameters that ORI's OpenAI-compatible callers may
     # supply by default. Omit them unless explicitly opted in so Codex model
@@ -189,6 +204,7 @@ def codex_responses_events_to_chat_completion(events: Iterable[Any], model: str)
     tool_calls: list[dict[str, Any]] = []
     finish_reason = "stop"
     usage: dict[str, Any] | None = None
+    completed_response: Any | None = None
 
     for event in events:
         etype = getattr(event, "type", None)
@@ -208,12 +224,38 @@ def codex_responses_events_to_chat_completion(events: Iterable[Any], model: str)
                     }
                 )
                 finish_reason = "tool_calls"
+        elif etype == "error":
+            raise CodexResponseStreamError(_stream_error_detail(event))
+        elif etype in {"response.failed", "response.incomplete"}:
+            response = getattr(event, "response", None)
+            raise CodexResponseStreamError(_terminal_response_error_detail(etype, response))
         elif etype == "response.completed":
             response = getattr(event, "response", None)
+            completed_response = response
             if response is not None and getattr(response, "usage", None) is not None:
                 usage = _translate_usage(response.usage)
 
-    message: dict[str, Any] = {"role": "assistant", "content": "".join(text_parts) or None}
+    if completed_response is None:
+        raise CodexResponseStreamError(
+            "Codex Responses API stream ended without a response.completed event"
+        )
+
+    if not text_parts:
+        fallback_text = _response_output_text(completed_response)
+        if fallback_text:
+            text_parts.append(fallback_text)
+    if not tool_calls:
+        tool_calls.extend(_response_function_calls(completed_response))
+        if tool_calls:
+            finish_reason = "tool_calls"
+
+    content = "".join(text_parts)
+    if not content.strip() and not tool_calls:
+        raise CodexResponseStreamError(
+            "Codex Responses API response completed without text or tool calls"
+        )
+
+    message: dict[str, Any] = {"role": "assistant", "content": content or None}
     if tool_calls:
         message["tool_calls"] = tool_calls
     completion: dict[str, Any] = {
@@ -226,6 +268,68 @@ def codex_responses_events_to_chat_completion(events: Iterable[Any], model: str)
     if usage is not None:
         completion["usage"] = usage
     return completion
+
+
+def _stream_error_detail(event: Any) -> str:
+    code = getattr(event, "code", None)
+    message = getattr(event, "message", None)
+    detail = ": ".join(str(value) for value in (code, message) if value)
+    return f"Codex Responses API stream error{f': {detail}' if detail else ''}"
+
+
+def _terminal_response_error_detail(event_type: str, response: Any) -> str:
+    state = event_type.removeprefix("response.")
+    detail = ""
+    if state == "failed":
+        error = getattr(response, "error", None)
+        code = getattr(error, "code", None)
+        message = getattr(error, "message", None)
+        detail = ": ".join(str(value) for value in (code, message) if value)
+    elif state == "incomplete":
+        incomplete = getattr(response, "incomplete_details", None)
+        reason = getattr(incomplete, "reason", None)
+        detail = str(reason or "")
+    return f"Codex Responses API response {state}{f': {detail}' if detail else ''}"
+
+
+def _response_output_text(response: Any) -> str:
+    output_text = getattr(response, "output_text", None)
+    if isinstance(output_text, str) and output_text:
+        return output_text
+
+    parts: list[str] = []
+    for item in getattr(response, "output", None) or []:
+        if getattr(item, "type", None) != "message":
+            continue
+        for content in getattr(item, "content", None) or []:
+            content_type = getattr(content, "type", None)
+            if content_type == "output_text":
+                text = getattr(content, "text", None)
+            elif content_type == "refusal":
+                text = getattr(content, "refusal", None)
+            else:
+                text = None
+            if isinstance(text, str) and text:
+                parts.append(text)
+    return "".join(parts)
+
+
+def _response_function_calls(response: Any) -> list[dict[str, Any]]:
+    calls: list[dict[str, Any]] = []
+    for item in getattr(response, "output", None) or []:
+        if getattr(item, "type", None) != "function_call":
+            continue
+        calls.append(
+            {
+                "id": getattr(item, "call_id", "") or _new_id("call"),
+                "type": "function",
+                "function": {
+                    "name": getattr(item, "name", "") or "",
+                    "arguments": getattr(item, "arguments", "") or "{}",
+                },
+            }
+        )
+    return calls
 
 
 def _translate_usage(usage: Any) -> dict[str, Any]:

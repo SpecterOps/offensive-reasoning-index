@@ -1,39 +1,83 @@
-# Model matrix for `ori run --config models.yaml --manifest <manifest.json>`.
-# The same list is run in direct and MCP modes by default.
+# Complete model-matrix example for:
+#   uv run ori run --config models.local.yaml
+#
+# Copy this file, choose a new output_dir for every campaign, and keep private
+# endpoints or machine-specific paths in the untracked copy. Relative paths are
+# resolved from the directory containing the config file.
 
+version: 1
+
+# May be overridden with `ori run --manifest ...`.
+manifest: datasets/benchmarks/complex-v1-seed-4401_manifest.json
+
+# Supported values: direct, mcp. Use one or both.
 modes: [direct, mcp]
-output_dir: results/benchmark-runs/example
+
+# This is the campaign name and artifact root. Change it for every fresh run.
+# Existing directories may contain resumable checkpoints and deny-cache state.
+output_dir: results/benchmark-runs/change-me
 
 defaults:
+  # Direct samples are serialized even when a larger value is requested.
   concurrency: 1
-  # Independent full passes per model against the same manifest.
+
+  # Independent complete passes per model. This is not an infrastructure retry.
   runs_per_model: 1
+
+  # null uses BLOODHOUND_* environment variables or the provider/runtime default.
   bhce_url: null
   model_base_url: null
+
+  # Full-run recovery attempts after infrastructure-attributable failures.
   max_model_reruns_on_infra: 1
+
   health:
     timeout_seconds: 60
     poll_interval: 5
+
+  # Model-blind guard for direct Cypher only. Rejected queries receive
+  # QUERY_TOO_EXPENSIVE without being sent to BloodHound.
+  direct_query_safety:
+    enabled: true
+    policy_version: bloodhound-cysql-direct-v3
+    server_timeout_seconds: 10
+    client_timeout_seconds: 15
+    max_recursive_hops: 12
+    max_result_rows: 1000
+    max_query_characters: 16384
+    max_recursive_patterns: 2
+    # Sum of recursive upper-hop-bound × relationship alternatives.
+    max_recursive_expansion_complexity: 256
+
   mcp:
     mcp_dir: ../bloodhound-mcp
     max_steps: 16
+    # Supported values: "off", "on-demand". Quote "off" for YAML portability.
     resource_mode: "off"
+    # Supported values: auto, inspect, native-ollama, native-openai-compatible.
     tool_loop: auto
+    # Supported values: auto, generic, llama-cpp, mlx-lm, vllm, lm-studio.
     openai_compat_telemetry_adapter: auto
     ollama_read_timeout_seconds: 900
+
   telemetry:
     enabled: true
 
 models:
+  # This entry demonstrates every supported per-model override.
   - name: local-qwen-fast
     provider: openai-compat
     model: qwen-fast
-    model_base_url: http://death-star:8080/v1
+    concurrency: 1
+    runs_per_model: 1
+    model_base_url: http://127.0.0.1:8080/v1
+    max_steps: 24
     mcp_tool_loop: native-openai-compatible
     openai_compat_telemetry_adapter: llama-cpp
     mcp_ollama_read_timeout_seconds: 1800
     options:
       temperature: 0
+      num_ctx: 65536
 
   # OpenRouter uses the OPENROUTER_API_KEY environment variable.
   # Replace the model ID with one currently available from OpenRouter.
@@ -48,8 +92,6 @@ models:
   - name: codex-gpt-5-5
     provider: codex
     model: gpt-5.5
-    # Per-model override of defaults.runs_per_model.
-    runs_per_model: 3
     mcp_tool_loop: native-openai-compatible
     options:
       temperature: 0

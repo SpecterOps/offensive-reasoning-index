@@ -184,12 +184,24 @@ Edit `models.local.yaml` with the providers you actually want to run. Keep local
 The model matrix supports direct and MCP modes. Example shape:
 
 ```yaml
+version: 1
+manifest: datasets/benchmarks/complex-v1-seed-4401_manifest.json
 modes: [direct, mcp]
 output_dir: results/benchmark-runs/complex-v1-seed-4401
 
 defaults:
   concurrency: 1
   runs_per_model: 3
+  direct_query_safety:
+    enabled: true
+    policy_version: bloodhound-cysql-direct-v3
+    server_timeout_seconds: 10
+    client_timeout_seconds: 15
+    max_recursive_hops: 12
+    max_result_rows: 1000
+    max_query_characters: 16384
+    max_recursive_patterns: 2
+    max_recursive_expansion_complexity: 256
   mcp:
     mcp_dir: ../bloodhound-mcp
     max_steps: 16
@@ -231,10 +243,31 @@ models:
 
 Replace `<openrouter-model-id>` with the exact model ID available from OpenRouter.
 
+The top-level `manifest` and `output_dir` make the matrix self-contained.
+Relative paths are resolved from the config file's directory. Treat
+`output_dir` as the campaign name: copy the config and select a new value for
+each fresh campaign so checkpoints and policy-scoped deny-cache state are never
+silently reused. `--manifest` and `--output-dir` remain explicit CLI overrides.
+See [`models.example.yaml`](../models.example.yaml) for every supported
+model-matrix option and per-model override.
+
+Unknown model-matrix settings are errors. ORI writes a directly runnable,
+absolute-path `campaign-config.yaml`, preserves the untouched input as
+`campaign-config.source.yaml`, and records hashes plus CLI overrides in
+`campaign-provenance.yaml`. The generated config can resume that exact campaign.
+If any provenance record differs on a later invocation, ORI requires a new
+`output_dir`.
 `runs_per_model` controls independent full benchmark passes against the same
 dataset and manifest. A model entry overrides the default. Each repetition has
 its own CSV and run metadata. `max_model_reruns_on_infra` remains reserved for
 recovery retries and does not increase the requested sample count.
+
+Direct mode applies the versioned safety policy after model generation. It does
+not alter the prompt or repair the answer. Policy-rejected queries are scored as
+`QUERY_TOO_EXPENSIVE` without reaching BloodHound; admitted queries run once
+with BloodHound's documented server timeout. See
+[Benchmark Hardening Runbook](benchmark-hardening-runbook.md#direct-cypher-containment)
+for circuit-breaker, deny-cache, checkpoint, and reporting details.
 
 For Codex OAuth, log in with Codex CLI first:
 
@@ -255,9 +288,7 @@ Never print or commit the auth file. A safe readiness check is to report only wh
 Run the direct track:
 
 ```bash
-uv run ori run \
-  --config models.local.yaml \
-  --manifest datasets/benchmarks/complex-v1-seed-4401_manifest.json
+uv run ori run --config models.local.yaml
 ```
 
 Run the MCP track from the same manifest by setting `modes: [mcp]` in the model
@@ -279,6 +310,7 @@ results/benchmark-runs/complex-v1-seed-4401
 
 Preserve these outputs:
 
+- exact and resolved campaign-config YAML,
 - per-model CSVs,
 - combined CSV,
 - summary CSV,
@@ -338,9 +370,7 @@ uv run ori verify-ingest \
   --manifest datasets/benchmarks/complex-v1-seed-4401_manifest.json
 
 # 5. Run the configured model matrix.
-uv run ori run \
-  --config models.local.yaml \
-  --manifest datasets/benchmarks/complex-v1-seed-4401_manifest.json
+uv run ori run --config models.local.yaml
 ```
 
 If step 4 fails, stop. Do not grade models against a mismatched graph; the scores will describe ingest drift, not reasoning quality.

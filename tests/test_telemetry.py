@@ -74,6 +74,9 @@ def test_record_eval_telemetry_writes_artifacts_and_annotates_results(tmp_path) 
     assert sample["task_wall_seconds"] == 2.5
     assert sample["output_tokens_per_second"] == 20.0
     assert sample["tokens_per_second_source"] == "ollama_eval_duration"
+    assert sample["direct_query"]["query_executed"] is True
+    assert sample["direct_query"]["execution_attempts"] == 1
+    assert sample["direct_query"]["circuit_state"] == "closed"
     assert result.telemetry
     assert result.telemetry["output_tokens_per_second"] == 20.0
     assert result.telemetry["sample_ref"].endswith("mock-run.jsonl:L1")

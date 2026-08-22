@@ -883,6 +883,84 @@ def test_run_openai_compat_mcp_loop_executes_tool_calls(monkeypatch) -> None:
     assert len(messages) >= 4
 
 
+def test_run_openai_compat_mcp_loop_enforces_total_tool_call_budget(monkeypatch) -> None:
+    import asyncio
+
+    executed = {"count": 0}
+
+    async def fake_turn(**kwargs):
+        assert kwargs["tools"]
+        return {
+            "model": "ori-mlx",
+            "content": "",
+            "thinking": "request two calls in one turn",
+            "tool_calls": [
+                {
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {
+                        "name": "group_info",
+                        "arguments": json.dumps(
+                            {
+                                "group_name": "DOMAIN ADMINS@TEST.LOCAL",
+                                "info_type": "members",
+                            }
+                        ),
+                    },
+                },
+                {
+                    "id": "call-2",
+                    "type": "function",
+                    "function": {
+                        "name": "group_info",
+                        "arguments": json.dumps(
+                            {
+                                "group_name": "ENTERPRISE ADMINS@TEST.LOCAL",
+                                "info_type": "members",
+                            }
+                        ),
+                    },
+                },
+            ],
+            "prompt_tokens": 70,
+            "completion_tokens": 12,
+            "finish_reason": "tool_calls",
+            "provider_metrics": {
+                "telemetry_adapter": "mlx-lm",
+                "finish_reason": "tool_calls",
+            },
+        }
+
+    monkeypatch.setattr("ori.eval.mcp_runtime._openai_compat_chat_turn", fake_turn)
+
+    @tool(name="group_info")
+    def group_info():
+        async def execute(group_name: str, info_type: str) -> str:
+            executed["count"] += 1
+            return '{"success": true, "nodes": ["WS-01.TEST.LOCAL"]}'
+
+        return execute
+
+    response, trajectory, messages = asyncio.run(
+        _run_openai_compat_mcp_loop(
+            task=_task(),
+            model_name="openai-compat/ori-mlx@http://127.0.0.1:8080/v1",
+            base_url=None,
+            extra_body=None,
+            tools=[group_info],
+            max_steps=1,
+            telemetry_adapter="mlx-lm",
+        )
+    )
+
+    assert response.error == "MCP loop exhausted without final answer"
+    assert executed["count"] == 1
+    assert trajectory.tool_calls_total == 2
+    tool_messages = [message for message in messages if isinstance(message, ChatMessageTool)]
+    assert len(tool_messages) == 2
+    assert "tool_call_budget_exceeded" in tool_messages[1].text
+
+
 def test_hallucination_check_allows_group_names_with_spaces() -> None:
     from ori.eval.grader import _check_hallucination
 

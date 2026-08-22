@@ -27,6 +27,13 @@ CSV_FIELDNAMES = [
     "score",
     "outcome",
     "failure_subtype",
+    "query_executed",
+    "query_attempts",
+    "query_fingerprint",
+    "safety_policy_version",
+    "safety_rule",
+    "bhce_health_after",
+    "circuit_state",
     "hallucination",
     "tokens_input",
     "tokens_output",
@@ -168,7 +175,20 @@ def _row_for_result(r: EvalResult) -> dict[str, object]:
         "model": r.model_response.model,
         "score": r.grade.score,
         "outcome": r.grade.outcome,
-        "failure_subtype": (mcp_meta.failure_subtype if mcp_meta else ""),
+        "failure_subtype": (
+            mcp_meta.failure_subtype
+            if mcp_meta
+            else r.model_result.failure_subtype
+        ),
+        "query_executed": r.model_result.query_executed if not mcp_meta else "",
+        "query_attempts": r.model_result.execution_attempts if not mcp_meta else "",
+        "query_fingerprint": r.model_result.query_fingerprint if not mcp_meta else "",
+        "safety_policy_version": (
+            r.model_result.safety_policy_version if not mcp_meta else ""
+        ),
+        "safety_rule": r.model_result.safety_rule if not mcp_meta else "",
+        "bhce_health_after": r.model_result.bhce_health_after if not mcp_meta else "",
+        "circuit_state": r.model_result.circuit_state if not mcp_meta else "",
         "hallucination": r.grade.hallucination,
         "tokens_input": r.model_response.tokens_input,
         "tokens_output": r.model_response.tokens_output,
@@ -237,7 +257,15 @@ def _row_for_result(r: EvalResult) -> dict[str, object]:
         "model_quantization_level": telemetry.get("model_quantization_level", ""),
         "telemetry_sample_ref": telemetry.get("sample_ref", ""),
         "partial_result": getattr(r, "partial_result", False),
-        "infra_error_subtype": mcp_meta.infra_error_subtype if mcp_meta else "",
+        "infra_error_subtype": (
+            mcp_meta.infra_error_subtype
+            if mcp_meta
+            else (
+                r.model_result.failure_subtype
+                if r.grade.outcome == "INFRA_ERROR"
+                else ""
+            )
+        ),
         "failure_stage": diag.get("failure_stage", ""),
         "evidence_found": diag.get("evidence_found", False),
         "evidence_depth_score": diag.get("evidence_depth_score", 0),
@@ -303,6 +331,18 @@ def _stats(results: list[EvalResult]) -> dict:
     hallucs = sum(1 for r in results if r.grade.hallucination)
     cypher_errors = sum(1 for r in results if r.grade.outcome == "CYPHER_ERROR")
     query_too_expensive = sum(1 for r in results if r.grade.outcome == "QUERY_TOO_EXPENSIVE")
+    policy_rejections = sum(
+        1 for r in results if r.model_result.failure_type == "policy_rejected"
+    )
+    server_query_timeouts = sum(
+        1 for r in results if r.model_result.failure_type == "query_timeout"
+    )
+    circuit_open_skips = sum(
+        1 for r in results if r.model_result.failure_type == "circuit_open"
+    )
+    executed_direct_queries = sum(
+        1 for r in results if not r.mcp and r.model_result.query_executed
+    )
     parse_fails = sum(1 for r in results if r.grade.outcome == "PARSE_FAIL")
     model_errors = sum(1 for r in results if r.grade.outcome == "MODEL_ERROR")
     loop_exhaustions = sum(1 for r in results if r.grade.outcome == "LOOP_EXHAUSTED")
@@ -362,6 +402,11 @@ def _stats(results: list[EvalResult]) -> dict:
         "hallucs": hallucs,
         "cypher_errors": cypher_errors,
         "query_too_expensive": query_too_expensive,
+        "policy_rejections": policy_rejections,
+        "server_query_timeouts": server_query_timeouts,
+        "circuit_open_skips": circuit_open_skips,
+        "executed_direct_queries": executed_direct_queries,
+        "greedy_query_rate": query_too_expensive / total if total else 0.0,
         "parse_fails": parse_fails,
         "model_errors": model_errors,
         "loop_exhaustions": loop_exhaustions,
@@ -432,6 +477,11 @@ def write_summary_csv(all_results: dict[str, list[EvalResult]], output_path: Pat
         "hallucinations",
         "cypher_errors",
         "query_too_expensive",
+        "policy_rejections",
+        "server_query_timeouts",
+        "circuit_open_skips",
+        "executed_direct_queries",
+        "greedy_query_rate",
         "parse_fails",
         "model_errors",
         "loop_exhaustions",
@@ -528,6 +578,11 @@ def write_summary_csv(all_results: dict[str, list[EvalResult]], output_path: Pat
                 "hallucinations": s["hallucs"],
                 "cypher_errors": s["cypher_errors"],
                 "query_too_expensive": s["query_too_expensive"],
+                "policy_rejections": s["policy_rejections"],
+                "server_query_timeouts": s["server_query_timeouts"],
+                "circuit_open_skips": s["circuit_open_skips"],
+                "executed_direct_queries": s["executed_direct_queries"],
+                "greedy_query_rate": round(s["greedy_query_rate"], 6),
                 "parse_fails": s["parse_fails"],
                 "model_errors": s["model_errors"],
                 "loop_exhaustions": s["loop_exhaustions"],
@@ -656,6 +711,14 @@ def print_summary(results: list[EvalResult], model: str) -> None:
         f"Model errors: {model_errors}  |  Loop exhausted: {loop_exhaustions}  |  "
         f"Infra errors: {infra_errors}"
     )
+    direct_stats = _stats(results)
+    if not any(r.mcp for r in results):
+        print(
+            f"Direct safety: policy rejections={direct_stats['policy_rejections']}  |  "
+            f"server timeouts={direct_stats['server_query_timeouts']}  |  "
+            f"circuit skips={direct_stats['circuit_open_skips']}  |  "
+            f"queries executed={direct_stats['executed_direct_queries']}"
+        )
     if no_path_reported or wrong_path or incomplete_answers:
         print(
             f"MCP incorrect subtypes: no_path={no_path_reported}  |  "
@@ -673,7 +736,7 @@ def print_summary(results: list[EvalResult], model: str) -> None:
     if status != "complete":
         print(f"Run status: {status} ({detail})")
     if any(r.mcp for r in results):
-        mcp = _stats(results)
+        mcp = direct_stats
         avg_tools = mcp["tool_calls_total"] / mcp["mcp_samples"] if mcp["mcp_samples"] else 0.0
         print(
             f"Reasoning accuracy: {mcp['correct_completed']}/{mcp['completed_samples']} "
