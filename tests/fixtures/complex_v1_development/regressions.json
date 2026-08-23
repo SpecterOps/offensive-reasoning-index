@@ -1,0 +1,73 @@
+{
+  "schema_version": "complex-v1-regression-characterization-v1",
+  "benchmark_product": "complex-v1",
+  "benchmark_seed": 4401,
+  "campaign_id": "complex-v1-seed-4401-gpt56sol-vs-gpt55",
+  "campaign_status": "development_invalid_for_ranking",
+  "cases": [
+    {
+      "id": "CV1-001",
+      "track": "direct",
+      "category": "failure_attribution",
+      "observed_behavior": "A BloodHound or transport failure was labeled QUERY_TOO_EXPENSIVE for 25 scored samples.",
+      "required_v2_behavior": "Distinguish query syntax, policy rejection, cost termination, authentication, server unavailability, and client timeout. Stop the campaign after a failed health circuit breaker.",
+      "evidence": "direct Inspect archive: 26 samples, 25 QUERY_TOO_EXPENSIVE, 1 unscored"
+    },
+    {
+      "id": "CV1-002",
+      "track": "both",
+      "category": "prompt_contract_alignment",
+      "observed_behavior": "Some prompts requested entities or explanatory context that the reference query and answer contract did not score consistently.",
+      "required_v2_behavior": "Compile solver-visible wording and scorer requirements from one semantic claim while keeping oracle-only facts sealed.",
+      "evidence": "campaign prompt, reference, and contract review"
+    },
+    {
+      "id": "CV1-003",
+      "track": "both",
+      "category": "route_equivalence",
+      "observed_behavior": "A planted or reference route could be treated as the only acceptable answer even when another route satisfied the intended objective.",
+      "required_v2_behavior": "Validate an ordered submitted witness against an explicit exact-route, predicate-valid-route, closed-variant, or bounded-negative policy.",
+      "evidence": "campaign path-scoring review"
+    },
+    {
+      "id": "CV1-004",
+      "track": "mcp",
+      "category": "set_exactness",
+      "observed_behavior": "Node-set grading could pass an answer that covered all reference nodes while also containing extra valid graph nodes.",
+      "required_v2_behavior": "Require normalized set equality for official enumeration tasks and retain precision and recall only as diagnostics.",
+      "evidence": "grade_mcp_diagnostic node_set behavior"
+    },
+    {
+      "id": "CV1-005",
+      "track": "both",
+      "category": "scoring_parity",
+      "observed_behavior": "Live, direct, MCP, and offline scoring could normalize identities or materialize expected evidence through different paths.",
+      "required_v2_behavior": "Normalize every answer and oracle into one typed evidence representation before invoking a shared comparator.",
+      "evidence": "campaign scorer-path review"
+    },
+    {
+      "id": "CV1-006",
+      "track": "mcp",
+      "category": "tool_semantics",
+      "observed_behavior": "Task contracts did not always make direct, transitive, and effective membership or administrative semantics explicit.",
+      "required_v2_behavior": "Bind every MCP task to a versioned capability and semantic profile and exclude unsupported claims.",
+      "evidence": "campaign MCP task and tool review"
+    },
+    {
+      "id": "CV1-007",
+      "track": "both",
+      "category": "bounded_enumeration",
+      "observed_behavior": "Some enumeration or traversal requests could generate unbounded queries or answers too large for a stable evaluation.",
+      "required_v2_behavior": "Certify bounded traversal, result cardinality, paging, output bytes, and time budgets before suite eligibility.",
+      "evidence": "campaign query and result-volume review"
+    },
+    {
+      "id": "CV1-008",
+      "track": "mcp",
+      "category": "runtime_finalization",
+      "observed_behavior": "Structured finalization could use a progress counter that did not accurately represent successful tool evidence.",
+      "required_v2_behavior": "Drive finalization from a tested runtime state machine and the successful-evidence counter.",
+      "evidence": "campaign MCP runtime review"
+    }
+  ]
+}

@@ -47,7 +47,8 @@ uv run pytest
 uv run ruff check src scripts tests
 ```
 
-For live MCP runs, configure BloodHound CE credentials in `.env` or the shell:
+For live MCP runs, keep BloodHound CE credentials in a protected file outside
+the repository (mode `0600`) or in the shell:
 
 ```bash
 BLOODHOUND_DOMAIN=<host>
@@ -56,6 +57,16 @@ BLOODHOUND_TOKEN_KEY=<token key>
 ```
 
 Do not commit `.env`, tokens, auth files, generated private results, or local operator logs.
+
+ORI forwards only `BLOODHOUND_DOMAIN`, `BLOODHOUND_PORT`,
+`BLOODHOUND_SCHEME`, `BLOODHOUND_TOKEN_ID`, `BLOODHOUND_TOKEN_KEY`, and
+`BLOODHOUND_VERIFY_TLS` to the MCP child. It never copies the full parent
+environment. Load a protected file explicitly:
+
+```bash
+uv run --env-file /absolute/private/path/bloodhound.env \
+  ori verify-bh-health
+```
 
 Check BloodHound CE before grading:
 
@@ -184,14 +195,28 @@ Edit `models.local.yaml` with the providers you actually want to run. Keep local
 The model matrix supports direct and MCP modes. Example shape:
 
 ```yaml
+version: 1
+manifest: datasets/benchmarks/complex-v1-seed-4401_manifest.json
 modes: [direct, mcp]
 output_dir: results/benchmark-runs/complex-v1-seed-4401
 
 defaults:
   concurrency: 1
   runs_per_model: 3
+  direct_query_safety:
+    enabled: true
+    policy_version: bloodhound-cysql-direct-v3
+    server_timeout_seconds: 10
+    client_timeout_seconds: 15
+    max_recursive_hops: 12
+    max_result_rows: 1000
+    max_query_characters: 16384
+    max_recursive_patterns: 2
+    max_recursive_expansion_complexity: 256
   mcp:
-    mcp_dir: ../bloodhound-mcp
+    launcher: uvx_git
+    source: git+https://github.com/mwnickerson/bloodhound_mcp@cdb17097e761c8a8622cb93bc3ba49a9e150bb6e
+    executable: bloodhound-mcp
     max_steps: 16
     resource_mode: "off"
     tool_loop: auto
@@ -210,10 +235,52 @@ models:
     mcp_tool_loop: native-openai-compatible
 ```
 
+For OpenRouter, set `OPENROUTER_API_KEY` in the environment and use the
+OpenAI-compatible provider. ORI checks compatible credentials in this order:
+`OPENAI_COMPAT_API_KEY`, `OPENROUTER_API_KEY`, then `OPENAI_API_KEY`. The key
+works for both direct and MCP inference; keep it out of YAML and other tracked
+files.
+
+```bash
+export OPENROUTER_API_KEY="<your OpenRouter key>"
+```
+
+```yaml
+models:
+  - name: openrouter-model
+    model: openai-compat/<openrouter-model-id>
+    model_base_url: https://openrouter.ai/api/v1
+    mcp_tool_loop: native-openai-compatible
+    openai_compat_telemetry_adapter: generic
+```
+
+Replace `<openrouter-model-id>` with the exact model ID available from OpenRouter.
+
+The top-level `manifest` and `output_dir` make the matrix self-contained.
+Relative paths are resolved from the config file's directory. Treat
+`output_dir` as the campaign name: copy the config and select a new value for
+each fresh campaign so checkpoints and policy-scoped deny-cache state are never
+silently reused. `--manifest` and `--output-dir` remain explicit CLI overrides.
+See [`models.example.yaml`](../models.example.yaml) for every supported
+model-matrix option and per-model override.
+
+Unknown model-matrix settings are errors. ORI writes a directly runnable,
+absolute-path `campaign-config.yaml`, preserves the untouched input as
+`campaign-config.source.yaml`, and records hashes plus CLI overrides in
+`campaign-provenance.yaml`. The generated config can resume that exact campaign.
+If any provenance record differs on a later invocation, ORI requires a new
+`output_dir`.
 `runs_per_model` controls independent full benchmark passes against the same
 dataset and manifest. A model entry overrides the default. Each repetition has
 its own CSV and run metadata. `max_model_reruns_on_infra` remains reserved for
 recovery retries and does not increase the requested sample count.
+
+Direct mode applies the versioned safety policy after model generation. It does
+not alter the prompt or repair the answer. Policy-rejected queries are scored as
+`QUERY_TOO_EXPENSIVE` without reaching BloodHound; admitted queries run once
+with BloodHound's documented server timeout. See
+[Benchmark Hardening Runbook](benchmark-hardening-runbook.md#direct-cypher-containment)
+for circuit-breaker, deny-cache, checkpoint, and reporting details.
 
 For Codex OAuth, log in with Codex CLI first:
 
@@ -229,14 +296,40 @@ ORI can use the Codex auth file at:
 
 Never print or commit the auth file. A safe readiness check is to report only whether a token exists and its length, not the token value.
 
+Before model grading, start the exact pinned MCP package and exercise prompt,
+resource, tool, and credential startup paths without calling a model:
+
+```bash
+uv run --env-file /absolute/private/path/bloodhound.env \
+  ori verify-mcp \
+  --config models.local.yaml \
+  --manifest datasets/benchmarks/complex-v1-seed-4401_manifest.json \
+  --output results/readiness/cdb17097/mcp-readiness.json
+```
+
+The output is an immutable readiness receipt. Use a new output root when the
+MCP revision changes. It records the launcher, canonical source, full revision,
+executable, `uv` version, prompt/resource discovery, read-only tool inventory,
+and hashed response evidence; it never records credential values or tool
+response bodies.
+
+For local MCP development only, retain the legacy launcher:
+
+```yaml
+mcp:
+  launcher: local_checkout
+  mcp_dir: ../bloodhound-mcp
+```
+
+That mode preserves `uv --directory <mcp_dir> run main.py`. Benchmark configs
+should use the pinned `uvx_git` form above.
+
 ## Run a Benchmark Campaign
 
 Run the direct track:
 
 ```bash
-uv run ori run \
-  --config models.local.yaml \
-  --manifest datasets/benchmarks/complex-v1-seed-4401_manifest.json
+uv run ori run --config models.local.yaml
 ```
 
 Run the MCP track from the same manifest by setting `modes: [mcp]` in the model
@@ -258,6 +351,7 @@ results/benchmark-runs/complex-v1-seed-4401
 
 Preserve these outputs:
 
+- exact and resolved campaign-config YAML,
 - per-model CSVs,
 - combined CSV,
 - summary CSV,
@@ -317,9 +411,7 @@ uv run ori verify-ingest \
   --manifest datasets/benchmarks/complex-v1-seed-4401_manifest.json
 
 # 5. Run the configured model matrix.
-uv run ori run \
-  --config models.local.yaml \
-  --manifest datasets/benchmarks/complex-v1-seed-4401_manifest.json
+uv run ori run --config models.local.yaml
 ```
 
 If step 4 fails, stop. Do not grade models against a mismatched graph; the scores will describe ingest drift, not reasoning quality.

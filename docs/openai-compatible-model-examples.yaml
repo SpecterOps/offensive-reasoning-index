@@ -4,7 +4,9 @@
 # or a generated run config, then update model names, URLs, and env vars.
 #
 # Secret handling:
-# - Native OpenAI-compatible MCP calls use OPENAI_COMPAT_API_KEY first, then OPENAI_API_KEY.
+# - OpenAI-compatible calls use OPENAI_COMPAT_API_KEY first, then OPENROUTER_API_KEY,
+#   then OPENAI_API_KEY.
+# - Set OPENROUTER_API_KEY to use an OpenRouter key directly; do not put the key in YAML.
 # - Some gateways need provider-specific headers. Add those at the gateway/proxy layer for now.
 
 version: 1
@@ -14,7 +16,9 @@ defaults:
   concurrency: 1
   max_model_reruns_on_infra: 1
   mcp:
-    mcp_dir: ../bloodhound-mcp
+    launcher: uvx_git
+    source: git+https://github.com/mwnickerson/bloodhound_mcp@cdb17097e761c8a8622cb93bc3ba49a9e150bb6e
+    executable: bloodhound-mcp
     max_steps: 16
     resource_mode: on-demand
     ollama_read_timeout_seconds: 1800
@@ -113,6 +117,7 @@ profiles:
       model_base_url: https://openrouter.ai/api/v1
       mcp_tool_loop: native-openai-compatible
       openai_compat_telemetry_adapter: generic
+      # Authentication is read from OPENROUTER_API_KEY.
       options:
         temperature: 0
 
@@ -143,4 +148,3 @@ profiles:
       openai_compat_telemetry_adapter: generic
       options:
         temperature: 0
-

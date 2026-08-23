@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from ori.eval.adapter import ModelResponse
 from ori.eval.bhce import BHHealthResult, CypherResult
 from ori.eval.grader import GradeResult
@@ -269,3 +271,180 @@ def test_run_eval_cli_bare_threads_explicit_bhce_url_kwargs(tmp_path: Path, monk
         "scheme": "http",
         "port": 8080,
     }
+
+
+def test_run_eval_cli_bare_complete_checkpoint_skips_external_calls(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import asyncio
+
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps({"domain": "TEST.LOCAL"}))
+    output_path = tmp_path / "results.csv"
+    monkeypatch.setattr("ori.eval.runner.generate_tasks", lambda manifest: [_task()])
+    monkeypatch.setattr(
+        "ori.eval.runner.BHCEClient",
+        lambda **kwargs: FakeBHCEClient(**kwargs),
+    )
+
+    calls = 0
+
+    async def fake_run_eval_with_inspect(**kwargs):
+        nonlocal calls
+        calls += 1
+        return [_result("CORRECT")]
+
+    monkeypatch.setattr("ori.eval.runner.run_eval_with_inspect", fake_run_eval_with_inspect)
+
+    first = asyncio.run(
+        run_eval_cli_bare(
+            manifest_path=manifest_path,
+            model="ollama/test:latest",
+            output_path=output_path,
+        )
+    )
+    assert len(first) == 1
+    assert calls == 1
+    assert output_path.with_suffix(".csv.checkpoint.json").exists()
+
+    def fail_if_bhce_created(**kwargs):
+        raise AssertionError("complete checkpoint should not create a BloodHound client")
+
+    monkeypatch.setattr("ori.eval.runner.BHCEClient", fail_if_bhce_created)
+    second = asyncio.run(
+        run_eval_cli_bare(
+            manifest_path=manifest_path,
+            model="ollama/test:latest",
+            output_path=output_path,
+        )
+    )
+
+    assert len(second) == 1
+    assert second[0].grade.outcome == "CORRECT"
+    assert calls == 1
+
+
+def test_run_eval_cli_bare_checkpoint_rejects_changed_model_config(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import asyncio
+
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps({"domain": "TEST.LOCAL"}))
+    output_path = tmp_path / "results.csv"
+    monkeypatch.setattr("ori.eval.runner.generate_tasks", lambda manifest: [_task()])
+    monkeypatch.setattr(
+        "ori.eval.runner.BHCEClient",
+        lambda **kwargs: FakeBHCEClient(**kwargs),
+    )
+
+    async def fake_run_eval_with_inspect(**kwargs):
+        return [_result("CORRECT")]
+
+    monkeypatch.setattr("ori.eval.runner.run_eval_with_inspect", fake_run_eval_with_inspect)
+    asyncio.run(
+        run_eval_cli_bare(
+            manifest_path=manifest_path,
+            model="ollama/test:latest",
+            output_path=output_path,
+            model_base_url="http://first.example/v1",
+            run_config={"options": {"temperature": 0}},
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="model_config_identity"):
+        asyncio.run(
+            run_eval_cli_bare(
+                manifest_path=manifest_path,
+                model="ollama/test:latest",
+                output_path=output_path,
+                model_base_url="http://second.example/v1",
+                run_config={"options": {"temperature": 1}},
+            )
+        )
+
+
+def test_run_eval_cli_bare_checkpoint_rejects_changed_bloodhound_target(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import asyncio
+
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps({"domain": "TEST.LOCAL"}))
+    output_path = tmp_path / "results.csv"
+    monkeypatch.setattr("ori.eval.runner.generate_tasks", lambda manifest: [_task()])
+    monkeypatch.setattr(
+        "ori.eval.runner.BHCEClient",
+        lambda **kwargs: FakeBHCEClient(**kwargs),
+    )
+
+    async def fake_run_eval_with_inspect(**kwargs):
+        return [_result("CORRECT")]
+
+    monkeypatch.setattr("ori.eval.runner.run_eval_with_inspect", fake_run_eval_with_inspect)
+    asyncio.run(
+        run_eval_cli_bare(
+            manifest_path=manifest_path,
+            model="ollama/test:latest",
+            output_path=output_path,
+            bhce_url="https://first.example:443",
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="model_config_identity"):
+        asyncio.run(
+            run_eval_cli_bare(
+                manifest_path=manifest_path,
+                model="ollama/test:latest",
+                output_path=output_path,
+                bhce_url="https://second.example:443",
+            )
+        )
+
+
+def test_run_eval_cli_bare_resumes_only_checkpointed_infra_tasks(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import asyncio
+
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps({"domain": "TEST.LOCAL"}))
+    output_path = tmp_path / "results.csv"
+    tasks = [_task("t1"), _task("t2")]
+    monkeypatch.setattr("ori.eval.runner.generate_tasks", lambda manifest: tasks)
+    monkeypatch.setattr(
+        "ori.eval.runner.BHCEClient",
+        lambda **kwargs: FakeBHCEClient(**kwargs),
+    )
+    calls: list[list[str]] = []
+
+    async def fake_run_eval_with_inspect(**kwargs):
+        task_ids = [task.id for task in kwargs["tasks"]]
+        calls.append(task_ids)
+        if len(calls) == 1:
+            return [_result("CORRECT", "t1"), _result("INFRA_ERROR", "t2")]
+        return [_result("CORRECT", "t2")]
+
+    monkeypatch.setattr("ori.eval.runner.run_eval_with_inspect", fake_run_eval_with_inspect)
+
+    first = asyncio.run(
+        run_eval_cli_bare(
+            manifest_path=manifest_path,
+            model="ollama/test:latest",
+            output_path=output_path,
+            max_model_reruns_on_infra=0,
+        )
+    )
+    assert [result.grade.outcome for result in first] == ["CORRECT", "INFRA_ERROR"]
+
+    second = asyncio.run(
+        run_eval_cli_bare(
+            manifest_path=manifest_path,
+            model="ollama/test:latest",
+            output_path=output_path,
+            max_model_reruns_on_infra=0,
+        )
+    )
+
+    assert calls == [["t1", "t2"], ["t2"]]
+    assert [result.grade.outcome for result in second] == ["CORRECT", "CORRECT"]

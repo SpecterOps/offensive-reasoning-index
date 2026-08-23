@@ -185,6 +185,18 @@ the live graph.
 For OpenAI-compatible APIs, set the model to `openai-compat/...`, provide the
 base URL, and force the native OpenAI-compatible MCP tool loop.
 
+ORI reads OpenAI-compatible credentials from the environment in this order:
+
+```text
+OPENAI_COMPAT_API_KEY
+OPENROUTER_API_KEY
+OPENAI_API_KEY
+```
+
+For OpenRouter, set `OPENROUTER_API_KEY` before running ORI. Keep the key out of
+run-config YAML and other tracked files. The same key works for direct and MCP
+inference.
+
 Reusable examples live in:
 
 ```text
@@ -233,6 +245,8 @@ model:
   options:
     temperature: 0
 ```
+
+Replace `qwen/qwen3-32b` with the exact OpenRouter model ID you want to run.
 
 Supported OpenAI-compatible telemetry adapters:
 

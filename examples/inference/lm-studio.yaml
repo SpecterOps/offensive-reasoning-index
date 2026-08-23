@@ -1,0 +1,33 @@
+# LM Studio OpenAI-compatible ORI inference template.
+#
+# LM Studio commonly exposes an OpenAI-compatible local server at
+# http://127.0.0.1:1234/v1. Replace the model name with the model identifier
+# served by your LM Studio instance.
+
+version: 1
+
+defaults:
+  bhce_url: ${ORI_BHCE_URL:-https://bloodhound.example.invalid}
+  concurrency: 1
+  max_model_reruns_on_infra: 1
+  mcp:
+    mcp_dir: ${ORI_BLOODHOUND_MCP_DIR:-../bloodhound-mcp}
+    max_steps: 16
+    resource_mode: off
+    tool_loop: native-openai-compatible
+    openai_compat_telemetry_adapter: lm-studio
+
+profiles:
+  eval_mcp_lm_studio:
+    enabled: false
+    kind: eval-mcp
+    manifest: ${ORI_MANIFEST:-datasets/phase4-v1_manifest.json}
+    output: ${ORI_OUTPUT:-results/lm-studio/example-model-mcp.csv}
+    model:
+      name: example-lm-studio-model
+      model: openai-compat/example-model
+      model_base_url: ${ORI_LM_STUDIO_BASE_URL:-http://127.0.0.1:1234/v1}
+      mcp_tool_loop: native-openai-compatible
+      openai_compat_telemetry_adapter: lm-studio
+      options:
+        temperature: 0

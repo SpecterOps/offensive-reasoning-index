@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
+import yaml
 from click.testing import CliRunner
 
-from ori.cli import _build_run_specs, main
-from ori.eval.bhce import BHHealthResult, CypherResult
+from ori.cli import _build_run_specs, _validate_model_matrix_config, main
+from ori.eval.bhce import BHCEClient, BHHealthResult, CypherResult
+from ori.eval.mcp_runtime import MCPRunMetadata
 from ori.eval.ops import (
     SMOKE_EXPECTATIONS,
     PreflightResult,
@@ -19,7 +22,7 @@ from ori.eval.ops import (
     verify_bh_health,
     verify_ingest,
 )
-from ori.eval.runner import EvalResult
+from ori.eval.runner import EvalResult, _mcp_runtime_run_config
 from ori.eval.tasks import Task
 
 
@@ -68,6 +71,46 @@ class FakeBHCEClient:
             query=query,
             classification="ok",
         )
+
+
+def test_mcp_runtime_config_preserves_pin_when_mock_metadata_is_blank() -> None:
+    config = {
+        "mcp_launcher": "uvx_git",
+        "mcp_source": "git+https://github.com/mwnickerson/bloodhound_mcp@" + "a" * 40,
+        "mcp_revision": "a" * 40,
+        "mcp_executable": "bloodhound-mcp",
+        "uv_version": "uv 0.test",
+    }
+
+    merged = _mcp_runtime_run_config(
+        config,
+        [SimpleNamespace(mcp=MCPRunMetadata(prompt_discovery_status="not_requested"))],
+    )
+
+    assert merged is not None
+    assert merged["mcp_launcher"] == "uvx_git"
+    assert merged["mcp_revision"] == "a" * 40
+    assert merged["mcp_executable"] == "bloodhound-mcp"
+    assert merged["prompt_discovery_status"] == "not_requested"
+
+
+def test_bhce_client_honors_strict_boolean_tls_environment(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeAsyncClient:
+        def __init__(self, **kwargs) -> None:
+            captured.update(kwargs)
+
+    monkeypatch.setattr("ori.eval.bhce.httpx.AsyncClient", FakeAsyncClient)
+    monkeypatch.setenv("BLOODHOUND_DOMAIN", "bh.example")
+    monkeypatch.setenv("BLOODHOUND_TOKEN_ID", "id")
+    monkeypatch.setenv("BLOODHOUND_TOKEN_KEY", "key")
+    monkeypatch.setenv("BLOODHOUND_VERIFY_TLS", "false")
+
+    client = BHCEClient()
+
+    assert client.verify_tls is False
+    assert captured["verify"] is False
 
 
 def _manifest(tmp_path: Path) -> Path:
@@ -450,6 +493,17 @@ def test_cli_eval_parses_ollama_options(tmp_path: Path, monkeypatch) -> None:
     assert captured["run_config"] == {
         "model": "ollama/gemma4:e4b",
         "options": {"num_ctx": 16384, "temperature": 0.2},
+        "direct_query_safety": {
+            "enabled": True,
+            "policy_version": "bloodhound-cysql-direct-v3",
+            "server_timeout_seconds": 10.0,
+            "client_timeout_seconds": 15.0,
+            "max_recursive_hops": 12,
+            "max_result_rows": 1000,
+            "max_query_characters": 16384,
+            "max_recursive_patterns": 2,
+            "max_recursive_expansion_complexity": 256,
+        },
     }
 
 
@@ -463,6 +517,7 @@ def test_cli_eval_mcp_parses_ollama_options(tmp_path: Path, monkeypatch) -> None
         captured.update(kwargs)
 
     monkeypatch.setattr("ori.eval.runner.run_eval_mcp_cli", fake_run_eval_mcp_cli)
+    monkeypatch.setattr("ori.cli.detect_uv_version", lambda: "uv 0.test")
     runner = CliRunner()
     result = runner.invoke(
         main,
@@ -497,6 +552,11 @@ def test_cli_eval_mcp_parses_ollama_options(tmp_path: Path, monkeypatch) -> None
         "mcp_tool_loop": "auto",
         "openai_compat_telemetry_adapter": "auto",
         "mcp_ollama_read_timeout_seconds": 900.0,
+        "mcp_launcher": "local_checkout",
+        "mcp_source": None,
+        "mcp_revision": None,
+        "mcp_executable": "main.py",
+        "uv_version": "uv 0.test",
         "model": "ollama/gemma4:e4b",
         "options": {"num_ctx": 16384, "temperature": 0.2},
         "resource_mode": "on-demand",
@@ -547,19 +607,78 @@ models:
     assert spec.mcp_tool_loop == "native-openai-compatible"
 
 
+def test_models_example_documents_complete_model_matrix_surface() -> None:
+    data = yaml.safe_load(Path("models.example.yaml").read_text())
+    _validate_model_matrix_config(data)
+    assert data["version"] == 1
+    assert data["manifest"]
+    assert data["modes"] == ["direct", "mcp"]
+    assert data["output_dir"]
+    assert set(data["defaults"]) == {
+        "concurrency",
+        "runs_per_model",
+        "bhce_url",
+        "model_base_url",
+        "max_model_reruns_on_infra",
+        "health",
+        "direct_query_safety",
+        "mcp",
+        "telemetry",
+    }
+    assert set(data["defaults"]["direct_query_safety"]) == {
+        "enabled",
+        "policy_version",
+        "server_timeout_seconds",
+        "client_timeout_seconds",
+        "max_recursive_hops",
+        "max_result_rows",
+        "max_query_characters",
+        "max_recursive_patterns",
+        "max_recursive_expansion_complexity",
+    }
+    assert set(data["defaults"]["mcp"]) == {
+        "launcher",
+        "source",
+        "executable",
+        "max_steps",
+        "resource_mode",
+        "tool_loop",
+        "openai_compat_telemetry_adapter",
+        "ollama_read_timeout_seconds",
+    }
+
+    specs = _build_run_specs(models=(), models_file="models.example.yaml")
+    complete_override = specs[0]
+    assert complete_override.concurrency == 1
+    assert complete_override.runs_per_model == 1
+    assert complete_override.model_base_url == "http://127.0.0.1:8080/v1"
+    assert complete_override.max_steps == 24
+    assert complete_override.mcp_tool_loop == "native-openai-compatible"
+    assert complete_override.openai_compat_telemetry_adapter == "llama-cpp"
+    assert complete_override.mcp_ollama_read_timeout_seconds == 1800
+
+
 def test_run_with_model_matrix_config_runs_direct_and_mcp(tmp_path: Path, monkeypatch) -> None:
     manifest = _manifest(tmp_path)
     config = tmp_path / "models.yaml"
     config.write_text(
-        """
+        f"""
+manifest: {manifest.name}
 modes: [direct, mcp]
 output_dir: out
 
 defaults:
   concurrency: 1
+  direct_query_safety:
+    server_timeout_seconds: 7
+    client_timeout_seconds: 11
+    max_result_rows: 250
   mcp:
-    mcp_dir: bloodhound-mcp
+    launcher: uvx_git
+    source: git+https://github.com/mwnickerson/bloodhound_mcp@cdb17097e761c8a8622cb93bc3ba49a9e150bb6e
+    executable: bloodhound-mcp
     max_steps: 9
+    resource_mode: "off"
     tool_loop: auto
 
 models:
@@ -573,7 +692,6 @@ models:
     model: claude-sonnet-4-5
 """
     )
-    (tmp_path / "bloodhound-mcp").mkdir()
     captured: dict[str, dict] = {}
 
     async def fake_direct(**kwargs):
@@ -591,7 +709,7 @@ models:
 
     result = CliRunner().invoke(
         main,
-        ["run", "--config", str(config), "--manifest", str(manifest)],
+        ["run", "--config", str(config)],
     )
 
     assert result.exit_code == 0, result.output
@@ -604,9 +722,226 @@ models:
         "anthropic/claude-sonnet-4-5",
     ]
     assert captured["direct"]["output_dir"] == tmp_path / "out" / "direct"
+    assert captured["direct"]["manifest_path"] == manifest
+    safety = captured["direct"]["direct_query_safety"]
+    assert safety.server_timeout_seconds == 7
+    assert safety.client_timeout_seconds == 11
+    assert safety.max_result_rows == 250
+    assert safety.max_recursive_hops == 12
     assert captured["mcp"]["output_dir"] == tmp_path / "out" / "mcp"
-    assert captured["mcp"]["mcp_dir"] == tmp_path / "bloodhound-mcp"
+    assert captured["mcp"]["manifest_path"] == manifest
+    assert captured["mcp"]["mcp_dir"] is None
+    assert captured["mcp"]["mcp_launcher"].launcher == "uvx_git"
+    assert captured["mcp"]["mcp_launcher"].revision == ("cdb17097e761c8a8622cb93bc3ba49a9e150bb6e")
+    assert captured["mcp"]["resource_mode"] == "off"
     assert captured["mcp"]["max_steps"] == 9
+    assert (tmp_path / "out" / "campaign-config.source.yaml").read_text() == config.read_text()
+    runnable_snapshot = yaml.safe_load((tmp_path / "out" / "campaign-config.yaml").read_text())
+    _validate_model_matrix_config(runnable_snapshot)
+    assert runnable_snapshot["manifest"] == str(manifest)
+    assert runnable_snapshot["output_dir"] == str(tmp_path / "out")
+    assert runnable_snapshot["modes"] == ["direct", "mcp"]
+    assert runnable_snapshot["defaults"]["mcp"]["launcher"] == "uvx_git"
+    assert runnable_snapshot["defaults"]["mcp"]["source"].endswith(
+        "@cdb17097e761c8a8622cb93bc3ba49a9e150bb6e"
+    )
+    assert runnable_snapshot["defaults"]["mcp"]["executable"] == "bloodhound-mcp"
+    provenance = yaml.safe_load((tmp_path / "out" / "campaign-provenance.yaml").read_text())
+    assert provenance["manifest"] == str(manifest)
+    assert provenance["cli_overrides"] == {}
+
+    generated_config = tmp_path / "out" / "campaign-config.yaml"
+    resume = CliRunner().invoke(main, ["run", "--config", str(generated_config)])
+    assert resume.exit_code == 0, resume.output
+
+    config.write_text(config.read_text().replace("max_steps: 9", "max_steps: 10"))
+    rerun = CliRunner().invoke(main, ["run", "--config", str(config)])
+    assert rerun.exit_code != 0
+    assert "already contains different campaign provenance" in rerun.output
+    assert "Choose a new output_dir" in rerun.output
+
+
+def test_model_matrix_cli_manifest_override_wins_over_config(tmp_path: Path, monkeypatch) -> None:
+    config_manifest = _manifest(tmp_path)
+    override_dir = tmp_path / "override"
+    override_dir.mkdir()
+    override_manifest = _manifest(override_dir)
+    config = tmp_path / "models.yaml"
+    config.write_text(
+        f"""
+manifest: {config_manifest.name}
+modes: [direct]
+output_dir: out
+models:
+  - model: mock/perfect
+"""
+    )
+    captured: dict[str, object] = {}
+
+    async def fake_direct(**kwargs):
+        captured.update(kwargs)
+        return []
+
+    monkeypatch.setattr("ori.cli._run_baseline_with_specs", fake_direct)
+    monkeypatch.setattr("ori.eval.report.write_combined_csv", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("ori.eval.report.write_summary_csv", lambda *_args, **_kwargs: None)
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "run",
+            "--config",
+            str(config),
+            "--manifest",
+            str(override_manifest),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["manifest_path"] == override_manifest
+    runnable_snapshot = yaml.safe_load((tmp_path / "out" / "campaign-config.yaml").read_text())
+    assert runnable_snapshot["manifest"] == str(override_manifest)
+    provenance = yaml.safe_load((tmp_path / "out" / "campaign-provenance.yaml").read_text())
+    assert provenance["manifest"] == str(override_manifest)
+    assert provenance["cli_overrides"] == {
+        "manifest": str(override_manifest),
+    }
+
+
+def test_model_matrix_cli_mcp_overrides_match_runtime_and_snapshot(
+    tmp_path: Path, monkeypatch
+) -> None:
+    manifest = _manifest(tmp_path)
+    config = tmp_path / "models.yaml"
+    config.write_text(
+        f"""
+manifest: {manifest.name}
+modes: [mcp]
+output_dir: out
+defaults:
+  mcp:
+    mcp_dir: bloodhound-mcp
+    max_steps: 9
+models:
+  - model: openai-compat/qwen-fast
+    mcp_tool_loop: native-openai-compatible
+    openai_compat_telemetry_adapter: llama-cpp
+    mcp_ollama_read_timeout_seconds: 1200
+"""
+    )
+    (tmp_path / "bloodhound-mcp").mkdir()
+    captured: dict[str, object] = {}
+    captured_calls: list[dict[str, object]] = []
+
+    async def fake_mcp_runner(**kwargs):
+        captured.update(kwargs)
+        captured_calls.append(dict(kwargs))
+        return []
+
+    monkeypatch.setattr("ori.eval.runner.run_eval_mcp_cli_bare", fake_mcp_runner)
+    monkeypatch.setattr("ori.eval.report.write_combined_csv", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("ori.eval.report.write_summary_csv", lambda *_args, **_kwargs: None)
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "run",
+            "--config",
+            str(config),
+            "--mcp-tool-loop",
+            "inspect",
+            "--openai-compat-telemetry-adapter",
+            "vllm",
+            "--mcp-ollama-read-timeout",
+            "60",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["mcp_tool_loop"] == "inspect"
+    assert captured["openai_compat_telemetry_adapter"] == "vllm"
+    assert captured["mcp_ollama_read_timeout_seconds"] == 60.0
+    run_config = captured["run_config"]
+    assert isinstance(run_config, dict)
+    assert run_config["mcp_tool_loop"] == "inspect"
+    assert run_config["openai_compat_telemetry_adapter"] == "vllm"
+    assert run_config["mcp_ollama_read_timeout_seconds"] == 60.0
+    runnable_snapshot = yaml.safe_load((tmp_path / "out" / "campaign-config.yaml").read_text())
+    assert runnable_snapshot["models"][0]["mcp_tool_loop"] == "inspect"
+    assert runnable_snapshot["models"][0]["openai_compat_telemetry_adapter"] == "vllm"
+    assert runnable_snapshot["models"][0]["mcp_ollama_read_timeout_seconds"] == 60.0
+    assert runnable_snapshot["models"][0]["name"] == (
+        "openai-compat/qwen-fast [mcp_ollama_read_timeout_seconds=1200, "
+        'mcp_tool_loop="native-openai-compatible", '
+        'openai_compat_telemetry_adapter="llama-cpp"]'
+    )
+
+    resume = CliRunner().invoke(
+        main,
+        ["run", "--config", str(tmp_path / "out" / "campaign-config.yaml")],
+    )
+    assert resume.exit_code == 0, resume.output
+    assert len(captured_calls) == 2
+    assert captured_calls[1]["run_name"] == captured_calls[0]["run_name"]
+    assert captured_calls[1]["output_path"] == captured_calls[0]["output_path"]
+
+
+def test_model_matrix_rejects_unsupported_version(tmp_path: Path) -> None:
+    config = tmp_path / "models.yaml"
+    config.write_text(
+        """
+version: 2
+manifest: manifest.json
+models:
+  - model: mock/perfect
+"""
+    )
+
+    result = CliRunner().invoke(main, ["run", "--config", str(config)])
+
+    assert result.exit_code != 0
+    assert "Unsupported model-matrix config version 2" in result.output
+
+
+def test_model_matrix_rejects_unknown_settings(tmp_path: Path) -> None:
+    cases = [
+        (
+            """
+manifest: manifest.json
+output_directory: typo
+models:
+  - model: mock/perfect
+""",
+            "Unsupported model-matrix setting(s): output_directory",
+        ),
+        (
+            """
+manifest: manifest.json
+defaults:
+  health:
+    timeout_second: 60
+models:
+  - model: mock/perfect
+""",
+            "Unsupported defaults.health setting(s): timeout_second",
+        ),
+        (
+            """
+manifest: manifest.json
+models:
+  - model: mock/perfect
+    run_per_model: 1
+""",
+            "Unsupported models[0] setting(s): run_per_model",
+        ),
+    ]
+
+    for index, (contents, expected) in enumerate(cases):
+        config = tmp_path / f"models-{index}.yaml"
+        config.write_text(contents)
+        result = CliRunner().invoke(main, ["run", "--config", str(config)])
+        assert result.exit_code != 0
+        assert expected in result.output
 
 
 def test_build_run_specs_preserves_model_base_url_and_max_steps(tmp_path: Path) -> None:

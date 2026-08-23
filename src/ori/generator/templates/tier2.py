@@ -101,10 +101,10 @@ def plant_kerberoast_chain(graph: ADGraph) -> PlantedPath:
         )
 
     cypher = (
-        f"MATCH p=shortestPath( "
-        f"(u:User {{name: 'SVC_BACKUP@{graph.domain}'}}) "
-        f"-[*1..]->(c:Computer {{name: '{target_server.properties['name']}'}}) "
-        f") RETURN p"
+        f"MATCH p=(u:User {{name: 'SVC_BACKUP@{graph.domain}'}}) "
+        f"-[:MemberOf]->(g:Group {{name: 'SERVER-ADMINS@{graph.domain}'}}) "
+        f"-[:AdminTo]->(c:Computer {{name: '{target_server.properties['name']}'}}) "
+        f"WHERE u.hasspn = true RETURN p"
     )
 
     planted = PlantedPath(
@@ -183,10 +183,10 @@ def plant_acl_chain(graph: ADGraph) -> PlantedPath:
     target_server = servers[0] if servers else graph.nodes_by_type("Computer")[0]
 
     cypher = (
-        f"MATCH p=shortestPath( "
-        f"(u:User {{name: '{attacker.properties['name']}'}}) "
-        f"-[*1..]->(c:Computer {{name: '{target_server.properties['name']}'}}) "
-        f") RETURN p"
+        f"MATCH p=(u:User {{name: '{attacker.properties['name']}'}}) "
+        f"-[:GenericAll]->(g:Group {{name: 'SERVER-ADMINS@{graph.domain}'}}) "
+        f"-[:AdminTo]->(c:Computer {{name: '{target_server.properties['name']}'}}) "
+        f"RETURN p"
     )
 
     planted = PlantedPath(

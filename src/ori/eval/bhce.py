@@ -22,6 +22,16 @@ class CypherResult:
     node_names: set[str] = field(default_factory=set)
     error: str | None = None
     raw: dict = field(default_factory=dict)
+    failure_type: str | None = None
+    failure_subtype: str = ""
+    status_code: int | None = None
+    query_executed: bool = True
+    execution_attempts: int = 1
+    query_fingerprint: str = ""
+    safety_policy_version: str = ""
+    safety_rule: str = ""
+    bhce_health_after: str = ""
+    circuit_state: str = "closed"
 
 
 @dataclass
@@ -31,6 +41,18 @@ class BHHealthResult:
     query: str
     status_code: int | None = None
     classification: str = "ok"
+
+
+def _env_bool(name: str, *, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    normalized = raw.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be a boolean value when set.")
 
 
 def parse_bhce_url(bhce_url: str | None) -> dict[str, str | int]:
@@ -46,6 +68,17 @@ def parse_bhce_url(bhce_url: str | None) -> dict[str, str | int]:
     if parsed.port is not None:
         kwargs["port"] = parsed.port
     return kwargs
+
+
+def resolve_bhce_target(bhce_url: str | None) -> dict[str, str | int]:
+    """Return the effective non-secret BloodHound target used by the client."""
+
+    explicit = parse_bhce_url(bhce_url)
+    return {
+        "scheme": str(explicit.get("scheme", "https")).lower(),
+        "domain": str(explicit.get("domain") or os.environ.get("BLOODHOUND_DOMAIN", "")).lower(),
+        "port": int(explicit.get("port", 443)),
+    }
 
 
 class BHCEClient:
@@ -64,13 +97,19 @@ class BHCEClient:
         token_key: str | None = None,
         scheme: str = "https",
         port: int = 443,
+        verify_tls: bool | None = None,
     ) -> None:
         self.domain = domain or os.environ["BLOODHOUND_DOMAIN"]
         self.token_id = token_id or os.environ["BLOODHOUND_TOKEN_ID"]
         self.token_key = token_key or os.environ["BLOODHOUND_TOKEN_KEY"]
         self.scheme = scheme or os.getenv("BLOODHOUND_SCHEME", "https")
         self.port = port or int(os.getenv("BLOODHOUND_PORT", "443"))
-        self._client = httpx.AsyncClient(timeout=30.0)
+        self.verify_tls = (
+            verify_tls
+            if verify_tls is not None
+            else _env_bool("BLOODHOUND_VERIFY_TLS", default=True)
+        )
+        self._client = httpx.AsyncClient(timeout=30.0, verify=self.verify_tls)
 
     def _sign(self, method: str, path: str, body: bytes = b"") -> dict:
         """
@@ -176,38 +215,170 @@ class BHCEClient:
         q = re.sub(r"\s+\)", ")", q)
         return q.strip()
 
-    async def run_cypher(self, query: str) -> CypherResult:
+    @staticmethod
+    def _is_query_complexity_rejection(response_text: str) -> bool:
+        text = response_text.lower()
+        complexity_markers = (
+            "query is too complex",
+            "query too complex",
+            "poor or unstable database performance",
+        )
+        return any(marker in text for marker in complexity_markers)
+
+    @staticmethod
+    def _http_failure_type(status_code: int, response_text: str) -> str:
+        text = response_text.lower()
+        if status_code in {401, 403}:
+            return "auth_error"
+        if status_code == 429:
+            return "rate_limited"
+        if status_code in {408, 502, 503, 504}:
+            return "server_unavailable"
+        if BHCEClient._is_query_complexity_rejection(response_text):
+            return "query_timeout"
+        query_markers = (
+            "cypher syntax error",
+            "neo.clienterror",
+            "syntaxerror",
+            "no viable alternative",
+            "mismatched input",
+            "extraneous input",
+            "token recognition error",
+        )
+        if any(marker in text for marker in query_markers):
+            return "query_error"
+        timeout_markers = (
+            "query timeout",
+            "query timed out",
+            "timed out",
+            "timeout",
+            "deadline exceeded",
+            "statement timeout",
+            "operation was canceled",
+            "operation was cancelled",
+        )
+        if any(marker in text for marker in timeout_markers):
+            return "query_timeout"
+        if status_code >= 500:
+            return "server_error"
+        return "query_error"
+
+    async def run_cypher(
+        self,
+        query: str,
+        *,
+        include_properties: bool = True,
+        server_timeout_seconds: float | None = None,
+        client_timeout_seconds: float | None = None,
+    ) -> CypherResult:
         """Execute a Cypher query against BH CE and return normalized result."""
         import json
 
         path = "/api/v2/graphs/cypher"
         query = self._normalize_cypher(query)
-        body = json.dumps({"query": query, "includeproperties": True}).encode()
+        body = json.dumps(
+            {
+                "query": query,
+                "include_properties": include_properties,
+            }
+        ).encode()
         headers = self._sign("POST", path, body)
+        if server_timeout_seconds is not None:
+            wait_seconds = max(1, int(server_timeout_seconds))
+            headers["Prefer"] = f"wait={wait_seconds}"
 
         try:
-            resp = await self._client.post(self._url(path), content=body, headers=headers)
+            request_kwargs = {
+                "content": body,
+                "headers": headers,
+            }
+            if client_timeout_seconds is not None:
+                request_kwargs["timeout"] = client_timeout_seconds
+            resp = await self._client.post(self._url(path), **request_kwargs)
+        except httpx.TimeoutException as e:
+            return CypherResult(
+                success=False,
+                error=f"Client timed out waiting for BloodHound: {e}",
+                failure_type="client_timeout",
+                failure_subtype="client_transport_timeout",
+                query_executed=True,
+                execution_attempts=1,
+            )
         except httpx.RequestError as e:
-            return CypherResult(success=False, error=f"Request failed: {e}")
+            request_may_have_reached_server = not isinstance(
+                e,
+                (
+                    httpx.ConnectError,
+                    httpx.ConnectTimeout,
+                    httpx.PoolTimeout,
+                ),
+            )
+            return CypherResult(
+                success=False,
+                error=f"Request failed: {e}",
+                failure_type="transport_error",
+                failure_subtype="request_transport_error",
+                query_executed=request_may_have_reached_server,
+                execution_attempts=1,
+            )
 
         if resp.status_code == 404:
             # BH CE returns 404 for queries that return no results
-            return CypherResult(success=True, nodes=[], node_names=set(), raw={})
+            return CypherResult(
+                success=True,
+                nodes=[],
+                node_names=set(),
+                raw={},
+                status_code=resp.status_code,
+            )
 
         if resp.status_code == 400:
-            return CypherResult(success=False, error=f"Cypher syntax error: {resp.text}")
+            if self._is_query_complexity_rejection(resp.text):
+                return CypherResult(
+                    success=False,
+                    error=f"HTTP 400: {resp.text}",
+                    failure_type="query_timeout",
+                    failure_subtype="bloodhound_query_too_complex",
+                    status_code=resp.status_code,
+                )
+            return CypherResult(
+                success=False,
+                error=f"Cypher syntax error: {resp.text}",
+                failure_type="query_error",
+                failure_subtype="cysql_syntax_error",
+                status_code=resp.status_code,
+            )
 
         if resp.status_code not in (200, 201):
-            return CypherResult(success=False, error=f"HTTP {resp.status_code}: {resp.text}")
+            failure_type = self._http_failure_type(resp.status_code, resp.text)
+            return CypherResult(
+                success=False,
+                error=f"HTTP {resp.status_code}: {resp.text}",
+                failure_type=failure_type,
+                failure_subtype=f"bloodhound_{failure_type}",
+                status_code=resp.status_code,
+            )
 
         try:
             data = resp.json()
         except Exception as e:
-            return CypherResult(success=False, error=f"JSON parse error: {e}")
+            return CypherResult(
+                success=False,
+                error=f"JSON parse error: {e}",
+                failure_type="response_error",
+                failure_subtype="invalid_json_response",
+                status_code=resp.status_code,
+            )
 
         nodes = _extract_nodes(data)
         names = _extract_node_names(nodes)
-        return CypherResult(success=True, nodes=nodes, node_names=names, raw=data)
+        return CypherResult(
+            success=True,
+            nodes=nodes,
+            node_names=names,
+            raw=data,
+            status_code=resp.status_code,
+        )
 
     async def wait_until_healthy(
         self,
@@ -238,7 +409,20 @@ class BHCEClient:
         result = await self.run_cypher(query)
         if result.success:
             return result
-        classification = self.classify_error(result.error)
+        classification = (
+            "infra"
+            if result.failure_type
+            in {
+                "auth_error",
+                "client_timeout",
+                "rate_limited",
+                "response_error",
+                "server_error",
+                "server_unavailable",
+                "transport_error",
+            }
+            else self.classify_error(result.error)
+        )
         if classification != "infra":
             return result
 
@@ -253,8 +437,14 @@ class BHCEClient:
                     f"BHCE unavailable after recovery wait: {result.error} "
                     f"(last health check: {health.detail})"
                 ),
+                failure_type="server_unavailable",
+                failure_subtype="recovery_wait_exhausted",
+                query_executed=result.query_executed,
+                execution_attempts=result.execution_attempts,
             )
-        return await self.run_cypher(query)
+        retry = await self.run_cypher(query)
+        retry.execution_attempts = result.execution_attempts + retry.execution_attempts
+        return retry
 
     async def check_health(
         self,

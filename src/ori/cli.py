@@ -6,6 +6,7 @@ import hashlib
 import json
 import re
 from collections import Counter
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,7 @@ import click
 import yaml
 
 from .benchmarks import describe_benchmark, get_benchmark, list_benchmarks
+from .eval.direct_query_safety import DirectQuerySafetyConfig
 from .eval.phase4_v2 import generate_phase4_v2_official_tasks
 from .generator.archive_validation import _relationships_from_archive
 from .generator.attack_paths import plant_all_paths
@@ -32,12 +34,21 @@ from .generator.serializer import (
     serialize_to_dir,
     serialize_to_zip,
 )
+from .mcp_launcher import (
+    MCPLauncherConfig,
+    detect_uv_version,
+    resolve_mcp_launcher_config,
+)
 from .relationships import (
     RELATIONSHIP_CONTRACT_VERSION,
     SHARPHOUND_PROFILE,
     canonical_relationship_kind,
 )
-from .run_config import RunConfigOverrides, list_run_profiles, load_run_profile
+from .run_config import (
+    RunConfigOverrides,
+    list_run_profiles,
+    load_run_profile,
+)
 
 
 @dataclass(frozen=True)
@@ -55,6 +66,190 @@ class RunSpec:
     config_identity: dict[str, Any]
     config_identity_json: str
     file_slug: str
+
+
+_MODEL_MATRIX_TOP_LEVEL_KEYS = {
+    "version",
+    "manifest",
+    "modes",
+    "output_dir",
+    "defaults",
+    "models",
+}
+_MODEL_MATRIX_DEFAULT_KEYS = {
+    "concurrency",
+    "runs_per_model",
+    "bhce_url",
+    "model_base_url",
+    "max_model_reruns_on_infra",
+    "health",
+    "direct_query_safety",
+    "mcp",
+    "telemetry",
+}
+_MODEL_MATRIX_HEALTH_KEYS = {"timeout_seconds", "poll_interval"}
+_MODEL_MATRIX_MCP_KEYS = {
+    "mcp_dir",
+    "launcher",
+    "source",
+    "revision",
+    "executable",
+    "max_steps",
+    "resource_mode",
+    "tool_loop",
+    "openai_compat_telemetry_adapter",
+    "ollama_read_timeout_seconds",
+}
+_MODEL_MATRIX_TELEMETRY_KEYS = {"enabled"}
+_MODEL_MATRIX_MODEL_KEYS = {
+    "name",
+    "provider",
+    "model",
+    "concurrency",
+    "runs_per_model",
+    "model_base_url",
+    "max_steps",
+    "mcp_tool_loop",
+    "tool_loop",
+    "openai_compat_telemetry_adapter",
+    "telemetry_adapter",
+    "mcp_ollama_read_timeout_seconds",
+    "options",
+    "num_ctx",
+}
+
+
+def _reject_unknown_config_keys(
+    value: dict[str, Any], *, supported: set[str], context: str
+) -> None:
+    unknown = sorted(set(value) - supported)
+    if unknown:
+        raise click.UsageError(f"Unsupported {context} setting(s): {', '.join(unknown)}")
+
+
+def _validate_model_matrix_config(data: dict[str, Any]) -> None:
+    """Reject misspelled or misplaced model-matrix settings."""
+
+    _reject_unknown_config_keys(
+        data,
+        supported=_MODEL_MATRIX_TOP_LEVEL_KEYS,
+        context="model-matrix",
+    )
+    defaults = data.get("defaults") or {}
+    if not isinstance(defaults, dict):
+        raise click.UsageError("defaults must be a mapping when present.")
+    _reject_unknown_config_keys(
+        defaults,
+        supported=_MODEL_MATRIX_DEFAULT_KEYS,
+        context="model-matrix defaults",
+    )
+
+    nested_sections = (
+        ("health", _MODEL_MATRIX_HEALTH_KEYS),
+        (
+            "direct_query_safety",
+            {field.name for field in DirectQuerySafetyConfig.__dataclass_fields__.values()},
+        ),
+        ("mcp", _MODEL_MATRIX_MCP_KEYS),
+        ("telemetry", _MODEL_MATRIX_TELEMETRY_KEYS),
+    )
+    for section, supported in nested_sections:
+        section_value = defaults.get(section) or {}
+        if not isinstance(section_value, dict):
+            raise click.UsageError(f"defaults.{section} must be a mapping when present.")
+        _reject_unknown_config_keys(
+            section_value,
+            supported=supported,
+            context=f"defaults.{section}",
+        )
+
+    model_entries = data.get("models")
+    if not isinstance(model_entries, list) or not model_entries:
+        raise click.UsageError("Model-matrix configs require a non-empty models list.")
+    for index, entry in enumerate(model_entries):
+        if isinstance(entry, str):
+            continue
+        if not isinstance(entry, dict):
+            raise click.UsageError(f"models[{index}] must be a model string or mapping.")
+        _reject_unknown_config_keys(
+            entry,
+            supported=_MODEL_MATRIX_MODEL_KEYS,
+            context=f"models[{index}]",
+        )
+
+
+def _write_campaign_config_snapshot(
+    *,
+    config_file: Path,
+    resolved_config: dict[str, Any],
+    output_dir: Path,
+    manifest_path: Path,
+    modes: list[str],
+    cli_overrides: dict[str, Any],
+) -> None:
+    """Preserve the exact source config and resolved run provenance."""
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    source_text = config_file.read_text()
+    source_snapshot = output_dir / "campaign-config.source.yaml"
+    runnable_snapshot = output_dir / "campaign-config.yaml"
+    provenance_snapshot = output_dir / "campaign-provenance.yaml"
+    runnable_text = yaml.safe_dump(resolved_config, sort_keys=False)
+    campaign_config_sha256 = hashlib.sha256(runnable_text.encode("utf-8")).hexdigest()
+    manifest_sha256 = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+    provenance_record = {
+        "version": 1,
+        "source_config": str(config_file.resolve()),
+        "source_config_sha256": hashlib.sha256(source_text.encode("utf-8")).hexdigest(),
+        "campaign_config_sha256": campaign_config_sha256,
+        "manifest": str(manifest_path),
+        "manifest_sha256": manifest_sha256,
+        "output_dir": str(output_dir),
+        "modes": modes,
+        "cli_overrides": cli_overrides,
+    }
+    provenance_text = yaml.safe_dump(provenance_record, sort_keys=False)
+
+    if config_file.resolve() == runnable_snapshot.resolve():
+        if not source_snapshot.exists() or not provenance_snapshot.exists():
+            raise click.UsageError(
+                f"{output_dir} is missing campaign provenance required to resume from "
+                "campaign-config.yaml. Choose a new output_dir."
+            )
+        try:
+            existing_provenance = yaml.safe_load(provenance_snapshot.read_text())
+        except yaml.YAMLError as exc:
+            raise click.UsageError(f"{provenance_snapshot} is not valid YAML: {exc}") from exc
+        expected_provenance = {
+            "campaign_config_sha256": campaign_config_sha256,
+            "manifest": str(manifest_path),
+            "manifest_sha256": manifest_sha256,
+            "output_dir": str(output_dir),
+            "modes": modes,
+        }
+        provenance_matches = isinstance(existing_provenance, dict) and all(
+            existing_provenance.get(key) == value for key, value in expected_provenance.items()
+        )
+        if runnable_snapshot.read_text() != runnable_text or not provenance_matches:
+            raise click.UsageError(
+                f"{output_dir} contains campaign-config.yaml that no longer matches "
+                "its recorded provenance. Choose a new output_dir."
+            )
+        return
+
+    for snapshot_path, expected_text in (
+        (source_snapshot, source_text),
+        (runnable_snapshot, runnable_text),
+        (provenance_snapshot, provenance_text),
+    ):
+        if snapshot_path.exists():
+            if snapshot_path.read_text() != expected_text:
+                raise click.UsageError(
+                    f"{output_dir} already contains different campaign provenance "
+                    f"in {snapshot_path.name}. Choose a new output_dir."
+                )
+            continue
+        snapshot_path.write_text(expected_text)
 
 
 def _parse_ollama_options(options: tuple[str, ...]) -> dict:
@@ -348,33 +543,34 @@ def _effective_run_config(
     openai_compat_telemetry_adapter: str | None = None,
     mcp_ollama_read_timeout_seconds: float | None = None,
     telemetry_enabled: bool | None = None,
+    mcp_launcher: MCPLauncherConfig | None = None,
     run_index: int | None = None,
     runs_per_model: int | None = None,
+    direct_query_safety: DirectQuerySafetyConfig | None = None,
 ) -> dict[str, Any]:
     config = dict(run_spec.config_identity)
-    if model_base_url is not None and "model_base_url" not in config:
+    if model_base_url is not None:
         config["model_base_url"] = model_base_url
-    if max_steps is not None and "max_steps" not in config:
+    if max_steps is not None:
         config["max_steps"] = max_steps
-    if resource_mode is not None and "resource_mode" not in config:
+    if resource_mode is not None:
         config["resource_mode"] = resource_mode
-    if mcp_tool_loop is not None and "mcp_tool_loop" not in config and "tool_loop" not in config:
+    if mcp_tool_loop is not None:
+        config.pop("tool_loop", None)
         config["mcp_tool_loop"] = mcp_tool_loop
-    if (
-        openai_compat_telemetry_adapter is not None
-        and "openai_compat_telemetry_adapter" not in config
-        and "telemetry_adapter" not in config
-    ):
+    if openai_compat_telemetry_adapter is not None:
+        config.pop("telemetry_adapter", None)
         config["openai_compat_telemetry_adapter"] = openai_compat_telemetry_adapter
-    if (
-        mcp_ollama_read_timeout_seconds is not None
-        and "mcp_ollama_read_timeout_seconds" not in config
-    ):
+    if mcp_ollama_read_timeout_seconds is not None:
         config["mcp_ollama_read_timeout_seconds"] = mcp_ollama_read_timeout_seconds
     if run_index is not None:
         config["run_index"] = run_index
     if runs_per_model is not None:
         config["runs_per_model"] = runs_per_model
+    if direct_query_safety is not None:
+        config["direct_query_safety"] = direct_query_safety.to_jsonable()
+    if mcp_launcher is not None:
+        config.update(mcp_launcher.provenance(uv_version=detect_uv_version()))
     return config
 
 
@@ -391,10 +587,12 @@ async def _run_baseline_with_specs(
     health_timeout_seconds: float = 60.0,
     health_poll_interval: float = 5.0,
     telemetry_enabled: bool = True,
+    direct_query_safety: DirectQuerySafetyConfig | None = None,
 ) -> dict[str, list]:
     from .eval.runner import run_eval_cli_bare
 
     output_dir.mkdir(parents=True, exist_ok=True)
+    safety_config = direct_query_safety or DirectQuerySafetyConfig()
     results = {}
     total_runs = sum(run_spec.runs_per_model for run_spec in run_specs)
     run_number = 0
@@ -437,11 +635,13 @@ async def _run_baseline_with_specs(
                     telemetry_enabled=telemetry_enabled,
                     run_index=run_index,
                     runs_per_model=run_spec.runs_per_model,
+                    direct_query_safety=safety_config,
                 ),
                 model_base_url=effective_model_base_url,
                 health_timeout_seconds=health_timeout_seconds,
                 health_poll_interval=health_poll_interval,
                 telemetry_enabled=telemetry_enabled,
+                direct_query_safety=safety_config,
             )
     return results
 
@@ -453,7 +653,8 @@ async def _run_baseline_mcp_with_specs(
     output_dir: Path,
     concurrency_override: int | None,
     bhce_url: str | None,
-    mcp_dir: Path,
+    mcp_dir: Path | None,
+    mcp_launcher: MCPLauncherConfig | None,
     max_steps: int,
     resource_mode: str,
     mcp_tool_loop: str,
@@ -462,6 +663,9 @@ async def _run_baseline_mcp_with_specs(
     default_model_base_url: str | None = None,
     max_steps_override: int | None = None,
     model_base_url_override: str | None = None,
+    mcp_tool_loop_override: str | None = None,
+    openai_compat_telemetry_adapter_override: str | None = None,
+    mcp_ollama_read_timeout_seconds_override: float | None = None,
     max_model_reruns_on_infra: int = 1,
     health_timeout_seconds: float = 60.0,
     health_poll_interval: float = 5.0,
@@ -470,6 +674,9 @@ async def _run_baseline_mcp_with_specs(
     from .eval.runner import run_eval_mcp_cli_bare
 
     output_dir.mkdir(parents=True, exist_ok=True)
+    resolved_mcp_launcher = mcp_launcher or MCPLauncherConfig.local_checkout(
+        (mcp_dir or (Path.cwd().parent / "bloodhound-mcp")).resolve()
+    )
     results = {}
     total_runs = sum(run_spec.runs_per_model for run_spec in run_specs)
     run_number = 0
@@ -490,13 +697,21 @@ async def _run_baseline_mcp_with_specs(
             else run_spec.model_base_url or default_model_base_url
         )
         effective_mcp_ollama_read_timeout_seconds = (
-            run_spec.mcp_ollama_read_timeout_seconds
+            mcp_ollama_read_timeout_seconds_override
+            if mcp_ollama_read_timeout_seconds_override is not None
+            else run_spec.mcp_ollama_read_timeout_seconds
             if run_spec.mcp_ollama_read_timeout_seconds is not None
             else mcp_ollama_read_timeout_seconds
         )
-        effective_mcp_tool_loop = run_spec.mcp_tool_loop or mcp_tool_loop
+        effective_mcp_tool_loop = (
+            mcp_tool_loop_override
+            if mcp_tool_loop_override is not None
+            else run_spec.mcp_tool_loop or mcp_tool_loop
+        )
         effective_openai_compat_telemetry_adapter = (
-            run_spec.openai_compat_telemetry_adapter or openai_compat_telemetry_adapter
+            openai_compat_telemetry_adapter_override
+            if openai_compat_telemetry_adapter_override is not None
+            else run_spec.openai_compat_telemetry_adapter or openai_compat_telemetry_adapter
         )
         opts_str = f", options={run_spec.ollama_options}" if run_spec.ollama_options else ""
         base_url_str = f", base_url={effective_model_base_url}" if effective_model_base_url else ""
@@ -522,7 +737,8 @@ async def _run_baseline_mcp_with_specs(
                 bhce_url=bhce_url,
                 ollama_options=run_spec.ollama_options,
                 max_model_reruns_on_infra=max_model_reruns_on_infra,
-                mcp_dir=mcp_dir,
+                mcp_dir=resolved_mcp_launcher.mcp_dir,
+                mcp_launcher=resolved_mcp_launcher,
                 max_steps=effective_max_steps,
                 resource_mode=resource_mode,
                 mcp_tool_loop=effective_mcp_tool_loop,
@@ -538,6 +754,7 @@ async def _run_baseline_mcp_with_specs(
                     openai_compat_telemetry_adapter=effective_openai_compat_telemetry_adapter,
                     mcp_ollama_read_timeout_seconds=effective_mcp_ollama_read_timeout_seconds,
                     telemetry_enabled=telemetry_enabled,
+                    mcp_launcher=resolved_mcp_launcher,
                     run_index=run_index,
                     runs_per_model=run_spec.runs_per_model,
                 ),
@@ -557,6 +774,154 @@ def main() -> None:
     from dotenv import load_dotenv
 
     load_dotenv(override=False)
+
+
+@main.group(name="discovery")
+def discovery_group() -> None:
+    """Compile, preflight, and grade V28-native open-world discovery artifacts."""
+
+
+@discovery_group.command(name="compile")
+@click.option(
+    "--manifest",
+    "manifest_path",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False),
+    help="Standard ORI source manifest paired with the SharpHound archive.",
+)
+@click.option(
+    "--archive",
+    "archive_path",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False),
+    help="Exact standard ORI SharpHound ZIP.",
+)
+@click.option(
+    "--v2-public",
+    "v2_public_path",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False),
+    help="V28 public artifact compiled from the same manifest and archive.",
+)
+@click.option(
+    "--v2-oracles",
+    "v2_oracle_path",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False),
+    help="Matching scorer-only V28 oracle artifact.",
+)
+@click.option(
+    "--output-dir",
+    required=True,
+    type=click.Path(file_okay=False),
+)
+def discovery_compile_command(
+    manifest_path: str,
+    archive_path: str,
+    v2_public_path: str,
+    v2_oracle_path: str,
+    output_dir: str,
+) -> None:
+    """Compile closed V28 route truth into separated discovery artifacts."""
+    from .discovery import compile_discovery_files
+
+    try:
+        paths = compile_discovery_files(
+            manifest_path=Path(manifest_path),
+            archive_path=Path(archive_path),
+            v2_public_path=Path(v2_public_path),
+            v2_oracle_path=Path(v2_oracle_path),
+            output_dir=Path(output_dir),
+        )
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo("DISCOVERY COMPILE: PASS")
+    click.echo(f"  public: {paths['public']}")
+    click.echo(f"  private: {paths['private']}")
+
+
+@discovery_group.command(name="preflight")
+@click.option(
+    "--public",
+    "public_path",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False),
+)
+@click.option(
+    "--private",
+    "private_path",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False),
+)
+@click.option("--output", "output_path", type=click.Path(dir_okay=False))
+def discovery_preflight_command(
+    public_path: str,
+    private_path: str,
+    output_path: str | None,
+) -> None:
+    """Validate a discovery pair before any external model execution."""
+    from .discovery import preflight_discovery_files
+
+    try:
+        report = preflight_discovery_files(
+            public_path=Path(public_path),
+            private_path=Path(private_path),
+            output_path=Path(output_path) if output_path else None,
+        )
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo("DISCOVERY PREFLIGHT: PASS")
+    click.echo(f"  objectives={report.target_count} variants={report.variant_count}")
+
+
+@discovery_group.command(name="grade")
+@click.option(
+    "--public",
+    "public_path",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False),
+)
+@click.option(
+    "--private",
+    "private_path",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False),
+)
+@click.option(
+    "--submission",
+    "submission_path",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False),
+)
+@click.option(
+    "--output",
+    "output_path",
+    required=True,
+    type=click.Path(dir_okay=False),
+)
+def discovery_grade_command(
+    public_path: str,
+    private_path: str,
+    submission_path: str,
+    output_path: str,
+) -> None:
+    """Grade one bounded structured submission; never execute a model or upload."""
+    from .discovery.grader import grade_discovery_files
+
+    try:
+        report = grade_discovery_files(
+            public_path=Path(public_path),
+            private_path=Path(private_path),
+            submission_path=Path(submission_path),
+            output_path=Path(output_path),
+        )
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo("DISCOVERY GRADE: PASS")
+    click.echo(
+        f"  f1={report.f1:.6f} precision={report.precision:.6f} "
+        f"recall={report.recall:.6f} false_positives={report.false_positive_count}"
+    )
 
 
 @main.group(name="benchmark")
@@ -824,6 +1189,178 @@ def generate(
         click.echo(f"  [{path.tier}] {path.template_id}: {path.description[:80]}...")
 
 
+@main.command(name="compile-v2")
+@click.option(
+    "--manifest",
+    "manifest_path",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False),
+    help="Source ori-generated-manifest-v2 JSON.",
+)
+@click.option(
+    "--archive",
+    "archive_path",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False),
+    help="Exact generated SharpHound ZIP paired with the source manifest.",
+)
+@click.option(
+    "--product",
+    type=click.Choice(["simple", "complex"]),
+    required=True,
+)
+@click.option(
+    "--track",
+    type=click.Choice(["direct", "mcp"]),
+    required=True,
+)
+@click.option(
+    "--output-dir",
+    required=True,
+    type=click.Path(file_okay=False),
+    help="Directory for separated public/private v2 artifacts.",
+)
+def compile_v2_command(
+    manifest_path: str,
+    archive_path: str,
+    product: str,
+    track: str,
+    output_dir: str,
+) -> None:
+    """Compile and offline-certify one explicit v2 product track."""
+    from .eval.v2.cli_support import compile_v2_files
+    from .eval.v2.schema import Track
+
+    try:
+        paths = compile_v2_files(
+            source_manifest_path=Path(manifest_path),
+            archive_path=Path(archive_path),
+            product=product,
+            track=Track(track),
+            output_dir=Path(output_dir),
+        )
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    click.echo("V2 COMPILE: PASS")
+    for label, path in paths.items():
+        visibility = "private" if "private" in path.name else "public"
+        click.echo(f"  {label} ({visibility}): {path}")
+
+
+@main.command(name="run-v2")
+@click.option(
+    "--config",
+    "config_path",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False),
+    help="Strict protocol-v2 campaign YAML.",
+)
+@click.option(
+    "--execute",
+    is_flag=True,
+    default=False,
+    help=(
+        "Launch configured model calls after readiness passes. Without this "
+        "flag, run only artifact, capability, health, and live-graph gates."
+    ),
+)
+def run_v2_command(config_path: str, execute: bool) -> None:
+    """Preflight or execute an explicit, candidate-certified V2 campaign."""
+    import asyncio
+
+    from .eval.v2.campaign_config import load_v2_campaign_config
+    from .eval.v2.campaign_runner import run_v2_campaign
+
+    try:
+        readiness = asyncio.run(
+            run_v2_campaign(
+                Path(config_path),
+                preflight_only=not execute,
+                progress=click.echo,
+            )
+        )
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    if execute:
+        click.echo("V2 MODEL CAMPAIGN: COMPLETE")
+    else:
+        click.echo("V2 MODEL CAMPAIGN READINESS: PASS")
+        click.echo("  No model calls were launched. Add --execute to run the campaign.")
+    click.echo(f"  Graph: {readiness.graph_fingerprint}")
+    click.echo(f"  Models: {readiness.model_count}")
+    for model in readiness.models:
+        click.echo(
+            f"    {model.name}: {model.provider}/{model.model} "
+            f"({model.credential_check}, {model.capability_check})"
+        )
+    for track in readiness.tracks:
+        click.echo(
+            f"  {track.track.value}: {track.task_count} candidate tasks "
+            f"(release={track.candidate_release_fingerprint[:12]})"
+        )
+    resolved = load_v2_campaign_config(Path(config_path))
+    click.echo(f"  Readiness: {resolved.output_dir / 'v2-run-readiness.private.json'}")
+
+
+@main.command(name="certify-v2-live")
+@click.option(
+    "--manifest",
+    "manifest_path",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False),
+)
+@click.option(
+    "--archive",
+    "archive_path",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False),
+)
+@click.option(
+    "--product",
+    type=click.Choice(["simple", "complex"]),
+    required=True,
+)
+@click.option(
+    "--output-dir",
+    required=True,
+    type=click.Path(file_okay=False),
+)
+@click.option("--bhce-url", default=None, help="Override BH CE base URL.")
+@click.option("--page-size", type=click.IntRange(min=1, max=2000), default=1000)
+def certify_v2_live_command(
+    manifest_path: str,
+    archive_path: str,
+    product: str,
+    output_dir: str,
+    bhce_url: str | None,
+    page_size: int,
+) -> None:
+    """Certify both v2 tracks against a controlled BloodHound graph."""
+    import asyncio
+
+    from .eval.v2.cli_support import certify_v2_live_files
+
+    try:
+        paths = asyncio.run(
+            certify_v2_live_files(
+                source_manifest_path=Path(manifest_path),
+                archive_path=Path(archive_path),
+                product=product,
+                output_dir=Path(output_dir),
+                bhce_url=bhce_url,
+                page_size=page_size,
+            )
+        )
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    click.echo("V2 LIVE CERTIFICATION: PASS")
+    for label, path in paths.items():
+        click.echo(f"  {label}: {path}")
+
+
 @main.command(name="preflight-tasks")
 @click.option(
     "--manifest",
@@ -893,7 +1430,28 @@ def preflight_tasks_command(
 @click.option(
     "--output", "output_path", required=True, type=click.Path(), help="Projection JSON output path"
 )
-def score_answers(manifest_path: str, answers_path: str, track: str, output_path: str) -> None:
+@click.option(
+    "--protocol",
+    type=click.Choice(["v1", "v2"]),
+    default="v1",
+    show_default=True,
+    help="Scoring protocol. V2 requires a separate --oracles artifact.",
+)
+@click.option(
+    "--oracles",
+    "oracle_path",
+    type=click.Path(exists=True, dir_okay=False),
+    default=None,
+    help="Sealed scorer-only oracle artifact required by protocol v2.",
+)
+def score_answers(
+    manifest_path: str,
+    answers_path: str,
+    track: str,
+    output_path: str,
+    protocol: str,
+    oracle_path: str | None,
+) -> None:
     """Grade a structured answers file without launching a model campaign."""
     from .eval.answer_scoring import (
         score_official_answers_projection,
@@ -901,7 +1459,35 @@ def score_answers(manifest_path: str, answers_path: str, track: str, output_path
     )
 
     try:
+        if protocol == "v2":
+            if oracle_path is None:
+                raise ValueError("protocol v2 requires --oracles")
+            from .eval.v2.cli_support import score_v2_files
+            from .eval.v2.schema import Track
+
+            expected_track = "direct" if track == "cypher" else track
+            scoring = score_v2_files(
+                public_path=Path(manifest_path),
+                oracle_path=Path(oracle_path),
+                answers_path=Path(answers_path),
+                output_path=Path(output_path),
+                expected_track=Track(expected_track),
+            )
+            summary = scoring.summary
+            click.echo(
+                f"Scored {summary.completed}/{summary.scheduled} v2 samples; "
+                f"reasoning_accuracy={summary.reasoning_accuracy or 0.0:.3f}; "
+                f"effective_accuracy={summary.effective_accuracy or 0.0:.3f}; "
+                f"campaign_valid={str(summary.campaign_valid).lower()}"
+            )
+            click.echo(f"Projection written to {output_path}")
+            return
         manifest = json.loads(Path(manifest_path).read_text())
+        if (
+            manifest.get("schema_version") == "ori-generated-manifest-v3"
+            or manifest.get("protocol_version") == "ori-eval-protocol-v2"
+        ):
+            raise ValueError("v2 artifacts require explicit --protocol v2 and --oracles")
         if manifest.get("schema_version") == "phase4b_v2.0" and "tasks_official" in manifest:
             projection = score_official_answers_projection(
                 manifest_path=Path(manifest_path),
@@ -977,6 +1563,7 @@ def eval(
     run_spec = _build_inline_run_spec(
         model=model, ollama_options=_parse_ollama_options(ollama_options_raw)
     )
+    direct_query_safety = DirectQuerySafetyConfig()
     asyncio.run(
         run_eval_cli(
             manifest_path=Path(manifest),
@@ -986,8 +1573,13 @@ def eval(
             bhce_url=bhce_url,
             ollama_options=run_spec.ollama_options,
             run_name=run_spec.run_name,
-            run_config=_effective_run_config(run_spec, telemetry_enabled=telemetry_enabled),
+            run_config=_effective_run_config(
+                run_spec,
+                telemetry_enabled=telemetry_enabled,
+                direct_query_safety=direct_query_safety,
+            ),
             telemetry_enabled=telemetry_enabled,
+            direct_query_safety=direct_query_safety,
         )
     )
 
@@ -1074,6 +1666,7 @@ def eval_mcp(
     run_spec = _build_inline_run_spec(
         model=model, ollama_options=_parse_ollama_options(ollama_options_raw)
     )
+    mcp_launcher = MCPLauncherConfig.local_checkout(Path(mcp_dir))
 
     asyncio.run(
         run_eval_mcp_cli(
@@ -1082,7 +1675,8 @@ def eval_mcp(
             output_path=Path(output),
             concurrency=concurrency,
             bhce_url=bhce_url,
-            mcp_dir=Path(mcp_dir),
+            mcp_dir=mcp_launcher.mcp_dir,
+            mcp_launcher=mcp_launcher,
             max_steps=max_steps,
             resource_mode=resource_mode,
             mcp_tool_loop=mcp_tool_loop,
@@ -1097,6 +1691,8 @@ def eval_mcp(
                 mcp_tool_loop=mcp_tool_loop,
                 openai_compat_telemetry_adapter=openai_compat_telemetry_adapter,
                 mcp_ollama_read_timeout_seconds=mcp_ollama_read_timeout,
+                telemetry_enabled=telemetry_enabled,
+                mcp_launcher=mcp_launcher,
             ),
             telemetry_enabled=telemetry_enabled,
         )
@@ -1135,6 +1731,96 @@ def verify_bh_health(bhce_url: str | None, timeout: float, poll_interval: float)
         )
     )
     print_verify_bh_health(result)
+    if not result.ok:
+        raise SystemExit(1)
+
+
+@main.command(name="verify-mcp")
+@click.option(
+    "--config",
+    "config_path",
+    required=True,
+    type=click.Path(exists=True),
+    help="Run config containing the MCP launcher definition.",
+)
+@click.option("--profile", default=None, help="Profile name for a profile-based config.")
+@click.option(
+    "--manifest", "-m", required=True, type=click.Path(exists=True), help="Benchmark manifest."
+)
+@click.option(
+    "--output",
+    "-o",
+    required=True,
+    type=click.Path(),
+    help="New immutable MCP readiness JSON path.",
+)
+@click.option(
+    "--mcp-dir",
+    default=None,
+    type=click.Path(exists=True),
+    help="Explicit legacy local checkout override.",
+)
+def verify_mcp(
+    config_path: str,
+    profile: str | None,
+    manifest: str,
+    output: str,
+    mcp_dir: str | None,
+) -> None:
+    """Start MCP without a model and verify read-only launcher capabilities."""
+    import asyncio
+
+    from .eval.mcp_runtime import (
+        verify_mcp_launcher_readiness,
+        write_mcp_readiness_artifact,
+    )
+
+    config_file = Path(config_path).resolve()
+    try:
+        data = yaml.safe_load(config_file.read_text()) or {}
+        if not isinstance(data, dict):
+            raise ValueError("Run config root must be a mapping.")
+        if "profiles" in data:
+            resolved = load_run_profile(
+                config_file,
+                profile_name=profile,
+                overrides=RunConfigOverrides(mcp_dir=mcp_dir),
+            )
+            launcher = resolved.mcp_launcher
+        else:
+            defaults = data.get("defaults") or {}
+            if not isinstance(defaults, dict):
+                raise ValueError("defaults must be a mapping when present.")
+            mcp_section = defaults.get("mcp") or {}
+            if not isinstance(mcp_section, dict):
+                raise ValueError("defaults.mcp must be a mapping when present.")
+            launcher = resolve_mcp_launcher_config(
+                mcp_section,
+                config_dir=config_file.parent,
+                mcp_dir_override=mcp_dir,
+            )
+        manifest_data = json.loads(Path(manifest).read_text())
+        domain_query = manifest_data.get("domain")
+        if not isinstance(domain_query, str) or not domain_query.strip():
+            raise ValueError("Manifest must define a non-empty domain for MCP readiness.")
+        result = asyncio.run(verify_mcp_launcher_readiness(launcher, domain_query=domain_query))
+        artifact = write_mcp_readiness_artifact(result, Path(output))
+    except (OSError, ValueError, RuntimeError, json.JSONDecodeError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    except Exception as exc:
+        raise click.ClickException(
+            f"MCP readiness startup failed ({exc.__class__.__name__})."
+        ) from None
+
+    provenance = artifact["provenance"]
+    click.echo(f"MCP launcher: {provenance['mcp_launcher']}")
+    click.echo(f"MCP revision: {provenance.get('mcp_revision') or 'local checkout'}")
+    click.echo(f"Prompt discovery: {artifact['prompt_discovery']['status']}")
+    click.echo(f"Resource discovery: {artifact['resource_discovery']['status']}")
+    click.echo(f"Read-only tools: {len(artifact['read_only_tools'])}")
+    click.echo(f"Readiness fingerprint: {artifact['readiness_fingerprint']}")
+    click.echo(f"Readiness artifact: {Path(output).resolve()}")
+    click.echo(f"MCP READINESS: {'PASS' if result.ok else 'FAIL'}")
     if not result.ok:
         raise SystemExit(1)
 
@@ -1224,12 +1910,15 @@ def smoke_mcp(
 
     from .eval.ops import print_smoke_eval, run_smoke_mcp_eval
 
+    mcp_launcher = MCPLauncherConfig.local_checkout(Path(mcp_dir))
+
     result = asyncio.run(
         run_smoke_mcp_eval(
             manifest_path=Path(manifest),
             output_dir=Path(output_dir),
             bhce_url=bhce_url,
-            mcp_dir=Path(mcp_dir),
+            mcp_dir=mcp_launcher.mcp_dir,
+            mcp_launcher=mcp_launcher,
             max_steps=max_steps,
             resource_mode=resource_mode,
         )
@@ -1407,18 +2096,33 @@ def run_from_config(
         data = yaml.safe_load(config_file.read_text()) or {}
         if not isinstance(data, dict) or "profiles" in data:
             return False
+        version = data.get("version", 1)
+        if version != 1:
+            raise click.UsageError(
+                f"Unsupported model-matrix config version {version!r}; expected 1."
+            )
         model_entries = data.get("models")
         if not isinstance(model_entries, list) or not model_entries:
             return False
+        _validate_model_matrix_config(data)
         if profile is not None or run_all_profiles:
             raise click.UsageError("--profile/--run-all-profiles require a profile-based config.")
-        if manifest is None:
-            raise click.UsageError("Model-list configs require --manifest.")
 
         defaults = data.get("defaults") or {}
-        if not isinstance(defaults, dict):
-            raise click.UsageError("defaults must be a mapping when present.")
         config_dir = config_file.parent
+        raw_manifest = manifest if manifest is not None else data.get("manifest")
+        if raw_manifest is None:
+            raise click.UsageError("Model-list configs require top-level `manifest` or --manifest.")
+        if not isinstance(raw_manifest, str) or not raw_manifest.strip():
+            raise click.UsageError("Model-list config manifest must be a non-empty path.")
+        manifest_path = Path(raw_manifest)
+        if not manifest_path.is_absolute():
+            manifest_path = (
+                manifest_path.resolve()
+                if manifest is not None
+                else (config_dir / manifest_path).resolve()
+            )
+
         default_concurrency = concurrency or defaults.get("concurrency", 1)
         default_runs_per_model = defaults.get("runs_per_model", 1)
         run_specs = _dedupe_run_specs(
@@ -1439,14 +2143,23 @@ def run_from_config(
             raise click.UsageError(f"Unsupported run mode(s): {', '.join(unsupported)}")
 
         root_output_dir = Path(
-            output_dir or data.get("output_dir") or f"results/benchmark-runs/{Path(manifest).stem}"
+            output_dir or data.get("output_dir") or f"results/benchmark-runs/{manifest_path.stem}"
         )
         if not root_output_dir.is_absolute():
             root_output_dir = (config_dir / root_output_dir).resolve()
 
         mcp_defaults = defaults.get("mcp") or {}
+        if not isinstance(mcp_defaults, dict):
+            raise click.UsageError("defaults.mcp must be a mapping when present.")
         health_defaults = defaults.get("health") or {}
         telemetry_defaults = defaults.get("telemetry") or {}
+        direct_safety_defaults = defaults.get("direct_query_safety") or {}
+        if not isinstance(direct_safety_defaults, dict):
+            raise click.UsageError("defaults.direct_query_safety must be a mapping when present.")
+        try:
+            effective_direct_safety = DirectQuerySafetyConfig.from_mapping(direct_safety_defaults)
+        except (TypeError, ValueError) as exc:
+            raise click.UsageError(str(exc)) from exc
         effective_bhce_url = bhce_url if bhce_url is not None else defaults.get("bhce_url")
         effective_model_base_url = (
             model_base_url if model_base_url is not None else defaults.get("model_base_url")
@@ -1471,13 +2184,154 @@ def run_from_config(
             if telemetry_enabled is not None
             else bool(telemetry_defaults.get("enabled", True))
         )
+        effective_mcp_launcher: MCPLauncherConfig | None = None
+        if "mcp" in modes:
+            try:
+                effective_mcp_launcher = resolve_mcp_launcher_config(
+                    mcp_defaults,
+                    config_dir=config_dir,
+                    mcp_dir_override=mcp_dir,
+                )
+            except ValueError as exc:
+                raise click.UsageError(str(exc)) from exc
+        effective_max_steps = int(
+            max_steps if max_steps is not None else mcp_defaults.get("max_steps", 12)
+        )
+        effective_resource_mode = resource_mode or mcp_defaults.get("resource_mode", "off")
+        if effective_resource_mode is False:
+            effective_resource_mode = "off"
+        if effective_resource_mode not in {"off", "on-demand"}:
+            raise click.UsageError(
+                "Unsupported MCP resource_mode. Supported values: off, on-demand"
+            )
+        effective_mcp_tool_loop = mcp_tool_loop or mcp_defaults.get("tool_loop", "auto")
+        supported_tool_loops = {
+            "auto",
+            "inspect",
+            "native-ollama",
+            "native-openai-compatible",
+        }
+        if effective_mcp_tool_loop not in supported_tool_loops:
+            raise click.UsageError(
+                "Unsupported MCP tool_loop. Supported values: "
+                + ", ".join(sorted(supported_tool_loops))
+            )
+        effective_telemetry_adapter = openai_compat_telemetry_adapter or mcp_defaults.get(
+            "openai_compat_telemetry_adapter", "auto"
+        )
+        supported_telemetry_adapters = {
+            "auto",
+            "generic",
+            "llama-cpp",
+            "mlx-lm",
+            "vllm",
+            "lm-studio",
+        }
+        if effective_telemetry_adapter not in supported_telemetry_adapters:
+            raise click.UsageError(
+                "Unsupported MCP openai_compat_telemetry_adapter. Supported values: "
+                + ", ".join(sorted(supported_telemetry_adapters))
+            )
+        effective_ollama_read_timeout = float(
+            mcp_ollama_read_timeout
+            if mcp_ollama_read_timeout is not None
+            else mcp_defaults.get("ollama_read_timeout_seconds", 900)
+        )
+
+        resolved_config = deepcopy(data)
+        resolved_config.setdefault("version", 1)
+        resolved_config["manifest"] = str(manifest_path)
+        resolved_config["modes"] = modes
+        resolved_config["output_dir"] = str(root_output_dir)
+        resolved_defaults = resolved_config.setdefault("defaults", {})
+        resolved_mcp = (
+            effective_mcp_launcher.to_config()
+            if effective_mcp_launcher is not None
+            else dict(mcp_defaults)
+        )
+        resolved_mcp.update(
+            {
+                "max_steps": effective_max_steps,
+                "resource_mode": effective_resource_mode,
+                "tool_loop": effective_mcp_tool_loop,
+                "openai_compat_telemetry_adapter": effective_telemetry_adapter,
+                "ollama_read_timeout_seconds": effective_ollama_read_timeout,
+            }
+        )
+        resolved_defaults.update(
+            {
+                "concurrency": default_concurrency,
+                "runs_per_model": default_runs_per_model,
+                "bhce_url": effective_bhce_url,
+                "model_base_url": effective_model_base_url,
+                "max_model_reruns_on_infra": effective_max_reruns,
+                "health": {
+                    "timeout_seconds": effective_health_timeout,
+                    "poll_interval": effective_health_poll,
+                },
+                "direct_query_safety": effective_direct_safety.to_jsonable(),
+                "mcp": resolved_mcp,
+                "telemetry": {"enabled": effective_telemetry},
+            }
+        )
+        for entry, run_spec in zip(
+            resolved_config["models"],
+            run_specs,
+            strict=True,
+        ):
+            if not isinstance(entry, dict):
+                continue
+            # CLI overrides become part of the runnable snapshot, but the active
+            # run specs were derived from the source entries before those
+            # overrides were applied. Preserve that original run identity so a
+            # resume from campaign-config.yaml targets the same artifacts.
+            entry.setdefault("name", run_spec.run_name)
+            per_model_cli_overrides = {
+                "concurrency": concurrency,
+                "model_base_url": model_base_url,
+                "max_steps": max_steps,
+                "mcp_tool_loop": mcp_tool_loop,
+                "openai_compat_telemetry_adapter": openai_compat_telemetry_adapter,
+                "mcp_ollama_read_timeout_seconds": mcp_ollama_read_timeout,
+            }
+            entry.update(
+                {key: value for key, value in per_model_cli_overrides.items() if value is not None}
+            )
+
+        cli_override_values = {
+            "manifest": manifest,
+            "output_dir": output_dir,
+            "bhce_url": bhce_url,
+            "concurrency": concurrency,
+            "mcp_dir": mcp_dir,
+            "max_steps": max_steps,
+            "resource_mode": resource_mode,
+            "mcp_tool_loop": mcp_tool_loop,
+            "openai_compat_telemetry_adapter": openai_compat_telemetry_adapter,
+            "mcp_ollama_read_timeout_seconds": mcp_ollama_read_timeout,
+            "model_base_url": model_base_url,
+            "max_model_reruns_on_infra": max_model_reruns_on_infra,
+            "health_timeout_seconds": health_timeout,
+            "health_poll_interval": health_poll_interval,
+            "telemetry_enabled": telemetry_enabled,
+        }
+        _write_campaign_config_snapshot(
+            config_file=config_file,
+            resolved_config=resolved_config,
+            output_dir=root_output_dir,
+            manifest_path=manifest_path,
+            modes=modes,
+            cli_overrides={
+                key: value for key, value in cli_override_values.items() if value is not None
+            },
+        )
 
         if "direct" in modes:
             direct_dir = root_output_dir / "direct"
             direct_dir.mkdir(parents=True, exist_ok=True)
             all_results = asyncio.run(
                 _run_baseline_with_specs(
-                    manifest_path=Path(manifest),
+                    manifest_path=manifest_path,
                     run_specs=run_specs,
                     output_dir=direct_dir,
                     concurrency_override=concurrency,
@@ -1488,6 +2342,7 @@ def run_from_config(
                     health_timeout_seconds=effective_health_timeout,
                     health_poll_interval=effective_health_poll,
                     telemetry_enabled=effective_telemetry,
+                    direct_query_safety=effective_direct_safety,
                 )
             )
             write_combined_csv(all_results, direct_dir / "baseline_combined.csv")
@@ -1495,38 +2350,28 @@ def run_from_config(
             click.echo(f"Direct benchmark results written to {direct_dir}")
 
         if "mcp" in modes:
-            raw_mcp_dir = mcp_dir or mcp_defaults.get("mcp_dir", "../bloodhound-mcp")
-            effective_mcp_dir = Path(raw_mcp_dir)
-            if not effective_mcp_dir.is_absolute():
-                effective_mcp_dir = (config_dir / effective_mcp_dir).resolve()
             mcp_dir_out = root_output_dir / "mcp"
             mcp_dir_out.mkdir(parents=True, exist_ok=True)
-            effective_max_steps = int(
-                max_steps if max_steps is not None else mcp_defaults.get("max_steps", 12)
-            )
             all_results = asyncio.run(
                 _run_baseline_mcp_with_specs(
-                    manifest_path=Path(manifest),
+                    manifest_path=manifest_path,
                     run_specs=run_specs,
                     output_dir=mcp_dir_out,
                     concurrency_override=concurrency,
                     bhce_url=effective_bhce_url,
-                    mcp_dir=effective_mcp_dir,
+                    mcp_dir=effective_mcp_launcher.mcp_dir,
+                    mcp_launcher=effective_mcp_launcher,
                     max_steps=effective_max_steps,
-                    resource_mode=resource_mode or mcp_defaults.get("resource_mode", "off"),
-                    mcp_tool_loop=mcp_tool_loop or mcp_defaults.get("tool_loop", "auto"),
-                    openai_compat_telemetry_adapter=(
-                        openai_compat_telemetry_adapter
-                        or mcp_defaults.get("openai_compat_telemetry_adapter", "auto")
-                    ),
-                    mcp_ollama_read_timeout_seconds=float(
-                        mcp_ollama_read_timeout
-                        if mcp_ollama_read_timeout is not None
-                        else mcp_defaults.get("ollama_read_timeout_seconds", 900)
-                    ),
+                    resource_mode=effective_resource_mode,
+                    mcp_tool_loop=effective_mcp_tool_loop,
+                    openai_compat_telemetry_adapter=effective_telemetry_adapter,
+                    mcp_ollama_read_timeout_seconds=effective_ollama_read_timeout,
                     default_model_base_url=effective_model_base_url,
                     max_steps_override=max_steps,
                     model_base_url_override=model_base_url,
+                    mcp_tool_loop_override=mcp_tool_loop,
+                    openai_compat_telemetry_adapter_override=(openai_compat_telemetry_adapter),
+                    mcp_ollama_read_timeout_seconds_override=mcp_ollama_read_timeout,
                     max_model_reruns_on_infra=effective_max_reruns,
                     health_timeout_seconds=effective_health_timeout,
                     health_poll_interval=effective_health_poll,
@@ -1575,6 +2420,9 @@ def run_from_config(
                         health_timeout_seconds=resolved.health_timeout_seconds,
                         health_poll_interval=resolved.health_poll_interval,
                         telemetry_enabled=resolved.telemetry_enabled,
+                        direct_query_safety=DirectQuerySafetyConfig.from_mapping(
+                            resolved.direct_query_safety
+                        ),
                     )
                 )
                 write_combined_csv(all_results, repeated_output_dir / "combined.csv")
@@ -1594,11 +2442,17 @@ def run_from_config(
                         run_spec,
                         model_base_url=effective_model_base_url,
                         telemetry_enabled=resolved.telemetry_enabled,
+                        direct_query_safety=DirectQuerySafetyConfig.from_mapping(
+                            resolved.direct_query_safety
+                        ),
                     ),
                     model_base_url=effective_model_base_url,
                     health_timeout_seconds=resolved.health_timeout_seconds,
                     health_poll_interval=resolved.health_poll_interval,
                     telemetry_enabled=resolved.telemetry_enabled,
+                    direct_query_safety=DirectQuerySafetyConfig.from_mapping(
+                        resolved.direct_query_safety
+                    ),
                 )
             )
             return
@@ -1625,6 +2479,24 @@ def run_from_config(
                 if run_spec.max_steps is not None
                 else resolved.max_steps
             )
+            effective_mcp_tool_loop = (
+                mcp_tool_loop
+                if mcp_tool_loop is not None
+                else run_spec.mcp_tool_loop or resolved.mcp_tool_loop
+            )
+            effective_openai_compat_telemetry_adapter = (
+                openai_compat_telemetry_adapter
+                if openai_compat_telemetry_adapter is not None
+                else run_spec.openai_compat_telemetry_adapter
+                or resolved.openai_compat_telemetry_adapter
+            )
+            effective_mcp_ollama_read_timeout_seconds = (
+                mcp_ollama_read_timeout
+                if mcp_ollama_read_timeout is not None
+                else run_spec.mcp_ollama_read_timeout_seconds
+                if run_spec.mcp_ollama_read_timeout_seconds is not None
+                else resolved.mcp_ollama_read_timeout_seconds
+            )
             if run_spec.runs_per_model > 1:
                 repeated_output_dir = Path(resolved.output).with_suffix("")
                 all_results = asyncio.run(
@@ -1634,7 +2506,8 @@ def run_from_config(
                         output_dir=repeated_output_dir,
                         concurrency_override=concurrency,
                         bhce_url=resolved.bhce_url,
-                        mcp_dir=Path(resolved.mcp_dir),
+                        mcp_dir=resolved.mcp_launcher.mcp_dir,
+                        mcp_launcher=resolved.mcp_launcher,
                         max_steps=effective_max_steps,
                         resource_mode=resolved.resource_mode,
                         mcp_tool_loop=resolved.mcp_tool_loop,
@@ -1643,6 +2516,9 @@ def run_from_config(
                         default_model_base_url=resolved.model_base_url,
                         max_steps_override=max_steps,
                         model_base_url_override=model_base_url,
+                        mcp_tool_loop_override=mcp_tool_loop,
+                        openai_compat_telemetry_adapter_override=(openai_compat_telemetry_adapter),
+                        mcp_ollama_read_timeout_seconds_override=(mcp_ollama_read_timeout),
                         max_model_reruns_on_infra=resolved.max_model_reruns_on_infra,
                         health_timeout_seconds=resolved.health_timeout_seconds,
                         health_poll_interval=resolved.health_poll_interval,
@@ -1660,15 +2536,13 @@ def run_from_config(
                     concurrency=concurrency if concurrency is not None else run_spec.concurrency,
                     bhce_url=resolved.bhce_url,
                     max_model_reruns_on_infra=resolved.max_model_reruns_on_infra,
-                    mcp_dir=Path(resolved.mcp_dir),
+                    mcp_dir=resolved.mcp_launcher.mcp_dir,
+                    mcp_launcher=resolved.mcp_launcher,
                     max_steps=effective_max_steps,
                     resource_mode=resolved.resource_mode,
-                    mcp_tool_loop=run_spec.mcp_tool_loop or resolved.mcp_tool_loop,
-                    openai_compat_telemetry_adapter=(
-                        run_spec.openai_compat_telemetry_adapter
-                        or resolved.openai_compat_telemetry_adapter
-                    ),
-                    mcp_ollama_read_timeout_seconds=resolved.mcp_ollama_read_timeout_seconds,
+                    mcp_tool_loop=effective_mcp_tool_loop,
+                    openai_compat_telemetry_adapter=(effective_openai_compat_telemetry_adapter),
+                    mcp_ollama_read_timeout_seconds=(effective_mcp_ollama_read_timeout_seconds),
                     ollama_options=run_spec.ollama_options,
                     run_name=run_spec.run_name,
                     run_config=_effective_run_config(
@@ -1676,13 +2550,11 @@ def run_from_config(
                         model_base_url=effective_model_base_url,
                         max_steps=effective_max_steps,
                         resource_mode=resolved.resource_mode,
-                        mcp_tool_loop=run_spec.mcp_tool_loop or resolved.mcp_tool_loop,
-                        openai_compat_telemetry_adapter=(
-                            run_spec.openai_compat_telemetry_adapter
-                            or resolved.openai_compat_telemetry_adapter
-                        ),
-                        mcp_ollama_read_timeout_seconds=resolved.mcp_ollama_read_timeout_seconds,
+                        mcp_tool_loop=effective_mcp_tool_loop,
+                        openai_compat_telemetry_adapter=(effective_openai_compat_telemetry_adapter),
+                        mcp_ollama_read_timeout_seconds=(effective_mcp_ollama_read_timeout_seconds),
                         telemetry_enabled=resolved.telemetry_enabled,
+                        mcp_launcher=resolved.mcp_launcher,
                     ),
                     model_base_url=effective_model_base_url,
                     health_timeout_seconds=resolved.health_timeout_seconds,
@@ -1716,6 +2588,9 @@ def run_from_config(
                     health_timeout_seconds=resolved.health_timeout_seconds,
                     health_poll_interval=resolved.health_poll_interval,
                     telemetry_enabled=resolved.telemetry_enabled,
+                    direct_query_safety=DirectQuerySafetyConfig.from_mapping(
+                        resolved.direct_query_safety
+                    ),
                 )
             )
             combined_csv_path = Path(resolved.output_dir) / "baseline_combined.csv"
@@ -1746,7 +2621,8 @@ def run_from_config(
                     output_dir=Path(resolved.output_dir),
                     concurrency_override=concurrency,
                     bhce_url=resolved.bhce_url,
-                    mcp_dir=Path(resolved.mcp_dir),
+                    mcp_dir=resolved.mcp_launcher.mcp_dir,
+                    mcp_launcher=resolved.mcp_launcher,
                     max_steps=resolved.max_steps,
                     resource_mode=resolved.resource_mode,
                     mcp_tool_loop=resolved.mcp_tool_loop,
@@ -1755,6 +2631,9 @@ def run_from_config(
                     default_model_base_url=resolved.model_base_url,
                     max_steps_override=max_steps,
                     model_base_url_override=model_base_url,
+                    mcp_tool_loop_override=mcp_tool_loop,
+                    openai_compat_telemetry_adapter_override=(openai_compat_telemetry_adapter),
+                    mcp_ollama_read_timeout_seconds_override=mcp_ollama_read_timeout,
                     max_model_reruns_on_infra=resolved.max_model_reruns_on_infra,
                     health_timeout_seconds=resolved.health_timeout_seconds,
                     health_poll_interval=resolved.health_poll_interval,
@@ -1790,7 +2669,8 @@ def run_from_config(
                     manifest_path=Path(resolved.manifest),
                     output_dir=Path(resolved.output_dir),
                     bhce_url=resolved.bhce_url,
-                    mcp_dir=Path(resolved.mcp_dir),
+                    mcp_dir=resolved.mcp_launcher.mcp_dir,
+                    mcp_launcher=resolved.mcp_launcher,
                     max_steps=resolved.max_steps,
                     resource_mode=resolved.resource_mode,
                 )
@@ -2008,6 +2888,7 @@ def _run_baseline_mcp(
             concurrency_override=concurrency,
             bhce_url=bhce_url,
             mcp_dir=Path(mcp_dir),
+            mcp_launcher=MCPLauncherConfig.local_checkout(Path(mcp_dir)),
             max_steps=max_steps,
             resource_mode=resource_mode,
             mcp_tool_loop=mcp_tool_loop,

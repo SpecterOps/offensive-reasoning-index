@@ -244,11 +244,79 @@ def test_write_combined_csv_includes_attempt_source_and_infra_subtype(tmp_path) 
     assert row["result_source"] == "retry_interrupted_placeholder"
 
 
+def test_summary_uses_populated_mcp_provenance_after_initial_placeholder(tmp_path) -> None:
+    output = tmp_path / "summary.csv"
+    placeholder = _result("INFRA_ERROR")
+    placeholder.mcp = MCPRunMetadata(infra_error_subtype="missing")
+    populated = _result("CORRECT", score=1.0)
+    populated.mcp = MCPRunMetadata(
+        mcp_launcher="uvx_git",
+        mcp_revision="a" * 40,
+        mcp_executable="bloodhound-mcp",
+        prompt_discovery_status="selected",
+        resource_discovery_status="listed",
+    )
+
+    write_summary_csv({"model": [placeholder, populated]}, output)
+
+    with output.open() as handle:
+        row = next(csv.DictReader(handle))
+    assert row["mcp_launcher"] == "uvx_git"
+    assert row["mcp_revision"] == "a" * 40
+    assert row["prompt_discovery_succeeded"] == "True"
+    assert row["resource_discovery_succeeded"] == "True"
+
+
+def test_reports_fall_back_to_pinned_run_config_for_blank_mcp_metadata(tmp_path) -> None:
+    combined = tmp_path / "combined.csv"
+    summary = tmp_path / "summary.csv"
+    result = _result("INFRA_ERROR")
+    result.mcp = MCPRunMetadata()
+    revision = "a" * 40
+    result.run_config = {
+        "mcp_launcher": "uvx_git",
+        "mcp_source": ("git+https://github.com/mwnickerson/bloodhound_mcp@" + revision),
+        "mcp_revision": revision,
+        "mcp_executable": "bloodhound-mcp",
+        "uv_version": "uv 0.test",
+        "prompt_discovery_status": "selected",
+        "resource_discovery_status": "listed",
+    }
+
+    write_combined_csv({"model": [result]}, combined)
+    write_summary_csv({"model": [result]}, summary)
+
+    with combined.open() as handle:
+        combined_row = next(csv.DictReader(handle))
+    with summary.open() as handle:
+        summary_row = next(csv.DictReader(handle))
+    for row in (combined_row, summary_row):
+        assert row["mcp_launcher"] == "uvx_git"
+        assert row["mcp_revision"] == revision
+        assert row["mcp_executable"] == "bloodhound-mcp"
+        assert row["prompt_discovery_succeeded"] == "True"
+        assert row["resource_discovery_succeeded"] == "True"
+
+
 def test_write_summary_csv_tracks_query_too_expensive(tmp_path) -> None:
     output = tmp_path / "baseline_summary.csv"
+    result = _result("QUERY_TOO_EXPENSIVE")
+    result.model_result = CypherResult(
+        success=False,
+        error="rejected",
+        failure_type="policy_rejected",
+        failure_subtype="unbounded_wildcard_path_enumeration",
+        query_executed=False,
+        execution_attempts=0,
+        query_fingerprint="abc123",
+        safety_policy_version="bloodhound-cysql-direct-v3",
+        safety_rule="unbounded_wildcard_path_enumeration",
+        bhce_health_after="not_checked",
+        circuit_state="closed",
+    )
     write_summary_csv(
         {
-            "ollama/a:latest": [_result("QUERY_TOO_EXPENSIVE")],
+            "ollama/a:latest": [result],
         },
         output,
     )
@@ -256,6 +324,39 @@ def test_write_summary_csv_tracks_query_too_expensive(tmp_path) -> None:
         rows = list(csv.DictReader(f))
     assert len(rows) == 1
     assert rows[0]["query_too_expensive"] == "1"
+    assert rows[0]["policy_rejections"] == "1"
+    assert rows[0]["executed_direct_queries"] == "0"
+    assert rows[0]["greedy_query_rate"] == "1.0"
+
+
+def test_write_combined_csv_includes_direct_query_containment_fields(tmp_path) -> None:
+    output = tmp_path / "baseline_combined.csv"
+    result = _result("QUERY_TOO_EXPENSIVE")
+    result.model_result = CypherResult(
+        success=False,
+        error="query timeout",
+        failure_type="query_timeout",
+        failure_subtype="bloodhound_query_timeout",
+        query_executed=True,
+        execution_attempts=1,
+        query_fingerprint="fingerprint",
+        safety_policy_version="bloodhound-cysql-direct-v3",
+        safety_rule="allowed",
+        bhce_health_after="healthy",
+        circuit_state="closed",
+    )
+
+    write_combined_csv({"ollama/a:latest": [result]}, output)
+
+    with output.open() as f:
+        row = next(csv.DictReader(f))
+    assert row["query_executed"] == "True"
+    assert row["query_attempts"] == "1"
+    assert row["query_fingerprint"] == "fingerprint"
+    assert row["safety_policy_version"] == "bloodhound-cysql-direct-v3"
+    assert row["safety_rule"] == "allowed"
+    assert row["bhce_health_after"] == "healthy"
+    assert row["circuit_state"] == "closed"
 
 
 def test_write_summary_csv_includes_run_metadata(tmp_path) -> None:

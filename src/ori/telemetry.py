@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import os
 import platform
@@ -16,6 +17,9 @@ from typing import Any
 import httpx
 
 SCHEMA_VERSION = 1
+_SENSITIVE_KEY_RE = re.compile(
+    r"(?:token|secret|password|authorization|credential|api[_-]?key)", re.IGNORECASE
+)
 
 
 def utc_now_iso() -> str:
@@ -411,6 +415,78 @@ def _derive_tokens_per_second(result: Any) -> tuple[float | None, str]:
     return None, "unavailable"
 
 
+def _sanitize_sensitive(value: Any) -> Any:
+    """Recursively redact credential-shaped config fields before persistence."""
+
+    if isinstance(value, dict):
+        return {
+            str(key): (
+                "[REDACTED]" if _SENSITIVE_KEY_RE.search(str(key)) else _sanitize_sensitive(item)
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_sanitize_sensitive(item) for item in value]
+    if isinstance(value, tuple):
+        return [_sanitize_sensitive(item) for item in value]
+    return value
+
+
+def _mcp_provenance(
+    results: list[Any],
+    run_config: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    metadata = [mcp for result in results if (mcp := getattr(result, "mcp", None)) is not None]
+    first_mcp = next(
+        (
+            mcp
+            for mcp in metadata
+            if mcp.mcp_launcher and (mcp.prompt_discovery_status or mcp.resource_discovery_status)
+        ),
+        None,
+    )
+    first_mcp = first_mcp or next((mcp for mcp in metadata if mcp.mcp_launcher), None)
+    first_mcp = first_mcp or (metadata[0] if metadata else None)
+    config = run_config or {}
+    if first_mcp is None and not config.get("mcp_launcher"):
+        return None
+
+    def value(attribute: str, config_key: str) -> Any:
+        metadata_value = getattr(first_mcp, attribute, None) if first_mcp else None
+        return metadata_value if metadata_value not in (None, "") else config.get(config_key, "")
+
+    prompt_status = str(value("prompt_discovery_status", "prompt_discovery_status") or "")
+    resource_status = str(value("resource_discovery_status", "resource_discovery_status") or "")
+    core = {
+        "artifact_type": "ori.mcp_runtime_provenance",
+        "schema_version": 1,
+        "mcp_launcher": value("mcp_launcher", "mcp_launcher"),
+        "mcp_source": value("mcp_source", "mcp_source"),
+        "mcp_revision": value("mcp_revision", "mcp_revision"),
+        "mcp_executable": value("mcp_executable", "mcp_executable"),
+        "uv_version": value("uv_version", "uv_version"),
+        "prompt_discovery_status": prompt_status,
+        "prompt_discovery_succeeded": prompt_status == "selected",
+        "available_prompt_names": (sorted(first_mcp.available_prompt_names) if first_mcp else []),
+        "resource_discovery_status": resource_status,
+        "resource_discovery_succeeded": resource_status == "listed",
+        "available_resource_uris": (sorted(first_mcp.available_resource_uris) if first_mcp else []),
+    }
+    material = json.dumps(core, sort_keys=True, separators=(",", ":")).encode()
+    core["provenance_fingerprint"] = hashlib.sha256(material).hexdigest()
+    return core
+
+
+def _write_immutable_json(path: Path, data: dict[str, Any]) -> None:
+    serialized = json.dumps(data, indent=2, sort_keys=True) + "\n"
+    if path.exists():
+        if path.read_text(encoding="utf-8") != serialized:
+            raise RuntimeError(f"Refusing to overwrite mismatched provenance artifact: {path}")
+        return
+    with path.open("x", encoding="utf-8") as handle:
+        handle.write(serialized)
+
+
 def record_eval_telemetry(
     results: list[Any],
     *,
@@ -440,6 +516,11 @@ def record_eval_telemetry(
     root.mkdir(parents=True, exist_ok=True)
     model_dir.mkdir(parents=True, exist_ok=True)
     sample_path.parent.mkdir(parents=True, exist_ok=True)
+    safe_run_config = _sanitize_sensitive(run_config or {})
+
+    mcp_provenance = _mcp_provenance(results, safe_run_config)
+    if mcp_provenance is not None:
+        _write_immutable_json(root / "mcp_provenance.json", mcp_provenance)
 
     run_env = collect_run_environment(include_native=not model.startswith("mock/"))
     (root / "run_environment.json").write_text(
@@ -520,7 +601,21 @@ def record_eval_telemetry(
                 "provider_metrics": dict(
                     getattr(result.model_response, "provider_metrics", {}) or {}
                 ),
-                "run_config": run_config or {},
+                "direct_query": {
+                    "failure_type": getattr(result.model_result, "failure_type", None),
+                    "failure_subtype": getattr(result.model_result, "failure_subtype", ""),
+                    "query_executed": getattr(result.model_result, "query_executed", False),
+                    "execution_attempts": getattr(result.model_result, "execution_attempts", 0),
+                    "query_fingerprint": getattr(result.model_result, "query_fingerprint", ""),
+                    "safety_policy_version": getattr(
+                        result.model_result, "safety_policy_version", ""
+                    ),
+                    "safety_rule": getattr(result.model_result, "safety_rule", ""),
+                    "bhce_health_after": getattr(result.model_result, "bhce_health_after", ""),
+                    "circuit_state": getattr(result.model_result, "circuit_state", ""),
+                },
+                "run_config": safe_run_config,
+                "mcp": mcp_provenance or {},
                 "ollama": {
                     "version": version,
                     "model_digest": digest,
@@ -565,6 +660,15 @@ def record_eval_telemetry(
         "ollama_model_size_bytes",
         "ollama_model_size_vram_bytes",
         "model_quantization_level",
+        "mcp_launcher",
+        "mcp_source",
+        "mcp_revision",
+        "mcp_executable",
+        "uv_version",
+        "prompt_discovery_status",
+        "prompt_discovery_succeeded",
+        "resource_discovery_status",
+        "resource_discovery_succeeded",
         "model_metadata_status",
         "modelfile_status",
         "telemetry_samples",
@@ -606,6 +710,23 @@ def record_eval_telemetry(
                 "ollama_model_size_bytes": size_bytes or "",
                 "ollama_model_size_vram_bytes": size_vram_bytes or "",
                 "model_quantization_level": quantization,
+                "mcp_launcher": (mcp_provenance or {}).get("mcp_launcher", ""),
+                "mcp_source": (mcp_provenance or {}).get("mcp_source", ""),
+                "mcp_revision": (mcp_provenance or {}).get("mcp_revision", ""),
+                "mcp_executable": (mcp_provenance or {}).get("mcp_executable", ""),
+                "uv_version": (mcp_provenance or {}).get("uv_version", ""),
+                "prompt_discovery_status": (mcp_provenance or {}).get(
+                    "prompt_discovery_status", ""
+                ),
+                "prompt_discovery_succeeded": (mcp_provenance or {}).get(
+                    "prompt_discovery_succeeded", False
+                ),
+                "resource_discovery_status": (mcp_provenance or {}).get(
+                    "resource_discovery_status", ""
+                ),
+                "resource_discovery_succeeded": (mcp_provenance or {}).get(
+                    "resource_discovery_succeeded", False
+                ),
                 "model_metadata_status": model_metadata.get("status", ""),
                 "modelfile_status": modelfile_status.get("status", ""),
                 "telemetry_samples": str(sample_path),

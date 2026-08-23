@@ -94,6 +94,19 @@ def grade(
 ) -> GradeResult:
     """Grade a model response against the reference result."""
 
+    # A circuit-open placeholder is an unexecuted infrastructure result. Check it
+    # before parse handling because the model was intentionally not called.
+    if model_result.failure_type == "circuit_open":
+        return GradeResult(
+            score=0.0,
+            outcome=OUTCOME_INFRA_ERROR,
+            hallucination=False,
+            details=(
+                "Direct Cypher sample was not executed because the BloodHound "
+                f"circuit was open: {model_result.error}"
+            ),
+        )
+
     # Model-level error (API call failed)
     if model_response.error:
         return GradeResult(
@@ -113,7 +126,21 @@ def grade(
         )
 
     # Infrastructure/runtime failure reaching BHCE
-    if not ref_result.success and BHCEClient.classify_error(ref_result.error) == "infra":
+    reference_failure_type = ref_result.failure_type or (
+        "infra"
+        if BHCEClient.classify_error(ref_result.error) == "infra"
+        else "query"
+    )
+    if not ref_result.success and reference_failure_type in {
+        "infra",
+        "auth_error",
+        "client_timeout",
+        "transport_error",
+        "server_unavailable",
+        "server_error",
+        "rate_limited",
+        "response_error",
+    }:
         return GradeResult(
             score=0.0,
             outcome="INFRA_ERROR",
@@ -123,14 +150,35 @@ def grade(
 
     # Cypher execution error
     if not model_result.success:
-        if BHCEClient.classify_error(model_result.error) == "infra":
+        if model_result.failure_type in {"policy_rejected", "query_timeout"}:
             return GradeResult(
                 score=0.0,
-                outcome="QUERY_TOO_EXPENSIVE",
+                outcome=OUTCOME_QUERY_TOO_EXPENSIVE,
                 hallucination=False,
                 details=(
-                    "Model-generated Cypher could not be executed by BloodHound CE "
-                    f"(likely overly expensive or otherwise non-viable): {model_result.error}"
+                    "Model-generated Cypher violated the direct-query resource contract: "
+                    f"{model_result.error}"
+                ),
+            )
+        if model_result.failure_type in {
+            "auth_error",
+            "client_timeout",
+            "transport_error",
+            "server_unavailable",
+            "server_error",
+            "rate_limited",
+            "response_error",
+        } or (
+            model_result.failure_type is None
+            and BHCEClient.classify_error(model_result.error) == "infra"
+        ):
+            return GradeResult(
+                score=0.0,
+                outcome=OUTCOME_INFRA_ERROR,
+                hallucination=False,
+                details=(
+                    "Model-generated Cypher could not be graded because BloodHound "
+                    f"or its transport was unavailable: {model_result.error}"
                 ),
             )
         return GradeResult(
@@ -173,11 +221,22 @@ def grade(
 
     # Grade by mode
     mode = task.grade_mode
+    contract = task_contract_for(task)
     if mode == "path_exists":
         # Model must return at least one result AND include all reference nodes.
         # Checking only len > 0 would accept any non-empty query (e.g. MATCH (n) RETURN n LIMIT 1).
         model_nonempty = len(model_result.nodes) > 0
-        if not ref_result.node_names:
+        reference_nodes = (
+            set(contract.required_nodes)
+            if contract and contract.required_nodes
+            else set(ref_result.node_names)
+        )
+        _, missing_reference_nodes, _ = _covered_reference_nodes(
+            reference_nodes,
+            set(model_result.node_names),
+            ref_result,
+        )
+        if not reference_nodes:
             # Reference returned nothing — planted path not found in BH CE, can't grade
             correct = False
             details = "path_exists: reference result is empty — verify BH CE ingest"
@@ -185,12 +244,12 @@ def grade(
             correct = False
             details = f"path_exists: model returned 0 nodes (ref: {len(ref_result.nodes)})"
         else:
-            # Model must contain all nodes that appear in the reference path
-            correct = ref_result.node_names.issubset(model_result.node_names)
+            # Model must contain all contract/reference nodes, accepting graph aliases.
+            correct = not missing_reference_nodes
             details = (
                 f"path_exists: model={len(model_result.node_names)} nodes, "
-                f"ref={len(ref_result.node_names)} nodes, "
-                f"overlap={len(ref_result.node_names & model_result.node_names)}"
+                f"ref={len(reference_nodes)} nodes, "
+                f"covered={len(reference_nodes - missing_reference_nodes)}"
             )
         return GradeResult(
             score=1.0 if correct else 0.0,
@@ -219,12 +278,13 @@ def grade(
         )
 
     elif mode == "node_set":
-        # Reference nodes must be a subset of model nodes (superset_ok)
-        if not ref_result.node_names:
-            # Reference returned nothing — any non-empty result is wrong
-            correct = len(model_result.node_names) == 0
-        else:
-            correct = ref_result.node_names.issubset(model_result.node_names)
+        reference_nodes = set(ref_result.node_names)
+        _, missing_reference_nodes, extra_answer_nodes = _covered_reference_nodes(
+            reference_nodes,
+            set(model_result.node_names),
+            ref_result,
+        )
+        correct = not missing_reference_nodes and not extra_answer_nodes
         return GradeResult(
             score=1.0 if correct else 0.0,
             outcome="CORRECT" if correct else "INCORRECT",
@@ -232,7 +292,8 @@ def grade(
             details=(
                 f"node_set: ref has {len(ref_result.node_names)} names, "
                 f"model has {len(model_result.node_names)} names, "
-                f"overlap: {len(ref_result.node_names & model_result.node_names)}"
+                f"missing: {len(missing_reference_nodes)}, "
+                f"extra: {len(extra_answer_nodes)}"
             ),
         )
 
@@ -685,7 +746,7 @@ def grade_mcp_diagnostic(
             details,
         )
     elif task.grade_mode == "node_set":
-        correct = answer_nodes == set() if not reference_nodes else not missing_reference_nodes
+        correct = not missing_reference_nodes and not extra_valid
         details = (
             f"node_set (mcp): ref has {len(reference_nodes)} names, "
             f"answer has {len(answer_nodes)} names, "

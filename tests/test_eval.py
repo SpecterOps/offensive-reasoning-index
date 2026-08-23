@@ -453,11 +453,34 @@ def test_grade_cypher_error():
     assert result.outcome == "CYPHER_ERROR"
 
 
-def test_grade_query_too_expensive_for_model_query_failure():
+def test_grade_infra_error_for_untyped_model_transport_failure():
     task = _make_task()
     resp = _make_model_response()
     model_result = _make_cypher_result([], success=False)
     model_result.error = "HTTP 502: Bad Gateway"
+    result = grade(task, resp, model_result, _make_cypher_result(["A@CORP.LOCAL"]), set())
+    assert result.score == 0.0
+    assert result.outcome == "INFRA_ERROR"
+
+
+def test_grade_query_too_expensive_for_policy_rejection():
+    task = _make_task()
+    resp = _make_model_response()
+    model_result = _make_cypher_result([], success=False)
+    model_result.error = "rejected unbounded wildcard path"
+    model_result.failure_type = "policy_rejected"
+    model_result.failure_subtype = "unbounded_wildcard_path_enumeration"
+    result = grade(task, resp, model_result, _make_cypher_result(["A@CORP.LOCAL"]), set())
+    assert result.score == 0.0
+    assert result.outcome == "QUERY_TOO_EXPENSIVE"
+
+
+def test_grade_query_too_expensive_for_explicit_server_query_timeout():
+    task = _make_task()
+    resp = _make_model_response()
+    model_result = _make_cypher_result([], success=False)
+    model_result.error = "HTTP 500: query timeout"
+    model_result.failure_type = "query_timeout"
     result = grade(task, resp, model_result, _make_cypher_result(["A@CORP.LOCAL"]), set())
     assert result.score == 0.0
     assert result.outcome == "QUERY_TOO_EXPENSIVE"
@@ -643,13 +666,14 @@ def test_mcp_grade_requires_declared_contextual_relationship() -> None:
     assert present.grade.score == 1.0
 
 
-def test_grade_node_set_superset_ok():
+def test_grade_node_set_rejects_extra_valid_node():
     task = _make_task("node_set")
     resp = _make_model_response()
     ref = _make_cypher_result(["SVC_BACKUP@CORP.LOCAL"])
     model = _make_cypher_result(["SVC_BACKUP@CORP.LOCAL", "SVC_MSSQL@CORP.LOCAL"])
     result = grade(task, resp, model, ref, set())
-    assert result.score == 1.0
+    assert result.score == 0.0
+    assert result.outcome == "INCORRECT"
 
 
 def test_grade_node_set_missing_ref_node():
@@ -900,12 +924,22 @@ def test_acl_chain_02_names_source_and_target():
     assert "abused group" in task.question
 
 
+def test_all_anchored_generated_questions_name_their_graded_endpoints():
+    tasks = generate_tasks(_make_manifest())
+
+    for task in tasks:
+        if task.metadata.get("reference_scope") != "anchored":
+            continue
+        assert task.metadata["source_name"] in task.question
+        assert task.metadata["target_name"] in task.question
+
+
 def test_phase4_composite_names_bridge_and_delegation_target():
     tasks = generate_tasks(_make_manifest())
     task = next(t for t in tasks if t.id == "t5_adcs_to_delegation_composite-01")
     assert "TBERGER@TEST.LOCAL" in task.question
     assert "SVC_PHASE4_BRIDGE@TEST.LOCAL" in task.question
-    assert "WS-IT-04.TEST.LOCAL" in task.question
+    assert task.metadata["target_name"] in task.question
 
 
 # ---------------------------------------------------------------------------
@@ -967,6 +1001,21 @@ def test_mock_unknown_variant_returns_error():
     resp = asyncio.run(call_model(task, "mock/nonexistent"))
     assert resp.error is not None
     assert "nonexistent" in resp.error
+
+
+def test_provider_stream_failure_is_scored_as_model_error(monkeypatch):
+    async def fail_provider(**kwargs):
+        raise RuntimeError("Codex Responses API response incomplete: max_output_tokens")
+
+    monkeypatch.setattr("ori.eval.adapter._call_provider", fail_provider)
+    task = _make_task_for_mock()
+
+    resp = asyncio.run(call_model(task, "codex/gpt-5.5"))
+    result = grade(task, resp, _make_cypher_result([]), _make_cypher_result([]), set())
+
+    assert resp.cypher is None
+    assert resp.error == "Codex Responses API response incomplete: max_output_tokens"
+    assert result.outcome == "MODEL_ERROR"
 
 
 def _make_phase4b_official_manifest():

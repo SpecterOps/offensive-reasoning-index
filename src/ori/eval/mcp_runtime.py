@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import builtins
+import hashlib
 import inspect
 import json
 import os
 import re
 import time
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
+from datetime import UTC, datetime
 from functools import wraps
 from pathlib import Path
 from typing import Any
@@ -33,6 +36,12 @@ from inspect_ai.tool import ToolCall, ToolCallError, ToolError, mcp_server_stdio
 from inspect_ai.tool._tool_info import parse_tool_info
 from mcp.types import EmbeddedResource, PromptMessage, ResourceLink, TextContent
 
+from ori.mcp_launcher import (
+    MCPLauncherConfig,
+    build_mcp_launch_spec,
+    detect_uv_version,
+)
+
 from .adapter import ModelResponse
 from .bhce import BHCEClient, CypherResult
 from .grader import GradeResult, grade_mcp_diagnostic
@@ -52,6 +61,7 @@ from .inspect_runtime import (
     _task_name_for_model,
     _task_to_dict,
 )
+from .provider_auth import openai_compat_api_key
 from .tasks import Task
 
 RESOURCE_MODE_OFF = "off"
@@ -222,6 +232,63 @@ class MCPNoProgressTimeout(TimeoutError):
         )
 
 
+class MCPToolInfrastructureError(RuntimeError):
+    """Raised after preserving a failed MCP tool receipt for infrastructure faults."""
+
+    def __init__(self, *, subtype: str, detail: str) -> None:
+        self.subtype = subtype
+        super().__init__(f"{subtype}: {detail}")
+
+
+def _mcp_tool_infrastructure_subtype(exc: Exception) -> str | None:
+    """Classify transport failures without treating model/tool defects as infra."""
+
+    if isinstance(exc, httpx.TimeoutException):
+        return "MCP_TOOL_TIMEOUT"
+    if isinstance(exc, httpx.RequestError):
+        return "MCP_TOOL_TRANSPORT"
+    if isinstance(exc, (ConnectionError, BrokenPipeError, EOFError)):
+        return "MCP_TOOL_TRANSPORT"
+    name = type(exc).__name__.casefold()
+    if "timeout" in name:
+        return "MCP_TOOL_TIMEOUT"
+    if any(
+        marker in name
+        for marker in (
+            "connection",
+            "disconnect",
+            "transport",
+            "brokenresource",
+            "closedresource",
+            "endofstream",
+        )
+    ):
+        return "MCP_TOOL_TRANSPORT"
+    return None
+
+
+async def _execute_mcp_tool(
+    runner: Any,
+    arguments: dict[str, Any],
+    *,
+    timeout_seconds: float | None,
+) -> Any:
+    """Execute one tool with an optional V2-only sub-deadline."""
+
+    result = runner(**arguments)
+    if not inspect.isawaitable(result):
+        return result
+    if timeout_seconds is None:
+        return await result
+    try:
+        return await asyncio.wait_for(result, timeout=timeout_seconds)
+    except TimeoutError as exc:
+        raise MCPToolInfrastructureError(
+            subtype="MCP_TOOL_TIMEOUT",
+            detail=f"tool exceeded its {timeout_seconds:.1f}s sub-deadline",
+        ) from exc
+
+
 def _raise_if_no_progress(
     *, last_activity: float, now: float, timeout_seconds: float | None, scope: str
 ) -> None:
@@ -240,6 +307,9 @@ class MCPServerBundle:
     server_prompt_name: str = ""
     available_prompt_names: list[str] = field(default_factory=list)
     prompt_discovery_status: str = "not_requested"
+    available_resource_uris: list[str] = field(default_factory=list)
+    resource_discovery_status: str = "not_requested"
+    launcher_provenance: dict[str, str | None] = field(default_factory=dict)
 
 
 @dataclass
@@ -259,6 +329,8 @@ class MCPRunMetadata:
     server_prompt_name: str = ""
     available_prompt_names: list[str] = field(default_factory=list)
     prompt_discovery_status: str = ""
+    available_resource_uris: list[str] = field(default_factory=list)
+    resource_discovery_status: str = ""
     resource_mode: str = RESOURCE_MODE_OFF
     tool_loop: str = MCP_TOOL_LOOP_AUTO
     resource_reads_total: int = 0
@@ -272,12 +344,122 @@ class MCPRunMetadata:
     minimum_evidence_satisfied: bool = False
     final_answer_diagnostics: dict[str, Any] = field(default_factory=dict)
     repair_turn_used: bool = False
+    mcp_launcher: str = ""
+    mcp_source: str = ""
+    mcp_revision: str = ""
+    mcp_executable: str = ""
+    uv_version: str = ""
 
     @property
     def final_answer_normalized_json(self) -> str:
         if self.final_answer_normalized is None:
             return ""
         return json.dumps(self.final_answer_normalized, sort_keys=True)
+
+
+def _apply_mcp_runtime_metadata(
+    metadata: MCPRunMetadata,
+    *,
+    available_resource_uris: list[str],
+    resource_discovery_status: str,
+    launcher_provenance: dict[str, str | None],
+) -> None:
+    metadata.available_resource_uris = sorted(available_resource_uris)
+    metadata.resource_discovery_status = resource_discovery_status
+    metadata.mcp_launcher = str(launcher_provenance.get("mcp_launcher") or "")
+    metadata.mcp_source = str(launcher_provenance.get("mcp_source") or "")
+    metadata.mcp_revision = str(launcher_provenance.get("mcp_revision") or "")
+    metadata.mcp_executable = str(launcher_provenance.get("mcp_executable") or "")
+    metadata.uv_version = str(launcher_provenance.get("uv_version") or "")
+
+
+@dataclass(frozen=True)
+class MCPReadinessResult:
+    """No-model evidence that a configured MCP launcher is usable and read-only."""
+
+    launcher_provenance: dict[str, str | None]
+    prompt_discovery_status: str
+    available_prompt_names: list[str]
+    resource_discovery_status: str
+    available_resource_uris: list[str]
+    read_only_tools: list[str]
+    checks: dict[str, dict[str, Any]]
+    captured_at: str
+
+    @property
+    def ok(self) -> bool:
+        required_checks = {
+            "startup_credential_preflight",
+            "data_quality",
+            "domain_info",
+            "graph_analysis",
+            "cypher_query",
+            RESOURCE_LIST_TOOL_NAME,
+        }
+        return (
+            self.prompt_discovery_status == "selected"
+            and self.resource_discovery_status == "listed"
+            and bool(self.available_resource_uris)
+            and required_checks.issubset(self.checks)
+            and all(self.checks[name].get("status") == "passed" for name in required_checks)
+        )
+
+    def artifact(self) -> dict[str, Any]:
+        core = {
+            "artifact_type": "ori.mcp_runtime_readiness",
+            "schema_version": 1,
+            "captured_at": self.captured_at,
+            "provenance": dict(self.launcher_provenance),
+            "prompt_discovery": {
+                "status": self.prompt_discovery_status,
+                "succeeded": self.prompt_discovery_status == "selected",
+                "available_prompt_names": sorted(self.available_prompt_names),
+            },
+            "resource_discovery": {
+                "status": self.resource_discovery_status,
+                "succeeded": self.resource_discovery_status == "listed",
+                "available_resource_uris": sorted(self.available_resource_uris),
+            },
+            "read_only_tools": sorted(self.read_only_tools),
+            "checks": self.checks,
+            "ready": self.ok,
+        }
+        capability_material = json.dumps(
+            {
+                "provenance": core["provenance"],
+                "read_only_tools": core["read_only_tools"],
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        capability_fingerprint = hashlib.sha256(capability_material).hexdigest()
+        revision = str(self.launcher_provenance.get("mcp_revision") or "local")
+        core["capability_identity"] = f"ori-mcp-{revision[:12]}-{capability_fingerprint[:12]}"
+        core["capability_fingerprint"] = capability_fingerprint
+        readiness_material = json.dumps(
+            core,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        core["readiness_fingerprint"] = hashlib.sha256(readiness_material).hexdigest()
+        return core
+
+
+def write_mcp_readiness_artifact(result: MCPReadinessResult, output_path: Path) -> dict[str, Any]:
+    """Create an immutable readiness receipt; never overwrite mismatched evidence."""
+
+    artifact = result.artifact()
+    serialized = json.dumps(artifact, indent=2, sort_keys=True) + "\n"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    if output_path.exists():
+        if output_path.read_text(encoding="utf-8") != serialized:
+            raise FileExistsError(
+                f"Refusing to overwrite mismatched MCP readiness artifact: {output_path}"
+            )
+        return artifact
+    with output_path.open("x", encoding="utf-8") as handle:
+        handle.write(serialized)
+    return artifact
 
 
 _READ_ONLY_MCP_INFO_TYPES: dict[str, set[str]] = {
@@ -366,12 +548,15 @@ def _canonical_tool_name(tool_obj: Any) -> str:
 
 
 def _mcp_subprocess_env() -> dict[str, str]:
-    env = dict(os.environ)
-    # Avoid noisy uv warnings when the parent ORI process is already inside a
-    # different virtualenv than the MCP project being launched via `uv run`.
-    env.pop("VIRTUAL_ENV", None)
-    env.setdefault("UV_CACHE_DIR", str(Path.cwd() / ".uv-cache"))
-    return env
+    allowed = {
+        "BLOODHOUND_DOMAIN",
+        "BLOODHOUND_PORT",
+        "BLOODHOUND_SCHEME",
+        "BLOODHOUND_TOKEN_ID",
+        "BLOODHOUND_TOKEN_KEY",
+        "BLOODHOUND_VERIFY_TLS",
+    }
+    return {name: os.environ[name] for name in sorted(allowed) if name in os.environ}
 
 
 def _tool_doc(tool_obj: Any, name: str, allowed: set[str]) -> str:
@@ -382,7 +567,46 @@ def _tool_doc(tool_obj: Any, name: str, allowed: set[str]) -> str:
     return f"{original}\n\nAllowed info_type values: {allowed_text}."
 
 
-def _wrap_read_only_tool(tool_obj: Any) -> Any:
+def _coordinator_result_to_mcp_text(result: Any) -> str:
+    """Render an authoritative direct-coordinator result like MCP cypher_query."""
+
+    if not result.success:
+        return json.dumps(
+            {
+                "info_type": "run",
+                "success": False,
+                "error": str(result.error or result.failure_type or "query failed"),
+                "error_type": str(result.failure_type or "query_error"),
+                "query_executed": bool(result.query_executed),
+                "policy_rule": str(result.safety_rule or ""),
+            }
+        )
+    raw = result.raw if isinstance(result.raw, dict) else {}
+    data = raw.get("data", raw)
+    if not isinstance(data, dict):
+        data = {}
+    nodes = data.get("nodes") or {}
+    edges = data.get("edges") or ()
+    node_count = len(nodes) if isinstance(nodes, (dict, list)) else 0
+    edge_count = len(edges) if isinstance(edges, list) else 0
+    return json.dumps(
+        {
+            "info_type": "run",
+            "success": True,
+            "has_results": bool(nodes or edges or data.get("literals")),
+            "data": data,
+            "node_count": node_count,
+            "edge_count": edge_count,
+            "query_executed": True,
+        }
+    )
+
+
+def _wrap_read_only_tool(
+    tool_obj: Any,
+    *,
+    cypher_executor: Callable[..., Any] | None = None,
+) -> Any:
     tool_name = _canonical_tool_name(tool_obj)
     allowed = _READ_ONLY_MCP_INFO_TYPES[tool_name]
 
@@ -395,6 +619,17 @@ def _wrap_read_only_tool(tool_obj: Any) -> Any:
                 raise ToolError(
                     f"POLICY_VIOLATION: {tool_name}.{info_type} is not allowed in ORI eval mode"
                 )
+            if cypher_executor is not None and tool_name == "cypher_query" and info_type == "run":
+                query = kwargs.get("query")
+                if not isinstance(query, str) or not query.strip():
+                    raise ToolError("INVALID_ARGUMENTS: cypher_query.run requires query")
+                result = cypher_executor(
+                    query,
+                    include_properties=bool(kwargs.get("include_properties", True)),
+                )
+                if inspect.isawaitable(result):
+                    result = await result
+                return _coordinator_result_to_mcp_text(result)
             result = tool_obj(*args, **kwargs)
             if inspect.isawaitable(result):
                 return await result
@@ -406,11 +641,12 @@ def _wrap_read_only_tool(tool_obj: Any) -> Any:
     return wrapped_tool()
 
 
-def _create_bloodhound_mcp_server(mcp_dir: Path) -> Any:
+def _create_bloodhound_mcp_server(launcher: MCPLauncherConfig) -> Any:
+    launch_spec = build_mcp_launch_spec(launcher)
     return mcp_server_stdio(
-        command="uv",
-        args=["--directory", str(mcp_dir), "run", "main.py"],
-        cwd=str(mcp_dir),
+        command=launch_spec.command,
+        args=list(launch_spec.args),
+        cwd=launch_spec.cwd,
         env=_mcp_subprocess_env(),
     )
 
@@ -494,8 +730,32 @@ async def _discover_bloodhound_mcp_prompt(server: Any) -> tuple[str, str, list[s
             return "", selected, names, "empty_selected_prompt"
         return text, selected, names, "selected"
     except Exception as exc:
-        print(f"  WARNING: MCP prompt discovery failed ({exc}); using built-in ORI MCP prompt.")
+        print(
+            "  WARNING: MCP prompt discovery failed "
+            f"({exc.__class__.__name__}); using built-in ORI MCP prompt."
+        )
         return "", "", [], "discovery_failed"
+
+
+async def _discover_bloodhound_mcp_resources(server: Any) -> tuple[list[str], str]:
+    """List resource URIs for capability provenance without exposing them to the model."""
+
+    session_handle = server._task_session()
+    try:
+        async with session_handle._client_session() as session:
+            listed = await session.list_resources()
+        resources = list(getattr(listed, "resources", listed) or [])
+        uris = sorted(
+            {
+                str(uri)
+                for resource in resources
+                if (uri := getattr(resource, "uri", None)) is not None
+            }
+        )
+        return uris, "listed"
+    except Exception as exc:
+        print(f"  WARNING: MCP resource discovery failed ({exc.__class__.__name__}).")
+        return [], "discovery_failed"
 
 
 def _format_resource_list(resources: list[Any]) -> str:
@@ -555,18 +815,25 @@ def _resource_tools(server: Any) -> list[Any]:
 
 
 async def _load_bloodhound_mcp_bundle(
-    mcp_dir: Path,
+    launcher: MCPLauncherConfig,
     *,
     include_resources: bool,
     include_prompt: bool,
+    cypher_executor: Callable[..., Any] | None = None,
 ) -> MCPServerBundle:
-    server = _create_bloodhound_mcp_server(mcp_dir)
+    uv_version = detect_uv_version()
+    server = _create_bloodhound_mcp_server(launcher)
     raw_tools = await mcp_tools(server).tools()
     wrapped: list[Any] = []
     for raw_tool in raw_tools:
         name = _canonical_tool_name(raw_tool)
         if name in _READ_ONLY_MCP_INFO_TYPES:
-            wrapped.append(_wrap_read_only_tool(raw_tool))
+            wrapped.append(
+                _wrap_read_only_tool(
+                    raw_tool,
+                    cypher_executor=cypher_executor,
+                )
+            )
     if include_resources:
         wrapped.extend(_resource_tools(server))
 
@@ -582,12 +849,120 @@ async def _load_bloodhound_mcp_bundle(
             prompt_discovery_status,
         ) = await _discover_bloodhound_mcp_prompt(server)
 
+    available_resource_uris, resource_discovery_status = await _discover_bloodhound_mcp_resources(
+        server
+    )
+
     return MCPServerBundle(
         tools=wrapped,
         server_prompt_text=prompt_text,
         server_prompt_name=prompt_name,
         available_prompt_names=available_prompt_names,
         prompt_discovery_status=prompt_discovery_status,
+        available_resource_uris=available_resource_uris,
+        resource_discovery_status=resource_discovery_status,
+        launcher_provenance=launcher.provenance(uv_version=uv_version),
+    )
+
+
+def _readiness_response_failed(response: Any) -> bool:
+    if isinstance(response, str):
+        try:
+            return _readiness_response_failed(json.loads(response))
+        except json.JSONDecodeError:
+            normalized = response.strip().lower()
+            return normalized.startswith("error") or bool(
+                re.search(r"[\"']error[\"']\s*:", normalized)
+            )
+    if isinstance(response, dict):
+        if response.get("success") is False or response.get("isError") is True:
+            return True
+        if response.get("error"):
+            return True
+        return any(
+            _readiness_response_failed(response[key])
+            for key in ("content", "text")
+            if key in response
+        )
+    if isinstance(response, list | tuple):
+        return any(_readiness_response_failed(item) for item in response)
+    for attribute in ("content", "text"):
+        value = getattr(response, attribute, None)
+        if value is not None and _readiness_response_failed(value):
+            return True
+    return False
+
+
+async def _invoke_readiness_tool(tool_obj: Any, **kwargs: Any) -> dict[str, Any]:
+    """Invoke one wrapped read-only tool and retain only non-sensitive evidence."""
+
+    try:
+        _, executor = _ollama_tool_spec(tool_obj)
+        response = executor(**kwargs)
+        if inspect.isawaitable(response):
+            response = await response
+        rendered = _tool_result_to_text(response)
+        if _readiness_response_failed(response):
+            return {
+                "status": "failed",
+                "error_type": "tool_error_response",
+                "response_bytes": len(rendered.encode()),
+                "response_sha256": hashlib.sha256(rendered.encode()).hexdigest(),
+            }
+        return {
+            "status": "passed",
+            "response_bytes": len(rendered.encode()),
+            "response_sha256": hashlib.sha256(rendered.encode()).hexdigest(),
+        }
+    except Exception as exc:
+        return {"status": "failed", "error_type": exc.__class__.__name__}
+
+
+async def verify_mcp_launcher_readiness(
+    launcher: MCPLauncherConfig,
+    *,
+    domain_query: str,
+) -> MCPReadinessResult:
+    """Start MCP without a model and exercise representative read-only operations."""
+
+    bundle = await _load_bloodhound_mcp_bundle(
+        launcher,
+        include_resources=True,
+        include_prompt=True,
+    )
+    tools_by_name = {_canonical_tool_name(tool_obj): tool_obj for tool_obj in bundle.tools}
+    checks: dict[str, dict[str, Any]] = {"startup_credential_preflight": {"status": "passed"}}
+    requested_checks: dict[str, dict[str, Any]] = {
+        "data_quality": {"info_type": "completeness"},
+        "domain_info": {"info_type": "list", "limit": 10, "skip": 0},
+        "graph_analysis": {
+            "info_type": "search",
+            "query": domain_query,
+            "search_type": "exact",
+        },
+        "cypher_query": {
+            "info_type": "run",
+            "query": "MATCH (n:Domain) RETURN n LIMIT 1",
+            "include_properties": False,
+        },
+        RESOURCE_LIST_TOOL_NAME: {},
+    }
+    for name, kwargs in requested_checks.items():
+        tool_obj = tools_by_name.get(name)
+        if tool_obj is None:
+            checks[name] = {"status": "failed", "error_type": "tool_not_exposed"}
+            continue
+        checks[name] = await _invoke_readiness_tool(tool_obj, **kwargs)
+
+    return MCPReadinessResult(
+        launcher_provenance=bundle.launcher_provenance,
+        prompt_discovery_status=bundle.prompt_discovery_status,
+        available_prompt_names=bundle.available_prompt_names,
+        resource_discovery_status=bundle.resource_discovery_status,
+        available_resource_uris=bundle.available_resource_uris,
+        read_only_tools=sorted(tools_by_name),
+        checks=checks,
+        captured_at=datetime.now(UTC).isoformat(),
     )
 
 
@@ -641,10 +1016,18 @@ Rules:
 
 
 def _mcp_conversation_messages(
-    task: Task,
+    task: Task | None,
     server_prompt_text: str = "",
     server_prompt_name: str = BLOODHOUND_PROMPT_NAME,
+    system_prompt_override: str | None = None,
+    public_question: str | None = None,
 ) -> list[Any]:
+    question = public_question or (task.question if task is not None else "")
+    if not question:
+        raise ValueError("MCP conversation requires a public question")
+    system_prompt = system_prompt_override or (_mcp_system_prompt(task) if task is not None else "")
+    if not system_prompt:
+        raise ValueError("MCP conversation requires a system prompt")
     messages: list[Any] = []
     if server_prompt_text.strip():
         messages.append(
@@ -657,8 +1040,8 @@ def _mcp_conversation_messages(
         )
     messages.extend(
         [
-            ChatMessageSystem(content=_mcp_system_prompt(task)),
-            ChatMessageUser(content=task.question),
+            ChatMessageSystem(content=system_prompt),
+            ChatMessageUser(content=question),
         ]
     )
     return messages
@@ -871,6 +1254,8 @@ def _mcp_metadata_from_dict(data: dict[str, Any]) -> MCPRunMetadata:
         resource_characters_total=int(data.get("resource_characters_total", 0)),
         available_prompt_names=list(data.get("available_prompt_names", [])),
         prompt_discovery_status=data.get("prompt_discovery_status", ""),
+        available_resource_uris=list(data.get("available_resource_uris", [])),
+        resource_discovery_status=data.get("resource_discovery_status", ""),
         infra_error_subtype=data.get("infra_error_subtype", ""),
         failure_subtype=data.get("failure_subtype", ""),
         successful_tool_results=int(data.get("successful_tool_results", 0)),
@@ -879,6 +1264,11 @@ def _mcp_metadata_from_dict(data: dict[str, Any]) -> MCPRunMetadata:
         minimum_evidence_satisfied=bool(data.get("minimum_evidence_satisfied", False)),
         final_answer_diagnostics=dict(data.get("final_answer_diagnostics") or {}),
         repair_turn_used=bool(data.get("repair_turn_used", False)),
+        mcp_launcher=data.get("mcp_launcher", ""),
+        mcp_source=data.get("mcp_source", ""),
+        mcp_revision=data.get("mcp_revision", ""),
+        mcp_executable=data.get("mcp_executable", ""),
+        uv_version=data.get("uv_version", ""),
     )
 
 
@@ -945,7 +1335,7 @@ def _openai_compat_chat_url(base_url: str | None, model_name: str) -> str:
 
 
 def _openai_compat_api_key() -> str:
-    return os.getenv("OPENAI_COMPAT_API_KEY") or os.getenv("OPENAI_API_KEY") or "not-needed"
+    return openai_compat_api_key() or "not-needed"
 
 
 def _normalize_openai_compat_telemetry_adapter(raw_adapter: str | None) -> str:
@@ -1068,6 +1458,21 @@ def _openai_compat_provider_metrics(
 def _tool_result_to_text(result: Any) -> str:
     if isinstance(result, str):
         return result
+    content_items = result if isinstance(result, (list, tuple)) else (result,)
+    content_text: list[str] = []
+    for item in content_items:
+        if isinstance(item, dict):
+            item_type = item.get("type")
+            text = item.get("text")
+        else:
+            item_type = getattr(item, "type", None)
+            text = getattr(item, "text", None)
+        if item_type != "text" or not isinstance(text, str):
+            content_text = []
+            break
+        content_text.append(text)
+    if content_text:
+        return "\n".join(content_text)
     try:
         return json.dumps(result)
     except Exception:
@@ -1190,6 +1595,7 @@ async def _openai_compat_chat_turn(
     extra_body: dict[str, Any] | None = None,
     telemetry_adapter: str = OPENAI_COMPAT_TELEMETRY_GENERIC,
     read_timeout_seconds: float = DEFAULT_MCP_OLLAMA_READ_TIMEOUT_SECONDS,
+    event_progress_observer: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "model": _openai_compat_model_name(model_name),
@@ -1223,9 +1629,15 @@ async def _openai_compat_chat_turn(
         )
         try:
             events = await client.responses.create(**params, stream=True, extra_headers=headers)
-            data = codex_responses_events_to_chat_completion(
-                [event async for event in events], str(payload["model"])
-            )
+            buffered_events: list[Any] = []
+            partial_text: list[str] = []
+            async for event in events:
+                buffered_events.append(event)
+                if getattr(event, "type", None) == "response.output_text.delta":
+                    partial_text.append(getattr(event, "delta", "") or "")
+                if event_progress_observer is not None:
+                    event_progress_observer("".join(partial_text))
+            data = codex_responses_events_to_chat_completion(buffered_events, str(payload["model"]))
         finally:
             await client.close()
     else:
@@ -1313,9 +1725,25 @@ def _tool_result_has_successful_evidence(
     return bool(result_text.strip())
 
 
+def _emit_mcp_loop_progress(
+    observer: Callable[[ModelResponse, list[Any]], None] | None,
+    response: ModelResponse,
+    messages: list[Any],
+) -> None:
+    """Expose a cancellation-safe private snapshot without affecting the loop."""
+
+    if observer is None:
+        return
+    try:
+        observer(response, list(messages))
+    except Exception:
+        return
+
+
 async def _run_ollama_mcp_loop(
     *,
-    task: Task,
+    task: Task | None,
+    public_question: str | None = None,
     model_name: str,
     base_url: str | None,
     ollama_options: dict[str, Any] | None,
@@ -1327,18 +1755,37 @@ async def _run_ollama_mcp_loop(
     prompt_discovery_status: str = "",
     resource_mode: str = RESOURCE_MODE_OFF,
     ollama_read_timeout_seconds: float = DEFAULT_MCP_OLLAMA_READ_TIMEOUT_SECONDS,
+    system_prompt_override: str | None = None,
+    tool_result_observer: (
+        Callable[[str, dict[str, Any], str, ToolCallError | None], bool] | None
+    ) = None,
+    progress_observer: Callable[[ModelResponse, list[Any]], None] | None = None,
+    tool_timeout_seconds: float | None = None,
 ) -> tuple[ModelResponse, MCPRunMetadata, list[Any]]:
+    question = public_question or (task.question if task is not None else "")
+    if not question:
+        raise ValueError("MCP loop requires a public question")
+    system_prompt = system_prompt_override or (_mcp_system_prompt(task) if task is not None else "")
+    if not system_prompt:
+        raise ValueError("MCP loop requires a system prompt")
     url = _native_ollama_chat_url(base_url)
     messages_payload: list[dict[str, Any]] = []
     if server_prompt_text.strip():
         messages_payload.append({"role": "system", "content": server_prompt_text})
-    messages_payload.append({"role": "system", "content": _mcp_system_prompt(task)})
-    messages_payload.append({"role": "user", "content": task.question})
+    messages_payload.append(
+        {
+            "role": "system",
+            "content": system_prompt,
+        }
+    )
+    messages_payload.append({"role": "user", "content": question})
 
     inspect_messages = _mcp_conversation_messages(
         task,
         server_prompt_text=server_prompt_text,
         server_prompt_name=server_prompt_name,
+        system_prompt_override=system_prompt,
+        public_question=question,
     )
     tool_specs: list[dict[str, Any]] = []
     tool_runners: dict[str, Any] = {}
@@ -1359,14 +1806,20 @@ async def _run_ollama_mcp_loop(
     final_content = ""
     resolved_model = model_name
     successful_tool_results = 0
+    executed_tool_calls = 0
+    typed_finalization_ready = False
     finalization_guard_used = False
     t0 = time.monotonic()
 
     for step in range(max_steps):
         use_finalization_guard = (
             _env_flag("ORI_MCP_FINALIZATION_GUARD", True)
-            and step >= max_steps - 1
-            and successful_tool_results > 0
+            and (step >= max_steps - 1 or executed_tool_calls >= max_steps)
+            and (
+                typed_finalization_ready
+                if tool_result_observer is not None
+                else successful_tool_results > 0
+            )
             and not finalization_guard_used
         )
         if use_finalization_guard:
@@ -1414,6 +1867,27 @@ async def _run_ollama_mcp_loop(
                 model=resolved_model,
             )
         )
+        progress_response = ModelResponse(
+            raw_text=content,
+            cypher=None,
+            parse_stage="mcp_partial",
+            tokens_input=total_prompt_tokens,
+            tokens_output=total_completion_tokens,
+            elapsed_seconds=time.monotonic() - t0,
+            model=resolved_model,
+            thinking="\n".join(thinking_parts),
+            provider_metrics={
+                "provider": "ollama_native_chat_mcp_loop",
+                "prompt_eval_count": total_prompt_tokens,
+                "eval_count": total_completion_tokens,
+                **total_metrics,
+            },
+        )
+        _emit_mcp_loop_progress(
+            progress_observer,
+            progress_response,
+            inspect_messages,
+        )
 
         if not raw_tool_calls:
             final_content = content
@@ -1424,18 +1898,55 @@ async def _run_ollama_mcp_loop(
             tool_runner = tool_runners.get(tool_name)
             result_text = ""
             tool_error: ToolCallError | None = None
-            try:
-                if tool_runner is None:
-                    raise RuntimeError(f"Unknown tool: {tool_name}")
-                result = tool_runner(**tool_call.arguments)
-                if inspect.isawaitable(result):
-                    result = await result
-                result_text = _tool_result_to_text(result)
-            except Exception as exc:
+            infrastructure_error: MCPToolInfrastructureError | None = None
+            if executed_tool_calls >= max_steps:
                 result_text = json.dumps(
-                    {"success": False, "error": str(exc), "error_type": "tool_error"}
+                    {
+                        "success": False,
+                        "error": "MCP tool-call budget exhausted",
+                        "error_type": "tool_call_budget_exceeded",
+                    }
                 )
-                tool_error = ToolCallError(type="unknown", message=str(exc))
+                tool_error = ToolCallError(
+                    type="unknown",
+                    message="MCP tool-call budget exhausted",
+                )
+            else:
+                executed_tool_calls += 1
+                try:
+                    if tool_runner is None:
+                        raise RuntimeError(f"Unknown tool: {tool_name}")
+                    result = await _execute_mcp_tool(
+                        tool_runner,
+                        dict(tool_call.arguments),
+                        timeout_seconds=tool_timeout_seconds,
+                    )
+                    result_text = _tool_result_to_text(result)
+                except Exception as exc:
+                    subtype = (
+                        exc.subtype
+                        if isinstance(exc, MCPToolInfrastructureError)
+                        else _mcp_tool_infrastructure_subtype(exc)
+                    )
+                    if subtype is not None:
+                        infrastructure_error = MCPToolInfrastructureError(
+                            subtype=subtype,
+                            detail=str(exc),
+                        )
+                    result_text = json.dumps(
+                        {
+                            "success": False,
+                            "error": str(exc),
+                            "error_type": (
+                                "client_timeout"
+                                if subtype == "MCP_TOOL_TIMEOUT"
+                                else "transport_error"
+                                if subtype is not None
+                                else "tool_error"
+                            ),
+                        }
+                    )
+                    tool_error = ToolCallError(type="unknown", message=str(exc))
 
             if _tool_result_has_successful_evidence(result_text, tool_error):
                 successful_tool_results += 1
@@ -1450,6 +1961,26 @@ async def _run_ollama_mcp_loop(
                     error=tool_error,
                 )
             )
+            if tool_result_observer is not None:
+                # V2's observer reports readiness for the complete transcript,
+                # not only the current observation. Replacing this value keeps
+                # later irrelevant calls sticky while allowing a later
+                # truncation to revoke an earlier proof.
+                typed_finalization_ready = bool(
+                    tool_result_observer(
+                        tool_name,
+                        dict(tool_call.arguments),
+                        result_text,
+                        tool_error,
+                    )
+                )
+            _emit_mcp_loop_progress(
+                progress_observer,
+                progress_response,
+                inspect_messages,
+            )
+            if infrastructure_error is not None:
+                raise infrastructure_error
     else:
         final_content = ""
 
@@ -1490,7 +2021,8 @@ async def _run_ollama_mcp_loop(
 
 async def _run_openai_compat_mcp_loop(
     *,
-    task: Task,
+    task: Task | None,
+    public_question: str | None = None,
     model_name: str,
     base_url: str | None,
     extra_body: dict[str, Any] | None,
@@ -1503,7 +2035,19 @@ async def _run_openai_compat_mcp_loop(
     resource_mode: str = RESOURCE_MODE_OFF,
     telemetry_adapter: str = OPENAI_COMPAT_TELEMETRY_AUTO,
     read_timeout_seconds: float = DEFAULT_MCP_OLLAMA_READ_TIMEOUT_SECONDS,
+    system_prompt_override: str | None = None,
+    tool_result_observer: (
+        Callable[[str, dict[str, Any], str, ToolCallError | None], bool] | None
+    ) = None,
+    progress_observer: Callable[[ModelResponse, list[Any]], None] | None = None,
+    tool_timeout_seconds: float | None = None,
 ) -> tuple[ModelResponse, MCPRunMetadata, list[Any]]:
+    question = public_question or (task.question if task is not None else "")
+    if not question:
+        raise ValueError("MCP loop requires a public question")
+    system_prompt = system_prompt_override or (_mcp_system_prompt(task) if task is not None else "")
+    if not system_prompt:
+        raise ValueError("MCP loop requires a system prompt")
     url = _openai_compat_chat_url(base_url, model_name)
     resolved_telemetry_adapter = _infer_openai_compat_telemetry_adapter(
         telemetry_adapter,
@@ -1513,13 +2057,20 @@ async def _run_openai_compat_mcp_loop(
     messages_payload: list[dict[str, Any]] = []
     if server_prompt_text.strip():
         messages_payload.append({"role": "system", "content": server_prompt_text})
-    messages_payload.append({"role": "system", "content": _mcp_system_prompt(task)})
-    messages_payload.append({"role": "user", "content": task.question})
+    messages_payload.append(
+        {
+            "role": "system",
+            "content": system_prompt,
+        }
+    )
+    messages_payload.append({"role": "user", "content": question})
 
     inspect_messages = _mcp_conversation_messages(
         task,
         server_prompt_text=server_prompt_text,
         server_prompt_name=server_prompt_name,
+        system_prompt_override=system_prompt,
+        public_question=question,
     )
     tool_specs: list[dict[str, Any]] = []
     tool_runners: dict[str, Any] = {}
@@ -1536,19 +2087,55 @@ async def _run_openai_compat_mcp_loop(
     final_content = ""
     resolved_model = _openai_compat_model_name(model_name)
     successful_tool_results = 0
+    executed_tool_calls = 0
+    typed_finalization_ready = False
     finalization_guard_used = False
     t0 = time.monotonic()
 
     for step in range(max_steps):
         use_finalization_guard = (
             _env_flag("ORI_MCP_FINALIZATION_GUARD", True)
-            and step >= max_steps - 1
-            and successful_tool_results > 0
+            and (step >= max_steps - 1 or executed_tool_calls >= max_steps)
+            and (
+                typed_finalization_ready
+                if tool_result_observer is not None
+                else successful_tool_results > 0
+            )
             and not finalization_guard_used
         )
         if use_finalization_guard:
             messages_payload.append({"role": "user", "content": FINALIZATION_GUARD_PROMPT})
             finalization_guard_used = True
+
+        def observe_stream_progress(partial_text: str) -> None:
+            partial_messages = list(inspect_messages)
+            if partial_text:
+                partial_messages.append(
+                    ChatMessageAssistant(
+                        content=partial_text,
+                        model=resolved_model,
+                    )
+                )
+            _emit_mcp_loop_progress(
+                progress_observer,
+                ModelResponse(
+                    raw_text=partial_text,
+                    cypher=None,
+                    parse_stage="mcp_stream_partial",
+                    tokens_input=total_prompt_tokens,
+                    tokens_output=total_completion_tokens,
+                    elapsed_seconds=time.monotonic() - t0,
+                    model=resolved_model,
+                    thinking="\n".join(thinking_parts),
+                    provider_metrics={
+                        "provider": "openai_compat_native_chat_mcp_loop",
+                        "telemetry_adapter": resolved_telemetry_adapter,
+                        "stream_in_progress": True,
+                    },
+                ),
+                partial_messages,
+            )
+
         turn = await _openai_compat_chat_turn(
             url=url,
             model_name=model_name,
@@ -1557,6 +2144,7 @@ async def _run_openai_compat_mcp_loop(
             extra_body=extra_body,
             telemetry_adapter=resolved_telemetry_adapter,
             read_timeout_seconds=read_timeout_seconds,
+            event_progress_observer=observe_stream_progress,
         )
         total_prompt_tokens += int(turn["prompt_tokens"])
         total_completion_tokens += int(turn["completion_tokens"])
@@ -1598,6 +2186,29 @@ async def _run_openai_compat_mcp_loop(
                 model=resolved_model,
             )
         )
+        progress_response = ModelResponse(
+            raw_text=content,
+            cypher=None,
+            parse_stage="mcp_partial",
+            tokens_input=total_prompt_tokens,
+            tokens_output=total_completion_tokens,
+            elapsed_seconds=time.monotonic() - t0,
+            model=resolved_model,
+            thinking="\n".join(thinking_parts),
+            provider_metrics={
+                "provider": "openai_compat_native_chat_mcp_loop",
+                "telemetry_adapter": resolved_telemetry_adapter,
+                "prompt_tokens": total_prompt_tokens,
+                "completion_tokens": total_completion_tokens,
+                "finish_reasons": finish_reasons,
+                "turn_metrics": turn_provider_metrics,
+            },
+        )
+        _emit_mcp_loop_progress(
+            progress_observer,
+            progress_response,
+            inspect_messages,
+        )
 
         if not raw_tool_calls:
             final_content = content
@@ -1608,18 +2219,55 @@ async def _run_openai_compat_mcp_loop(
             tool_runner = tool_runners.get(tool_name)
             result_text = ""
             tool_error: ToolCallError | None = None
-            try:
-                if tool_runner is None:
-                    raise RuntimeError(f"Unknown tool: {tool_name}")
-                result = tool_runner(**tool_call.arguments)
-                if inspect.isawaitable(result):
-                    result = await result
-                result_text = _tool_result_to_text(result)
-            except Exception as exc:
+            infrastructure_error: MCPToolInfrastructureError | None = None
+            if executed_tool_calls >= max_steps:
                 result_text = json.dumps(
-                    {"success": False, "error": str(exc), "error_type": "tool_error"}
+                    {
+                        "success": False,
+                        "error": "MCP tool-call budget exhausted",
+                        "error_type": "tool_call_budget_exceeded",
+                    }
                 )
-                tool_error = ToolCallError(type="unknown", message=str(exc))
+                tool_error = ToolCallError(
+                    type="unknown",
+                    message="MCP tool-call budget exhausted",
+                )
+            else:
+                executed_tool_calls += 1
+                try:
+                    if tool_runner is None:
+                        raise RuntimeError(f"Unknown tool: {tool_name}")
+                    result = await _execute_mcp_tool(
+                        tool_runner,
+                        dict(tool_call.arguments),
+                        timeout_seconds=tool_timeout_seconds,
+                    )
+                    result_text = _tool_result_to_text(result)
+                except Exception as exc:
+                    subtype = (
+                        exc.subtype
+                        if isinstance(exc, MCPToolInfrastructureError)
+                        else _mcp_tool_infrastructure_subtype(exc)
+                    )
+                    if subtype is not None:
+                        infrastructure_error = MCPToolInfrastructureError(
+                            subtype=subtype,
+                            detail=str(exc),
+                        )
+                    result_text = json.dumps(
+                        {
+                            "success": False,
+                            "error": str(exc),
+                            "error_type": (
+                                "client_timeout"
+                                if subtype == "MCP_TOOL_TIMEOUT"
+                                else "transport_error"
+                                if subtype is not None
+                                else "tool_error"
+                            ),
+                        }
+                    )
+                    tool_error = ToolCallError(type="unknown", message=str(exc))
 
             messages_payload.append(
                 {
@@ -1637,6 +2285,26 @@ async def _run_openai_compat_mcp_loop(
                     error=tool_error,
                 )
             )
+            if tool_result_observer is not None:
+                # V2's observer reports readiness for the complete transcript,
+                # not only the current observation. Replacing this value keeps
+                # later irrelevant calls sticky while allowing a later
+                # truncation to revoke an earlier proof.
+                typed_finalization_ready = bool(
+                    tool_result_observer(
+                        tool_name,
+                        dict(tool_call.arguments),
+                        result_text,
+                        tool_error,
+                    )
+                )
+            _emit_mcp_loop_progress(
+                progress_observer,
+                progress_response,
+                inspect_messages,
+            )
+            if infrastructure_error is not None:
+                raise infrastructure_error
     else:
         final_content = ""
 
@@ -1849,6 +2517,9 @@ def ori_mcp_solver(
     server_prompt_name: str = "",
     available_prompt_names: list[str] | None = None,
     prompt_discovery_status: str = "",
+    available_resource_uris: list[str] | None = None,
+    resource_discovery_status: str = "",
+    launcher_provenance: dict[str, str | None] | None = None,
     resource_mode: str = RESOURCE_MODE_OFF,
     mcp_tool_loop: str = MCP_TOOL_LOOP_AUTO,
     openai_compat_telemetry_adapter: str = OPENAI_COMPAT_TELEMETRY_AUTO,
@@ -1867,6 +2538,8 @@ def ori_mcp_solver(
         )
 
         prompt_names = sorted(available_prompt_names or [])
+        resource_uris = sorted(available_resource_uris or [])
+        provenance = dict(launcher_provenance or {})
         state.messages = _mcp_conversation_messages(
             task,
             server_prompt_text=server_prompt_text,
@@ -1932,6 +2605,12 @@ def ori_mcp_solver(
                     model=model_response.model,
                     content="",
                     error=model_response.error,
+                )
+                _apply_mcp_runtime_metadata(
+                    trajectory,
+                    available_resource_uris=resource_uris,
+                    resource_discovery_status=resource_discovery_status,
+                    launcher_provenance=provenance,
                 )
                 _persist_mcp_state(
                     state,
@@ -2045,6 +2724,12 @@ def ori_mcp_solver(
             trajectory.prompt_discovery_status = prompt_discovery_status
             trajectory.resource_mode = resource_mode
             trajectory.tool_loop = MCP_TOOL_LOOP_INSPECT
+        _apply_mcp_runtime_metadata(
+            trajectory,
+            available_resource_uris=resource_uris,
+            resource_discovery_status=resource_discovery_status,
+            launcher_provenance=provenance,
+        )
         trajectory.final_answer_normalized = normalized
         _persist_mcp_state(
             state,
@@ -2322,6 +3007,7 @@ async def run_mcp_eval_with_inspect(
     log_dir: Path | None = None,
     bhce_domain: str | None = None,
     mcp_dir: Path | None = None,
+    mcp_launcher: MCPLauncherConfig | None = None,
     max_steps: int = 12,
     resource_mode: str = RESOURCE_MODE_OFF,
     mcp_tool_loop: str = MCP_TOOL_LOOP_AUTO,
@@ -2379,12 +3065,17 @@ async def run_mcp_eval_with_inspect(
     server_prompt_name = ""
     available_prompt_names: list[str] = []
     prompt_discovery_status = "not_requested"
+    available_resource_uris: list[str] = []
+    resource_discovery_status = "not_requested"
+    launcher_provenance: dict[str, str | None] = {}
     if model.startswith("mock/mcp_"):
         tools: list[Any] = []
     else:
-        resolved_mcp_dir = (mcp_dir or (Path.cwd().parent / "bloodhound-mcp")).resolve()
+        resolved_launcher = mcp_launcher or MCPLauncherConfig.local_checkout(
+            (mcp_dir or (Path.cwd().parent / "bloodhound-mcp")).resolve()
+        )
         bundle = await _load_bloodhound_mcp_bundle(
-            resolved_mcp_dir,
+            resolved_launcher,
             include_resources=resource_mode == RESOURCE_MODE_ON_DEMAND,
             include_prompt=True,
         )
@@ -2393,6 +3084,9 @@ async def run_mcp_eval_with_inspect(
         server_prompt_name = bundle.server_prompt_name
         available_prompt_names = bundle.available_prompt_names
         prompt_discovery_status = bundle.prompt_discovery_status
+        available_resource_uris = bundle.available_resource_uris
+        resource_discovery_status = bundle.resource_discovery_status
+        launcher_provenance = bundle.launcher_provenance
         if server_prompt_name:
             print(
                 f"Loaded BloodHound MCP prompt: {server_prompt_name} "
@@ -2417,6 +3111,9 @@ async def run_mcp_eval_with_inspect(
             server_prompt_name=server_prompt_name,
             available_prompt_names=available_prompt_names,
             prompt_discovery_status=prompt_discovery_status,
+            available_resource_uris=available_resource_uris,
+            resource_discovery_status=resource_discovery_status,
+            launcher_provenance=launcher_provenance,
             resource_mode=resource_mode,
             mcp_tool_loop=mcp_tool_loop,
             openai_compat_telemetry_adapter=resolved_openai_compat_telemetry_adapter,

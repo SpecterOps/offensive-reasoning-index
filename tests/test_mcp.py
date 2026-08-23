@@ -4,9 +4,10 @@ import csv
 import json
 from pathlib import Path
 
+import pytest
 from click.testing import CliRunner
 from inspect_ai.model import ChatMessageAssistant, ChatMessageTool
-from inspect_ai.tool import ToolCall, tool
+from inspect_ai.tool import ToolCall, ToolError, tool
 from inspect_ai.tool._tool_def import ToolDef
 
 from ori.cli import main
@@ -34,6 +35,7 @@ from ori.eval.mcp_runtime import (
     _run_openai_compat_mcp_loop,
     _task_to_dict,
     _trajectory_from_messages,
+    _wrap_read_only_tool,
     ori_mcp_scorer,
     ori_mcp_solver,
     run_mcp_eval_with_inspect,
@@ -136,12 +138,18 @@ def test_generate_mcp_tasks_includes_both_tracks() -> None:
     assert any(task.id == "mcp-shortest-path-admin-to" for task in tasks)
 
 
-def test_mcp_subprocess_env_strips_virtual_env(monkeypatch) -> None:
+def test_mcp_subprocess_env_allows_only_bloodhound_connection_fields(monkeypatch) -> None:
     monkeypatch.setenv("VIRTUAL_ENV", "/tmp/fake-venv")
     monkeypatch.setenv("PATH", "/usr/bin")
+    monkeypatch.setenv("UNRELATED_SECRET", "never-forward-this")
+    monkeypatch.setenv("BLOODHOUND_DOMAIN", "bh.example")
+    monkeypatch.setenv("BLOODHOUND_TOKEN_KEY", "credential-sentinel")
     env = _mcp_subprocess_env()
-    assert "VIRTUAL_ENV" not in env
-    assert env["PATH"] == "/usr/bin"
+    assert env == {
+        "BLOODHOUND_DOMAIN": "bh.example",
+        "BLOODHOUND_TOKEN_KEY": "credential-sentinel",
+    }
+    assert "never-forward-this" not in repr(env)
 
 
 def test_parse_and_normalize_final_answer_handles_fenced_json() -> None:
@@ -311,6 +319,9 @@ def test_openai_compat_chat_turn_posts_tool_payload(monkeypatch) -> None:
     import asyncio
 
     captured: dict[str, object] = {}
+    monkeypatch.delenv("OPENAI_COMPAT_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter-key")
 
     class FakeResponse:
         def raise_for_status(self) -> None:
@@ -371,7 +382,7 @@ def test_openai_compat_chat_turn_posts_tool_payload(monkeypatch) -> None:
     )
 
     assert captured["url"] == "http://127.0.0.1:8080/v1/chat/completions"
-    assert captured["headers"]["Authorization"].startswith("Bearer ")
+    assert captured["headers"]["Authorization"] == "Bearer openrouter-key"
     payload = captured["payload"]
     assert payload["model"] == "ori-test"
     assert payload["stream"] is False
@@ -454,6 +465,24 @@ def test_ollama_tool_spec_accepts_executor_callable_without_calling_it() -> None
     assert asyncio.run(executor(group_name="DOMAIN ADMINS@TEST.LOCAL", info_type="members")) == (
         "DOMAIN ADMINS@TEST.LOCAL:members"
     )
+
+
+def test_read_only_wrapper_preserves_allowed_calls_and_blocks_mutation_modes() -> None:
+    import asyncio
+
+    @tool(name="domain_info")
+    def domain_info():
+        async def execute(info_type: str) -> str:
+            return info_type
+
+        return execute
+
+    wrapped = _wrap_read_only_tool(domain_info())
+    _, executor = _ollama_tool_spec(wrapped)
+
+    assert asyncio.run(executor(info_type="list")) == "list"
+    with pytest.raises(ToolError, match="POLICY_VIOLATION"):
+        asyncio.run(executor(info_type="delete"))
 
 
 def test_resource_tools_construct_read_tool_without_uri() -> None:
@@ -880,6 +909,84 @@ def test_run_openai_compat_mcp_loop_executes_tool_calls(monkeypatch) -> None:
     assert len(messages) >= 4
 
 
+def test_run_openai_compat_mcp_loop_enforces_total_tool_call_budget(monkeypatch) -> None:
+    import asyncio
+
+    executed = {"count": 0}
+
+    async def fake_turn(**kwargs):
+        assert kwargs["tools"]
+        return {
+            "model": "ori-mlx",
+            "content": "",
+            "thinking": "request two calls in one turn",
+            "tool_calls": [
+                {
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {
+                        "name": "group_info",
+                        "arguments": json.dumps(
+                            {
+                                "group_name": "DOMAIN ADMINS@TEST.LOCAL",
+                                "info_type": "members",
+                            }
+                        ),
+                    },
+                },
+                {
+                    "id": "call-2",
+                    "type": "function",
+                    "function": {
+                        "name": "group_info",
+                        "arguments": json.dumps(
+                            {
+                                "group_name": "ENTERPRISE ADMINS@TEST.LOCAL",
+                                "info_type": "members",
+                            }
+                        ),
+                    },
+                },
+            ],
+            "prompt_tokens": 70,
+            "completion_tokens": 12,
+            "finish_reason": "tool_calls",
+            "provider_metrics": {
+                "telemetry_adapter": "mlx-lm",
+                "finish_reason": "tool_calls",
+            },
+        }
+
+    monkeypatch.setattr("ori.eval.mcp_runtime._openai_compat_chat_turn", fake_turn)
+
+    @tool(name="group_info")
+    def group_info():
+        async def execute(group_name: str, info_type: str) -> str:
+            executed["count"] += 1
+            return '{"success": true, "nodes": ["WS-01.TEST.LOCAL"]}'
+
+        return execute
+
+    response, trajectory, messages = asyncio.run(
+        _run_openai_compat_mcp_loop(
+            task=_task(),
+            model_name="openai-compat/ori-mlx@http://127.0.0.1:8080/v1",
+            base_url=None,
+            extra_body=None,
+            tools=[group_info],
+            max_steps=1,
+            telemetry_adapter="mlx-lm",
+        )
+    )
+
+    assert response.error == "MCP loop exhausted without final answer"
+    assert executed["count"] == 1
+    assert trajectory.tool_calls_total == 2
+    tool_messages = [message for message in messages if isinstance(message, ChatMessageTool)]
+    assert len(tool_messages) == 2
+    assert "tool_call_budget_exceeded" in tool_messages[1].text
+
+
 def test_hallucination_check_allows_group_names_with_spaces() -> None:
     from ori.eval.grader import _check_hallucination
 
@@ -1032,6 +1139,16 @@ def test_report_includes_mcp_fields(tmp_path: Path) -> None:
             server_prompt_name="bloodhound_assistant",
             available_prompt_names=["bloodhound_assistant", "generic_helper"],
             prompt_discovery_status="selected",
+            available_resource_uris=["bloodhound://schema", "bloodhound://domains"],
+            resource_discovery_status="listed",
+            mcp_launcher="uvx_git",
+            mcp_source=(
+                "git+https://github.com/mwnickerson/bloodhound_mcp@"
+                "cdb17097e761c8a8622cb93bc3ba49a9e150bb6e"
+            ),
+            mcp_revision="cdb17097e761c8a8622cb93bc3ba49a9e150bb6e",
+            mcp_executable="bloodhound-mcp",
+            uv_version="uv 0.test",
             resource_mode="on-demand",
             tool_loop="native-openai-compatible",
             resource_reads_total=2,
@@ -1052,6 +1169,14 @@ def test_report_includes_mcp_fields(tmp_path: Path) -> None:
     assert row["server_prompt_name"] == "bloodhound_assistant"
     assert row["available_prompt_names"] == "bloodhound_assistant,generic_helper"
     assert row["prompt_discovery_status"] == "selected"
+    assert row["prompt_discovery_succeeded"] == "True"
+    assert row["available_resource_uris"] == "bloodhound://schema,bloodhound://domains"
+    assert row["resource_discovery_status"] == "listed"
+    assert row["resource_discovery_succeeded"] == "True"
+    assert row["mcp_launcher"] == "uvx_git"
+    assert row["mcp_revision"] == "cdb17097e761c8a8622cb93bc3ba49a9e150bb6e"
+    assert row["mcp_executable"] == "bloodhound-mcp"
+    assert row["uv_version"] == "uv 0.test"
     assert row["resource_mode"] == "on-demand"
     assert row["mcp_tool_loop"] == "native-openai-compatible"
     assert row["resource_reads_total"] == "2"
@@ -1061,6 +1186,9 @@ def test_report_includes_mcp_fields(tmp_path: Path) -> None:
         summary_row = next(csv.DictReader(f))
     assert summary_row["avg_tool_calls"] == "3.0"
     assert summary_row["non_cypher_tool_calls"] == "2"
+    assert summary_row["mcp_launcher"] == "uvx_git"
+    assert summary_row["prompt_discovery_succeeded"] == "True"
+    assert summary_row["resource_discovery_succeeded"] == "True"
 
 
 def test_cli_smoke_mcp(tmp_path: Path, monkeypatch) -> None:
@@ -1074,6 +1202,7 @@ def test_cli_smoke_mcp(tmp_path: Path, monkeypatch) -> None:
         output_dir: Path,
         bhce_url: str | None = None,
         mcp_dir: Path | None = None,
+        mcp_launcher=None,
         max_steps: int = 12,
         resource_mode: str = "off",
     ) -> SmokeEvalResult:

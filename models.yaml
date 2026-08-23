@@ -8,6 +8,7 @@
 #   openai/MODEL              — OpenAI API (requires OPENAI_API_KEY)
 #   gemini/MODEL              — Google Gemini (requires GEMINI_API_KEY)
 #   openai-compat/MODEL@URL   — any OpenAI-compatible endpoint
+#                                (OPENROUTER_API_KEY works for OpenRouter)
 #   mock/perfect              — smoke test (no API key needed)
 
 defaults:

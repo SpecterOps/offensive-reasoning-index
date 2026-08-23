@@ -8,6 +8,9 @@ from typing import Any
 
 import yaml
 
+from .eval.direct_query_safety import DirectQuerySafetyConfig
+from .mcp_launcher import MCPLauncherConfig, resolve_mcp_launcher_config
+
 
 @dataclass(frozen=True)
 class RunConfigOverrides:
@@ -48,6 +51,7 @@ class ResolvedRunProfile:
     max_model_reruns_on_infra: int
     health_timeout_seconds: float
     health_poll_interval: float
+    mcp_launcher: MCPLauncherConfig
     mcp_dir: str | None
     max_steps: int | None
     resource_mode: str
@@ -55,6 +59,7 @@ class ResolvedRunProfile:
     openai_compat_telemetry_adapter: str
     mcp_ollama_read_timeout_seconds: float
     telemetry_enabled: bool
+    direct_query_safety: dict[str, Any]
     model_entry: str | dict[str, Any] | None
     model_entries: list[str | dict[str, Any]] | None
     seed: int | None = None
@@ -301,17 +306,16 @@ def load_run_profile(
         "poll_interval",
         fallback=5.0,
     )
-    mcp_dir = _resolve_path(
-        config_dir,
-        _merged_nested_value(
-            overrides.mcp_dir,
-            profile,
-            defaults,
-            "mcp",
-            "mcp_dir",
-            fallback="../bloodhound-mcp",
-        ),
+    defaults_mcp = defaults.get("mcp") or {}
+    profile_mcp = profile.get("mcp") or {}
+    if not isinstance(defaults_mcp, dict) or not isinstance(profile_mcp, dict):
+        raise ValueError("mcp must be a mapping when present.")
+    mcp_launcher = resolve_mcp_launcher_config(
+        {**defaults_mcp, **profile_mcp},
+        config_dir=config_dir,
+        mcp_dir_override=overrides.mcp_dir,
     )
+    mcp_dir = str(mcp_launcher.mcp_dir) if mcp_launcher.mcp_dir is not None else None
     max_steps = _merged_nested_value(
         overrides.max_steps,
         profile,
@@ -368,6 +372,15 @@ def load_run_profile(
             fallback=True,
         )
     )
+    defaults_direct_safety = defaults.get("direct_query_safety") or {}
+    profile_direct_safety = profile.get("direct_query_safety") or {}
+    if not isinstance(defaults_direct_safety, dict):
+        raise ValueError("defaults.direct_query_safety must be a mapping when present.")
+    if not isinstance(profile_direct_safety, dict):
+        raise ValueError("profile direct_query_safety must be a mapping when present.")
+    direct_query_safety = DirectQuerySafetyConfig.from_mapping(
+        {**defaults_direct_safety, **profile_direct_safety}
+    ).to_jsonable()
 
     model_entry = profile.get("model")
     model_entries = profile.get("models")
@@ -449,6 +462,7 @@ def load_run_profile(
         max_model_reruns_on_infra=int(max_model_reruns_on_infra),
         health_timeout_seconds=float(health_timeout_seconds),
         health_poll_interval=float(health_poll_interval),
+        mcp_launcher=mcp_launcher,
         mcp_dir=mcp_dir,
         max_steps=int(max_steps) if max_steps is not None else None,
         resource_mode=resource_mode,
@@ -456,6 +470,7 @@ def load_run_profile(
         openai_compat_telemetry_adapter=openai_compat_telemetry_adapter,
         mcp_ollama_read_timeout_seconds=float(mcp_ollama_read_timeout_seconds),
         telemetry_enabled=telemetry_enabled,
+        direct_query_safety=direct_query_safety,
         model_entry=model_entry,
         model_entries=model_entries,
         seed=int(seed) if seed is not None else None,

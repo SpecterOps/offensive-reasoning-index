@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import asyncio
+import sys
 from types import SimpleNamespace
 
 import pytest
 
+from ori.eval.adapter import call_provider_text
 from ori.eval.codex_oauth import (
+    CodexResponseStreamError,
     chat_request_to_codex_responses_params,
     codex_headers,
     codex_model_name,
@@ -117,6 +121,79 @@ def test_codex_chat_translation_omits_unsupported_optional_params_by_default() -
 
     assert "max_output_tokens" not in params
     assert "temperature" not in params
+    assert "reasoning" not in params
+
+
+def test_codex_chat_translation_sets_explicit_reasoning_effort() -> None:
+    params = chat_request_to_codex_responses_params(
+        {
+            "model": "gpt-5.6-sol",
+            "messages": [{"role": "user", "content": "question"}],
+            "options": {"reasoning_effort": "high"},
+        }
+    )
+
+    assert params["reasoning"] == {"effort": "high"}
+
+
+def test_codex_chat_translation_rejects_unknown_reasoning_effort() -> None:
+    with pytest.raises(ValueError, match="unsupported Codex reasoning effort"):
+        chat_request_to_codex_responses_params(
+            {
+                "model": "gpt-5.6-sol",
+                "messages": [{"role": "user", "content": "question"}],
+                "options": {"reasoning_effort": "extreme"},
+            }
+        )
+
+
+def test_codex_provider_sends_reasoning_effort_to_responses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class EventStream:
+        def __aiter__(self):
+            async def events():
+                yield SimpleNamespace(type="response.output_text.delta", delta="answer")
+                yield SimpleNamespace(
+                    type="response.completed",
+                    response=SimpleNamespace(
+                        usage=SimpleNamespace(
+                            input_tokens=10,
+                            output_tokens=2,
+                            total_tokens=12,
+                        )
+                    ),
+                )
+
+            return events()
+
+    class Responses:
+        async def create(self, **kwargs):
+            captured.update(kwargs)
+            return EventStream()
+
+    class Client:
+        def __init__(self, **_kwargs):
+            self.responses = Responses()
+
+        async def close(self) -> None:
+            return None
+
+    monkeypatch.setitem(sys.modules, "openai", SimpleNamespace(AsyncOpenAI=Client))
+    monkeypatch.setenv("CODEX_API_KEY", "test-token")
+    response = asyncio.run(
+        call_provider_text(
+            model="codex/gpt-5.6-sol",
+            messages=[{"role": "user", "content": "question"}],
+            system="system",
+            ollama_options={"reasoning_effort": "high"},
+        )
+    )
+
+    assert captured["reasoning"] == {"effort": "high"}
+    assert response.provider_metrics["reasoning_effort"] == "high"
 
 
 def test_codex_chat_translation_can_opt_into_optional_params(
@@ -172,3 +249,83 @@ def test_codex_responses_events_collect_chat_completion() -> None:
     assert choice["message"]["content"] == "hello"
     assert choice["message"]["tool_calls"][0]["function"]["name"] == "group_info"
     assert data["usage"] == {"prompt_tokens": 10, "completion_tokens": 3, "total_tokens": 13}
+
+
+def test_codex_responses_events_raise_on_stream_error() -> None:
+    events = [
+        SimpleNamespace(
+            type="error",
+            code="server_error",
+            message="The response could not be generated.",
+        )
+    ]
+
+    with pytest.raises(
+        CodexResponseStreamError,
+        match="stream error: server_error: The response could not be generated",
+    ):
+        codex_responses_events_to_chat_completion(events, "gpt-5.5")
+
+
+def test_codex_responses_events_raise_on_failed_response() -> None:
+    response = SimpleNamespace(
+        error=SimpleNamespace(code="server_error", message="The model failed."),
+    )
+    events = [SimpleNamespace(type="response.failed", response=response)]
+
+    with pytest.raises(
+        CodexResponseStreamError,
+        match="response failed: server_error: The model failed",
+    ):
+        codex_responses_events_to_chat_completion(events, "gpt-5.5")
+
+
+def test_codex_responses_events_raise_on_incomplete_response() -> None:
+    response = SimpleNamespace(
+        incomplete_details=SimpleNamespace(reason="max_output_tokens"),
+    )
+    events = [SimpleNamespace(type="response.incomplete", response=response)]
+
+    with pytest.raises(
+        CodexResponseStreamError,
+        match="response incomplete: max_output_tokens",
+    ):
+        codex_responses_events_to_chat_completion(events, "gpt-5.5")
+
+
+def test_codex_responses_events_raise_without_terminal_event() -> None:
+    events = [SimpleNamespace(type="response.output_text.delta", delta="partial")]
+
+    with pytest.raises(
+        CodexResponseStreamError,
+        match=r"ended without a response\.completed event",
+    ):
+        codex_responses_events_to_chat_completion(events, "gpt-5.5")
+
+
+def test_codex_responses_events_raise_on_empty_completed_response() -> None:
+    events = [
+        SimpleNamespace(
+            type="response.completed",
+            response=SimpleNamespace(usage=None, output=[], output_text=""),
+        )
+    ]
+
+    with pytest.raises(
+        CodexResponseStreamError,
+        match="completed without text or tool calls",
+    ):
+        codex_responses_events_to_chat_completion(events, "gpt-5.5")
+
+
+def test_codex_responses_events_fall_back_to_completed_response_output() -> None:
+    response = SimpleNamespace(
+        usage=None,
+        output_text="MATCH (n:Domain) RETURN n LIMIT 1",
+        output=[],
+    )
+    events = [SimpleNamespace(type="response.completed", response=response)]
+
+    data = codex_responses_events_to_chat_completion(events, "gpt-5.5")
+
+    assert data["choices"][0]["message"]["content"] == "MATCH (n:Domain) RETURN n LIMIT 1"

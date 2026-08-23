@@ -11,7 +11,6 @@ from .contracts import contract_nodes, task_contract_for
 from .tasks import Task, generate_mcp_tasks, generate_tasks
 
 _ROW_COUNT_HINTS = ("count", "how many", "number of")
-_NODE_WORDS = ("root ca", "ntauth", "certificate template", "domain admins", "privileged")
 
 
 def check_reference_result(task: Task, result: CypherResult) -> dict[str, Any]:
@@ -107,22 +106,61 @@ def preflight_tasks(
                         ),
                     }
                 )
-        q = task.question.lower()
-        if (
-            any(word in q for word in _NODE_WORDS)
-            and contract is None
-            and task.grade_mode in {"node_set", "path_exists"}
+        if task.metadata.get("reference_scope") == "anchored":
+            prompt_upper = task.question.upper()
+            anchors = [
+                str(task.metadata.get(key) or "").strip()
+                for key in ("source_name", "target_name")
+            ]
+            missing_anchors = [
+                anchor for anchor in anchors if anchor and anchor.upper() not in prompt_upper
+            ]
+            if missing_anchors:
+                findings.append(
+                    {
+                        "task_id": task.id,
+                        "severity": "error",
+                        "code": "ANCHORED_PROMPT_SCOPE_MISMATCH",
+                        "detail": (
+                            "anchored reference task does not name its graded endpoint(s): "
+                            + ", ".join(missing_anchors)
+                        ),
+                    }
+                )
+        if task.grade_mode == "node_set" and (
+            contract is None
+            or contract.oracle != "materialized_reference"
+            or contract.set_semantics != "exact"
         ):
             findings.append(
                 {
                     "task_id": task.id,
                     "severity": "warn",
-                    "code": "PROMPT_ENTITY_WITHOUT_CONTRACT",
+                    "code": "NODE_SET_WITHOUT_MATERIALIZED_REFERENCE_CONTRACT",
                     "detail": (
-                        "task mentions important entities but has no explicit answer contract"
+                        "node_set task must declare that its live reference result defines "
+                        "the exact answer set"
                     ),
                 }
             )
+        if (
+            task.tier == 6
+            and task.grade_mode == "path_exists"
+            and task.metadata.get("critical_nodes")
+        ):
+            expected_nodes = {
+                str(node) for node in task.metadata.get("critical_nodes", [])
+            }
+            contracted_nodes = set(contract.required_nodes) if contract else set()
+            if not expected_nodes.issubset(contracted_nodes):
+                findings.append(
+                    {
+                        "task_id": task.id,
+                        "severity": "error",
+                        "code": "TIER6_CRITICAL_NODES_WITHOUT_CONTRACT",
+                        "detail": ", ".join(sorted(expected_nodes - contracted_nodes)),
+                    }
+                )
     return {
         "ok": not any(item["severity"] == "error" for item in findings),
         "findings": findings,
