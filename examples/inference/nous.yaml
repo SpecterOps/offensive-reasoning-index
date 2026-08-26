@@ -1,0 +1,32 @@
+# Nous Portal ORI inference template.
+#
+# Set NOUS_API_KEY (or NOUS_PORTAL_API_KEY) before running. Keep the key out of
+# this file. Replace the model ID with one listed in the Nous Portal API docs.
+
+version: 1
+
+defaults:
+  bhce_url: ${ORI_BHCE_URL:-https://bloodhound.example.invalid}
+  concurrency: 1
+  max_model_reruns_on_infra: 1
+  mcp:
+    mcp_dir: ${ORI_BLOODHOUND_MCP_DIR:-../bloodhound-mcp}
+    max_steps: 16
+    resource_mode: off
+    tool_loop: native-openai-compatible
+    openai_compat_telemetry_adapter: generic
+
+profiles:
+  eval_mcp_nous:
+    enabled: false
+    kind: eval-mcp
+    manifest: ${ORI_MANIFEST:-datasets/phase4-v1_manifest.json}
+    output: ${ORI_OUTPUT:-results/nous/example-model-mcp.csv}
+    model:
+      name: example-nous-model
+      model: openai-compat/<nous-model-id>
+      model_base_url: ${ORI_NOUS_BASE_URL:-https://inference-api.nousresearch.com/v1}
+      mcp_tool_loop: native-openai-compatible
+      openai_compat_telemetry_adapter: generic
+      options:
+        temperature: 0

@@ -92,6 +92,16 @@ models:
     options:
       temperature: 0
 
+  # Nous Portal uses NOUS_API_KEY (or NOUS_PORTAL_API_KEY).
+  # Replace the model ID with one currently available from Nous Portal.
+  - name: nous-portal-model
+    model: openai-compat/<nous-model-id>
+    model_base_url: https://inference-api.nousresearch.com/v1
+    mcp_tool_loop: native-openai-compatible
+    openai_compat_telemetry_adapter: generic
+    options:
+      temperature: 0
+
   - name: codex-gpt-5-5
     provider: codex
     model: gpt-5.5

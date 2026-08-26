@@ -1334,8 +1334,8 @@ def _openai_compat_chat_url(base_url: str | None, model_name: str) -> str:
     return f"{resolved}/v1/chat/completions"
 
 
-def _openai_compat_api_key() -> str:
-    return openai_compat_api_key() or "not-needed"
+def _openai_compat_api_key(base_url: str | None = None) -> str:
+    return openai_compat_api_key(base_url) or "not-needed"
 
 
 def _normalize_openai_compat_telemetry_adapter(raw_adapter: str | None) -> str:
@@ -1641,7 +1641,7 @@ async def _openai_compat_chat_turn(
         finally:
             await client.close()
     else:
-        headers = {"Authorization": f"Bearer {_openai_compat_api_key()}"}
+        headers = {"Authorization": f"Bearer {_openai_compat_api_key(url)}"}
         async with httpx.AsyncClient(timeout=timeout) as client:
             resp = await client.post(url, json=payload, headers=headers)
             resp.raise_for_status()

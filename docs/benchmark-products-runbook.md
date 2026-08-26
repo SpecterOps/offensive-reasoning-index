@@ -236,8 +236,9 @@ models:
 ```
 
 For OpenRouter, set `OPENROUTER_API_KEY` in the environment and use the
-OpenAI-compatible provider. ORI checks compatible credentials in this order:
-`OPENAI_COMPAT_API_KEY`, `OPENROUTER_API_KEY`, then `OPENAI_API_KEY`. The key
+OpenAI-compatible provider. ORI uses `OPENAI_COMPAT_API_KEY` as the explicit
+override, selects `OPENROUTER_API_KEY` or `NOUS_API_KEY`/`NOUS_PORTAL_API_KEY`
+for matching provider endpoints, and falls back to `OPENAI_API_KEY`. The key
 works for both direct and MCP inference; keep it out of YAML and other tracked
 files.
 
@@ -255,6 +256,28 @@ models:
 ```
 
 Replace `<openrouter-model-id>` with the exact model ID available from OpenRouter.
+
+For Nous Portal, set `NOUS_API_KEY` (or `NOUS_PORTAL_API_KEY`) and use the
+OpenAI-compatible inference endpoint. ORI selects the Nous-specific key when
+`model_base_url` points at `inference-api.nousresearch.com`:
+
+```bash
+export NOUS_API_KEY="<your Nous Portal key>"
+```
+
+```yaml
+models:
+  - name: nous-portal-model
+    model: openai-compat/<nous-model-id>
+    model_base_url: https://inference-api.nousresearch.com/v1
+    mcp_tool_loop: native-openai-compatible
+    openai_compat_telemetry_adapter: generic
+```
+
+Replace `<nous-model-id>` with the exact model ID shown in the [Nous Portal API
+Docs](https://portal.nousresearch.com/api-docs). Keep the key out of YAML and
+use a model that supports the OpenAI chat-completions/tool-calling surface for
+MCP runs.
 
 The top-level `manifest` and `output_dir` make the matrix self-contained.
 Relative paths are resolved from the config file's directory. Treat

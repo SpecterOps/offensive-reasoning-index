@@ -5,6 +5,7 @@
 #
 # Secret handling:
 # - Set OPENAI_COMPAT_API_KEY for most OpenAI-compatible gateways.
+# - Nous Portal accepts NOUS_API_KEY (or NOUS_PORTAL_API_KEY).
 # - Some gateways accept OPENAI_API_KEY instead; check your provider docs.
 # - Do not put API keys in this YAML file.
 

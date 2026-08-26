@@ -320,8 +320,9 @@ def test_openai_compat_chat_turn_posts_tool_payload(monkeypatch) -> None:
 
     captured: dict[str, object] = {}
     monkeypatch.delenv("OPENAI_COMPAT_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter-key")
+    monkeypatch.setenv("NOUS_API_KEY", "nous-key")
 
     class FakeResponse:
         def raise_for_status(self) -> None:
@@ -372,8 +373,8 @@ def test_openai_compat_chat_turn_posts_tool_payload(monkeypatch) -> None:
 
     turn = asyncio.run(
         _openai_compat_chat_turn(
-            url="http://127.0.0.1:8080/v1/chat/completions",
-            model_name="openai-compat/ori-test@http://127.0.0.1:8080/v1",
+            url="https://inference-api.nousresearch.com/v1/chat/completions",
+            model_name="openai-compat/openai/gpt-5.5",
             messages=[{"role": "user", "content": "q"}],
             tools=[{"type": "function", "function": {"name": "group_info"}}],
             extra_body={"temperature": 0},
@@ -381,10 +382,10 @@ def test_openai_compat_chat_turn_posts_tool_payload(monkeypatch) -> None:
         )
     )
 
-    assert captured["url"] == "http://127.0.0.1:8080/v1/chat/completions"
-    assert captured["headers"]["Authorization"] == "Bearer openrouter-key"
+    assert captured["url"] == "https://inference-api.nousresearch.com/v1/chat/completions"
+    assert captured["headers"]["Authorization"] == "Bearer nous-key"
     payload = captured["payload"]
-    assert payload["model"] == "ori-test"
+    assert payload["model"] == "openai/gpt-5.5"
     assert payload["stream"] is False
     assert payload["tool_choice"] == "auto"
     assert payload["temperature"] == 0

@@ -569,9 +569,10 @@ models:
 ```
 
 For OpenRouter, use the OpenAI-compatible provider and set the key in the
-environment. ORI reads `OPENROUTER_API_KEY` automatically (after
-`OPENAI_COMPAT_API_KEY` and before `OPENAI_API_KEY`), so the same key works for
-direct and MCP inference:
+environment. ORI uses `OPENAI_COMPAT_API_KEY` as the explicit override and
+selects `OPENROUTER_API_KEY` or `NOUS_API_KEY`/`NOUS_PORTAL_API_KEY` for matching
+provider endpoints, with `OPENAI_API_KEY` as the generic fallback. The same key
+works for direct and MCP inference:
 
 ```bash
 export OPENROUTER_API_KEY="<your OpenRouter key>"
@@ -588,6 +589,26 @@ models:
 
 Keep API keys out of model configuration files and replace
 `<openrouter-model-id>` with the exact model ID available from OpenRouter.
+
+For Nous Portal, set `NOUS_API_KEY` (or `NOUS_PORTAL_API_KEY`) and use the
+OpenAI-compatible inference endpoint:
+
+```bash
+export NOUS_API_KEY="<your Nous Portal key>"
+```
+
+```yaml
+models:
+  - name: nous-portal-model
+    model: openai-compat/<nous-model-id>
+    model_base_url: https://inference-api.nousresearch.com/v1
+    mcp_tool_loop: native-openai-compatible
+    openai_compat_telemetry_adapter: generic
+```
+
+Replace `<nous-model-id>` with the exact model ID shown in the [Nous Portal API
+Docs](https://portal.nousresearch.com/api-docs). Use a model that supports the
+OpenAI chat-completions/tool-calling surface for MCP runs.
 
 The top-level `manifest` and `output_dir` make a model-matrix config
 self-contained. Relative paths are resolved from the config file's directory.
@@ -1179,12 +1200,12 @@ dataset.
   historical comparison and focused diagnostic profiles.
 - [Inference Config Examples](examples/inference/): sanitized templates for
   Ollama, generic OpenAI-compatible endpoints, llama.cpp, vLLM, LM Studio,
-  OpenRouter, NVIDIA NIM, and BloodHound MCP environment wiring. Copy these to
+  OpenRouter, Nous Portal, NVIDIA NIM, and BloodHound MCP environment wiring. Copy these to
   local run configs and replace placeholders; keep real inference endpoints,
   private model aliases, API keys, and local paths out of public commits.
 - [OpenAI-Compatible Model Examples](docs/openai-compatible-model-examples.yaml):
   legacy disabled profile examples for Ollama OpenAI compat, llama.cpp, MLX,
-  vLLM, LM Studio, OpenRouter, and NVIDIA NIM.
+  vLLM, LM Studio, OpenRouter, Nous Portal, and NVIDIA NIM.
 
 ## Common Commands
 

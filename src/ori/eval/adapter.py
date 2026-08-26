@@ -364,11 +364,13 @@ async def _call_provider(
         resolved_base = {
             "gemini": "https://generativelanguage.googleapis.com/v1beta/openai/",
         }.get(provider, base_url)
-        api_key = openai_compat_api_key() if provider == "openai-compat" else None
-
         # handle "modelname@http://custom-url" for openai-compat
         if "@" in name and provider == "openai-compat":
             name, resolved_base = name.split("@", 1)
+
+        api_key = (
+            openai_compat_api_key(resolved_base) if provider == "openai-compat" else None
+        )
 
         client_kwargs = {"base_url": resolved_base}
         if api_key:

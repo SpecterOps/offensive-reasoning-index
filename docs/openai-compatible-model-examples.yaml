@@ -4,9 +4,10 @@
 # or a generated run config, then update model names, URLs, and env vars.
 #
 # Secret handling:
-# - OpenAI-compatible calls use OPENAI_COMPAT_API_KEY first, then OPENROUTER_API_KEY,
-#   then OPENAI_API_KEY.
-# - Set OPENROUTER_API_KEY to use an OpenRouter key directly; do not put the key in YAML.
+# - OPENAI_COMPAT_API_KEY is the explicit universal override.
+# - Nous endpoints select NOUS_API_KEY (or NOUS_PORTAL_API_KEY).
+# - OpenRouter endpoints select OPENROUTER_API_KEY.
+# - OPENAI_API_KEY remains the generic fallback; do not put keys in YAML.
 # - Some gateways need provider-specific headers. Add those at the gateway/proxy layer for now.
 
 version: 1
@@ -135,16 +136,17 @@ profiles:
       options:
         temperature: 0
 
-  phase4_hermes_portal:
+  phase4_nous_portal:
     enabled: false
     kind: eval-mcp
     manifest: datasets/phase4-v1_manifest.json
-    output: results/phase4-v1/hermes-portal.csv
+    output: results/phase4-v1/nous-portal.csv
     model:
-      name: hermes-portal
-      model: openai-compat/hermes-model-name
-      model_base_url: https://hermes.example.com/v1
+      name: nous-portal
+      model: openai-compat/<nous-model-id>
+      model_base_url: https://inference-api.nousresearch.com/v1
       mcp_tool_loop: native-openai-compatible
       openai_compat_telemetry_adapter: generic
+      # Authentication is read from NOUS_API_KEY or NOUS_PORTAL_API_KEY.
       options:
         temperature: 0

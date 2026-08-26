@@ -34,6 +34,7 @@ Use them as copy-and-edit starting points:
 - `vllm.yaml` — vLLM OpenAI-compatible server.
 - `lm-studio.yaml` — LM Studio local OpenAI-compatible server.
 - `openrouter.yaml` — OpenRouter via OpenAI-compatible API.
+- `nous.yaml` — Nous Portal via its OpenAI-compatible inference API.
 - `nvidia-nim.yaml` — NVIDIA NIM via OpenAI-compatible API.
 - `bloodhound-mcp.yaml` — BloodHound MCP and BloodHound CE environment shape.
 
