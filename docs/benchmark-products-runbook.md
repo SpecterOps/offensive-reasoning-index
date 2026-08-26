@@ -438,3 +438,29 @@ uv run ori run --config models.local.yaml
 ```
 
 If step 4 fails, stop. Do not grade models against a mismatched graph; the scores will describe ingest drift, not reasoning quality.
+
+## Nous Portal Ox Alpha quick start
+
+The current Nous Portal catalog exposes Ox Alpha as `stealth/ox-alpha`. In a
+copy of `models.example.yaml`, use the `nous-ox-alpha` entry and set the key
+outside the repository:
+
+```bash
+export NOUS_API_KEY="<your Nous Portal key>"
+uv run ori run --config models.local.yaml
+```
+
+The reusable legacy template also includes disabled direct and MCP profiles in
+[`examples/inference/nous.yaml`](../examples/inference/nous.yaml). Start with
+the direct profile; tool-enabled compatibility for this newly released model
+should be validated against the controlled target before an MCP run.
+
+To use the dedicated legacy profile instead:
+
+```bash
+cp examples/inference/nous.yaml run-config.nous.yaml
+export NOUS_API_KEY="<your Nous Portal key>"
+uv run ori run \
+  --config run-config.nous.yaml \
+  --profile eval_direct_nous_ox_alpha
+```

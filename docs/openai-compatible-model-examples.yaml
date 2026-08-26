@@ -150,3 +150,32 @@ profiles:
       # Authentication is read from NOUS_API_KEY or NOUS_PORTAL_API_KEY.
       options:
         temperature: 0
+
+  # Current Nous Portal Ox Alpha model. Start with the direct profile because
+  # the Nous/Hermes tracker has an open report for some tool-enabled requests.
+  phase4_nous_ox_alpha_direct:
+    enabled: false
+    kind: eval
+    manifest: datasets/phase4-v1_manifest.json
+    output: results/phase4-v1/nous-ox-alpha-direct.csv
+    model:
+      name: nous-ox-alpha
+      model: openai-compat/stealth/ox-alpha
+      model_base_url: https://inference-api.nousresearch.com/v1
+      options:
+        temperature: 0
+
+  phase4_nous_ox_alpha_mcp:
+    enabled: false
+    kind: eval-mcp
+    manifest: datasets/phase4-v1_manifest.json
+    output: results/phase4-v1/nous-ox-alpha-mcp.csv
+    model:
+      name: nous-ox-alpha
+      model: openai-compat/stealth/ox-alpha
+      model_base_url: https://inference-api.nousresearch.com/v1
+      mcp_tool_loop: native-openai-compatible
+      openai_compat_telemetry_adapter: generic
+      # Authentication is read from NOUS_API_KEY or NOUS_PORTAL_API_KEY.
+      options:
+        temperature: 0

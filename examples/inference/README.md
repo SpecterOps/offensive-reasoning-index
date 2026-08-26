@@ -43,3 +43,9 @@ Use them as copy-and-edit starting points:
 These examples are public-safe templates. Real inference routing files should
 remain local-only when they contain private hostnames, private model aliases,
 local output directories, reservation state, or internal network details.
+
+The Nous template includes disabled direct and MCP profiles for the current Ox
+Alpha catalog entry, `openai-compat/stealth/ox-alpha`. Set `NOUS_API_KEY` (or
+`NOUS_PORTAL_API_KEY`) in the environment and enable only the profile you have
+validated against your controlled BloodHound target. Start with the direct
+profile; tool-enabled compatibility may vary for this newly released model.

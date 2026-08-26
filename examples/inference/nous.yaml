@@ -30,3 +30,34 @@ profiles:
       openai_compat_telemetry_adapter: generic
       options:
         temperature: 0
+
+  # Ox Alpha is available through the same OpenAI-compatible Nous endpoint.
+  # Keep this disabled until the BloodHound health/ingest gates pass. The
+  # current Nous/Hermes compatibility issue affects some tool-enabled Ox Alpha
+  # requests, so validate the direct profile first.
+  eval_direct_nous_ox_alpha:
+    enabled: false
+    kind: eval
+    manifest: ${ORI_MANIFEST:-datasets/phase4-v1_manifest.json}
+    output: ${ORI_OUTPUT:-results/nous/ox-alpha-direct.csv}
+    model:
+      name: nous-ox-alpha
+      model: openai-compat/stealth/ox-alpha
+      model_base_url: ${ORI_NOUS_BASE_URL:-https://inference-api.nousresearch.com/v1}
+      options:
+        temperature: 0
+
+  # Enable only after a direct smoke run confirms the endpoint/tool behavior.
+  eval_mcp_nous_ox_alpha:
+    enabled: false
+    kind: eval-mcp
+    manifest: ${ORI_MANIFEST:-datasets/phase4-v1_manifest.json}
+    output: ${ORI_OUTPUT:-results/nous/ox-alpha-mcp.csv}
+    model:
+      name: nous-ox-alpha
+      model: openai-compat/stealth/ox-alpha
+      model_base_url: ${ORI_NOUS_BASE_URL:-https://inference-api.nousresearch.com/v1}
+      mcp_tool_loop: native-openai-compatible
+      openai_compat_telemetry_adapter: generic
+      options:
+        temperature: 0

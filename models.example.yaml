@@ -122,3 +122,14 @@ models:
     options:
       num_ctx: 65536
       temperature: 0
+
+  # Current Nous Portal Ox Alpha model. The direct track is the safest first
+  # run; Nous/Hermes has an open compatibility report for some tool-enabled
+  # Ox Alpha requests.
+  - name: nous-ox-alpha
+    model: openai-compat/stealth/ox-alpha
+    model_base_url: https://inference-api.nousresearch.com/v1
+    mcp_tool_loop: native-openai-compatible
+    openai_compat_telemetry_adapter: generic
+    options:
+      temperature: 0
