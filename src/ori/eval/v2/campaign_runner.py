@@ -33,6 +33,7 @@ from ori.eval.provider_auth import (
     resolve_openai_compat_credential,
 )
 from ori.eval.provider_contract import ProviderApiSurface, resolve_api_surface
+from ori.mcp_launcher import MCPLauncherConfig
 
 from .campaign import (
     CheckpointV2,
@@ -1692,7 +1693,7 @@ async def _run_model(
     bundle = None
     if prepared.track is Track.MCP:
         bundle = await _load_bloodhound_mcp_bundle(
-            resolved.mcp_dir,
+            MCPLauncherConfig.local_checkout(resolved.mcp_dir),
             include_resources=False,
             include_prompt=True,
             cypher_executor=coordinator.execute,

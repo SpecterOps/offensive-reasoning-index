@@ -4271,6 +4271,7 @@ def test_v2_model_runtime_has_no_legacy_grader_or_template_dispatch() -> None:
     assert 'run_dir / "direct-query-deny-cache' not in source
     assert "progress=progress" in source
     assert "_emit_progress" in source
+    assert "MCPLauncherConfig.local_checkout(resolved.mcp_dir)" in source
 
 
 def test_v2_campaign_progress_is_model_blind_and_non_fatal() -> None:
