@@ -11,7 +11,7 @@ from .comparator import COMPARATOR_FINGERPRINT, compare
 from .compiler import CompiledTask, compiler_fingerprint
 from .evidence import EvidenceNormalizationError, validate_and_normalize_evidence
 from .fingerprint import canonical_sha256, certifier_fingerprint
-from .graph import GraphSnapshot
+from .graph import GraphSnapshot, graph_identity_resolver
 from .identity import IdentityResolver
 from .profiles import capability_profile_for_track
 from .schema import (
@@ -501,7 +501,7 @@ def build_fixture_manifest(
 ) -> TaskFixtureManifest:
     """Build and execute the complete deterministic fixture matrix for one task."""
 
-    resolver = IdentityResolver(snapshot.entities)
+    resolver = graph_identity_resolver(snapshot)
     cases: list[FixtureCase] = [
         _case_from_payload(
             name="perfect",

@@ -21,7 +21,7 @@ from ori.eval.tasks import Task, generate_mcp_tasks, generate_tasks
 from ori.relationships import canonical_relationship_kind
 
 from .fingerprint import canonical_sha256
-from .graph import GraphSnapshot, build_graph_fact_registry
+from .graph import GraphSnapshot, build_graph_fact_registry, graph_relationship_buckets
 from .schema import (
     DIRECT_QUERY_POLICY_VERSION,
     MANIFEST_SCHEMA_VERSION,
@@ -422,12 +422,14 @@ def _route_registry_for_sequence(
     """Return only edges that can occupy a position in a matching bounded route."""
 
     sequence = tuple(relationships)
+    buckets = graph_relationship_buckets(snapshot)
     forward: list[set[str]] = [{source_id}]
     for relationship in sequence:
+        edges = buckets.get(relationship, ())
         next_nodes = {
             edge.target_id
-            for edge in snapshot.relationships
-            if edge.relationship == relationship and edge.source_id in forward[-1]
+            for edge in edges
+            if edge.source_id in forward[-1]
         }
         forward.append(next_nodes)
 
@@ -435,18 +437,18 @@ def _route_registry_for_sequence(
     backward[-1] = {target_id}
     for index in range(len(sequence) - 1, -1, -1):
         relationship = sequence[index]
+        edges = buckets.get(relationship, ())
         backward[index] = {
             edge.source_id
-            for edge in snapshot.relationships
-            if edge.relationship == relationship and edge.target_id in backward[index + 1]
+            for edge in edges
+            if edge.target_id in backward[index + 1]
         }
 
     registry: dict[tuple[str, str, str], EdgeWitness] = {}
     for index, relationship in enumerate(sequence):
-        for edge in snapshot.relationships:
+        for edge in buckets.get(relationship, ()):
             if (
-                edge.relationship == relationship
-                and edge.source_id in forward[index]
+                edge.source_id in forward[index]
                 and edge.target_id in backward[index + 1]
             ):
                 registry[(edge.source_id, edge.relationship, edge.target_id)] = edge
