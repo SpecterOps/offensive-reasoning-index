@@ -10,13 +10,15 @@ credibly by 2026-10-05.
 ### Release 1 provider hardening
 
 - Branch: `fix/openai-provider-runtime`
-- Published at signed commit `e35da9f`; ahead of `master` by six signed commits:
+- Published at signed candidate commit `d6ac198`; ahead of `master` by seven
+  signed commits:
   - `cd240d0` `feat: support Nous Portal API keys`
   - `cf458fb` `docs: add Nous Portal Ox Alpha run profiles`
   - `fa1e6c6` `fix: harden OpenAI-compatible provider runtime`
   - `5e3f7c7` `fix: construct typed V2 MCP launcher`
   - `ede0f49` `fix: normalize MCP provider tool schemas`
   - `e35da9f` `fix: close V2 provider hardening gaps`
+  - `d6ac198` `fix: harden compatible provider runtime`
 - Release 1 passed the original gates before the final benchmark-operations review:
   - `uv run pytest`: 872 passed
   - `uv run ruff check src scripts tests`: passed
@@ -33,8 +35,9 @@ configuration conditional on selecting the MCP track, so Direct-only campaigns
 no longer need a placeholder MCP checkout. The exact updated Release 1 batch
 passed its focused provider/runtime tests, Ruff, `git diff --check`, and a
 repository-wide secret scan before final review and live re-certification. The
-follow-up is now signed and published as `e35da9f`; no later operations,
-performance, or conference files were folded into that release commit.
+circuit/configuration follow-up is signed as `e35da9f`; the later fail-closed
+provider correction advances the frozen Release 1 candidate to `d6ac198`. No
+performance or conference files were folded into that release candidate.
 
 The controlled-host acceptance pass also found that a non-interactive operator shell
 could start ORI with an absolute `uv` path while the nested MCP launcher later
@@ -161,8 +164,8 @@ unbounded sequence of benchmark graphs.
 This is intentionally separate from Release 1 because it changes compiler and
 certifier implementation fingerprints and therefore requires fresh compilation,
 certification, readiness, and campaign roots. It must not invalidate the
-already-completed provider acceptance evidence by being folded into signed
-Release 1 commit `e35da9f`.
+candidate provider acceptance boundary by being folded into signed Release 1
+commit `d6ac198`.
 
 On the same workstation and complex seed-4401 inputs, clean `ede0f49` versus
 signed commit `56cb346` measured:
@@ -208,13 +211,15 @@ turn a useful experiment into a defensible benchmark:
    An autonomous supervisor then ran a six-model, five-pass campaign. Its Direct track is valid;
    Neo4j failed during MCP, revealing a costly circuit-amplification defect.
 6. **Late August — provider production hardening.** OpenRouter and Nous became
-   endpoint-isolated live providers. Laguna's nullable response exposed the need
-   for typed provider turns; live Nous testing then exposed null JSON-Schema
-   keywords rejected by the portal. Both are now regression-covered.
+   endpoint-isolated compatibility paths. Laguna's nullable response exposed the
+   need for typed provider turns; pre-correction Nous interoperability testing
+   then exposed null JSON-Schema keywords rejected by the portal. Both providers
+   are fixture/regression-covered; four post-correction live canaries remain the
+   Release 1 qualification gate.
 
 The presentation's strongest engineering story is not that ORI was correct on
-the first attempt. It is that each failure became a typed, fingerprinted,
-reproducible boundary rather than being hidden inside a score.
+the first attempt. It is that the incidents described here drove typed,
+fingerprinted, reproducible boundaries rather than being hidden inside a score.
 
 ## Current benchmark truth
 

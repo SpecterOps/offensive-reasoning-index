@@ -36,14 +36,16 @@ The main conference claim is:
 > separate Direct and MCP attack-path reasoning surfaces. Its most important
 > result is the failure-driven architecture that makes graph truth, model
 > evidence, infrastructure state, and scoring distinguishable. The historical
-> Direct campaign is valid evidence; current-runtime MCP model evidence is still
-> pending.
+> Direct campaign is valid evidence; fresh current-runtime Direct and MCP model
+> evidence is still pending.
 
 Do not call V29 the official public `100/100` suite. Do not present the failed
 historical MCP campaign as a ranking. Do not combine Direct and MCP into one
 headline score. Do not describe Release 1 as shipped until it is merged and all
-four post-correction Nous/OpenRouter Direct and MCP canaries pass on signed
-commit `d6ac198`.
+four post-correction Nous/OpenRouter Direct and MCP interoperability canaries
+complete on signed commit `d6ac198` with matching graph gates and zero unexpected
+infrastructure or harness failures. A typed `OUTPUT_INVALID` can satisfy this
+interoperability gate; it is not a claim that the model answered correctly.
 
 ## Three-act structure
 
