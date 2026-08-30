@@ -254,7 +254,9 @@ def _provider_infrastructure_details(
             return "PROVIDER_RATE_LIMIT", True
         if status >= 500:
             return "PROVIDER_SERVER", True
-        return None
+        if status in {404, 405, 406, 415}:
+            return "PROVIDER_CAPABILITY", False
+        return "PROVIDER_PROTOCOL", False
     if isinstance(exc, httpx.RequestError):
         return "PROVIDER_TRANSPORT", True
 

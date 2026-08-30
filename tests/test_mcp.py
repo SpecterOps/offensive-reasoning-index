@@ -621,6 +621,30 @@ def test_ollama_tool_spec_accepts_executor_callable_without_calling_it() -> None
     )
 
 
+def test_openai_compatible_tool_spec_omits_null_schema_keywords() -> None:
+    @tool(name="domain_info")
+    def domain_info():
+        async def execute(info_type: str = "list", domain_id: str | None = None) -> str:
+            return f"{info_type}:{domain_id}"
+
+        return execute
+
+    spec, _executor = _ollama_tool_spec(domain_info())
+
+    def assert_no_nulls(value: object) -> None:
+        if isinstance(value, dict):
+            assert all(item is not None for item in value.values())
+            for item in value.values():
+                assert_no_nulls(item)
+        elif isinstance(value, list):
+            for item in value:
+                assert_no_nulls(item)
+
+    parameters = spec["function"]["parameters"]
+    assert_no_nulls(parameters)
+    assert parameters["properties"]["info_type"]["default"] == "list"
+
+
 def test_read_only_wrapper_preserves_allowed_calls_and_blocks_mutation_modes() -> None:
     import asyncio
 

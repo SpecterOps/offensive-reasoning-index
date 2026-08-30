@@ -1497,7 +1497,10 @@ def _ollama_tool_spec(tool_obj: Any) -> tuple[dict[str, Any], Any]:
             "function": {
                 "name": canonical_name,
                 "description": info.description or "",
-                "parameters": info.parameters.model_dump(),
+                # Inspect's schema model serializes unset JSON-Schema keywords
+                # as explicit nulls by default. Several OpenAI-compatible
+                # gateways reject those otherwise-valid tool definitions.
+                "parameters": info.parameters.model_dump(exclude_none=True),
             },
         },
         executor,

@@ -1332,6 +1332,50 @@ def test_provider_protocol_error_is_nonretryable_infrastructure() -> None:
     ) == ("PROVIDER_PROTOCOL", False)
 
 
+@pytest.mark.parametrize("status_code", (301, 307, 400))
+def test_mcp_http_status_is_nonretryable_provider_protocol_not_harness_error(
+    monkeypatch: pytest.MonkeyPatch,
+    status_code: int,
+) -> None:
+    async def rejected_loop(**_kwargs: Any):
+        request = httpx.Request(
+            "POST",
+            "https://inference-api.nousresearch.com/v1/chat/completions",
+        )
+        response = httpx.Response(status_code, request=request)
+        raise httpx.HTTPStatusError(
+            "provider rejected request",
+            request=request,
+            response=response,
+        )
+
+    monkeypatch.setattr(
+        model_runtime,
+        "_run_openai_compat_mcp_loop",
+        rejected_loop,
+    )
+    outcome, record = asyncio.run(
+        run_mcp_model_task_v2(
+            task=MCP_TASK,
+            oracle=MCP_ORACLE,
+            resolver=MCP_RESOLVER,
+            profile=PROFILE,
+            bundle=MCPServerBundle(tools=[]),
+            model="openai-compat/poolside/laguna-s-2.1",
+            model_base_url="https://inference-api.nousresearch.com/v1",
+            tool_loop=MCPToolLoop.NATIVE_OPENAI_COMPATIBLE,
+            max_steps=4,
+        )
+    )
+
+    assert outcome.sample.execution_class is ExecutionClass.INFRA_FAILURE
+    assert outcome.sample.outcome is SampleOutcomeCode.INFRA_ERROR
+    assert outcome.sample.outcome is not SampleOutcomeCode.HARNESS_ERROR
+    assert record.provider_metrics["infra_scope"] == "provider"
+    assert record.provider_metrics["infra_error_subtype"] == "PROVIDER_PROTOCOL"
+    assert record.provider_metrics["infra_retryable"] is False
+
+
 def test_nonretryable_provider_attempt_is_terminal_on_resume() -> None:
     sample = SampleResult(
         task_id=DIRECT_TASK.task_id,
