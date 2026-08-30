@@ -141,7 +141,9 @@ def _lock_is_contended(output_dir: Path) -> bool:
 
     lock_path = output_dir / _LOCK_NAME
     if not lock_path.exists():
-        return False
+        raise CampaignStatusError(
+            "campaign lifecycle exists without its persistent campaign lock"
+        )
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
     flags |= getattr(os, "O_NOFOLLOW", 0)
     try:
@@ -462,8 +464,24 @@ def inspect_v2_campaign_status(config_path: Path) -> CampaignStatusV1:
             readiness_models != configured_models
         ):
             raise CampaignStatusError("campaign readiness models do not match config")
-    elif lifecycle.status == "completed":
-        raise CampaignStatusError("completed lifecycle is missing campaign readiness")
+    else:
+        execution_evidence = lifecycle.checkpointed_results > 0 or bool(
+            lifecycle.completed_tracks
+        )
+        if not execution_evidence:
+            for artifact_name in (
+                _PROVENANCE_NAME,
+                _STATE_NAME,
+                _REPORT_NAME,
+                _TRACK_RECEIPT_NAME,
+            ):
+                if next(output_dir.glob(f"**/{artifact_name}"), None) is not None:
+                    execution_evidence = True
+                    break
+        if lifecycle.status == "completed" or execution_evidence:
+            raise CampaignStatusError(
+                "campaign execution evidence exists without campaign readiness"
+            )
 
     readiness_by_track = {
         item.track: item for item in (readiness.tracks if readiness is not None else ())
@@ -520,7 +538,7 @@ def inspect_v2_campaign_status(config_path: Path) -> CampaignStatusV1:
             run_index=run_index,
             expected_tasks=(ready.task_count if ready is not None else None),
             track_receipt=track_receipts.get(track),
-            allow_uncommitted_report=lifecycle.status == "running",
+            allow_uncommitted_report=lifecycle.status in {"running", "interrupted"},
         )
         run_statuses.append(run_status)
         if provenance is not None:

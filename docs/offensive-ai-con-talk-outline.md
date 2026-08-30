@@ -105,9 +105,9 @@ questions according to the organizer's confirmed slot.
 Every quantitative slide must link to an immutable, redacted artifact bundle
 before technical freeze. The current Release 1 acceptance JSON describes the
 pre-final-review V13 runtime and is historical diagnostic evidence. Signed
-commit `d6ac198` is the candidate runtime identity, but it needs four fresh
-post-correction canaries and a new redacted acceptance receipt before it becomes
-immutable live-release evidence.
+commit `d6ac198` is the candidate runtime identity. Its fresh Nous Direct/MCP
+receipt is now immutable live interoperability evidence; two OpenRouter
+post-correction canaries and the merge still remain before Release 1 ships.
 
 | Proposed public statement | Current status | Evidence source | Required qualifier |
 |---|---|---|---|
@@ -118,9 +118,9 @@ immutable live-release evidence.
 | GPT-5.5 scored 207/210; Daybreak Red 206/210; Daybreak Blue 205/210; GPT-5.6 Sol 204/210; Luna 193/210; Terra 180/210 on that Direct campaign. | Supported historical evidence | historical campaign bundle and design rationale | Show repeat ranges and avoid strong ordering among the top cluster. |
 | The historical MCP campaign is not publishable as a model ranking. | Supported | missing post-track completion/public reports; incident analysis | Explain the failed graph gate and infrastructure incident. |
 | The older runner made 1,215 later provider attempts, used about 79.5 million tokens, and issued 15,124 MCP tool calls after the first affected task. | Private incident-analysis figures; not yet conference-ready | historical forensic bundle summarized in the design rationale | Keep the totals out of the deck until they are reverified directly and bound to a frozen forensic receipt/hash. If later used, say “the older runtime recorded” and “approximately” for tokens. |
-| Laguna-style nullable Chat Completions content no longer produces a harness `None.strip()` exception. | Supported on signed candidate commit `d6ac198` | provider fixtures and regression tests; pre-correction V13 canary classification is diagnostic only | Do not call Release 1 shipped until merge and fresh canaries. |
-| Nous Direct and MCP canaries completed with zero infrastructure and harness failures. | Historical pre-correction interoperability evidence | V13 acceptance evidence | Both outputs were typed `OUTPUT_INVALID`; rerun both on `d6ac198` before using them as release evidence. |
-| Release 1 supports production-qualified OpenRouter and Nous. | Not yet supported | Four post-correction canaries are pending | Describe both providers as fixture/regression-covered. Call either live-qualified only after its Direct and MCP canaries pass on `d6ac198`; call the release shipped only after merge. |
+| Laguna-style nullable Chat Completions content no longer produces a harness `None.strip()` exception. | Supported on signed candidate commit `d6ac198` | provider fixtures, regression tests, and exact-head Nous Direct receipt | The canary was typed `OUTPUT_INVALID`, not a successful benchmark answer; do not call Release 1 shipped until merge. |
+| Nous Direct and MCP canaries completed with zero infrastructure and harness failures. | Supported exact-head interoperability evidence | `docs/evidence/provider-hardening-d6ac198-nous-acceptance.json` | Both outputs were typed `OUTPUT_INVALID`; this qualifies transport/runtime/tool interoperability, not model correctness. |
+| Release 1 supports production-qualified OpenRouter and Nous. | Partially supported | Nous pair passed; OpenRouter pair pending | Call Nous live-qualified at `d6ac198`; describe OpenRouter as fixture/regression-covered until both live canaries pass; call the release shipped only after merge. |
 | ORI has an official deterministic 100 Direct / 100 MCP suite. | Unsupported | selector is not implemented | Future work only. |
 
 ## Direct results slide requirements

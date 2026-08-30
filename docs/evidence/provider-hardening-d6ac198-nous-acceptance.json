@@ -1,0 +1,107 @@
+{
+  "schema_version": 3,
+  "generated_at_utc": "2026-08-30T16:49:03Z",
+  "qualification_status": "nous-qualified-openrouter-pending",
+  "release_candidate": {
+    "git_commit": "d6ac198aabc42aaf4640edfd53bc86d623c161f2",
+    "runner_version": "ori-v2-model-campaign-v13",
+    "readiness_schema_version": "ori-v2-run-readiness-v9",
+    "runtime_implementation_fingerprint": "29d21a8fe1cfbbbdc88cb5fbf37ae1d74635898ebdd15ca91bdf277f039d2e3c"
+  },
+  "graph": {
+    "fingerprint": "fb0b6785e524d40abcc9033ea2c7887eaa88e13bb6cb1f329636a4ce4b74b1c4",
+    "live_certification": "PASS",
+    "before_after_match": true
+  },
+  "full_v29_readiness": {
+    "status": "PASS",
+    "readiness_fingerprint": "31eb3707e5dd50ec5d8323e4cff19317272f5aeb3b1b584a0a0420dd2c999f81",
+    "direct_tasks": 42,
+    "mcp_tasks": 55,
+    "provider_calls": 0
+  },
+  "launcher": {
+    "launcher": "local_checkout",
+    "mcp_server_revision": "92a37dd481ce675fe552f14c9957a31dbbcd212e",
+    "uv_executable": "<configured-absolute-uv-executable>",
+    "mcp_runtime_executable": "<configured-absolute-uv-executable>",
+    "uv_version": "uv 0.10.9 (Homebrew 2026-03-06)"
+  },
+  "local_validation": {
+    "full_pytest": "884 passed",
+    "ruff": "PASS",
+    "diff_check": "PASS",
+    "secret_scan": "PASS",
+    "independent_review": "PASS"
+  },
+  "provider": {
+    "endpoint_family": "nous",
+    "credential_source": "NOUS_API_KEY",
+    "requested_api_surface": "chat_completions",
+    "resolved_api_surface": "chat_completions",
+    "structured_output_mode": "prompt_local_validation"
+  },
+  "canaries": [
+    {
+      "track": "direct",
+      "model": "openai-compat/poolside/laguna-s-2.1",
+      "task_id": "complex.direct.global-admin-to.page-001@2",
+      "outcome": "OUTPUT_INVALID",
+      "execution_class": "model_failure",
+      "campaign_valid": true,
+      "attempts": 1,
+      "infrastructure_failures": 0,
+      "harness_failures": 0,
+      "tokens_input": 1096,
+      "tokens_output": 2048,
+      "mcp_tool_calls": 0,
+      "mcp_cypher_calls": 0,
+      "graph_before_after_match": true,
+      "readiness_fingerprint": "c91ae6088358f166f7480faa2627939e09e9ef0cc6647791cb514c3d34ee6684",
+      "track_completion_fingerprint": "08e0c528da600d7daf47497f787c7c5918ac4fec7b30397d3f9b3a279e24b977"
+    },
+    {
+      "track": "mcp",
+      "model": "openai-compat/qwen/qwen3.5-9b",
+      "task_id": "complex.mcp.global-admin-to.page-001@2",
+      "outcome": "OUTPUT_INVALID",
+      "execution_class": "model_failure",
+      "campaign_valid": true,
+      "attempts": 1,
+      "infrastructure_failures": 0,
+      "harness_failures": 0,
+      "tokens_input": 378529,
+      "tokens_output": 2816,
+      "mcp_tool_calls": 7,
+      "mcp_cypher_calls": 6,
+      "graph_before_after_match": true,
+      "readiness_fingerprint": "61f4a334f589b3c7e44df75a96ee5c3cde9ce7570b517240d58855c0732989be",
+      "track_completion_fingerprint": "2e6fb1a1a4f6a804420ba12b0a3dba5fa79035d6824954efb688d0a0837879c4"
+    }
+  ],
+  "acceptance": {
+    "authentication": "PASS",
+    "endpoint_interoperability": "PASS",
+    "direct_runtime": "PASS",
+    "mcp_tool_loop": "PASS",
+    "unexpected_infrastructure_failures": 0,
+    "unexpected_harness_failures": 0,
+    "note": "OUTPUT_INVALID is a model/output outcome and does not fail provider interoperability acceptance."
+  },
+  "pending": {
+    "openrouter_direct_canary": true,
+    "openrouter_mcp_canary": true,
+    "release_pr": true,
+    "merge_to_master": true
+  },
+  "redaction": {
+    "prompts_included": false,
+    "provider_responses_included": false,
+    "tool_arguments_included": false,
+    "tool_results_included": false,
+    "api_keys_included": false,
+    "bloodhound_credentials_included": false,
+    "private_endpoint_values_included": false,
+    "machine_specific_paths_included": false
+  }
+}

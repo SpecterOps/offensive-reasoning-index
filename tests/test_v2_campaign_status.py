@@ -81,6 +81,8 @@ def _config(tmp_path: Path, tracks: tuple[Track, ...] = (Track.DIRECT,)) -> Path
 def _dump(path: Path, model: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(model.model_dump_json(indent=2) + "\n")  # type: ignore[attr-defined]
+    if isinstance(model, campaign_runner.CampaignLifecycleV2):
+        (path.parent / ".ori-v2-campaign.lock").touch(exist_ok=True)
 
 
 def _base_provenance(track: Track) -> RunProvenanceV2:
@@ -523,6 +525,22 @@ def test_running_with_free_lock_is_stale_and_resumable(tmp_path: Path) -> None:
     assert status.next_action == "resume_campaign"
 
 
+def test_lifecycle_without_persistent_lock_fails_closed(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    from ori.eval.v2.campaign_config import load_v2_campaign_config
+
+    resolved = load_v2_campaign_config(config)
+    resolved.output_dir.mkdir()
+    _dump(
+        resolved.output_dir / "campaign-lifecycle-v2.private.json",
+        _lifecycle(resolved.source_config_fingerprint, status="running"),
+    )
+    (resolved.output_dir / ".ori-v2-campaign.lock").unlink()
+
+    with pytest.raises(CampaignStatusError, match="without its persistent campaign lock"):
+        inspect_v2_campaign_status(config)
+
+
 @pytest.mark.parametrize(
     ("lifecycle_status", "observed_state"),
     (("running", "stale_running"), ("interrupted", "interrupted")),
@@ -576,6 +594,28 @@ def test_running_projection_allows_atomic_report_before_track_receipt(
     assert status.tracks[0].completion_present is False
 
 
+def test_interrupted_projection_allows_atomic_report_before_track_receipt(
+    tmp_path: Path,
+) -> None:
+    config, resolved = _completed_campaign(tmp_path)
+    (resolved.output_dir / "direct" / "track-completion-v2.private.json").unlink()
+    _dump(
+        resolved.output_dir / "campaign-lifecycle-v2.private.json",
+        _lifecycle(
+            resolved.source_config_fingerprint,
+            status="interrupted",
+            checkpointed_results=1,
+        ),
+    )
+
+    status = inspect_v2_campaign_status(config)
+
+    assert status.observed_state == "interrupted"
+    assert status.next_action == "resume_campaign"
+    assert status.runs[0].report_present is True
+    assert status.tracks[0].completion_present is False
+
+
 def test_interrupted_campaign_is_resumable(tmp_path: Path) -> None:
     config = _config(tmp_path)
     from ori.eval.v2.campaign_config import load_v2_campaign_config
@@ -591,6 +631,43 @@ def test_interrupted_campaign_is_resumable(tmp_path: Path) -> None:
 
     assert status.observed_state == "interrupted"
     assert status.next_action == "resume_campaign"
+
+
+def test_missing_readiness_is_allowed_before_execution_evidence(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    from ori.eval.v2.campaign_config import load_v2_campaign_config
+
+    resolved = load_v2_campaign_config(config)
+    resolved.output_dir.mkdir()
+    _dump(
+        resolved.output_dir / "campaign-lifecycle-v2.private.json",
+        _lifecycle(resolved.source_config_fingerprint, status="interrupted"),
+    )
+
+    status = inspect_v2_campaign_status(config)
+
+    assert status.observed_state == "interrupted"
+    assert status.progress.expected_results is None
+    assert status.next_action == "resume_campaign"
+
+
+def test_execution_evidence_without_readiness_fails_closed(tmp_path: Path) -> None:
+    config, resolved = _completed_campaign(tmp_path)
+    (resolved.output_dir / "v2-run-readiness.private.json").unlink()
+    _dump(
+        resolved.output_dir / "campaign-lifecycle-v2.private.json",
+        _lifecycle(
+            resolved.source_config_fingerprint,
+            status="interrupted",
+            checkpointed_results=1,
+        ),
+    )
+
+    with pytest.raises(
+        CampaignStatusError,
+        match="execution evidence exists without campaign readiness",
+    ):
+        inspect_v2_campaign_status(config)
 
 
 def test_failed_campaign_requires_investigation_and_is_not_resumable(

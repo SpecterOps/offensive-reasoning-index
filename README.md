@@ -1249,6 +1249,15 @@ dataset.
 - [Offensive AI Con Talk Outline](docs/offensive-ai-con-talk-outline.md): timed
   narrative, public claim register, offline demo storyboard, and evidence-freeze
   checklist for the October 5 presentation.
+- [Offensive AI Con Readiness Report](docs/offensive-ai-con-readiness-plan.md):
+  project history, code/result/debt ledgers, definitions of finished, owners,
+  dated release/benchmark/conference schedule, and post-conference 100/100 lane.
+- [Offensive AI Con Offline Demo](docs/offensive-ai-con-offline-demo.md):
+  deterministic stage package, six static fallbacks, build/QA commands, and
+  abort rules for a presentation that does not depend on live services.
+- `scripts/build_v2_model_card.py`: validates a completed, graph-gated V29
+  Direct+MCP campaign and emits a public-safe JSON summary plus a deterministic
+  1280-by-720 SVG. It refuses incomplete, invalid, or mismatched evidence.
 - [Phase 4 v1 Runbook](docs/phase4-v1-runbook.md): older Phase 4 v1 workflow for
   historical comparison and focused diagnostic profiles.
 - [Inference Config Examples](examples/inference/): sanitized templates for

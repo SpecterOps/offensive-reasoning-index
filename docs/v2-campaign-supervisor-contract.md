@@ -115,6 +115,9 @@ Stop and notify the operator when any of these is true:
 - the config, runtime, graph, candidate, capability, or completion fingerprints
   disagree;
 - lifecycle evidence is missing while a lock or other campaign artifact exists;
+- lifecycle evidence exists but its persistent campaign lock file is missing;
+- provider-run, checkpoint, report, or completion evidence exists without the
+  readiness receipt that binds it to the graph and release;
 - authentication or another non-retryable provider failure occurs;
 - the external restart or spend limit is reached;
 - a track is complete but invalid;
@@ -169,3 +172,12 @@ with a token-capped smoke root:
 - failed, corrupt, incompatible, or invalid-completion evidence stops the
   supervisor;
 - valid completion produces graph-gated track receipts before archival.
+
+`running` proves exclusive ownership of the campaign root; it does not prove
+that the owning process is making progress. A supervisor must never start a
+second process while the lock is held. It may alert on an operator-defined
+no-progress deadline and request graceful termination, but restart eligibility
+begins only after the lock is free and `campaign-status` reports an allowed
+typed recovery action. The deadline must be longer than the configured graph,
+provider-read, tool-turn, and whole-task bounds so a valid long task is not
+mistaken for a wedge.
