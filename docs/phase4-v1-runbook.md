@@ -185,11 +185,11 @@ the live graph.
 For OpenAI-compatible APIs, set the model to `openai-compat/...`, provide the
 base URL, and force the native OpenAI-compatible MCP tool loop.
 
-ORI uses `OPENAI_COMPAT_API_KEY` as the explicit override. For provider-
-scoped endpoints it selects `OPENROUTER_API_KEY` or `NOUS_API_KEY` (with
-`NOUS_PORTAL_API_KEY` as an alias), then falls back to `OPENAI_API_KEY`. Keep
-keys out of run-config YAML and other tracked files. The selected key works for
-both direct and MCP inference.
+ORI uses `OPENAI_COMPAT_API_KEY` only as the explicit override for generic
+OpenAI-compatible endpoints. OpenRouter selects `OPENROUTER_API_KEY`, Nous
+selects `NOUS_API_KEY` (with `NOUS_PORTAL_API_KEY` as an alias), and official
+OpenAI selects `OPENAI_API_KEY`. Keep keys out of run-config YAML and other
+tracked files. The selected key works for both direct and MCP inference.
 
 For Nous Portal, use `https://inference-api.nousresearch.com/v1` as the base URL
 and set `NOUS_API_KEY` before running ORI.

@@ -27,6 +27,12 @@ from ori.eval.direct_query_safety import (
     QueryDenyCache,
 )
 from ori.eval.mcp_runtime import _load_bloodhound_mcp_bundle
+from ori.eval.provider_auth import (
+    official_openai_endpoint_is_secure,
+    openai_compat_endpoint_is_local,
+    resolve_openai_compat_credential,
+)
+from ori.eval.provider_contract import ProviderApiSurface, resolve_api_surface
 
 from .campaign import (
     CheckpointV2,
@@ -75,7 +81,7 @@ from .schema import (
     TaskCertification,
     Track,
 )
-from .scoring import SampleResult, summarize_results
+from .scoring import SampleOutcomeCode, SampleResult, summarize_results
 
 RUNNER_VERSION = "ori-v2-model-campaign-v12"
 RUN_STATE_SCHEMA_VERSION = "ori-v2-private-run-state-v5"
@@ -98,6 +104,8 @@ _RUNNER_IMPLEMENTATION_SOURCES = {
     "mcp_state_machine": Path(__file__).with_name("mcp.py"),
     "model_runtime": Path(__file__).with_name("model_runtime.py"),
     "query_contract": Path(__file__).with_name("query_contract.py"),
+    "provider_auth": Path(__file__).parent.parent / "provider_auth.py",
+    "provider_contract": Path(__file__).parent.parent / "provider_contract.py",
     "provider_loops": Path(__file__).parent.parent / "mcp_runtime.py",
     "runtime": Path(__file__).with_name("runtime.py"),
     "schema": Path(__file__).with_name("schema.py"),
@@ -217,6 +225,11 @@ class ModelRunProvenanceV2(StrictModel):
     containment_config_fingerprint: str
     runtime_implementation_fingerprint: str
     runtime_config_fingerprint: str
+    requested_api_surface: ProviderApiSurface
+    resolved_api_surface: ProviderApiSurface
+    structured_output_mode: Literal["prompt_local_validation"]
+    endpoint_family: str
+    credential_source: str | None = None
     provenance_fingerprint: str
 
     @model_validator(mode="after")
@@ -322,6 +335,11 @@ class ModelReadinessV2(StrictModel):
     model: str
     credential_check: str
     capability_check: str
+    requested_api_surface: ProviderApiSurface
+    resolved_api_surface: ProviderApiSurface
+    structured_output_mode: Literal["prompt_local_validation"]
+    endpoint_family: str
+    credential_source: str | None = None
     reasoning_effort: ReasoningEffort | None = None
 
 
@@ -883,6 +901,80 @@ def _git_revision(path: Path) -> str:
     return revision
 
 
+@dataclass(frozen=True)
+class _ProviderIdentityV2:
+    requested_api_surface: ProviderApiSurface
+    resolved_api_surface: ProviderApiSurface
+    structured_output_mode: Literal["prompt_local_validation"]
+    endpoint_family: str
+    credential_source: str | None
+
+
+def _model_base_url(
+    model: V2ModelEntry,
+    resolved: ResolvedV2CampaignConfig,
+) -> str | None:
+    base_url = model.model_base_url or resolved.config.defaults.model_base_url
+    if not base_url and "@" in model.model:
+        base_url = model.model.rsplit("@", 1)[1]
+    if not base_url and model.provider == "openai-compat":
+        base_url = os.getenv("OPENAI_COMPAT_BASE_URL")
+    if not base_url and model.provider == "openai":
+        base_url = "https://api.openai.com/v1"
+    return base_url
+
+
+def _provider_identity(
+    model: V2ModelEntry,
+    resolved: ResolvedV2CampaignConfig,
+) -> _ProviderIdentityV2:
+    requested = ProviderApiSurface(model.api_surface)
+    selected = resolve_api_surface(model.provider, requested)
+    if model.provider == "codex" and selected is not ProviderApiSurface.RESPONSES:
+        raise V2CampaignRunError(
+            f"model {model.name} cannot use api_surface={selected.value!r}; "
+            "Release 1 Codex requires Responses"
+        )
+    if model.provider != "codex" and selected is not ProviderApiSurface.CHAT_COMPLETIONS:
+        raise V2CampaignRunError(
+            f"model {model.name} cannot use api_surface={selected.value!r}; "
+            "Release 1 enables Responses only for Codex"
+        )
+
+    credential_source: str | None = None
+    endpoint_family = model.provider
+    if model.provider == "openai":
+        base_url = _model_base_url(model, resolved)
+        if not official_openai_endpoint_is_secure(base_url):
+            raise V2CampaignRunError(
+                f"model {model.name} provider='openai' requires the official "
+                "HTTPS api.openai.com origin; "
+                "use provider='openai-compat' for custom endpoints"
+            )
+        endpoint_family = "openai"
+        credential_source = "OPENAI_API_KEY" if os.getenv("OPENAI_API_KEY") else None
+    elif model.provider == "openai-compat":
+        base_url = _model_base_url(model, resolved)
+        credential = resolve_openai_compat_credential(base_url)
+        endpoint_family = credential.endpoint_family
+        credential_source = credential.credential_source
+    elif model.provider == "codex":
+        endpoint_family = "codex_oauth"
+        credential_source = "codex-login-status"
+    elif model.provider == "anthropic":
+        credential_source = "ANTHROPIC_API_KEY" if os.getenv("ANTHROPIC_API_KEY") else None
+    elif model.provider == "gemini":
+        credential_source = "GEMINI_API_KEY" if os.getenv("GEMINI_API_KEY") else None
+
+    return _ProviderIdentityV2(
+        requested_api_surface=requested,
+        resolved_api_surface=selected,
+        structured_output_mode="prompt_local_validation",
+        endpoint_family=endpoint_family,
+        credential_source=credential_source,
+    )
+
+
 def _codex_model_slug(model: V2ModelEntry) -> str:
     slug = model.model.split("/", 1)[1] if model.model.startswith("codex/") else model.model
     return slug.split("@", 1)[0]
@@ -897,6 +989,7 @@ def _model_readiness(
     codex_status_checked = False
     codex_capabilities: dict[str, set[str]] | None = None
     for model in resolved.config.models:
+        identity = _provider_identity(model, resolved)
         if model.provider == "codex":
             if not codex_status_checked:
                 try:
@@ -958,6 +1051,11 @@ def _model_readiness(
                         if reasoning_effort is not None
                         else "codex-model-cache"
                     ),
+                    requested_api_surface=identity.requested_api_surface,
+                    resolved_api_surface=identity.resolved_api_surface,
+                    structured_output_mode=identity.structured_output_mode,
+                    endpoint_family=identity.endpoint_family,
+                    credential_source=identity.credential_source,
                     reasoning_effort=reasoning_effort,
                 )
             )
@@ -968,25 +1066,35 @@ def _model_readiness(
             "gemini": "GEMINI_API_KEY",
             "openai": "OPENAI_API_KEY",
         }.get(model.provider)
-        if required_key is not None and not os.getenv(required_key):
-            raise V2CampaignRunError(f"model {model.name} requires {required_key}")
         if model.provider == "openai-compat":
-            base_url = (
-                model.model_base_url
-                or resolved.config.defaults.model_base_url
-                or os.getenv("OPENAI_COMPAT_BASE_URL")
-            )
-            if not base_url and "@" not in model.model:
+            base_url = _model_base_url(model, resolved)
+            if not base_url:
                 raise V2CampaignRunError(
                     f"model {model.name} requires an OpenAI-compatible base URL"
                 )
+            if identity.credential_source is None and not openai_compat_endpoint_is_local(
+                base_url
+            ):
+                raise V2CampaignRunError(
+                    f"model {model.name} has no credential for "
+                    f"{identity.endpoint_family} endpoint"
+                )
+        if required_key is not None and identity.credential_source is None:
+            raise V2CampaignRunError(f"model {model.name} requires {required_key}")
         receipts.append(
             ModelReadinessV2(
                 name=model.name,
                 provider=model.provider,
                 model=model.model,
-                credential_check=(required_key or "provider-does-not-require-a-key"),
+                credential_check=(
+                    identity.credential_source or "provider-does-not-require-a-key"
+                ),
                 capability_check="configured-not-probed",
+                requested_api_surface=identity.requested_api_surface,
+                resolved_api_surface=identity.resolved_api_surface,
+                structured_output_mode=identity.structured_output_mode,
+                endpoint_family=identity.endpoint_family,
+                credential_source=identity.credential_source,
             )
         )
     return tuple(receipts)
@@ -1212,6 +1320,7 @@ def _provenance(
     run_index: int,
     loop: MCPToolLoop | None,
 ) -> ModelRunProvenanceV2:
+    provider_identity = _provider_identity(model, resolved)
     run_identity = RunIdentity(
         provider=model.provider,
         model=model.model,
@@ -1229,6 +1338,11 @@ def _provenance(
         "live_certification_fingerprint": prepared.live.artifact_fingerprint,
         "containment_config_fingerprint": canonical_sha256(direct_config.to_jsonable()),
         "runtime_implementation_fingerprint": (RUNNER_IMPLEMENTATION_FINGERPRINT),
+        "requested_api_surface": provider_identity.requested_api_surface,
+        "resolved_api_surface": provider_identity.resolved_api_surface,
+        "structured_output_mode": provider_identity.structured_output_mode,
+        "endpoint_family": provider_identity.endpoint_family,
+        "credential_source": provider_identity.credential_source,
         "runtime_config_fingerprint": canonical_sha256(
             {
                 "runner_version": RUNNER_VERSION,
@@ -1236,6 +1350,11 @@ def _provenance(
                 "model": model.model_dump(mode="json"),
                 "track": prepared.track,
                 "loop": loop,
+                "requested_api_surface": provider_identity.requested_api_surface,
+                "resolved_api_surface": provider_identity.resolved_api_surface,
+                "structured_output_mode": provider_identity.structured_output_mode,
+                "endpoint_family": provider_identity.endpoint_family,
+                "credential_source": provider_identity.credential_source,
             }
         ),
         "provenance_fingerprint": "0" * 64,
@@ -1301,6 +1420,16 @@ def _attempt_consumes_retry_budget(attempt: ProviderAttemptV2) -> bool:
         and metrics.get("infra_scope") == "operator"
         and metrics.get("infra_error_subtype") == "INTERRUPTED"
     )
+
+
+def _attempt_is_terminal_on_resume(attempt: ProviderAttemptV2) -> bool:
+    """Keep typed non-retryable failures terminal across process restarts."""
+
+    sample = attempt.sample
+    if sample.outcome is SampleOutcomeCode.INTERRUPTED:
+        return False
+    policy = _infrastructure_retry_policy(sample, attempt.provider)
+    return policy is not None and policy[1] is False
 
 
 def _state(
@@ -1543,6 +1672,14 @@ async def _run_model(
         for result in results
         if result.execution_class not in retryable_execution_classes
     }
+    latest_attempts: dict[str, ProviderAttemptV2] = {}
+    for attempt in attempts:
+        latest_attempts[attempt.task_id] = attempt
+    completed.update(
+        task_id
+        for task_id, attempt in latest_attempts.items()
+        if _attempt_is_terminal_on_resume(attempt)
+    )
     _emit_progress(
         progress,
         (
@@ -1620,11 +1757,7 @@ async def _run_model(
             provider: ProviderRunRecord
             direct_preflight_blocked = False
             cancellation: V2ModelTaskCancelled | None = None
-            model_base_url = (
-                model.model_base_url
-                if model.model_base_url is not None
-                else resolved.config.defaults.model_base_url
-            )
+            model_base_url = _model_base_url(model, resolved)
             try:
                 if prepared.track is Track.DIRECT:
                     if coordinator.circuit_open:
@@ -1653,6 +1786,7 @@ async def _run_model(
                             resolver=resolver,
                             model=model.requested_model,
                             model_base_url=model_base_url,
+                            api_surface=getattr(model, "api_surface", "auto"),
                             ollama_options=provider_options,
                         )
                 else:
@@ -1666,6 +1800,7 @@ async def _run_model(
                         bundle=bundle,
                         model=model.requested_model,
                         model_base_url=model_base_url,
+                        api_surface=getattr(model, "api_surface", "auto"),
                         tool_loop=loop,
                         max_steps=resolved.config.defaults.mcp.max_steps,
                         ollama_options=provider_options,

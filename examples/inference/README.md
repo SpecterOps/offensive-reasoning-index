@@ -49,3 +49,18 @@ Alpha catalog entry, `openai-compat/stealth/ox-alpha`. Set `NOUS_API_KEY` (or
 `NOUS_PORTAL_API_KEY`) in the environment and enable only the profile you have
 validated against your controlled BloodHound target. Start with the direct
 profile; tool-enabled compatibility may vary for this newly released model.
+
+## Protocol V2 API surfaces
+
+V2 model entries accept `api_surface: auto | chat_completions | responses`.
+Release 1 preserves existing behavior: Codex OAuth resolves `auto` to Responses,
+while official OpenAI and OpenAI-compatible endpoints resolve it to Chat
+Completions. OpenRouter and Nous therefore use `auto` or explicit
+`chat_completions`. Other explicit Responses selections fail readiness before
+model usage.
+
+Credentials are endpoint-isolated. OpenRouter uses `OPENROUTER_API_KEY`, Nous
+uses `NOUS_API_KEY` or `NOUS_PORTAL_API_KEY`, official OpenAI uses only
+`OPENAI_API_KEY`, and an unrecognized compatible endpoint uses only the explicit
+`OPENAI_COMPAT_API_KEY` override. ORI never borrows one provider's key for a
+different hostname.

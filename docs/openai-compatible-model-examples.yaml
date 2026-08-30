@@ -4,10 +4,10 @@
 # or a generated run config, then update model names, URLs, and env vars.
 #
 # Secret handling:
-# - OPENAI_COMPAT_API_KEY is the explicit universal override.
+# - OPENAI_COMPAT_API_KEY is the explicit override for generic compatible endpoints.
 # - Nous endpoints select NOUS_API_KEY (or NOUS_PORTAL_API_KEY).
 # - OpenRouter endpoints select OPENROUTER_API_KEY.
-# - OPENAI_API_KEY remains the generic fallback; do not put keys in YAML.
+# - OPENAI_API_KEY remains for official OpenAI; do not put keys in YAML.
 # - Some gateways need provider-specific headers. Add those at the gateway/proxy layer for now.
 
 version: 1

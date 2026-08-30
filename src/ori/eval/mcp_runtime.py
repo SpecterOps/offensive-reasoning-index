@@ -61,7 +61,17 @@ from .inspect_runtime import (
     _task_name_for_model,
     _task_to_dict,
 )
-from .provider_auth import openai_compat_api_key
+from .provider_auth import (
+    openai_compat_endpoint_is_local,
+    resolve_openai_compat_credential,
+)
+from .provider_contract import (
+    ProviderApiSurface,
+    ProviderAuthenticationError,
+    ProviderProtocolError,
+    ToolArgumentParseStatus,
+    normalize_chat_completion,
+)
 from .tasks import Task
 
 RESOURCE_MODE_OFF = "off"
@@ -1334,10 +1344,6 @@ def _openai_compat_chat_url(base_url: str | None, model_name: str) -> str:
     return f"{resolved}/v1/chat/completions"
 
 
-def _openai_compat_api_key(base_url: str | None = None) -> str:
-    return openai_compat_api_key(base_url) or "not-needed"
-
-
 def _normalize_openai_compat_telemetry_adapter(raw_adapter: str | None) -> str:
     adapter = raw_adapter or OPENAI_COMPAT_TELEMETRY_AUTO
     if adapter not in OPENAI_COMPAT_TELEMETRY_VALUES:
@@ -1608,6 +1614,8 @@ async def _openai_compat_chat_turn(
         payload.update(dict(extra_body))
 
     timeout = httpx.Timeout(connect=10.0, read=read_timeout_seconds, write=30.0, pool=30.0)
+    endpoint_family = "codex"
+    credential_source = "CODEX_OAUTH"
     if model_name.startswith("codex/"):
         import openai
 
@@ -1641,25 +1649,43 @@ async def _openai_compat_chat_turn(
         finally:
             await client.close()
     else:
-        headers = {"Authorization": f"Bearer {_openai_compat_api_key(url)}"}
+        credential = resolve_openai_compat_credential(url)
+        endpoint_family = credential.endpoint_family
+        credential_source = credential.credential_source
+        if credential.api_key is None and not openai_compat_endpoint_is_local(url):
+            raise ProviderAuthenticationError(
+                "OpenAI-compatible remote endpoint requires a credential scoped to endpoint family "
+                f"{credential.endpoint_family!r}"
+            )
+        headers = (
+            {"Authorization": f"Bearer {credential.api_key}"}
+            if credential.api_key is not None
+            else {}
+        )
         async with httpx.AsyncClient(timeout=timeout) as client:
             resp = await client.post(url, json=payload, headers=headers)
             resp.raise_for_status()
-            data = resp.json()
+            try:
+                data = resp.json()
+            except (TypeError, ValueError) as exc:
+                raise ProviderProtocolError(
+                    "Chat Completions response body is not valid JSON"
+                ) from exc
 
-    choices = list(data.get("choices") or [])
-    choice = choices[0] if choices else {}
-    message = dict(choice.get("message") or {})
-    usage = dict(data.get("usage") or {})
-    content = message.get("content") or ""
-    content, think_block = _split_thinking_from_content(content)
-    thinking = _string_field(
-        message.get("reasoning"),
-        message.get("reasoning_content"),
-        message.get("thinking"),
-        data.get("reasoning"),
-        think_block,
+    turn = normalize_chat_completion(
+        data,
+        provider="codex" if model_name.startswith("codex/") else endpoint_family,
+        endpoint=url,
+        fallback_model=_openai_compat_model_name(model_name),
     )
+    if not isinstance(data, dict):
+        raise ProviderProtocolError("Chat Completions response envelope must be an object")
+    choice = dict(data["choices"][0])
+    message = dict(choice["message"])
+    usage = dict(data.get("usage") or {})
+    content = turn.text
+    content, think_block = _split_thinking_from_content(content)
+    thinking = turn.reasoning or think_block
     provider_metrics = _openai_compat_provider_metrics(
         data=data,
         choice=choice,
@@ -1669,30 +1695,84 @@ async def _openai_compat_chat_turn(
     )
     if think_block and "reasoning_source" not in provider_metrics:
         provider_metrics["reasoning_source"] = "think_block"
+    provider_metrics.update(
+        {
+            "refusal": turn.refusal,
+            "status": turn.status.value,
+            "usage_reported": turn.usage.usage_reported,
+            "usage_complete": turn.usage.usage_complete,
+            "response_id": turn.response_id,
+            "api_surface": (
+                ProviderApiSurface.RESPONSES.value
+                if model_name.startswith("codex/")
+                else ProviderApiSurface.CHAT_COMPLETIONS.value
+            ),
+            "endpoint_family": endpoint_family,
+            "credential_source": credential_source,
+        }
+    )
+    terminal_output_subtype = {
+        "truncated": "TRUNCATED",
+        "content_filtered": "CONTENT_FILTERED",
+    }.get(turn.status.value)
+    if terminal_output_subtype is not None:
+        content = ""
+        provider_metrics["model_output_error"] = True
+        provider_metrics["model_output_subtype"] = terminal_output_subtype
+        tool_calls_for_execution = ()
+    else:
+        tool_calls_for_execution = turn.tool_calls
+    normalized_tool_calls = [
+        {
+            "id": call.id,
+            "type": "function",
+            "function": {
+                "name": call.name,
+                "arguments": call.raw_arguments,
+            },
+            "parsed_arguments": call.parsed_arguments,
+            "argument_parse_status": call.argument_parse_status.value,
+            "argument_parse_error": call.argument_parse_error,
+        }
+        for call in tool_calls_for_execution
+    ]
     return {
-        "model": data.get("model") or _openai_compat_model_name(model_name),
+        "model": turn.model,
         "content": content,
         "thinking": thinking,
-        "tool_calls": message.get("tool_calls") or [],
-        "prompt_tokens": int(usage.get("prompt_tokens") or 0),
-        "completion_tokens": int(usage.get("completion_tokens") or 0),
-        "total_tokens": int(usage.get("total_tokens") or 0),
-        "finish_reason": choice.get("finish_reason") or "",
+        "tool_calls": normalized_tool_calls,
+        "prompt_tokens": turn.usage.input_tokens or 0,
+        "completion_tokens": turn.usage.output_tokens or 0,
+        "total_tokens": turn.usage.total_tokens or 0,
+        "finish_reason": turn.finish_reason,
         "provider_metrics": provider_metrics,
     }
 
 
-def _tool_call_arguments(raw_arguments: Any) -> dict[str, Any]:
+def _tool_call_arguments(
+    raw_arguments: Any,
+) -> tuple[dict[str, Any], ToolArgumentParseStatus, str | None]:
     if isinstance(raw_arguments, dict):
-        return raw_arguments
-    if isinstance(raw_arguments, str) and raw_arguments.strip():
+        return raw_arguments, ToolArgumentParseStatus.VALID, None
+    if raw_arguments is None or raw_arguments == "":
+        return {}, ToolArgumentParseStatus.EMPTY, None
+    if isinstance(raw_arguments, str):
         try:
             parsed = json.loads(raw_arguments)
             if isinstance(parsed, dict):
-                return parsed
-        except json.JSONDecodeError:
-            return {}
-    return {}
+                return parsed, ToolArgumentParseStatus.VALID, None
+            return (
+                {},
+                ToolArgumentParseStatus.NON_OBJECT,
+                "tool arguments JSON must decode to an object",
+            )
+        except json.JSONDecodeError as exc:
+            return {}, ToolArgumentParseStatus.MALFORMED, str(exc)
+    return (
+        {},
+        ToolArgumentParseStatus.MALFORMED,
+        f"tool arguments must be a JSON object or string, got {type(raw_arguments).__name__}",
+    )
 
 
 def _env_flag(name: str, default: bool = False) -> bool:
@@ -2161,16 +2241,52 @@ async def _run_openai_compat_mcp_loop(
 
         inspect_tool_calls: list[ToolCall] = []
         normalized_tool_calls: list[dict[str, Any]] = []
+        tool_argument_errors: dict[str, str] = {}
         for idx, call in enumerate(raw_tool_calls):
             function = dict(call.get("function") or {})
             name = str(function.get("name") or "")
-            arguments = _tool_call_arguments(function.get("arguments"))
             call_id = str(call.get("id") or f"openai-compat-call-{step + 1}-{idx + 1}")
+            parse_status_raw = call.get("argument_parse_status")
+            parsed_arguments = call.get("parsed_arguments")
+            parse_error = call.get("argument_parse_error")
+            try:
+                parse_status = (
+                    ToolArgumentParseStatus(parse_status_raw)
+                    if parse_status_raw is not None
+                    else None
+                )
+            except ValueError:
+                parse_status = ToolArgumentParseStatus.MALFORMED
+                parse_error = f"unknown argument parse status: {parse_status_raw!r}"
+            if parse_status is None:
+                arguments, parse_status, parse_error = _tool_call_arguments(
+                    function.get("arguments")
+                )
+            elif parse_status is ToolArgumentParseStatus.VALID:
+                if isinstance(parsed_arguments, dict):
+                    arguments = parsed_arguments
+                else:
+                    arguments = {}
+                    parse_status = ToolArgumentParseStatus.MALFORMED
+                    parse_error = "normalized tool arguments are missing their parsed object"
+            elif parse_status is ToolArgumentParseStatus.EMPTY:
+                arguments = {}
+            else:
+                arguments = {}
+                parse_error = str(parse_error or "tool arguments are not a JSON object")
+            if parse_status in {
+                ToolArgumentParseStatus.MALFORMED,
+                ToolArgumentParseStatus.NON_OBJECT,
+            }:
+                tool_argument_errors[call_id] = str(parse_error)
             normalized_tool_calls.append(
                 {
                     "id": call_id,
                     "type": "function",
-                    "function": {"name": name, "arguments": json.dumps(arguments)},
+                    "function": {
+                        "name": name,
+                        "arguments": function.get("arguments") or "",
+                    },
                 }
             )
             inspect_tool_calls.append(ToolCall(id=call_id, function=name, arguments=arguments))
@@ -2220,7 +2336,18 @@ async def _run_openai_compat_mcp_loop(
             result_text = ""
             tool_error: ToolCallError | None = None
             infrastructure_error: MCPToolInfrastructureError | None = None
-            if executed_tool_calls >= max_steps:
+            argument_error = tool_argument_errors.get(tool_call.id)
+            if argument_error is not None:
+                executed_tool_calls += 1
+                result_text = json.dumps(
+                    {
+                        "success": False,
+                        "error": argument_error,
+                        "error_type": "invalid_tool_arguments",
+                    }
+                )
+                tool_error = ToolCallError(type="parsing", message=argument_error)
+            elif executed_tool_calls >= max_steps:
                 result_text = json.dumps(
                     {
                         "success": False,

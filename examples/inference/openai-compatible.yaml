@@ -4,9 +4,10 @@
 # endpoint hostnames, API keys, and private model aliases out of public commits.
 #
 # Secret handling:
-# - Set OPENAI_COMPAT_API_KEY for most OpenAI-compatible gateways.
+# - Set OPENAI_COMPAT_API_KEY for generic OpenAI-compatible gateways.
+# - OpenRouter accepts OPENROUTER_API_KEY.
 # - Nous Portal accepts NOUS_API_KEY (or NOUS_PORTAL_API_KEY).
-# - Some gateways accept OPENAI_API_KEY instead; check your provider docs.
+# - Official OpenAI uses OPENAI_API_KEY.
 # - Do not put API keys in this YAML file.
 
 version: 1

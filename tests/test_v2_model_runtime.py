@@ -23,6 +23,7 @@ from ori.eval.mcp_runtime import (
     _tool_result_to_text,
     _wrap_read_only_tool,
 )
+from ori.eval.provider_contract import ProviderProtocolError
 from ori.eval.v2 import campaign_runner, model_runtime
 from ori.eval.v2.compiler import compile_acceptance_spec
 from ori.eval.v2.graph import entity_property_fact_key
@@ -95,7 +96,12 @@ from .test_v2_mcp_adapter import (
 )
 
 
-def _response(text: str, *, error: str | None = None) -> ModelResponse:
+def _response(
+    text: str,
+    *,
+    error: str | None = None,
+    provider_metrics: dict[str, object] | None = None,
+) -> ModelResponse:
     return ModelResponse(
         raw_text=text,
         cypher=None,
@@ -105,6 +111,7 @@ def _response(text: str, *, error: str | None = None) -> ModelResponse:
         elapsed_seconds=0.01,
         model="codex/gpt-test",
         error=error,
+        provider_metrics=provider_metrics or {},
     )
 
 
@@ -1290,19 +1297,110 @@ def test_invalid_direct_output_never_reaches_bloodhound() -> None:
     assert record.direct_receipt is None
 
 
-@pytest.mark.parametrize(
-    "error",
-    (
-        "HTTP 403 Forbidden",
-        "permission_denied",
-        "permission_error",
-        "insufficient permissions",
-        "not authorized to access model",
-    ),
-)
-def test_direct_provider_auth_error_response_is_not_retryable(error: str) -> None:
+def test_laguna_nullable_content_projection_is_output_invalid_not_harness_error() -> None:
     async def transport(**_kwargs: Any) -> ModelResponse:
-        return _response("", error=error)
+        return replace(
+            _response(""),
+            provider_metrics={
+                "provider_turn_status": "tool_calls",
+                "model_output_error": True,
+                "model_output_subtype": "TOOL_CALL_ONLY",
+            },
+        )
+
+    outcome, sample, record = asyncio.run(
+        run_direct_model_task_v2(
+            coordinator=FakeCoordinator(CypherResult(success=True, raw={})),
+            task=DIRECT_TASK,
+            oracle=DIRECT_ORACLE,
+            resolver=DIRECT_RESOLVER,
+            model="openai-compat/poolside/laguna-s-2.1",
+            transport=transport,
+        )
+    )
+
+    assert outcome is None
+    assert sample.execution_class is ExecutionClass.MODEL_FAILURE
+    assert sample.outcome is SampleOutcomeCode.OUTPUT_INVALID
+    assert sample.outcome is not SampleOutcomeCode.HARNESS_ERROR
+    assert record.provider_metrics["model_output_subtype"] == "TOOL_CALL_ONLY"
+
+
+def test_provider_protocol_error_is_nonretryable_infrastructure() -> None:
+    assert model_runtime._provider_infrastructure_details(
+        ProviderProtocolError("missing choices")
+    ) == ("PROVIDER_PROTOCOL", False)
+
+
+def test_nonretryable_provider_attempt_is_terminal_on_resume() -> None:
+    sample = SampleResult(
+        task_id=DIRECT_TASK.task_id,
+        task_fingerprint=DIRECT_TASK.task_fingerprint,
+        oracle_fingerprint=DIRECT_ORACLE.oracle_fingerprint,
+        execution_class=ExecutionClass.INFRA_FAILURE,
+        outcome=SampleOutcomeCode.INFRA_ERROR,
+        reasoning_correct=None,
+        detail="provider protocol mismatch",
+    )
+    provider = model_runtime._record(
+        task=DIRECT_TASK,
+        model="openai-compat/test",
+        surface="direct",
+        response=replace(
+            _response("", error="missing choices"),
+            provider_metrics={
+                "infra_scope": "provider",
+                "infra_error_subtype": "PROVIDER_PROTOCOL",
+                "infra_retryable": False,
+            },
+        ),
+    )
+    attempt = campaign_runner._attempt(
+        task_id=DIRECT_TASK.task_id,
+        number=1,
+        sample=sample,
+        provider=provider,
+    )
+
+    assert campaign_runner._attempt_is_terminal_on_resume(attempt) is True
+
+
+def test_operator_interruption_is_not_terminal_on_resume() -> None:
+    sample = SampleResult(
+        task_id=DIRECT_TASK.task_id,
+        task_fingerprint=DIRECT_TASK.task_fingerprint,
+        oracle_fingerprint=DIRECT_ORACLE.oracle_fingerprint,
+        execution_class=ExecutionClass.UNEXECUTED,
+        outcome=SampleOutcomeCode.INTERRUPTED,
+        reasoning_correct=None,
+        detail="interrupted",
+    )
+    provider = model_runtime._record(
+        task=DIRECT_TASK,
+        model="codex/gpt-test",
+        surface="direct",
+        response=replace(
+            _response("", error="interrupted"),
+            provider_metrics={
+                "infra_scope": "operator",
+                "infra_error_subtype": "INTERRUPTED",
+                "infra_retryable": False,
+            },
+        ),
+    )
+    attempt = campaign_runner._attempt(
+        task_id=DIRECT_TASK.task_id,
+        number=1,
+        sample=sample,
+        provider=provider,
+    )
+
+    assert campaign_runner._attempt_is_terminal_on_resume(attempt) is False
+
+
+def test_untyped_provider_error_response_fails_closed_without_string_inference() -> None:
+    async def transport(**_kwargs: Any) -> ModelResponse:
+        return _response("", error="HTTP 403 Forbidden permission_denied")
 
     coordinator = FakeCoordinator(CypherResult(success=True, raw={}))
     outcome, sample, record = asyncio.run(
@@ -1320,7 +1418,7 @@ def test_direct_provider_auth_error_response_is_not_retryable(error: str) -> Non
     assert coordinator.queries == []
     assert sample.execution_class is ExecutionClass.INFRA_FAILURE
     assert record.provider_metrics["infra_scope"] == "provider"
-    assert record.provider_metrics["infra_error_subtype"] == "PROVIDER_AUTH"
+    assert record.provider_metrics["infra_error_subtype"] == "PROVIDER_UNTYPED"
     assert record.provider_metrics["infra_retryable"] is False
 
 
@@ -3542,7 +3640,7 @@ def test_schema_only_retry_uses_schema_and_normalization_boundary(
     assert record.mcp_finalization["schema_retry_count"] == 1
 
 
-def test_schema_retry_provider_failure_is_retryable_infrastructure(
+def test_schema_retry_untyped_provider_failure_fails_closed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def fake_loop(**kwargs: Any):
@@ -3577,12 +3675,12 @@ def test_schema_retry_provider_failure_is_retryable_infrastructure(
     assert outcome.sample.reasoning_correct is None
     assert outcome.sample.outcome is SampleOutcomeCode.INFRA_ERROR
     assert record.provider_metrics["infra_scope"] == "provider"
-    assert record.provider_metrics["infra_error_subtype"] == "PROVIDER_ERROR"
-    assert record.provider_metrics["infra_retryable"] is True
+    assert record.provider_metrics["infra_error_subtype"] == "PROVIDER_UNTYPED"
+    assert record.provider_metrics["infra_retryable"] is False
     assert campaign_runner._infrastructure_retry_policy(
         outcome.sample,
         record,
-    ) == ("provider", True)
+    ) == ("provider", False)
 
 
 def test_schema_retry_provider_auth_failure_is_not_retryable(
@@ -3597,6 +3695,11 @@ def test_schema_retry_provider_auth_failure_is_not_retryable(
         return _response(
             "",
             error="Error code: 401 - invalid_api_key",
+            provider_metrics={
+                "infra_scope": "provider",
+                "infra_error_subtype": "PROVIDER_AUTH",
+                "infra_retryable": False,
+            },
         )
 
     monkeypatch.setattr(
@@ -4380,6 +4483,7 @@ def test_v2_run_model_emits_task_retry_completion_and_resume_progress(
     model = SimpleNamespace(
         name="gpt-test",
         provider="codex",
+        model="gpt-test",
         requested_model="codex/gpt-test",
         model_base_url=None,
         options={},
@@ -4465,12 +4569,22 @@ def test_v2_run_model_emits_task_retry_completion_and_resume_progress(
     assert not any("[1/1]" in message for message in resumed)
 
     state_holder["value"] = SimpleNamespace(
-        checkpoint=SimpleNamespace(results=(infrastructure,)),
-        attempts=(
-            SimpleNamespace(task_id=DIRECT_TASK.task_id, attempt=1),
-            SimpleNamespace(task_id=DIRECT_TASK.task_id, attempt=2),
-        ),
-    )
+            checkpoint=SimpleNamespace(results=(infrastructure,)),
+            attempts=(
+                SimpleNamespace(
+                    task_id=DIRECT_TASK.task_id,
+                    attempt=1,
+                    sample=infrastructure,
+                    provider=provider,
+                ),
+                SimpleNamespace(
+                    task_id=DIRECT_TASK.task_id,
+                    attempt=2,
+                    sample=infrastructure,
+                    provider=provider,
+                ),
+            ),
+        )
     resumed_infrastructure: list[str] = []
     resumed_attempt_numbers: list[int] = []
 
@@ -4505,6 +4619,46 @@ def test_v2_run_model_emits_task_retry_completion_and_resume_progress(
         "retry budget already exhausted" in message and DIRECT_TASK.task_id in message
         for message in resumed_infrastructure
     )
+
+    nonretryable_provider = provider.model_copy(
+        update={
+            "provider_metrics": {
+                "infra_scope": "provider",
+                "infra_error_subtype": "PROVIDER_AUTH",
+                "infra_retryable": False,
+            }
+        }
+    )
+    state_holder["value"] = SimpleNamespace(
+        checkpoint=SimpleNamespace(results=(infrastructure,)),
+        attempts=(
+            SimpleNamespace(
+                task_id=DIRECT_TASK.task_id,
+                attempt=1,
+                sample=infrastructure,
+                provider=nonretryable_provider,
+            ),
+        ),
+    )
+    resumed_nonretryable: list[str] = []
+    _provenance, nonretryable_results = asyncio.run(
+        campaign_runner._run_model(
+            resolved=resolved,
+            prepared=prepared,
+            model=model,
+            run_index=1,
+            bhce=HealthyBHCE(),
+            coordinator=coordinator,
+            loop=None,
+            runs_total=1,
+            progress=resumed_nonretryable.append,
+        )
+    )
+
+    assert nonretryable_results == (infrastructure,)
+    assert resumed_attempt_numbers == []
+    assert any("1 resumed" in message for message in resumed_nonretryable)
+    assert not any("[1/1]" in message for message in resumed_nonretryable)
 
     async def exploding_direct_run(**_kwargs: Any):
         raise AttributeError("future adapter schema drift")

@@ -571,7 +571,9 @@ models:
 For OpenRouter, use the OpenAI-compatible provider and set the key in the
 environment. ORI uses `OPENAI_COMPAT_API_KEY` as the explicit override and
 selects `OPENROUTER_API_KEY` or `NOUS_API_KEY`/`NOUS_PORTAL_API_KEY` for matching
-provider endpoints, with `OPENAI_API_KEY` as the generic fallback. The same key
+provider endpoints. Official OpenAI uses only `OPENAI_API_KEY`; generic
+compatible endpoints use only the explicit `OPENAI_COMPAT_API_KEY` override.
+Keys never fall back across provider hostnames. The same scoped key
 works for direct and MCP inference:
 
 ```bash
@@ -622,6 +624,18 @@ settings. At launch it writes the directly runnable, absolute-path
 and hashes plus any CLI overrides in `campaign-provenance.yaml`. You can resume
 with the generated `campaign-config.yaml`; a later run with different provenance
 is rejected from the same output directory.
+
+Protocol V2 models accept `api_surface: auto | chat_completions | responses`.
+`auto` preserves established behavior: Codex OAuth uses Responses and official
+OpenAI/OpenAI-compatible providers use Chat Completions. Release 1 enables
+explicit Responses only for Codex; unsupported selections fail no-model
+readiness. Private readiness and provenance record requested/resolved surface,
+structured-output mode, endpoint family, and credential-source name without
+recording secret values.
+
+Provider-runtime fingerprint changes make pre-hardening V2 campaigns
+incompatible. Never resume the failed Laguna S 2.1 campaign after this change;
+retain its artifacts as diagnostic evidence and use a fresh output directory.
 
 For local MCP development, `launcher: local_checkout` with `mcp_dir` remains
 supported and preserves `uv --directory <mcp_dir> run main.py`. Use the pinned

@@ -87,6 +87,11 @@ class V2ModelEntry(StrictModel):
         "openai-compat",
     ]
     model: str
+    api_surface: Literal[
+        "auto",
+        "chat_completions",
+        "responses",
+    ] = "auto"
     runs_per_model: int | None = Field(default=None, strict=True, gt=0)
     model_base_url: str | None = None
     mcp_tool_loop: (
@@ -111,6 +116,8 @@ class V2ModelEntry(StrictModel):
             raise ValueError(
                 "set defaults.reasoning_effort instead of model options.reasoning_effort"
             )
+        if "api_surface" in self.options:
+            raise ValueError("set model api_surface instead of model options.api_surface")
         return self
 
     @property

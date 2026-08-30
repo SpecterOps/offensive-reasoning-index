@@ -237,8 +237,8 @@ models:
 
 For OpenRouter, set `OPENROUTER_API_KEY` in the environment and use the
 OpenAI-compatible provider. ORI uses `OPENAI_COMPAT_API_KEY` as the explicit
-override, selects `OPENROUTER_API_KEY` or `NOUS_API_KEY`/`NOUS_PORTAL_API_KEY`
-for matching provider endpoints, and falls back to `OPENAI_API_KEY`. The key
+override and selects `OPENROUTER_API_KEY` only for OpenRouter endpoints. It
+never falls back to a key belonging to another provider hostname. The key
 works for both direct and MCP inference; keep it out of YAML and other tracked
 files.
 
@@ -293,6 +293,18 @@ absolute-path `campaign-config.yaml`, preserves the untouched input as
 `campaign-provenance.yaml`. The generated config can resume that exact campaign.
 If any provenance record differs on a later invocation, ORI requires a new
 `output_dir`.
+
+Protocol V2 model entries also record `api_surface`. `auto` preserves current
+behavior: Codex OAuth uses Responses and OpenAI-compatible providers use Chat
+Completions. OpenRouter and Nous may set `api_surface: chat_completions`
+explicitly. Release 1 rejects official OpenAI Responses and other unsupported
+surface selections during no-model readiness. Requested/resolved surfaces,
+structured-output mode, endpoint family, and credential-source name are private
+fingerprinted provenance; secret values are never recorded.
+
+Do not resume a campaign produced by the pre-hardening provider runtime. Retain
+the failed Laguna S 2.1 artifacts for diagnosis and create a fresh output
+directory for every post-fix run.
 `runs_per_model` controls independent full benchmark passes against the same
 dataset and manifest. A model entry overrides the default. Each repetition has
 its own CSV and run metadata. `max_model_reruns_on_infra` remains reserved for

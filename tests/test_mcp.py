@@ -40,6 +40,7 @@ from ori.eval.mcp_runtime import (
     ori_mcp_solver,
     run_mcp_eval_with_inspect,
 )
+from ori.eval.provider_contract import ProviderAuthenticationError, ProviderProtocolError
 from ori.eval.report import write_combined_csv, write_summary_csv
 from ori.eval.runner import EvalResult
 from ori.eval.tasks import Task, generate_mcp_tasks
@@ -330,13 +331,15 @@ def test_openai_compat_chat_turn_posts_tool_payload(monkeypatch) -> None:
 
         def json(self) -> dict:
             return {
+                "id": "chatcmpl-nous-1",
                 "model": "ori-test",
                 "system_fingerprint": "fp-local",
                 "choices": [
                     {
                         "finish_reason": "tool_calls",
                         "message": {
-                            "content": "<think>inspect group</think>",
+                            "content": None,
+                            "reasoning_content": "inspect group",
                             "tool_calls": [
                                 {
                                     "id": "call-1",
@@ -394,9 +397,159 @@ def test_openai_compat_chat_turn_posts_tool_payload(monkeypatch) -> None:
     assert turn["finish_reason"] == "tool_calls"
     assert turn["provider_metrics"]["telemetry_adapter"] == "llama-cpp"
     assert turn["provider_metrics"]["system_fingerprint"] == "fp-local"
+    assert turn["provider_metrics"]["status"] == "tool_calls"
+    assert turn["provider_metrics"]["refusal"] == ""
+    assert turn["provider_metrics"]["usage_reported"] is True
+    assert turn["provider_metrics"]["usage_complete"] is True
+    assert turn["provider_metrics"]["response_id"] == "chatcmpl-nous-1"
+    assert turn["provider_metrics"]["api_surface"] == "chat_completions"
+    assert turn["provider_metrics"]["endpoint_family"] == "nous"
+    assert turn["provider_metrics"]["credential_source"] == "NOUS_API_KEY"
     assert turn["tool_calls"][0]["function"]["name"] == "group_info"
+    assert turn["tool_calls"][0]["argument_parse_status"] == "valid"
+    assert turn["tool_calls"][0]["parsed_arguments"] == {
+        "group_name": "DOMAIN ADMINS@TEST.LOCAL"
+    }
     assert turn["prompt_tokens"] == 13
     assert turn["completion_tokens"] == 5
+
+
+@pytest.mark.parametrize(
+    ("envelope", "detail"),
+    [
+        ({}, "missing choices"),
+        ({"choices": [{}]}, "missing its message"),
+    ],
+)
+def test_openai_compat_chat_turn_rejects_malformed_envelopes(
+    monkeypatch, envelope: dict, detail: str
+) -> None:
+    import asyncio
+
+    monkeypatch.setenv("OPENAI_COMPAT_API_KEY", "compat-key")
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            return envelope
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def post(self, url: str, json: dict, headers: dict):
+            return FakeResponse()
+
+    monkeypatch.setattr("ori.eval.mcp_runtime.httpx.AsyncClient", FakeAsyncClient)
+
+    with pytest.raises(ProviderProtocolError, match=detail):
+        asyncio.run(
+            _openai_compat_chat_turn(
+                url="https://generic.example/v1/chat/completions",
+                model_name="openai-compat/test-model",
+                messages=[{"role": "user", "content": "q"}],
+                tools=[],
+            )
+        )
+
+
+def test_openai_compat_chat_turn_rejects_missing_remote_credential(monkeypatch) -> None:
+    import asyncio
+
+    for name in (
+        "OPENAI_COMPAT_API_KEY",
+        "OPENROUTER_API_KEY",
+        "NOUS_API_KEY",
+        "NOUS_PORTAL_API_KEY",
+        "OPENAI_API_KEY",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    with pytest.raises(ProviderAuthenticationError, match="requires a credential"):
+        asyncio.run(
+            _openai_compat_chat_turn(
+                url="https://inference-api.nousresearch.com/v1/chat/completions",
+                model_name="openai-compat/test-model",
+                messages=[{"role": "user", "content": "q"}],
+                tools=[],
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    ("finish_reason", "subtype"),
+    [("length", "TRUNCATED"), ("content_filter", "CONTENT_FILTERED")],
+)
+def test_openai_compat_chat_turn_suppresses_terminal_partial_tool_calls(
+    monkeypatch,
+    finish_reason: str,
+    subtype: str,
+) -> None:
+    import asyncio
+
+    monkeypatch.setenv("OPENAI_COMPAT_API_KEY", "compat-key")
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            return {
+                "choices": [
+                    {
+                        "finish_reason": finish_reason,
+                        "message": {
+                            "content": "partial",
+                            "tool_calls": [
+                                {
+                                    "id": "partial-call",
+                                    "function": {
+                                        "name": "cypher_query.run",
+                                        "arguments": '{"query":"MATCH (n) RETURN n"}',
+                                    },
+                                }
+                            ],
+                        },
+                    }
+                ]
+            }
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def post(self, url: str, json: dict, headers: dict):
+            return FakeResponse()
+
+    monkeypatch.setattr("ori.eval.mcp_runtime.httpx.AsyncClient", FakeAsyncClient)
+
+    turn = asyncio.run(
+        _openai_compat_chat_turn(
+            url="https://generic.example/v1/chat/completions",
+            model_name="openai-compat/test-model",
+            messages=[{"role": "user", "content": "q"}],
+            tools=[],
+        )
+    )
+
+    assert turn["content"] == ""
+    assert turn["tool_calls"] == []
+    assert turn["provider_metrics"]["model_output_error"] is True
+    assert turn["provider_metrics"]["model_output_subtype"] == subtype
 
 
 def test_openai_compat_provider_metrics_extracts_backend_specific_fields() -> None:
@@ -908,6 +1061,79 @@ def test_run_openai_compat_mcp_loop_executes_tool_calls(monkeypatch) -> None:
     assert trajectory.tool_calls_total == 1
     assert trajectory.tool_loop == "native-openai-compatible"
     assert len(messages) >= 4
+
+
+def test_run_openai_compat_mcp_loop_rejects_malformed_tool_arguments(monkeypatch) -> None:
+    import asyncio
+
+    calls = {"turn": 0, "tool": 0}
+
+    async def fake_turn(**kwargs):
+        calls["turn"] += 1
+        if calls["turn"] == 1:
+            return {
+                "model": "ori-test",
+                "content": "",
+                "thinking": "call the tool",
+                "tool_calls": [
+                    {
+                        "id": "bad-call-1",
+                        "type": "function",
+                        "function": {
+                            "name": "group_info",
+                            "arguments": '{"group_name":',
+                        },
+                        "parsed_arguments": None,
+                        "argument_parse_status": "malformed",
+                        "argument_parse_error": "invalid JSON tool arguments",
+                    }
+                ],
+                "prompt_tokens": 10,
+                "completion_tokens": 4,
+                "finish_reason": "tool_calls",
+                "provider_metrics": {"status": "tool_calls"},
+            }
+        return {
+            "model": "ori-test",
+            "content": '{"answer_type":"node_set","node_names":[]}',
+            "thinking": "",
+            "tool_calls": [],
+            "prompt_tokens": 12,
+            "completion_tokens": 5,
+            "finish_reason": "stop",
+            "provider_metrics": {"status": "completed"},
+        }
+
+    monkeypatch.setattr("ori.eval.mcp_runtime._openai_compat_chat_turn", fake_turn)
+
+    @tool(name="group_info")
+    def group_info():
+        async def execute(group_name: str) -> str:
+            calls["tool"] += 1
+            return '{"success": true}'
+
+        return execute
+
+    response, trajectory, messages = asyncio.run(
+        _run_openai_compat_mcp_loop(
+            task=_task(),
+            model_name="openai-compat/ori-test@http://127.0.0.1:8080/v1",
+            base_url=None,
+            extra_body=None,
+            tools=[group_info],
+            max_steps=3,
+        )
+    )
+
+    assert response.error is None
+    assert calls["tool"] == 0
+    assert trajectory.tool_calls_total == 1
+    assert trajectory.failed_tool_calls == 1
+    tool_messages = [message for message in messages if isinstance(message, ChatMessageTool)]
+    assert len(tool_messages) == 1
+    assert tool_messages[0].error is not None
+    assert tool_messages[0].error.type == "parsing"
+    assert "invalid_tool_arguments" in tool_messages[0].text
 
 
 def test_run_openai_compat_mcp_loop_enforces_total_tool_call_budget(monkeypatch) -> None:

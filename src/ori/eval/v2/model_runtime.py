@@ -28,6 +28,15 @@ from ori.eval.mcp_runtime import (
     _run_ollama_mcp_loop,
     _run_openai_compat_mcp_loop,
 )
+from ori.eval.provider_contract import (
+    ProviderApiSurface,
+    ProviderAuthenticationError,
+    ProviderCapabilityError,
+    ProviderContractError,
+    ProviderProtocolError,
+    resolve_api_surface,
+    validate_release1_api_surface,
+)
 from ori.relationships import canonical_relationship_kind, relationship_contract
 
 from .compiler import DIRECT_RESULT_CONTRACT_VERSION
@@ -224,6 +233,15 @@ def _provider_infrastructure_details(
 ) -> tuple[str, bool] | None:
     """Return a stable provider subtype and retryability for SDK/HTTP failures."""
 
+    if isinstance(exc, ProviderAuthenticationError):
+        return "PROVIDER_AUTH", False
+    if isinstance(exc, ProviderCapabilityError):
+        return "PROVIDER_CAPABILITY", False
+    if isinstance(exc, ProviderProtocolError):
+        return "PROVIDER_PROTOCOL", False
+    if isinstance(exc, ProviderContractError):
+        return "PROVIDER_CONTRACT", False
+
     if isinstance(exc, httpx.TimeoutException):
         return "PROVIDER_TIMEOUT", True
     if isinstance(exc, httpx.HTTPStatusError):
@@ -263,7 +281,7 @@ def _provider_infrastructure_details(
 def _provider_response_infrastructure_details(
     response: ModelResponse,
 ) -> tuple[str, str, bool]:
-    """Recover provider scope, subtype, and retryability from a returned error."""
+    """Recover typed provider failure metadata without guessing from prose."""
 
     metrics = response.provider_metrics
     scope_value = metrics.get("infra_scope")
@@ -274,43 +292,10 @@ def _provider_response_infrastructure_details(
     retryable = retryable_value if isinstance(retryable_value, bool) else None
     if subtype is not None and retryable is not None:
         return scope, subtype, retryable
-
-    error = (response.error or "").casefold()
-    status_match = re.search(r"(?<!\d)(?P<status>[1-5]\d\d)(?!\d)", error)
-    status = int(status_match.group("status")) if status_match is not None else None
-    if status in {401, 403} or any(
-        marker in error
-        for marker in (
-            "authentication",
-            "invalid_api_key",
-            "permission denied",
-            "permission_denied",
-            "permission_error",
-            "insufficient permission",
-            "not authorized",
-            "unauthorized",
-            "forbidden",
-        )
-    ):
-        inferred = ("PROVIDER_AUTH", False)
-    elif status == 408 or "timed out" in error or "timeout" in error:
-        inferred = ("PROVIDER_TIMEOUT", True)
-    elif status == 429 or "rate limit" in error or "rate_limit" in error:
-        inferred = ("PROVIDER_RATE_LIMIT", True)
-    elif (status is not None and status >= 500) or "server error" in error:
-        inferred = ("PROVIDER_SERVER", True)
-    elif any(
-        marker in error
-        for marker in ("connection error", "connection refused", "transport")
-    ):
-        inferred = ("PROVIDER_TRANSPORT", True)
-    else:
-        inferred = ("PROVIDER_ERROR", True)
-    return (
-        scope,
-        subtype or inferred[0],
-        retryable if retryable is not None else inferred[1],
-    )
+    # A legacy or third-party adapter that returns only prose must not gain a
+    # retry policy by matching words in an error message. Fail closed until the
+    # adapter supplies the typed metadata above.
+    return scope, subtype or "PROVIDER_UNTYPED", False
 
 
 def _failure_response(
@@ -840,6 +825,7 @@ async def run_direct_model_task_v2(
     model_base_url: str | None = None,
     ollama_options: dict[str, Any] | None = None,
     max_tokens: int = 2048,
+    api_surface: ProviderApiSurface | str = ProviderApiSurface.AUTO,
     transport: TextTransport = call_provider_text,
 ) -> tuple[DirectV2Outcome | None, SampleResult, ProviderRunRecord]:
     """Call one model with a public direct contract, then execute via policy v3."""
@@ -852,6 +838,7 @@ async def run_direct_model_task_v2(
             base_url=model_base_url,
             max_tokens=max_tokens,
             ollama_options=ollama_options,
+            api_surface=api_surface,
         )
     except asyncio.CancelledError as exc:
         detail = "direct model request interrupted before completion"
@@ -4055,6 +4042,7 @@ async def _schema_only_retry(
     ollama_options: dict[str, Any] | None,
     transport: TextTransport,
     max_tokens: int,
+    api_surface: ProviderApiSurface | str,
 ) -> ModelResponse:
     return await transport(
         model=model,
@@ -4067,6 +4055,7 @@ async def _schema_only_retry(
         base_url=model_base_url,
         max_tokens=max_tokens,
         ollama_options=ollama_options,
+        api_surface=api_surface,
     )
 
 
@@ -4086,11 +4075,16 @@ async def run_mcp_model_task_v2(
     read_timeout_seconds: float = DEFAULT_MCP_OLLAMA_READ_TIMEOUT_SECONDS,
     tool_timeout_seconds: float = 60.0,
     graph_fact_registry: GraphFactRegistry | None = None,
+    api_surface: ProviderApiSurface | str = ProviderApiSurface.AUTO,
     transport: TextTransport = call_provider_text,
 ) -> tuple[MCPV2Outcome, ProviderRunRecord]:
     """Run one certified native MCP loop and finalize through the V2 reducer."""
 
     resolved_loop = validate_certified_mcp_loop(tool_loop)
+    provider_name = model.split("/", 1)[0]
+    requested_api_surface = ProviderApiSurface(api_surface)
+    resolved_api_surface = resolve_api_surface(provider_name, requested_api_surface)
+    validate_release1_api_surface(provider_name, resolved_api_surface)
     if task.binding.mcp_tool_loop != resolved_loop.value:
         raise V2ModelRuntimeError("runtime MCP loop does not match the task binding fingerprint")
     if task.binding.mcp_resource_mode != "off":
@@ -4153,6 +4147,14 @@ async def run_mcp_model_task_v2(
                 raise V2ModelRuntimeError(
                     "Inspect-backed model campaigns require an Inspect-bound task catalog"
                 )
+            response = replace(
+                response,
+                provider_metrics={
+                    **dict(response.provider_metrics),
+                    "requested_api_surface": requested_api_surface.value,
+                    "resolved_api_surface": resolved_api_surface.value,
+                },
+            )
     except asyncio.CancelledError as exc:
         response = _failure_response(
             partial=partial_response,
@@ -4355,6 +4357,7 @@ async def run_mcp_model_task_v2(
                     ollama_options=ollama_options,
                     transport=transport,
                     max_tokens=retry_max_tokens,
+                    api_surface=requested_api_surface,
                 ),
                 timeout=remaining_seconds,
             )
