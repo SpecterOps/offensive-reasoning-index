@@ -330,8 +330,9 @@ Those are different claims. Only the first is currently plausible for 2026-10-05
   - the dedicated ORI BloodHound target
   - the pinned `92a37dd` MCP revision or its intentional successor
 - Add a short conference-facing report that translates V29 correctness into plain language.
-- Add a repository-owned campaign reporter and a reattachable supervisor status
-  bridge before another large unattended MCP campaign.
+- Validate the repository-owned `campaign-status` projection and supervisor
+  contract with an external fault-injection smoke before another large
+  unattended MCP campaign.
 
 ### Could
 
@@ -350,11 +351,16 @@ Those are different claims. Only the first is currently plausible for 2026-10-05
 
 ### 2026-08-30 to 2026-09-02 — close Release 1
 
+- Signed Release 1 commit `e35da9f` is published on
+  `fix/openai-provider-runtime`.
 - Add `OPENROUTER_API_KEY` on the controlled benchmark host.
 - Run the two missing OpenRouter canaries.
 - Open the Release 1 PR.
 - Merge Release 1 after review and canary confirmation.
-- Regenerate V29 certification/readiness receipts after the circuit fix.
+- Preserve the already-passing circuit-safe V13 certification/readiness
+  receipts. If the separate compiler-index commit is selected for the next
+  campaign, compile, certify, and run readiness again because its fingerprint
+  intentionally differs.
 
 ### 2026-09-03 to 2026-09-08 — freeze the conference claim
 
@@ -365,8 +371,8 @@ Those are different claims. Only the first is currently plausible for 2026-10-05
 
 ### 2026-09-09 to 2026-09-15 — operations hardening
 
-- Add the campaign-level reporter and reattachable status bridge, or document a
-  narrower manual fallback if they cannot be completed safely.
+- Merge or cleanly restack signed `campaign-status` commit `317ed9c` after
+  Release 1 lands.
 - Run a representative fault-injection smoke: BloodHound unavailable, circuit
   open, zero later provider calls, clean resume only after health recovery.
 - Produce an offline demo bundle so the talk does not depend on live services.
@@ -428,12 +434,12 @@ fill a denominator.
 
 ## Immediate next actions
 
-1. Unlock or repair the local SSH signing agent and commit the staged MCP
-   circuit guard without weakening signed-history policy.
-2. Add `OPENROUTER_API_KEY` on the controlled benchmark host and complete the missing live canaries.
-3. Authorize GitHub SSO and open the Release 1 PR from
+1. Add `OPENROUTER_API_KEY` on the controlled benchmark host and complete the missing live canaries.
+2. Authorize GitHub SSO and open the Release 1 PR from
    `fix/openai-provider-runtime`.
-4. Merge Release 1 to `master` after review.
+3. Merge Release 1 to `master` after review.
+4. Restack and review `feat/v2-campaign-operations` after Release 1 reaches
+   `master`; recertify if the compiler-index commit is included.
 5. Run one fresh V29 current-runtime campaign for conference evidence.
 6. Treat the official `100/100` selector as the next major product milestone,
    not as a prerequisite for the October 5 talk.
