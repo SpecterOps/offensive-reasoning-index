@@ -59,6 +59,10 @@ class CampaignRunStatusV1(StrictModel):
     expected_tasks: int | None = Field(default=None, strict=True, gt=0)
     started: bool
     checkpointed_results: int = Field(strict=True, ge=0)
+    provider_attempts: int = Field(default=0, strict=True, ge=0)
+    tokens_input: int = Field(default=0, strict=True, ge=0)
+    tokens_output: int = Field(default=0, strict=True, ge=0)
+    total_tokens: int = Field(default=0, strict=True, ge=0)
     report_present: bool
     campaign_valid: bool | None = Field(default=None, strict=True)
     outcomes: tuple[OutcomeCountV1, ...] = ()
@@ -70,6 +74,10 @@ class CampaignTrackStatusV1(StrictModel):
     expected_tasks_per_run: int | None = Field(default=None, strict=True, gt=0)
     checkpointed_results: int = Field(strict=True, ge=0)
     completed_results: int = Field(strict=True, ge=0)
+    provider_attempts: int = Field(default=0, strict=True, ge=0)
+    tokens_input: int = Field(default=0, strict=True, ge=0)
+    tokens_output: int = Field(default=0, strict=True, ge=0)
+    total_tokens: int = Field(default=0, strict=True, ge=0)
     completion_present: bool
     campaign_valid: bool | None = Field(default=None, strict=True)
     candidate_release_fingerprint: str | None = None
@@ -85,6 +93,10 @@ class CampaignProgressV1(StrictModel):
     expected_results: int | None = Field(default=None, strict=True, gt=0)
     checkpointed_results: int = Field(strict=True, ge=0)
     completed_results: int = Field(strict=True, ge=0)
+    provider_attempts: int = Field(default=0, strict=True, ge=0)
+    tokens_input: int = Field(default=0, strict=True, ge=0)
+    tokens_output: int = Field(default=0, strict=True, ge=0)
+    total_tokens: int = Field(default=0, strict=True, ge=0)
 
 
 class CampaignStatusV1(StrictModel):
@@ -356,6 +368,17 @@ def _read_run(
     else:
         outcomes = ()
         campaign_valid = None
+    provider_attempts = len(state.attempts) if state is not None else 0
+    tokens_input = (
+        sum(attempt.provider.tokens_input for attempt in state.attempts)
+        if state is not None
+        else 0
+    )
+    tokens_output = (
+        sum(attempt.provider.tokens_output for attempt in state.attempts)
+        if state is not None
+        else 0
+    )
     return (
         CampaignRunStatusV1(
             track=track,
@@ -366,6 +389,10 @@ def _read_run(
             checkpointed_results=(
                 len(state.checkpoint.results) if state is not None else 0
             ),
+            provider_attempts=provider_attempts,
+            tokens_input=tokens_input,
+            tokens_output=tokens_output,
+            total_tokens=tokens_input + tokens_output,
             report_present=report is not None,
             campaign_valid=campaign_valid,
             outcomes=outcomes,
@@ -596,6 +623,10 @@ def inspect_v2_campaign_status(config_path: Path) -> CampaignStatusV1:
                 ),
                 checkpointed_results=sum(item.checkpointed_results for item in track_runs),
                 completed_results=(receipt.result_count if receipt is not None else 0),
+                provider_attempts=sum(item.provider_attempts for item in track_runs),
+                tokens_input=sum(item.tokens_input for item in track_runs),
+                tokens_output=sum(item.tokens_output for item in track_runs),
+                total_tokens=sum(item.total_tokens for item in track_runs),
                 completion_present=receipt is not None,
                 campaign_valid=(receipt.campaign_valid if receipt is not None else None),
                 candidate_release_fingerprint=(
@@ -692,6 +723,10 @@ def inspect_v2_campaign_status(config_path: Path) -> CampaignStatusV1:
             expected_results=expected_results,
             checkpointed_results=actual_checkpointed,
             completed_results=completed_results,
+            provider_attempts=sum(item.provider_attempts for item in run_statuses),
+            tokens_input=sum(item.tokens_input for item in run_statuses),
+            tokens_output=sum(item.tokens_output for item in run_statuses),
+            total_tokens=sum(item.total_tokens for item in run_statuses),
         ),
         tracks=tuple(track_statuses),
         runs=tuple(run_statuses),

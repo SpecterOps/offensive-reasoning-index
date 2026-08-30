@@ -1258,6 +1258,11 @@ dataset.
 - `scripts/build_v2_model_card.py`: validates a completed, graph-gated V29
   Direct+MCP campaign and emits a public-safe JSON summary plus a deterministic
   1280-by-720 SVG. It refuses incomplete, invalid, or mismatched evidence.
+- `scripts/supervise_v2_campaign.py`: runs the exact no-model/execution commands
+  under durable restart and observed-token limits, explicit paid approval, an
+  external exclusive lock, fail-closed campaign status, and optional model-card
+  generation after valid completion. See the supervisor contract for the
+  required outside-root state path and budget headroom.
 - [Phase 4 v1 Runbook](docs/phase4-v1-runbook.md): older Phase 4 v1 workflow for
   historical comparison and focused diagnostic profiles.
 - [Inference Config Examples](examples/inference/): sanitized templates for

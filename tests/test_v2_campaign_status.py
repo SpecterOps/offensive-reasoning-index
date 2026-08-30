@@ -184,7 +184,10 @@ def _provider(sample: SampleResult, track: Track) -> ProviderRunRecord:
 
 
 def _state(
-    provenance: campaign_runner.ModelRunProvenanceV2, track: Track
+    provenance: campaign_runner.ModelRunProvenanceV2,
+    track: Track,
+    *,
+    attempt_count: int = 1,
 ) -> campaign_runner.PrivateRunStateV2:
     sample = _sample(track)
     checkpoint_payload = {
@@ -218,11 +221,19 @@ def _state(
         checkpoint_payload, exclude_fields=("checkpoint_fingerprint",)
     )
     checkpoint = CheckpointV2.model_validate(checkpoint_payload)
-    attempt = campaign_runner._attempt(sample.task_id, 1, sample, _provider(sample, track))
+    attempts = tuple(
+        campaign_runner._attempt(
+            sample.task_id,
+            attempt_number,
+            sample,
+            _provider(sample, track),
+        )
+        for attempt_number in range(1, attempt_count + 1)
+    )
     return campaign_runner._state(
         provenance=provenance,
         checkpoint=checkpoint,
-        attempts=(attempt,),
+        attempts=attempts,
     )
 
 
@@ -777,8 +788,34 @@ def test_completed_campaign_validates_full_accounting(tmp_path: Path) -> None:
     assert status.progress.expected_results == 1
     assert status.progress.checkpointed_results == 1
     assert status.progress.completed_results == 1
+    assert status.progress.provider_attempts == 1
+    assert status.progress.tokens_input == 1
+    assert status.progress.tokens_output == 1
+    assert status.progress.total_tokens == 2
+    assert status.tracks[0].total_tokens == 2
+    assert status.runs[0].total_tokens == 2
     assert status.runs[0].outcomes[0].outcome == "OUTPUT_INVALID"
     assert status.graph_fingerprint == _D
+
+
+def test_status_usage_counts_every_durable_provider_attempt(tmp_path: Path) -> None:
+    config, resolved = _completed_campaign(tmp_path)
+    provenance = _provenance(Track.DIRECT)
+    _dump(
+        resolved.output_dir
+        / "direct"
+        / "gpt-test"
+        / "run-001"
+        / "run-state-v5.private.json",
+        _state(provenance, Track.DIRECT, attempt_count=2),
+    )
+
+    status = inspect_v2_campaign_status(config)
+
+    assert status.progress.provider_attempts == 2
+    assert status.progress.tokens_input == 2
+    assert status.progress.tokens_output == 2
+    assert status.progress.total_tokens == 4
 
 
 def test_completed_invalid_campaign_is_explicitly_nonresumable(tmp_path: Path) -> None:
@@ -894,6 +931,7 @@ def test_campaign_status_cli_supports_human_and_json_output(tmp_path: Path) -> N
     assert human.exit_code == 0
     assert "V2 CAMPAIGN: NOT_STARTED" in human.output
     assert "Next action: run readiness" in human.output
+    assert "Usage: 0 total tokens (0 input + 0 output) across 0 provider attempts" in human.output
     assert machine.exit_code == 0
     assert '"schema_version": "ori-v2-campaign-status-v1"' in machine.output
 

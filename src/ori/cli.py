@@ -1340,6 +1340,13 @@ def campaign_status_command(config_path: str, json_output: bool) -> None:
         f"{status.progress.expected_results or 'unknown'} checkpointed results; "
         f"{status.progress.runs_reported}/{status.progress.expected_runs} runs reported"
     )
+    click.echo(
+        "  Usage: "
+        f"{status.progress.total_tokens} total tokens "
+        f"({status.progress.tokens_input} input + "
+        f"{status.progress.tokens_output} output) across "
+        f"{status.progress.provider_attempts} provider attempts"
+    )
     if status.active_run is not None:
         click.echo(
             "  Active: "

@@ -37,6 +37,11 @@ The external supervisor owns:
 - host reboot policy;
 - completed-bundle transfer and retention.
 
+The tracked reference implementation is `scripts/supervise_v2_campaign.py`.
+Its fingerprinted state and exclusive lock must live outside the ORI campaign
+root. This keeps external restart accounting durable without adding another
+file to ORI's own lifecycle namespace.
+
 The supervisor must not create a second campaign status file or infer success
 from a process exit alone. ORI's status projection is authoritative.
 
@@ -143,6 +148,39 @@ Provider credentials remain endpoint-specific environment variables. The
 supervisor may verify that a required variable is present, but it must never log
 its value. The same rule applies to BloodHound credentials and protected env
 files.
+
+Run the reference supervisor from the repository root, inject the protected
+environment outside the script, and supply the absolute approved ORI console
+executable:
+
+```bash
+uv run --env-file <protected-env-file> \
+  python scripts/supervise_v2_campaign.py \
+  --config <exact-v2-config> \
+  --state <path-outside-campaign-root>/supervisor-state.private.json \
+  --ori-executable <absolute-path-to-repo-venv>/bin/ori \
+  --token-ceiling 24000000 \
+  --max-restarts 1 \
+  --poll-interval-seconds 5 \
+  --execute-approved \
+  --model poolside/laguna-s-2.1 \
+  --display-name "Poolside: Laguna S 2.1" \
+  --model-card-output <public-evidence-output>
+```
+
+`--execute-approved` is the explicit paid-run authority boundary. Without it,
+the supervisor may run no-model readiness but stops before execution. The
+state fingerprint binds the exact config bytes, source-config fingerprint,
+token threshold, and restart limit so a later process cannot silently reset or
+change those policies.
+
+The token threshold is based only on durable provider attempts projected by
+`campaign-status`; it never reads raw responses. Polling cannot cancel usage
+already in flight, so leave explicit headroom below the operator's absolute
+provider budget. For a 25-million-token operator budget, the example stops at
+24 million observed tokens and permits no restart after a budget stop. A
+supervisor may signal only the child it launched itself; an adopted lock-held
+campaign is monitor-only.
 
 ## Completion and archival
 
