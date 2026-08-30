@@ -400,6 +400,18 @@ unclean prior process remain distinguishable. An interrupted provider attempt
 stays durably numbered but does not consume the next process's original
 infrastructure-retry allowance.
 
+Use `ori campaign-status --config <exact-v2-config>` to project lifecycle,
+checkpoint, report, and track-completion state without preparing the campaign
+or contacting models, MCP, BloodHound, or the graph. The command validates the
+stored fingerprints and accounting before reporting progress. `--json` emits a
+redacted supervisor-safe document. A `running` lifecycle with a free campaign
+lock is surfaced as `stale_running`; interrupted or stale readiness is rerun
+without `--execute`, while interrupted or stale execution uses the same
+`run-v2 --config ... --execute` command. Corrupt, incompatible, or failed
+evidence stops for investigation.
+The complete external state/action boundary is documented in the
+[V2 Campaign Supervisor Contract](v2-campaign-supervisor-contract.md).
+
 No-model `run-v2` readiness performs one exact bounded live-graph projection
 and reuses that immutable receipt across the prepared tracks. This is sound
 because readiness cannot invoke a provider, MCP tool, model-authored query, or

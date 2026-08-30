@@ -251,6 +251,13 @@ invalid. Private launcher provenance records the exact paths and `uv` version,
 and changing them invalidates resume state. ORI does not forward these settings
 to the BloodHound MCP child.
 
+For unattended V2 operation, use the read-only `ori campaign-status --json`
+projection and follow the
+[V2 Campaign Supervisor Contract](v2-campaign-supervisor-contract.md). External
+process managers own persistence, backoff, notifications, credential injection,
+and archival; ORI remains authoritative for locking, readiness, checkpoints,
+resume eligibility, graph gates, and completion.
+
 For OpenRouter, set `OPENROUTER_API_KEY` in the environment and use the
 OpenAI-compatible provider. ORI uses `OPENAI_COMPAT_API_KEY` as the explicit
 override and selects `OPENROUTER_API_KEY` only for OpenRouter endpoints. It

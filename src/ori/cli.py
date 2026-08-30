@@ -1304,6 +1304,64 @@ def run_v2_command(config_path: str, execute: bool) -> None:
     click.echo(f"  Readiness: {resolved.output_dir / 'v2-run-readiness.private.json'}")
 
 
+@main.command(name="campaign-status")
+@click.option(
+    "--config",
+    "config_path",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False),
+    help="Exact protocol-v2 campaign YAML used to start the campaign.",
+)
+@click.option(
+    "--json",
+    "json_output",
+    is_flag=True,
+    default=False,
+    help="Emit the redacted status projection as JSON.",
+)
+def campaign_status_command(config_path: str, json_output: bool) -> None:
+    """Inspect a V2 campaign without contacting models or BloodHound."""
+    from .eval.v2.campaign_status import inspect_v2_campaign_status
+
+    try:
+        status = inspect_v2_campaign_status(Path(config_path))
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    if json_output:
+        click.echo(status.model_dump_json(indent=2))
+        return
+
+    click.echo(f"V2 CAMPAIGN: {status.observed_state.upper()}")
+    click.echo(f"  Mode: {status.mode or 'not-started'}")
+    click.echo(
+        "  Progress: "
+        f"{status.progress.checkpointed_results}/"
+        f"{status.progress.expected_results or 'unknown'} checkpointed results; "
+        f"{status.progress.runs_reported}/{status.progress.expected_runs} runs reported"
+    )
+    if status.active_run is not None:
+        click.echo(
+            "  Active: "
+            f"{status.active_run.track.value}/{status.active_run.model}/"
+            f"run-{status.active_run.run_index:03d}"
+        )
+    for track in status.tracks:
+        validity = (
+            "valid"
+            if track.campaign_valid is True
+            else "invalid"
+            if track.campaign_valid is False
+            else "pending"
+        )
+        click.echo(
+            f"  {track.track.value}: {track.checkpointed_results} checkpointed, "
+            f"{track.completed_results} completed ({validity})"
+        )
+    click.echo(f"  Next action: {status.next_action.replace('_', ' ')}")
+    click.echo(f"  Resume allowed: {'yes' if status.resume_allowed else 'no'}")
+
+
 @main.command(name="certify-v2-live")
 @click.option(
     "--manifest",
