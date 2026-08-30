@@ -145,13 +145,13 @@ def test_v12_campaign_schemas_cannot_accept_prior_run_state() -> None:
     runner_source = inspect.getsource(campaign_runner._run_model)
 
     assert provenance_schema["properties"]["schema_version"]["const"] == (
-        "ori-v2-model-campaign-v12"
+        "ori-v2-model-campaign-v13"
     )
     assert state_schema["properties"]["schema_version"]["const"] == (
         "ori-v2-private-run-state-v5"
     )
     assert readiness_schema["properties"]["schema_version"]["const"] == (
-        "ori-v2-run-readiness-v8"
+        "ori-v2-run-readiness-v9"
     )
     assert "run-state-v5.private.json" in runner_source
     assert "run-state-v4.private.json" not in runner_source

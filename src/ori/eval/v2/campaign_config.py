@@ -67,7 +67,7 @@ class V2Defaults(StrictModel):
     max_infra_retries: int = Field(default=1, strict=True, ge=0)
     graph_page_size: int = Field(default=500, strict=True, gt=0, le=2000)
     health: V2HealthConfig = V2HealthConfig()
-    mcp: V2MCPConfig
+    mcp: V2MCPConfig | None = None
 
     @model_validator(mode="after")
     def certified_concurrency_is_serial(self) -> V2Defaults:
@@ -157,6 +157,10 @@ class V2CampaignConfig(StrictModel):
         if len(names) != len(set(names)):
             raise ValueError("v2 model names must be unique")
         if "mcp" in self.modes:
+            if self.defaults.mcp is None:
+                raise ValueError(
+                    "v2 MCP campaigns require defaults.mcp configuration"
+                )
             unsupported = sorted(
                 model.name
                 for model in self.models
@@ -191,7 +195,7 @@ class ResolvedV2CampaignConfig(StrictModel):
     archive: Path
     tracks: dict[Track, ResolvedV2TrackPaths]
     output_dir: Path
-    mcp_dir: Path
+    mcp_dir: Path | None
     config: V2CampaignConfig
     source_config_fingerprint: str
 
@@ -228,14 +232,17 @@ def load_v2_campaign_config(path: Path) -> ResolvedV2CampaignConfig:
         archive=_resolve(base, config.source.archive),
         tracks=resolved_tracks,
         output_dir=_resolve(base, config.output_dir),
-        mcp_dir=_resolve(base, config.defaults.mcp.mcp_dir),
+        mcp_dir=(
+            _resolve(base, config.defaults.mcp.mcp_dir)
+            if config.defaults.mcp is not None
+            else None
+        ),
         config=config,
         source_config_fingerprint=canonical_sha256(raw),
     )
     required = (
         resolved.source_manifest,
         resolved.archive,
-        resolved.mcp_dir,
         *(
             value
             for paths in resolved.tracks.values()
@@ -250,6 +257,8 @@ def load_v2_campaign_config(path: Path) -> ResolvedV2CampaignConfig:
     missing = [str(item) for item in required if not item.exists()]
     if missing:
         raise ValueError("v2 campaign config paths do not exist: " + ", ".join(missing))
-    if not resolved.mcp_dir.is_dir():
+    if resolved.mcp_dir is not None and not resolved.mcp_dir.exists():
+        raise ValueError("v2 campaign config paths do not exist: " + str(resolved.mcp_dir))
+    if resolved.mcp_dir is not None and not resolved.mcp_dir.is_dir():
         raise ValueError("v2 MCP path is not a directory")
     return resolved

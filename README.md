@@ -338,6 +338,22 @@ campaign directory because it may contain resumable checkpoints or a
 policy-scoped deny cache. The complete public-safe option reference is
 [`models.example.yaml`](models.example.yaml).
 
+ORI resolves `uv` and `uvx` through the operator's `PATH`. A non-interactive
+supervisor that intentionally omits their install directory must provide
+operator-approved absolute paths instead of relying on an implicit filesystem
+search:
+
+```bash
+export ORI_UV_EXECUTABLE=/opt/homebrew/bin/uv
+export ORI_UVX_EXECUTABLE=/opt/homebrew/bin/uvx
+```
+
+`ORI_UV_EXECUTABLE` is sufficient for `local_checkout`; pinned `uvx_git` also
+needs `ORI_UVX_EXECUTABLE`. ORI verifies the files are executable, records the
+resolved paths and `uv` version in private launcher provenance, and binds them
+to readiness and resume fingerprints. These parent-process settings are not
+forwarded to the BloodHound MCP child.
+
 Start with `runs_per_model: 1`. With the current corpus, this is already 208
 graded samples across two models and two tracks. After one complete campaign
 succeeds, use a new output directory and raise `runs_per_model` to `3` or more
@@ -640,7 +656,7 @@ retain its artifacts as diagnostic evidence and use a fresh output directory.
 For local MCP development, `launcher: local_checkout` with `mcp_dir` remains
 supported and preserves `uv --directory <mcp_dir> run main.py`. Use the pinned
 `uvx_git` launcher for benchmark profiles and a new output root whenever the
-revision changes.
+revision, resolved launcher executable, or runtime fingerprint changes.
 `runs_per_model` performs independent complete passes against the same manifest.
 The default applies to every model and a model entry can override it. Repeated
 outputs are isolated under `direct/<model>/run-001.csv` and

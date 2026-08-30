@@ -4316,6 +4316,9 @@ def test_v2_model_runtime_has_no_legacy_grader_or_template_dispatch() -> None:
     assert "progress=progress" in source
     assert "_emit_progress" in source
     assert "MCPLauncherConfig.local_checkout(resolved.mcp_dir)" in source
+    assert campaign_runner._RUNNER_IMPLEMENTATION_SOURCES["mcp_launcher"].name == (
+        "mcp_launcher.py"
+    )
 
 
 def test_v2_campaign_progress_is_model_blind_and_non_fatal() -> None:
@@ -4735,6 +4738,145 @@ def test_v2_run_model_emits_task_retry_completion_and_resume_progress(
     assert contained_results[0].reasoning_correct is None
     assert contained_results[0].detail == ("AttributeError: future adapter schema drift")
     assert any("HARNESS_ERROR" in message for message in contained_progress)
+
+
+def test_mcp_run_checks_open_circuit_before_provider(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    provider_calls = 0
+    captured_providers = []
+
+    async def fake_bundle(*_args: Any, **_kwargs: Any):
+        return SimpleNamespace()
+
+    async def fake_mcp_run(**_kwargs: Any):
+        nonlocal provider_calls
+        provider_calls += 1
+        raise AssertionError("provider must not run while BloodHound circuit is open")
+
+    class UnhealthyBHCE:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def wait_until_healthy(self, **_kwargs: Any):
+            self.calls += 1
+            return SimpleNamespace(ok=False)
+
+    class Coordinator:
+        def __init__(self) -> None:
+            self.circuit_open = True
+            self.closed = 0
+
+        def close_circuit(self) -> None:
+            self.closed += 1
+            self.circuit_open = False
+
+        async def execute(self, *_args: Any, **_kwargs: Any):
+            raise AssertionError("MCP tool execution must remain unreachable")
+
+    pair = SimpleNamespace(
+        public=SimpleNamespace(tasks=(MCP_TASK,)),
+        private=SimpleNamespace(
+            identity_catalog=MCP_ORACLE.resolved_roles,
+            graph_fact_registry=(),
+        ),
+    )
+    prepared = campaign_runner.PreparedTrack(
+        track=Track.MCP,
+        pair=pair,
+        profile=PROFILE,
+        release=SimpleNamespace(
+            entries=(SimpleNamespace(task_id=MCP_TASK.task_id),),
+        ),
+        live=SimpleNamespace(),
+        certifications={},
+    )
+    resolved = SimpleNamespace(
+        output_dir=tmp_path,
+        mcp_dir=tmp_path,
+        config=SimpleNamespace(
+            defaults=SimpleNamespace(
+                max_infra_retries=0,
+                model_base_url=None,
+                reasoning_effort=None,
+                health=SimpleNamespace(
+                    timeout_seconds=1.0,
+                    poll_interval=0.01,
+                ),
+                mcp=SimpleNamespace(
+                    max_steps=1,
+                    telemetry_adapter="generic",
+                    read_timeout_seconds=1.0,
+                    tool_timeout_seconds=1.0,
+                ),
+            )
+        ),
+    )
+    model = SimpleNamespace(
+        name="mcp-test",
+        provider="openai-compat",
+        model="test/model",
+        requested_model="openai-compat/test/model",
+        model_base_url="https://example.invalid/v1",
+        api_surface="chat_completions",
+        options={},
+    )
+
+    def capture_attempt(task_id, number, sample, provider):
+        captured_providers.append(provider)
+        return SimpleNamespace(
+            task_id=task_id,
+            attempt=number,
+            sample=sample,
+            provider=provider,
+        )
+
+    monkeypatch.setattr(
+        campaign_runner,
+        "_provenance",
+        lambda **_kwargs: SimpleNamespace(run_identity=object()),
+    )
+    monkeypatch.setattr(campaign_runner, "_guard_run_dir", lambda *_args: None)
+    monkeypatch.setattr(campaign_runner, "_load_state", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        campaign_runner,
+        "build_checkpoint",
+        lambda *_args, results, **_kwargs: SimpleNamespace(results=tuple(results)),
+    )
+    monkeypatch.setattr(campaign_runner, "_state", lambda **_kwargs: object())
+    monkeypatch.setattr(campaign_runner, "_write_model", lambda *_args: None)
+    monkeypatch.setattr(campaign_runner, "_attempt", capture_attempt)
+    monkeypatch.setattr(
+        campaign_runner,
+        "OracleRegistry",
+        lambda _private: SimpleNamespace(for_task=lambda _task_id: MCP_ORACLE),
+    )
+    monkeypatch.setattr(campaign_runner, "_load_bloodhound_mcp_bundle", fake_bundle)
+    monkeypatch.setattr(campaign_runner, "run_mcp_model_task_v2", fake_mcp_run)
+
+    bhce = UnhealthyBHCE()
+    coordinator = Coordinator()
+    _provenance, results = asyncio.run(
+        campaign_runner._run_model(
+            resolved=resolved,
+            prepared=prepared,
+            model=model,
+            run_index=1,
+            bhce=bhce,
+            coordinator=coordinator,
+            loop=SimpleNamespace(),
+            runs_total=1,
+        )
+    )
+
+    assert provider_calls == 0
+    assert bhce.calls == 1
+    assert coordinator.closed == 0
+    assert len(results) == 1
+    assert results[0].execution_class is ExecutionClass.UNEXECUTED
+    assert results[0].outcome is SampleOutcomeCode.CIRCUIT_OPEN
+    assert captured_providers[0].provider_metrics["provider_called"] is False
 
 
 @pytest.mark.parametrize(

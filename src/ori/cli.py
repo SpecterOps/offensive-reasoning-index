@@ -36,8 +36,8 @@ from .generator.serializer import (
 )
 from .mcp_launcher import (
     MCPLauncherConfig,
-    detect_uv_version,
     resolve_mcp_launcher_config,
+    resolve_mcp_launcher_runtime,
 )
 from .relationships import (
     RELATIONSHIP_CONTRACT_VERSION,
@@ -570,7 +570,7 @@ def _effective_run_config(
     if direct_query_safety is not None:
         config["direct_query_safety"] = direct_query_safety.to_jsonable()
     if mcp_launcher is not None:
-        config.update(mcp_launcher.provenance(uv_version=detect_uv_version()))
+        config.update(resolve_mcp_launcher_runtime(mcp_launcher).provenance(mcp_launcher))
     return config
 
 

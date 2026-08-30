@@ -12,6 +12,7 @@ from ori.eval.provider_contract import ProviderApiSurface
 from ori.eval.v2.campaign_config import (
     ResolvedV2CampaignConfig,
     V2CampaignConfig,
+    load_v2_campaign_config,
 )
 from ori.eval.v2.campaign_runner import (
     _RUNNER_IMPLEMENTATION_SOURCES,
@@ -199,8 +200,57 @@ def test_mcp_provider_gating_does_not_block_direct_only_campaigns() -> None:
         _config(provider="anthropic", modes=("mcp",))
 
 
+def test_direct_only_config_does_not_require_mcp_checkout(tmp_path: Path) -> None:
+    for name in (
+        "manifest.json",
+        "archive.zip",
+        "direct-public.json",
+        "direct-oracles.private.json",
+        "direct-candidates.json",
+        "direct-live.private.json",
+    ):
+        (tmp_path / name).touch()
+    config_path = tmp_path / "direct-only.yaml"
+    config_path.write_text(
+        """\
+version: 2
+source:
+  manifest: manifest.json
+  archive: archive.zip
+tracks:
+  direct:
+    public: direct-public.json
+    oracles: direct-oracles.private.json
+    candidates: direct-candidates.json
+    live_certification: direct-live.private.json
+modes: [direct]
+output_dir: results/direct-only
+defaults: {}
+models:
+  - name: direct-model
+    provider: openai-compat
+    model: provider/model
+    model_base_url: http://127.0.0.1:8080/v1
+"""
+    )
+
+    resolved = load_v2_campaign_config(config_path)
+
+    assert resolved.config.defaults.mcp is None
+    assert resolved.mcp_dir is None
+
+
+def test_mcp_mode_requires_explicit_mcp_configuration() -> None:
+    payload = _config(provider="openai-compat", modes=("mcp",)).model_dump(mode="json")
+    payload["defaults"].pop("mcp")
+
+    with pytest.raises(ValidationError, match="require defaults.mcp"):
+        V2CampaignConfig.model_validate(payload)
+
+
 def test_provider_behavior_sources_are_runtime_fingerprinted() -> None:
     assert {
+        "mcp_launcher",
         "provider_auth",
         "provider_contract",
     } <= _RUNNER_IMPLEMENTATION_SOURCES.keys()

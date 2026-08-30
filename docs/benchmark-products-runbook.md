@@ -235,6 +235,22 @@ models:
     mcp_tool_loop: native-openai-compatible
 ```
 
+ORI normally resolves `uv` and `uvx` from `PATH`. If Hermes, Dogwalker, cron,
+or another non-interactive supervisor deliberately supplies a restricted
+`PATH`, declare the operator-approved absolute executables in that supervisor's
+environment:
+
+```bash
+export ORI_UV_EXECUTABLE=/opt/homebrew/bin/uv
+export ORI_UVX_EXECUTABLE=/opt/homebrew/bin/uvx
+```
+
+Local-checkout runs need only `ORI_UV_EXECUTABLE`; `uvx_git` runs need both.
+Readiness fails before model usage when either required executable is missing or
+invalid. Private launcher provenance records the exact paths and `uv` version,
+and changing them invalidates resume state. ORI does not forward these settings
+to the BloodHound MCP child.
+
 For OpenRouter, set `OPENROUTER_API_KEY` in the environment and use the
 OpenAI-compatible provider. ORI uses `OPENAI_COMPAT_API_KEY` as the explicit
 override and selects `OPENROUTER_API_KEY` only for OpenRouter endpoints. It

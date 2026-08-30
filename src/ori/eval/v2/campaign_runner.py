@@ -33,7 +33,11 @@ from ori.eval.provider_auth import (
     resolve_openai_compat_credential,
 )
 from ori.eval.provider_contract import ProviderApiSurface, resolve_api_surface
-from ori.mcp_launcher import MCPLauncherConfig
+from ori.mcp_launcher import (
+    MCPLauncherConfig,
+    MCPLauncherRuntime,
+    resolve_mcp_launcher_runtime,
+)
 
 from .campaign import (
     CheckpointV2,
@@ -84,10 +88,10 @@ from .schema import (
 )
 from .scoring import SampleOutcomeCode, SampleResult, summarize_results
 
-RUNNER_VERSION = "ori-v2-model-campaign-v12"
+RUNNER_VERSION = "ori-v2-model-campaign-v13"
 RUN_STATE_SCHEMA_VERSION = "ori-v2-private-run-state-v5"
 MODEL_REPORT_SCHEMA_VERSION = "ori-v2-model-report-v2"
-READINESS_SCHEMA_VERSION = "ori-v2-run-readiness-v8"
+READINESS_SCHEMA_VERSION = "ori-v2-run-readiness-v9"
 CAMPAIGN_LIFECYCLE_SCHEMA_VERSION = "ori-v2-campaign-lifecycle-v1"
 TRACK_COMPLETION_SCHEMA_VERSION = "ori-v2-track-completion-v1"
 _RUNNER_IMPLEMENTATION_SOURCES = {
@@ -102,6 +106,7 @@ _RUNNER_IMPLEMENTATION_SOURCES = {
     "evidence": Path(__file__).with_name("evidence.py"),
     "identity": Path(__file__).with_name("identity.py"),
     "mcp_adapter": Path(__file__).with_name("mcp_adapter.py"),
+    "mcp_launcher": Path(__file__).parent.parent.parent / "mcp_launcher.py",
     "mcp_state_machine": Path(__file__).with_name("mcp.py"),
     "model_runtime": Path(__file__).with_name("model_runtime.py"),
     "query_contract": Path(__file__).with_name("query_contract.py"),
@@ -215,7 +220,7 @@ def _infrastructure_attempt_progress(
 
 
 class ModelRunProvenanceV2(StrictModel):
-    schema_version: Literal["ori-v2-model-campaign-v12"] = RUNNER_VERSION
+    schema_version: Literal["ori-v2-model-campaign-v13"] = RUNNER_VERSION
     protocol_version: Literal["ori-eval-protocol-v2"] = PROTOCOL_VERSION
     base: RunProvenanceV2
     run_identity: RunIdentity
@@ -231,6 +236,7 @@ class ModelRunProvenanceV2(StrictModel):
     structured_output_mode: Literal["prompt_local_validation"]
     endpoint_family: str
     credential_source: str | None = None
+    mcp_launcher_provenance: dict[str, str | None] | None = None
     provenance_fingerprint: str
 
     @model_validator(mode="after")
@@ -345,15 +351,16 @@ class ModelReadinessV2(StrictModel):
 
 
 class CampaignReadinessV2(StrictModel):
-    schema_version: Literal["ori-v2-run-readiness-v8"] = READINESS_SCHEMA_VERSION
+    schema_version: Literal["ori-v2-run-readiness-v9"] = READINESS_SCHEMA_VERSION
     protocol_version: Literal["ori-eval-protocol-v2"] = PROTOCOL_VERSION
-    runner_version: Literal["ori-v2-model-campaign-v12"] = RUNNER_VERSION
+    runner_version: Literal["ori-v2-model-campaign-v13"] = RUNNER_VERSION
     source_config_fingerprint: str
     source_manifest_sha256: str
     archive_sha256: str
     graph_fingerprint: str
     target_fingerprint: str
     mcp_server_revision: str
+    mcp_launcher_provenance: dict[str, str | None] | None = None
     tracks: tuple[ReadinessTrackV2, ...]
     models: tuple[ModelReadinessV2, ...]
     model_count: int = Field(strict=True, gt=0)
@@ -391,7 +398,7 @@ class CampaignCompletedTrackV2(StrictModel):
 class CampaignLifecycleV2(StrictModel):
     schema_version: Literal["ori-v2-campaign-lifecycle-v1"] = CAMPAIGN_LIFECYCLE_SCHEMA_VERSION
     protocol_version: Literal["ori-eval-protocol-v2"] = PROTOCOL_VERSION
-    runner_version: Literal["ori-v2-model-campaign-v12"] = RUNNER_VERSION
+    runner_version: Literal["ori-v2-model-campaign-v13"] = RUNNER_VERSION
     source_config_fingerprint: str
     mode: Literal["readiness", "execution"]
     status: Literal["running", "interrupted", "failed", "completed"]
@@ -435,7 +442,7 @@ class TrackRunCompletionV2(StrictModel):
 class TrackCompletionV2(StrictModel):
     schema_version: Literal["ori-v2-track-completion-v1"] = TRACK_COMPLETION_SCHEMA_VERSION
     protocol_version: Literal["ori-eval-protocol-v2"] = PROTOCOL_VERSION
-    runner_version: Literal["ori-v2-model-campaign-v12"] = RUNNER_VERSION
+    runner_version: Literal["ori-v2-model-campaign-v13"] = RUNNER_VERSION
     source_config_fingerprint: str
     track: Track
     candidate_release_fingerprint: str
@@ -1105,7 +1112,10 @@ def _model_loop(
     model: V2ModelEntry,
     resolved: ResolvedV2CampaignConfig,
 ) -> MCPToolLoop:
-    raw = model.mcp_tool_loop or resolved.config.defaults.mcp.tool_loop
+    configured = resolved.config.defaults.mcp
+    if configured is None:
+        raise V2CampaignRunError("MCP model loop requested without defaults.mcp")
+    raw = model.mcp_tool_loop or configured.tool_loop
     loop = MCPToolLoop(raw)
     if loop is MCPToolLoop.AUTO:
         raise V2CampaignRunError("certified v2 campaigns forbid MCP tool_loop=auto")
@@ -1163,6 +1173,8 @@ def _validate_runtime_bounds(
     required_steps = max(task.binding.bounds.max_tool_calls for task in tasks)
     minimum_task_timeout = min(task.binding.bounds.timeout_seconds for task in tasks)
     configured = resolved.config.defaults.mcp
+    if configured is None:
+        raise V2CampaignRunError("MCP runtime bounds requested without defaults.mcp")
     if configured.max_steps < required_steps:
         raise V2CampaignRunError(
             "configured MCP max_steps is below the certified task budget: "
@@ -1209,8 +1221,11 @@ def prepare_v2_campaign(
     _validate_model_bindings(resolved, prepared)
     _validate_runtime_bounds(resolved, prepared)
     model_readiness = _model_readiness(resolved)
-    mcp_revision = _git_revision(resolved.mcp_dir)
+    mcp_revision = "not-applicable"
     if Track.MCP in prepared:
+        if resolved.mcp_dir is None:
+            raise V2CampaignRunError("MCP campaign is missing its resolved MCP checkout")
+        mcp_revision = _git_revision(resolved.mcp_dir)
         expected_revision = prepared[Track.MCP].profile.mcp_server_revision
         if mcp_revision != expected_revision:
             raise V2CampaignRunError(
@@ -1267,6 +1282,7 @@ def _readiness(
     prepared: Mapping[Track, PreparedTrack],
     receipts: Mapping[Track, LiveGraphVerification],
     mcp_revision: str,
+    mcp_launcher_provenance: dict[str, str | None] | None,
     model_readiness: tuple[ModelReadinessV2, ...],
 ) -> CampaignReadinessV2:
     payload = {
@@ -1278,6 +1294,7 @@ def _readiness(
             resolve_bhce_target(resolved.config.defaults.bhce_url)
         ),
         "mcp_server_revision": mcp_revision,
+        "mcp_launcher_provenance": mcp_launcher_provenance,
         "tracks": tuple(
             ReadinessTrackV2(
                 track=track,
@@ -1320,6 +1337,7 @@ def _provenance(
     model: V2ModelEntry,
     run_index: int,
     loop: MCPToolLoop | None,
+    mcp_launcher_provenance: dict[str, str | None] | None = None,
 ) -> ModelRunProvenanceV2:
     provider_identity = _provider_identity(model, resolved)
     run_identity = RunIdentity(
@@ -1344,6 +1362,7 @@ def _provenance(
         "structured_output_mode": provider_identity.structured_output_mode,
         "endpoint_family": provider_identity.endpoint_family,
         "credential_source": provider_identity.credential_source,
+        "mcp_launcher_provenance": mcp_launcher_provenance,
         "runtime_config_fingerprint": canonical_sha256(
             {
                 "runner_version": RUNNER_VERSION,
@@ -1356,6 +1375,7 @@ def _provenance(
                 "structured_output_mode": provider_identity.structured_output_mode,
                 "endpoint_family": provider_identity.endpoint_family,
                 "credential_source": provider_identity.credential_source,
+                "mcp_launcher_provenance": mcp_launcher_provenance,
             }
         ),
         "provenance_fingerprint": "0" * 64,
@@ -1637,6 +1657,7 @@ async def _run_model(
     coordinator: DirectQueryCoordinator,
     loop: MCPToolLoop | None,
     runs_total: int,
+    mcp_launcher_runtime: MCPLauncherRuntime | None = None,
     progress: ProgressReporter | None = None,
     lifecycle: _CampaignLifecycleController | None = None,
 ) -> tuple[ModelRunProvenanceV2, tuple[SampleResult, ...]]:
@@ -1646,6 +1667,13 @@ async def _run_model(
         model=model,
         run_index=run_index,
         loop=loop,
+        mcp_launcher_provenance=(
+            mcp_launcher_runtime.provenance(
+                MCPLauncherConfig.local_checkout(resolved.mcp_dir)
+            )
+            if mcp_launcher_runtime is not None and resolved.mcp_dir is not None
+            else None
+        ),
     )
     run_dir = resolved.output_dir / prepared.track.value / model.name / f"run-{run_index:03d}"
     _guard_run_dir(run_dir, provenance)
@@ -1692,11 +1720,14 @@ async def _run_model(
 
     bundle = None
     if prepared.track is Track.MCP:
+        if resolved.mcp_dir is None:
+            raise V2CampaignRunError("MCP run is missing its resolved MCP checkout")
         bundle = await _load_bloodhound_mcp_bundle(
             MCPLauncherConfig.local_checkout(resolved.mcp_dir),
             include_resources=False,
             include_prompt=True,
             cypher_executor=coordinator.execute,
+            launcher_runtime=mcp_launcher_runtime,
         )
 
     task_by_id = {task.task_id: task for task in prepared.pair.public.tasks}
@@ -1757,6 +1788,7 @@ async def _run_model(
             sample: SampleResult
             provider: ProviderRunRecord
             direct_preflight_blocked = False
+            mcp_preflight_blocked = False
             cancellation: V2ModelTaskCancelled | None = None
             model_base_url = _model_base_url(model, resolved)
             try:
@@ -1793,26 +1825,56 @@ async def _run_model(
                 else:
                     if bundle is None or loop is None:
                         raise AssertionError("MCP model run is missing its runtime bundle")
-                    outcome, provider = await run_mcp_model_task_v2(
-                        task=task,
-                        oracle=oracle,
-                        resolver=resolver,
-                        profile=prepared.profile,
-                        bundle=bundle,
-                        model=model.requested_model,
-                        model_base_url=model_base_url,
-                        api_surface=getattr(model, "api_surface", "auto"),
-                        tool_loop=loop,
-                        max_steps=resolved.config.defaults.mcp.max_steps,
-                        ollama_options=provider_options,
-                        telemetry_adapter=(resolved.config.defaults.mcp.telemetry_adapter),
-                        read_timeout_seconds=(resolved.config.defaults.mcp.read_timeout_seconds),
-                        tool_timeout_seconds=(resolved.config.defaults.mcp.tool_timeout_seconds),
-                        graph_fact_registry=(
-                            prepared.pair.private.graph_fact_registry
-                        ),
-                    )
-                    sample = outcome.sample
+                    if coordinator.circuit_open:
+                        health = await bhce.wait_until_healthy(
+                            timeout_seconds=(resolved.config.defaults.health.timeout_seconds),
+                            poll_interval=(resolved.config.defaults.health.poll_interval),
+                        )
+                        if health.ok:
+                            coordinator.close_circuit()
+                        else:
+                            mcp_preflight_blocked = True
+                            sample, provider = unexecuted_model_record(
+                                task=task,
+                                oracle=oracle,
+                                model=model.requested_model,
+                                surface=prepared.track.value,
+                                detail=(
+                                    "BloodHound circuit remained open before provider execution"
+                                ),
+                            )
+                    if not mcp_preflight_blocked:
+                        configured_mcp = resolved.config.defaults.mcp
+                        if configured_mcp is None:
+                            raise V2CampaignRunError(
+                                "MCP run is missing defaults.mcp configuration"
+                            )
+                        outcome, provider = await run_mcp_model_task_v2(
+                            task=task,
+                            oracle=oracle,
+                            resolver=resolver,
+                            profile=prepared.profile,
+                            bundle=bundle,
+                            model=model.requested_model,
+                            model_base_url=model_base_url,
+                            api_surface=getattr(model, "api_surface", "auto"),
+                            tool_loop=loop,
+                            max_steps=configured_mcp.max_steps,
+                            ollama_options=provider_options,
+                            telemetry_adapter=(
+                                configured_mcp.telemetry_adapter
+                            ),
+                            read_timeout_seconds=(
+                                configured_mcp.read_timeout_seconds
+                            ),
+                            tool_timeout_seconds=(
+                                configured_mcp.tool_timeout_seconds
+                            ),
+                            graph_fact_registry=(
+                                prepared.pair.private.graph_fact_registry
+                            ),
+                        )
+                        sample = outcome.sample
             except V2ModelTaskCancelled as exc:
                 sample = exc.sample
                 provider = exc.provider
@@ -1922,6 +1984,21 @@ async def _run_prepared_v2_campaign(
     receipts_before: dict[Track, LiveGraphVerification] = {}
     shared_preflight: tuple[GraphSnapshot, LiveGraphVerification] | None = None
     invalid_campaigns: list[str] = []
+    mcp_launcher = None
+    if Track.MCP in resolved.config.track_modes:
+        if resolved.mcp_dir is None:
+            raise V2CampaignRunError("MCP campaign is missing its resolved MCP checkout")
+        mcp_launcher = MCPLauncherConfig.local_checkout(resolved.mcp_dir)
+    mcp_launcher_runtime = (
+        resolve_mcp_launcher_runtime(mcp_launcher)
+        if mcp_launcher is not None
+        else None
+    )
+    mcp_launcher_provenance = (
+        mcp_launcher_runtime.provenance(mcp_launcher)
+        if mcp_launcher_runtime is not None and mcp_launcher is not None
+        else None
+    )
 
     async with BHCEClient(**parse_bhce_url(resolved.config.defaults.bhce_url)) as bhce:
         direct_config = DirectQuerySafetyConfig()
@@ -1995,6 +2072,9 @@ async def _run_prepared_v2_campaign(
                         coordinator=coordinator,
                         loop=loop,
                         runs_total=runs,
+                        mcp_launcher_runtime=(
+                            mcp_launcher_runtime if track is Track.MCP else None
+                        ),
                         progress=progress,
                         lifecycle=lifecycle,
                     )
@@ -2046,6 +2126,7 @@ async def _run_prepared_v2_campaign(
         prepared=prepared,
         receipts=receipts_before,
         mcp_revision=mcp_revision,
+        mcp_launcher_provenance=mcp_launcher_provenance,
         model_readiness=model_readiness,
     )
     _write_model(

@@ -38,8 +38,10 @@ from mcp.types import EmbeddedResource, PromptMessage, ResourceLink, TextContent
 
 from ori.mcp_launcher import (
     MCPLauncherConfig,
+    MCPLauncherRuntime,
+    MCPLaunchSpec,
     build_mcp_launch_spec,
-    detect_uv_version,
+    resolve_mcp_launcher_runtime,
 )
 
 from .adapter import ModelResponse
@@ -651,12 +653,16 @@ def _wrap_read_only_tool(
     return wrapped_tool()
 
 
-def _create_bloodhound_mcp_server(launcher: MCPLauncherConfig) -> Any:
-    launch_spec = build_mcp_launch_spec(launcher)
+def _create_bloodhound_mcp_server(
+    launcher: MCPLauncherConfig,
+    *,
+    launch_spec: MCPLaunchSpec | None = None,
+) -> Any:
+    resolved_spec = launch_spec or build_mcp_launch_spec(launcher)
     return mcp_server_stdio(
-        command=launch_spec.command,
-        args=list(launch_spec.args),
-        cwd=launch_spec.cwd,
+        command=resolved_spec.command,
+        args=list(resolved_spec.args),
+        cwd=resolved_spec.cwd,
         env=_mcp_subprocess_env(),
     )
 
@@ -830,9 +836,13 @@ async def _load_bloodhound_mcp_bundle(
     include_resources: bool,
     include_prompt: bool,
     cypher_executor: Callable[..., Any] | None = None,
+    launcher_runtime: MCPLauncherRuntime | None = None,
 ) -> MCPServerBundle:
-    uv_version = detect_uv_version()
-    server = _create_bloodhound_mcp_server(launcher)
+    runtime = launcher_runtime or resolve_mcp_launcher_runtime(launcher)
+    server = _create_bloodhound_mcp_server(
+        launcher,
+        launch_spec=runtime.launch_spec,
+    )
     raw_tools = await mcp_tools(server).tools()
     wrapped: list[Any] = []
     for raw_tool in raw_tools:
@@ -871,7 +881,7 @@ async def _load_bloodhound_mcp_bundle(
         prompt_discovery_status=prompt_discovery_status,
         available_resource_uris=available_resource_uris,
         resource_discovery_status=resource_discovery_status,
-        launcher_provenance=launcher.provenance(uv_version=uv_version),
+        launcher_provenance=runtime.provenance(launcher),
     )
 
 
