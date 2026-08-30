@@ -18,6 +18,7 @@ from ori.eval.v2.campaign_runner import (
     _RUNNER_IMPLEMENTATION_SOURCES,
     V2CampaignRunError,
     _model_readiness,
+    _provider_endpoint_fingerprint,
     _provider_identity,
 )
 
@@ -254,3 +255,19 @@ def test_provider_behavior_sources_are_runtime_fingerprinted() -> None:
         "provider_auth",
         "provider_contract",
     } <= _RUNNER_IMPLEMENTATION_SOURCES.keys()
+
+
+def test_environment_compat_endpoint_is_resolved_for_runtime_fingerprinting(
+    monkeypatch,
+) -> None:
+    config = _config(provider="openai-compat")
+    resolved = _resolved(config)
+
+    monkeypatch.setenv("OPENAI_COMPAT_BASE_URL", "https://provider.example/v1")
+    first = _provider_endpoint_fingerprint(config.models[0], resolved)
+    monkeypatch.setenv("OPENAI_COMPAT_BASE_URL", "https://provider.example/v2")
+    second = _provider_endpoint_fingerprint(config.models[0], resolved)
+
+    assert len(first) == 64
+    assert len(second) == 64
+    assert first != second

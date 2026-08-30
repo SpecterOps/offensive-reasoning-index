@@ -71,7 +71,9 @@ from .provider_contract import (
     ProviderApiSurface,
     ProviderAuthenticationError,
     ProviderProtocolError,
+    ProviderRequest,
     ToolArgumentParseStatus,
+    chat_completions_payload,
     normalize_chat_completion,
 )
 from .tasks import Task
@@ -1616,13 +1618,17 @@ async def _openai_compat_chat_turn(
     read_timeout_seconds: float = DEFAULT_MCP_OLLAMA_READ_TIMEOUT_SECONDS,
     event_progress_observer: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
-    payload: dict[str, Any] = {
-        "model": _openai_compat_model_name(model_name),
-        "messages": messages,
-        "tools": tools,
-        "tool_choice": "auto",
-        "stream": False,
-    }
+    request = ProviderRequest(
+        messages=tuple(messages),
+        api_surface=ProviderApiSurface.CHAT_COMPLETIONS,
+        tools=tuple(tools),
+        tool_choice="auto",
+    )
+    payload = chat_completions_payload(
+        request,
+        model=_openai_compat_model_name(model_name),
+    )
+    payload["stream"] = False
     if extra_body:
         payload.update(dict(extra_body))
 

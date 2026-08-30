@@ -85,6 +85,37 @@ class ProviderRequest:
     structured_output_schema: dict[str, Any] | None = None
 
 
+def chat_completions_payload(
+    request: ProviderRequest,
+    *,
+    model: str,
+) -> dict[str, Any]:
+    """Project the shared request contract onto Chat Completions."""
+
+    if request.api_surface is not ProviderApiSurface.CHAT_COMPLETIONS:
+        raise ProviderCapabilityError(
+            "Chat Completions payload requires api_surface='chat_completions'"
+        )
+    payload: dict[str, Any] = {
+        "model": model,
+        "messages": [dict(message) for message in request.messages],
+    }
+    if request.tools:
+        payload["tools"] = [dict(tool) for tool in request.tools]
+    if request.tool_choice is not None:
+        payload["tool_choice"] = request.tool_choice
+    if request.output_limit is not None:
+        payload["max_tokens"] = request.output_limit
+    if request.reasoning:
+        payload.update(dict(request.reasoning))
+    if request.structured_output_schema is not None:
+        payload["response_format"] = {
+            "type": "json_schema",
+            "json_schema": dict(request.structured_output_schema),
+        }
+    return payload
+
+
 @dataclass(frozen=True, slots=True)
 class ProviderUsage:
     """Token usage without converting unknown values to zero."""

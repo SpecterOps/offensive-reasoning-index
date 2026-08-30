@@ -12,13 +12,40 @@ from ori.eval.provider_contract import (
     ProviderProtocolError,
     ProviderReasoningOutput,
     ProviderRefusalOutput,
+    ProviderRequest,
     ProviderTextOutput,
     ProviderTurnStatus,
     ToolArgumentParseStatus,
+    chat_completions_payload,
     normalize_chat_completion,
     resolve_api_surface,
     validate_release1_api_surface,
 )
+
+
+def test_chat_completions_payload_projects_shared_request_contract() -> None:
+    request = ProviderRequest(
+        messages=({"role": "user", "content": "question"},),
+        api_surface=ProviderApiSurface.CHAT_COMPLETIONS,
+        tools=({"type": "function", "function": {"name": "lookup"}},),
+        tool_choice="auto",
+        output_limit=321,
+        reasoning={"reasoning_effort": "low"},
+        structured_output_schema={"name": "answer", "schema": {"type": "object"}},
+    )
+
+    assert chat_completions_payload(request, model="model-id") == {
+        "model": "model-id",
+        "messages": [{"role": "user", "content": "question"}],
+        "tools": [{"type": "function", "function": {"name": "lookup"}}],
+        "tool_choice": "auto",
+        "max_tokens": 321,
+        "reasoning_effort": "low",
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {"name": "answer", "schema": {"type": "object"}},
+        },
+    }
 
 
 def _response(
