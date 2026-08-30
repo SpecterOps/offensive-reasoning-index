@@ -68,7 +68,7 @@ staged and unstaged `git diff --check`, and a 399 MB repository-wide secret scan
 - Direct-only V2 configs do not require MCP tools, configuration, or a checkout;
   MCP selection still fails readiness when its explicit configuration is absent.
 
-### Final live acceptance on the circuit-safe runtime
+### Pre-final-review V13 live acceptance (now historical)
 
 - Fresh V13 compile and full V29 live certification passed on the controlled benchmark host against graph
   `fb0b6785e524d40abcc9033ea2c7887eaa88e13bb6cb1f329636a4ce4b74b1c4`.
@@ -102,8 +102,30 @@ final exact runtime. The fresh V13 compile, live certification, Direct and MCP
 Nous canaries, and full no-model readiness all passed from new campaign roots;
 no old campaign root was resumed.
 
-### Remaining Release 1 blockers
+### Current Release 1 candidate and remaining blockers
 
+- A final independent provider review found two additional fail-closed gaps:
+  `openai-compat` could inherit the OpenAI SDK's official default endpoint when
+  no compatible base URL was supplied, and an environment-sourced compatible
+  endpoint was not included in resume identity. The correction now requires an
+  explicit compatible endpoint, hashes the exact effective endpoint into the
+  runtime fingerprint, and routes Direct and MCP request construction through
+  the shared `ProviderRequest` projection.
+- The post-review correction passed 215 focused tests, 884 tracked Release 1
+  tests, Ruff, `git diff --check`, a 135-commit Gitleaks scan, fresh Direct/MCP
+  compilation, fresh read-only V29 live certification, and fresh 42 Direct / 55
+  MCP no-model readiness with zero provider calls. An independent re-review
+  reported no findings.
+- The correction is now signed as commit `d6ac198` and pushed to
+  `origin/fix/openai-provider-runtime`. The signature uses the configured GitHub
+  RSA identity. This is the exact candidate head for all remaining canaries and
+  review; do not move the evidence boundary to a different tree implicitly.
+- The new runtime fingerprint makes the earlier Nous Direct and MCP canaries
+  pre-correction evidence. Rerun both from fresh roots after the signed fix is
+  pushed; never resume the old roots.
+- Fresh Nous Direct/MCP and OpenRouter Direct/MCP canaries are still required.
+  The controlled host still needs an `OPENROUTER_API_KEY`, and GitHub organization
+  SSO authorization is still required before opening or merging the PR.
 - OpenRouter live qualification is still blocked by the missing `OPENROUTER_API_KEY` on the controlled benchmark host.
 - Because the revised plan requires both OpenRouter and Nous live canaries, Release 1 is not merge-ready yet even though the code and local gates are ready.
 - Opening the PR is blocked on GitHub SSO authorization.
@@ -310,8 +332,11 @@ ORI is conference-finished by 2026-10-05 only when:
 ### Must
 
 - Open the Release 1 PR after SSO access is available.
-- Run the missing OpenRouter direct and MCP canaries on the controlled benchmark host with a fresh `OPENROUTER_API_KEY`.
-- Merge Release 1 only after those canaries pass.
+- Preserve signed candidate commit `d6ac198` as the exact canary and PR head.
+- Run fresh Nous Direct and MCP canaries from new roots on that exact head.
+- Run fresh OpenRouter Direct and MCP canaries on the controlled benchmark host
+  with a new `OPENROUTER_API_KEY`.
+- Merge Release 1 only after all four post-correction canaries pass.
 - Preserve the new full V29 live-certification and no-model-readiness receipts;
   they now cover the circuit-safe runtime fingerprint.
 - Start a fresh post-merge campaign root for any further provider runs.
@@ -342,7 +367,9 @@ Those are different claims. Only the first is currently plausible for 2026-10-05
 
 ## Risks
 
-- The biggest immediate schedule risk is not code quality. It is acceptance drift: code is ready locally, but Release 1 still lacks the required OpenRouter live canaries.
+- The biggest immediate schedule risk is acceptance drift: signed candidate
+  `d6ac198` is pushed, but all four provider canaries and the PR must remain
+  bound to that exact head.
 - The biggest product risk is over-claiming the benchmark as "official" before the `100/100` selector exists.
 - The biggest demo risk is depending on live infrastructure during the talk. BloodHound host state, provider availability, or MCP reachability can all fail independently.
 - The biggest interpretation risk is presenting historical autonomous supervisor artifacts as if they were current-runtime final rankings.
@@ -351,10 +378,10 @@ Those are different claims. Only the first is currently plausible for 2026-10-05
 
 ### 2026-08-30 to 2026-09-02 — close Release 1
 
-- Signed Release 1 commit `e35da9f` is published on
-  `fix/openai-provider-runtime`.
+- Signed candidate `d6ac198` is pushed; keep it frozen while completing release
+  acceptance.
 - Add `OPENROUTER_API_KEY` on the controlled benchmark host.
-- Run the two missing OpenRouter canaries.
+- Run fresh Nous and OpenRouter Direct/MCP canaries from four new campaign roots.
 - Open the Release 1 PR.
 - Merge Release 1 after review and canary confirmation.
 - Preserve the already-passing circuit-safe V13 certification/readiness
@@ -375,7 +402,10 @@ Those are different claims. Only the first is currently plausible for 2026-10-05
   Release 1 lands.
 - Run a representative fault-injection smoke: BloodHound unavailable, circuit
   open, zero later provider calls, clean resume only after health recovery.
-- Produce an offline demo bundle so the talk does not depend on live services.
+- Validate the completed offline demo bundle on a second machine/profile so the
+  talk does not depend on live services. The repository package contains six
+  keyboard-navigable beats, six 1280-by-720 static fallbacks, source and render
+  receipts, and explicit abort rules.
 
 ### 2026-09-16 to 2026-09-22 — fresh benchmark evidence
 
@@ -434,14 +464,17 @@ fill a denominator.
 
 ## Immediate next actions
 
-1. Add `OPENROUTER_API_KEY` on the controlled benchmark host and complete the missing live canaries.
-2. Authorize GitHub SSO and open the Release 1 PR from
+1. Unlock the SSH signing agent, restore the named post-review provider stash,
+   create the signed commit, and push it.
+2. Add `OPENROUTER_API_KEY` on the controlled benchmark host and rerun all four
+   Nous/OpenRouter Direct/MCP canaries from fresh roots.
+3. Authorize GitHub SSO and open the Release 1 PR from
    `fix/openai-provider-runtime`.
-3. Merge Release 1 to `master` after review.
-4. Restack and review `feat/v2-campaign-operations` after Release 1 reaches
+4. Merge Release 1 to `master` after review.
+5. Restack and review `feat/v2-campaign-operations` after Release 1 reaches
    `master`; recertify if the compiler-index commit is included.
-5. Run one fresh V29 current-runtime campaign for conference evidence.
-6. Treat the official `100/100` selector as the next major product milestone,
+6. Run one fresh V29 current-runtime campaign for conference evidence.
+7. Treat the official `100/100` selector as the next major product milestone,
    not as a prerequisite for the October 5 talk.
 
 ## Current working command boundary
@@ -465,7 +498,8 @@ spends provider usage.
 These are the main ways the current plan could still fail through wording or
 gate drift:
 
-- Release 1 is not merge-ready until the missing OpenRouter direct and MCP canaries pass on the controlled host with a fresh `OPENROUTER_API_KEY`.
+- Release 1 is not merge-ready until fresh Nous/OpenRouter Direct and MCP
+  canaries pass on signed candidate `d6ac198` and the PR review is complete.
 - The conference story must not drift into "official public benchmark" language. The honest current claim is the certified V29 development boundary plus the provider-hardening work that made it operable.
 - Historical autonomous campaign artifacts are useful diagnostics, but they are not current-runtime proof. Any table or screenshot for the talk needs a fresh post-hardening run.
 - The new read-only `ori campaign-status` slice closes the visibility gap for monitoring and reattachment checks, but it does not by itself prove that the outer supervisor can safely restart long unattended campaigns.

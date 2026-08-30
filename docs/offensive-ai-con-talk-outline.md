@@ -41,8 +41,9 @@ The main conference claim is:
 
 Do not call V29 the official public `100/100` suite. Do not present the failed
 historical MCP campaign as a ranking. Do not combine Direct and MCP into one
-headline score. Do not describe Release 1 as shipped until it is merged and the
-required OpenRouter canaries pass.
+headline score. Do not describe Release 1 as shipped until it is merged and all
+four post-correction Nous/OpenRouter Direct and MCP canaries pass on signed
+commit `d6ac198`.
 
 ## Three-act structure
 
@@ -100,9 +101,11 @@ questions according to the organizer's confirmed slot.
 ## Evidence register
 
 Every quantitative slide must link to an immutable, redacted artifact bundle
-before technical freeze. The current Release 1 acceptance JSON describes an
-uncommitted working tree and is not immutable release evidence until a signed
-commit/tree identity is recorded.
+before technical freeze. The current Release 1 acceptance JSON describes the
+pre-final-review V13 runtime and is historical diagnostic evidence. Signed
+commit `d6ac198` is the candidate runtime identity, but it needs four fresh
+post-correction canaries and a new redacted acceptance receipt before it becomes
+immutable live-release evidence.
 
 | Proposed public statement | Current status | Evidence source | Required qualifier |
 |---|---|---|---|
@@ -113,9 +116,9 @@ commit/tree identity is recorded.
 | GPT-5.5 scored 207/210; Daybreak Red 206/210; Daybreak Blue 205/210; GPT-5.6 Sol 204/210; Luna 193/210; Terra 180/210 on that Direct campaign. | Supported historical evidence | historical campaign bundle and design rationale | Show repeat ranges and avoid strong ordering among the top cluster. |
 | The historical MCP campaign is not publishable as a model ranking. | Supported | missing post-track completion/public reports; incident analysis | Explain the failed graph gate and infrastructure incident. |
 | The older runner made 1,215 later provider attempts, used about 79.5 million tokens, and issued 15,124 MCP tool calls after the first affected task. | Private incident-analysis figures; not yet conference-ready | historical forensic bundle summarized in the design rationale | Keep the totals out of the deck until they are reverified directly and bound to a frozen forensic receipt/hash. If later used, say “the older runtime recorded” and “approximately” for tokens. |
-| Laguna-style nullable Chat Completions content no longer produces a harness `None.strip()` exception. | Supported locally and by Nous canary classification | provider fixtures, regression tests, `docs/evidence/provider-hardening-v13-acceptance.json` | Do not call Release 1 shipped until merge. |
-| Nous Direct and MCP canaries completed with zero infrastructure and harness failures. | Supported | V13 acceptance evidence | Also state that both model outputs were typed `OUTPUT_INVALID`; these are interoperability canaries, not quality wins. |
-| Release 1 supports production-qualified OpenRouter and Nous. | Not yet supported | OpenRouter canaries missing | Use “Nous Release 1 interoperability canaries passed.” Describe OpenRouter only as fixture/regression-covered after the evidence index names those tests, and as live-qualified only after both canaries pass. |
+| Laguna-style nullable Chat Completions content no longer produces a harness `None.strip()` exception. | Supported on signed candidate commit `d6ac198` | provider fixtures and regression tests; pre-correction V13 canary classification is diagnostic only | Do not call Release 1 shipped until merge and fresh canaries. |
+| Nous Direct and MCP canaries completed with zero infrastructure and harness failures. | Historical pre-correction interoperability evidence | V13 acceptance evidence | Both outputs were typed `OUTPUT_INVALID`; rerun both on `d6ac198` before using them as release evidence. |
+| Release 1 supports production-qualified OpenRouter and Nous. | Not yet supported | Four post-correction canaries are pending | Describe both providers as fixture/regression-covered. Call either live-qualified only after its Direct and MCP canaries pass on `d6ac198`; call the release shipped only after merge. |
 | ORI has an official deterministic 100 Direct / 100 MCP suite. | Unsupported | selector is not implemented | Future work only. |
 
 ## Direct results slide requirements
@@ -169,8 +172,13 @@ outcomes, dirty or mismatched runner provenance, and effective-accuracy drift.
 
 ## Offline demo storyboard
 
-The conference demo should be prerecorded or rendered from a frozen local
-bundle. A live run may be optional, but it must not be required for the talk.
+The implemented conference demo is documented in
+[`offensive-ai-con-offline-demo.md`](offensive-ai-con-offline-demo.md) and opens
+from
+[`offline-demo/index.html`](assets/offensive-ai-con/offline-demo/index.html).
+It is rendered from a frozen local bundle, makes zero provider calls, and has a
+static 1280-by-720 PNG fallback for every beat. A live run may be optional, but
+it must not be required for the talk.
 
 1. **Graph gate:** show the exact manifest/archive identity and a passing ingest
    verification. Explain that a healthy API is insufficient.
@@ -268,5 +276,9 @@ Before freezing the deck:
   recovery, and archival boundary.
 - `docs/evidence/provider-hardening-v13-acceptance.json` — public-safe provider
   hardening and Nous canary evidence.
+- `docs/offensive-ai-con-offline-demo.md` — offline stage operation, claim
+  boundary, rebuild steps, and abort/fallback rules.
+- `docs/assets/offensive-ai-con/offline-demo/` — self-contained six-beat demo,
+  public evidence receipt, render receipt, and six static fallbacks.
 - `docs/assets/offensive-ai-con/` — reproducible historical Direct chart, CSV,
   and evidence manifest bound to all 30 public reports.
