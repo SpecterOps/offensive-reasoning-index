@@ -1,17 +1,22 @@
 # ORI Offensive AI Con Readiness Plan
 
 Date: 2026-08-30
-Scope: current `fix/openai-provider-runtime` branch, current V29 benchmark boundary, and the work needed to present ORI credibly by 2026-10-05.
+Scope: signed Release 1 branch plus the stacked campaign-operations and conference
+work, current V29 benchmark boundary, and the work needed to present ORI
+credibly by 2026-10-05.
 
 ## Current state
 
 ### Release 1 provider hardening
 
 - Branch: `fix/openai-provider-runtime`
-- Ahead of `master` by three signed commits:
+- Published at signed commit `e35da9f`; ahead of `master` by six signed commits:
+  - `cd240d0` `feat: support Nous Portal API keys`
+  - `cf458fb` `docs: add Nous Portal Ox Alpha run profiles`
   - `fa1e6c6` `fix: harden OpenAI-compatible provider runtime`
   - `5e3f7c7` `fix: construct typed V2 MCP launcher`
   - `ede0f49` `fix: normalize MCP provider tool schemas`
+  - `e35da9f` `fix: close V2 provider hardening gaps`
 - Release 1 passed the original gates before the final benchmark-operations review:
   - `uv run pytest`: 872 passed
   - `uv run ruff check src scripts tests`: passed
@@ -23,12 +28,13 @@ The final operations review also found the still-open MCP circuit-amplification
 defect from the August autonomous campaign. A bounded follow-up change now gives
 MCP the same pre-provider open-circuit gate as Direct. Its focused test proves
 that a failed BloodHound recovery produces a zero-token `CIRCUIT_OPEN` result
-without invoking the provider or a tool. The exact updated branch passed 879
-tests, Ruff, `git diff --check`, and a repository-wide secret scan before final
-review and live re-certification.
-The follow-up is staged but not committed because the configured SSH signing
-agent refused the signing request. It must not be replaced with an unsigned
-commit.
+without invoking the provider or a tool. The staged follow-up also makes MCP
+configuration conditional on selecting the MCP track, so Direct-only campaigns
+no longer need a placeholder MCP checkout. The exact updated Release 1 batch
+passed its focused provider/runtime tests, Ruff, `git diff --check`, and a
+repository-wide secret scan before final review and live re-certification. The
+follow-up is now signed and published as `e35da9f`; no later operations,
+performance, or conference files were folded into that release commit.
 
 The controlled-host acceptance pass also found that a non-interactive operator shell
 could start ORI with an absolute `uv` path while the nested MCP launcher later
@@ -44,7 +50,9 @@ An independent code-review pass initially rejected the implicit-directory
 fallback and incomplete binary provenance. After the trust-boundary and
 fingerprint fixes, the second review reported no findings. A restricted-`PATH`
 controlled-host test pass with explicit executable overrides completed 151 focused
-tests; the full local suite completed 879 tests.
+tests. The exact combined Release 1, campaign-operations, compiler-index, and
+conference-evidence tree then completed 919 tests in 86.48 seconds, Ruff,
+staged and unstaged `git diff --check`, and a 399 MB repository-wide secret scan.
 
 ### What Release 1 now proves
 
@@ -57,6 +65,8 @@ tests; the full local suite completed 879 tests.
   - generic compatible hosts use only `OPENAI_COMPAT_API_KEY`
 - Requested and resolved `api_surface` values are fingerprinted into V2 provenance and resume compatibility.
 - MCP tool schemas now omit explicit JSON `null` keywords that Nous rejected.
+- Direct-only V2 configs do not require MCP tools, configuration, or a checkout;
+  MCP selection still fails readiness when its explicit configuration is absent.
 
 ### Final live acceptance on the circuit-safe runtime
 
@@ -96,8 +106,56 @@ no old campaign root was resumed.
 
 - OpenRouter live qualification is still blocked by the missing `OPENROUTER_API_KEY` on the controlled benchmark host.
 - Because the revised plan requires both OpenRouter and Nous live canaries, Release 1 is not merge-ready yet even though the code and local gates are ready.
-- The final MCP circuit commit is blocked on the local SSH signing agent.
 - Opening the PR is blocked on GitHub SSO authorization.
+
+### Autonomous campaign operations
+
+A separate signed stacked commit, `317ed9c`, now adds
+`ori campaign-status --config <exact-config> [--json]`. It projects the current
+V2 lifecycle, lock liveness, readiness, checkpoints, reports, and track
+completion without preparing a campaign, calling a provider, starting MCP,
+querying BloodHound, reading the live graph, or writing state. It fails closed
+on corrupt, incompatible, orphaned, or incomplete evidence and distinguishes a
+truly active process from a stale `running` lifecycle.
+
+The repository-owned supervisor contract keeps process persistence, bounded
+restart policy, notifications, secret injection, and archive transfer outside
+ORI. The outer supervisor consumes only the redacted status JSON and may resume
+only by following ORI's typed `next_action` when resume is allowed. Interrupted
+readiness is rerun without `--execute`; interrupted paid execution uses the
+exact original `run-v2 --config ... --execute` command. This closes the
+monitoring and reattachment design gap without inventing a second checkpoint
+state machine.
+
+### Separate offline compiler-performance slice
+
+Signed stacked commit `56cb346` indexes immutable graph objects,
+relationships, properties, and identities by graph fingerprint instead of
+rescanning the 17,088-object / 60,342-relationship V29 snapshot for every
+fixture and route position. Process-wide derived indexes are limited to the two
+most recent graph fingerprints so a long-lived worker cannot retain an
+unbounded sequence of benchmark graphs.
+
+This is intentionally separate from Release 1 because it changes compiler and
+certifier implementation fingerprints and therefore requires fresh compilation,
+certification, readiness, and campaign roots. It must not invalidate the
+already-completed provider acceptance evidence by being folded into signed
+Release 1 commit `e35da9f`.
+
+On the same workstation and complex seed-4401 inputs, clean `ede0f49` versus
+signed commit `56cb346` measured:
+
+| Track | Clean `ede0f49` | Indexed working tree | Wall-time reduction | Maximum RSS |
+|---|---:|---:|---:|---:|
+| Direct compile/offline certification | 23.52 s | 13.87 s | 41.0% | 506 MB versus 507 MB |
+| MCP compile/offline certification | 33.22 s | 17.80 s | 46.4% | 530 MB versus 576 MB |
+
+All eight Direct/MCP public, oracle, inventory, and offline-certification JSON
+artifacts matched byte-for-byte after removing only fields whose names end in
+`fingerprint`; those fields are expected to change because the implementation
+fingerprint changed. The graph/compiler regression gate passed 51 tests and
+Ruff. Treat the timing comparison as working evidence until it is preserved in
+a repeatable host-qualified receipt.
 
 ## Project history and engineering narrative
 
@@ -125,7 +183,7 @@ turn a useful experiment into a defensible benchmark:
 5. **August — V29 and durable operations.** V29 separated the larger certified
    inventory from the semantic-unique release, bound graph/runtime/capability
    fingerprints, and added durable checkpoints and per-track publication.
-   autonomous supervisor then ran a six-model, five-pass campaign. Its Direct track is valid;
+   An autonomous supervisor then ran a six-model, five-pass campaign. Its Direct track is valid;
    Neo4j failed during MCP, revealing a costly circuit-amplification defect.
 6. **Late August — provider production hardening.** OpenRouter and Nous became
    endpoint-isolated live providers. Laguna's nullable response exposed the need
@@ -396,8 +454,25 @@ release, and a fresh output root. No-model readiness must pass again after every
 runtime fingerprint change; only the same config with explicit `--execute`
 spends provider usage.
 
+## Adversarial plan audit
+
+These are the main ways the current plan could still fail through wording or
+gate drift:
+
+- Release 1 is not merge-ready until the missing OpenRouter direct and MCP canaries pass on the controlled host with a fresh `OPENROUTER_API_KEY`.
+- The conference story must not drift into "official public benchmark" language. The honest current claim is the certified V29 development boundary plus the provider-hardening work that made it operable.
+- Historical autonomous campaign artifacts are useful diagnostics, but they are not current-runtime proof. Any table or screenshot for the talk needs a fresh post-hardening run.
+- The new read-only `ori campaign-status` slice closes the visibility gap for monitoring and reattachment checks, but it does not by itself prove that the outer supervisor can safely restart long unattended campaigns.
+- The old Laguna campaign and any pre-fingerprint-change checkpoints stay invalid for resume purposes even if they still exist on disk.
+- Direct and MCP must stay separated in every chart and conclusion; the failed MCP ranking is a boundary condition, not a benchmark result to average away.
+
 ## Source map
 
+- `scripts/build_offensive_ai_con_assets.py` and
+  `docs/assets/offensive-ai-con/` — deterministic historical Direct chart, CSV,
+  and report-hash evidence manifest.
+- `docs/offensive-ai-con-talk-outline.md` — timed narrative, claim register,
+  offline demo storyboard, visual inventory, and evidence-freeze checklist.
 - `docs/benchmark-v2-design-rationale.md` — canonical architecture, incidents,
   metrics, and V29 boundary.
 - `docs/benchmark-v2-certification-evidence.md` — offline/live certification
@@ -406,4 +481,6 @@ spends provider usage.
   and operational gates.
 - `docs/benchmark-v2-task-authoring.md` — candidate certification and future
   selector-facing contract.
+- `docs/v2-campaign-supervisor-contract.md` — bounded external monitoring,
+  restart, stop, and archival contract for autonomous campaigns.
 - `docs/evidence/provider-hardening-v13-acceptance.json` — public-safe V13 validation and canary evidence index.

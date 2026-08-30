@@ -948,6 +948,23 @@ uv run --env-file ../Bloodhound-MCP/.env \
   --execute
 ```
 
+Inspect that exact campaign from another terminal without contacting the model,
+MCP server, BloodHound, or live graph:
+
+```bash
+uv run ori campaign-status --config models.v2.local.yaml
+```
+
+Add `--json` for a redacted machine-readable projection suitable for a bounded
+supervisor. A lifecycle marked `running` is reported as `stale_running` when no
+process holds the campaign lock. Resume only when the command reports
+`resume_allowed: yes`, and follow its `next_action`: interrupted readiness is
+rerun without `--execute`, while interrupted execution uses the same
+`run-v2 --config ... --execute` command. Failed or incompatible evidence
+requires investigation and is never automatically declared resumable. See the
+[V2 Campaign Supervisor Contract](docs/v2-campaign-supervisor-contract.md) for
+the complete state/action and stop-condition boundary.
+
 The executable path derives its schedule from the candidate-certified catalog,
 keeps direct and MCP tracks separate, routes direct and MCP-issued Cypher
 through policy v3, checkpoints each completed task atomically, retries genuine
@@ -1226,6 +1243,12 @@ dataset.
 - [V2 Certification Evidence](docs/benchmark-v2-certification-evidence.md):
   deterministic generation, corpus migration, and controlled live/offline
   parity receipts.
+- [V2 Campaign Supervisor Contract](docs/v2-campaign-supervisor-contract.md):
+  read-only status, safe recovery, stop conditions, and external process-manager
+  responsibilities for unattended campaigns.
+- [Offensive AI Con Talk Outline](docs/offensive-ai-con-talk-outline.md): timed
+  narrative, public claim register, offline demo storyboard, and evidence-freeze
+  checklist for the October 5 presentation.
 - [Phase 4 v1 Runbook](docs/phase4-v1-runbook.md): older Phase 4 v1 workflow for
   historical comparison and focused diagnostic profiles.
 - [Inference Config Examples](examples/inference/): sanitized templates for
@@ -1287,6 +1310,12 @@ Execute that exact V2 campaign only after readiness passes:
 ```bash
 uv run --env-file ../Bloodhound-MCP/.env \
   ori run-v2 --config models.v2.local.yaml --execute
+```
+
+Inspect progress safely from another terminal:
+
+```bash
+uv run ori campaign-status --config models.v2.local.yaml
 ```
 
 Score structured answers offline without launching a model campaign:
