@@ -48,7 +48,7 @@ def _call_with_response(
     response: object,
     *,
     api_surface: str = "auto",
-    base_url: str = "https://compatible.example/v1",
+    base_url: str | None = "https://compatible.example/v1",
     set_compat_key: bool = True,
 ):
     captured: dict[str, Any] = {}
@@ -143,6 +143,24 @@ def test_remote_generic_compat_endpoint_requires_explicit_compat_key(monkeypatch
     assert "request" not in captured
     assert response.error is not None
     assert response.provider_metrics["infra_error_subtype"] == "PROVIDER_AUTH"
+    assert response.provider_metrics["infra_retryable"] is False
+
+
+def test_compat_provider_without_endpoint_fails_closed(monkeypatch) -> None:
+    monkeypatch.setenv("OPENAI_COMPAT_API_KEY", "compat-key")
+    monkeypatch.setenv("OPENAI_API_KEY", "official-openai-key")
+
+    response, captured = _call_with_response(
+        monkeypatch,
+        _sdk_response(),
+        base_url=None,
+    )
+
+    assert "client" not in captured
+    assert "request" not in captured
+    assert response.error is not None
+    assert "requires an explicit model_base_url" in response.error
+    assert response.provider_metrics["infra_error_subtype"] == "PROVIDER_CAPABILITY"
     assert response.provider_metrics["infra_retryable"] is False
 
 

@@ -18,8 +18,10 @@ from .provider_contract import (
     ProviderAuthenticationError,
     ProviderCapabilityError,
     ProviderContractError,
+    ProviderRequest,
     ProviderTurn,
     ProviderTurnStatus,
+    chat_completions_payload,
     normalize_chat_completion,
     resolve_api_surface,
     validate_release1_api_surface,
@@ -423,6 +425,11 @@ async def _call_provider(
         client_kwargs = {"base_url": resolved_base}
         credential = None
         if provider == "openai-compat":
+            if not resolved_base:
+                raise ProviderCapabilityError(
+                    "provider='openai-compat' requires an explicit model_base_url "
+                    "or model@URL endpoint"
+                )
             credential = resolve_openai_compat_credential(resolved_base)
             # Supplying an explicit placeholder prevents the OpenAI SDK from
             # silently borrowing OPENAI_API_KEY for an unrelated compatible
@@ -460,10 +467,13 @@ async def _call_provider(
         client = openai.AsyncOpenAI(**client_kwargs)
         # Inject system prompt as first message for OpenAI-compat providers
         full_messages = [{"role": "system", "content": system}] + messages
+        request = ProviderRequest(
+            messages=tuple(full_messages),
+            api_surface=ProviderApiSurface.CHAT_COMPLETIONS,
+            output_limit=max_tokens,
+        )
         resp = await client.chat.completions.create(
-            model=name,
-            max_tokens=max_tokens,
-            messages=full_messages,
+            **chat_completions_payload(request, model=name)
         )
         turn = normalize_chat_completion(
             resp,

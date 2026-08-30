@@ -932,6 +932,15 @@ def _model_base_url(
     return base_url
 
 
+def _provider_endpoint_fingerprint(
+    model: V2ModelEntry,
+    resolved: ResolvedV2CampaignConfig,
+) -> str:
+    """Hash the exact effective endpoint into the resume identity."""
+
+    return canonical_sha256({"endpoint": _model_base_url(model, resolved) or ""})
+
+
 def _provider_identity(
     model: V2ModelEntry,
     resolved: ResolvedV2CampaignConfig,
@@ -1375,6 +1384,9 @@ def _provenance(
                 "structured_output_mode": provider_identity.structured_output_mode,
                 "endpoint_family": provider_identity.endpoint_family,
                 "credential_source": provider_identity.credential_source,
+                "resolved_endpoint_fingerprint": _provider_endpoint_fingerprint(
+                    model, resolved
+                ),
                 "mcp_launcher_provenance": mcp_launcher_provenance,
             }
         ),
