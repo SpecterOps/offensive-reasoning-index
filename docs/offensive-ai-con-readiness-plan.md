@@ -5,6 +5,20 @@ Scope: signed Release 1 branch plus the stacked campaign-operations and conferen
 work, current V29 benchmark boundary, and the work needed to present ORI
 credibly by 2026-10-05.
 
+The qualified integrated runtime is signed commit `698dc52`. It combines the
+frozen Release 1 provider head `d6ac198` with the campaign-status, bounded
+supervisor, compiler-index, reporting, model-card, and conference slices. The
+exact integrated tree passed 967 tests and Ruff, was pushed to
+`origin/feat/v2-campaign-operations`, and completed fresh compile, three-gate
+live certification, and full 42 Direct / 55 MCP no-model readiness on the
+controlled host with zero provider attempts and zero tokens.
+
+The final post-r3 delivery tree adds the deadline, status, output-budget, and
+model-card packaging fixes proven by the live campaign. It passes 974 tests,
+full Ruff, `git diff --check`, and a redacted 141-commit Gitleaks history scan
+with no leaks. The model-card supervisor replay also passed on Antonetta against
+the already-completed campaign without launching another provider call.
+
 ## Current state
 
 ### Release 1 provider hardening
@@ -56,6 +70,8 @@ controlled-host test pass with explicit executable overrides completed 151 focus
 tests. The exact combined Release 1, campaign-operations, compiler-index, and
 conference-evidence tree then completed 919 tests in 86.48 seconds, Ruff,
 staged and unstaged `git diff --check`, and a 399 MB repository-wide secret scan.
+After the final bounded-supervisor fixes and merge at `698dc52`, the integrated
+tree completed 967 tests and Ruff with a clean tracked worktree.
 
 ### What Release 1 now proves
 
@@ -151,14 +167,115 @@ querying BloodHound, reading the live graph, or writing state. It fails closed
 on corrupt, incompatible, orphaned, or incomplete evidence and distinguishes a
 truly active process from a stale `running` lifecycle.
 
-The repository-owned supervisor contract keeps process persistence, bounded
-restart policy, notifications, secret injection, and archive transfer outside
-ORI. The outer supervisor consumes only the redacted status JSON and may resume
-only by following ORI's typed `next_action` when resume is allowed. Interrupted
-readiness is rerun without `--execute`; interrupted paid execution uses the
-exact original `run-v2 --config ... --execute` command. This closes the
-monitoring and reattachment design gap without inventing a second checkpoint
-state machine.
+The repository now includes a bounded reference supervisor in
+`src/ori/eval/v2/campaign_supervisor.py` plus the operator wrapper
+`scripts/supervise_v2_campaign.py`. It keeps fingerprinted supervisor state
+outside the campaign root, enforces an exclusive supervisor lock, requires
+explicit paid-run approval, preserves restart and observed-token ceilings, and
+signals only a child it owns. An adopted lock-owning process is monitor-only.
+The supervisor consumes the redacted status projection and follows ORI's typed
+`next_action`; it does not invent a second checkpoint state machine. Unit and
+durability coverage is complete for these invariants, while the full live
+BloodHound-outage and signal fault matrix remains a pre-unattended-operation
+gate.
+
+Fresh integrated qualification at `698dc52` produced readiness fingerprint
+`3ec2cab14d26905d43847d8205fca8ffb5b8fdf41e321b47d84f83f0980eefbe`.
+It certified graph `fb0b6785e...`, Direct release `1b58cc55...` with 42 tasks,
+and MCP release `4e8b35fe...` with 55 tasks, with zero provider attempts and
+zero tokens. The public-safe receipt is
+`docs/evidence/integrated-698dc52-laguna-v29-readiness.json`.
+
+The same exact runtime then passed a process-level readiness-recovery matrix on
+Antonetta without provider usage. The matrix proved the explicit paid approval
+gate, duplicate-supervisor exclusion, fail-closed missing-executable behavior,
+graceful `SIGTERM` interruption and one-restart recovery, pre-lifecycle hard
+failure accounting, and post-lifecycle `stale_running` recovery. Every recovered
+root completed no-model readiness with zero provider attempts and zero tokens.
+The production launcher now exports the qualified absolute `uv` and `uvx`
+executables so the supervised child inherits the same launcher boundary that
+readiness certified.
+
+Dogwalker's local ORI monitor and runbook now understand `ori run-v2`, consume
+only the redacted `ori-v2-campaign-status-v1` projection, keep Direct and MCP
+progress separate, and normalize legacy naive timestamps instead of crashing
+discovery. Its Hermes no-agent monitor is scheduled every five minutes. A
+forced scheduler run completed successfully while no campaign was active and
+therefore posted nothing to Discord. Rollback backups were retained. The
+public-safe process/monitoring receipt is
+`docs/evidence/integrated-698dc52-supervisor-dogwalker-acceptance.json`.
+
+### Full Laguna qualification and runtime findings
+
+The first paid integrated attempt exposed two operational gaps before it could
+be treated as benchmark evidence. Dogwalker fell back to its legacy status
+projection when V29 status rejected a valid checkpoint whose compiled task
+bindings were larger than its semantic release schedule. That fallback posted
+an `unknown model` / `unknown phase` milestone even though the ORI process still
+held the correct Laguna configuration. ORI also defaulted compatible-provider
+output to 2,048 tokens, causing otherwise typed Laguna answers to terminate at
+the harness ceiling. The status check now accepts the candidate-certified
+release subset while still rejecting durable results outside it, Dogwalker
+suppresses V2 milestones when V2 status is unavailable, and the typed model
+configuration exposes a fingerprinted `max_output_tokens` value used by both
+Direct and MCP.
+
+The replacement r2 campaign used 8,192 output tokens and completed all 42
+Direct plus 55 MCP scheduled samples. Its Direct track was campaign-valid with
+9 correct results, 32 model-attributable failures, zero infrastructure
+failures, and zero harness failures. Its MCP track reached every scheduled
+sample but retained two infrastructure failures after its retry budget, so ORI
+correctly invalidated the campaign and refused to publish a model card. The
+redacted diagnostic receipt is
+`docs/evidence/laguna-v29-r2-diagnostic.json`; it is evidence about runtime and
+model behavior, not a publishable model result.
+
+r2 also exposed a real deadline asymmetry. MCP already enforced each public
+whole-task budget, but Direct awaited provider inference and subsequent Cypher
+execution without placing both inside the task deadline. A slow compatible
+provider call could therefore block checkpointing beyond the advertised bound.
+Direct now mirrors MCP's typed deadline boundary, passes the same budget into
+the OpenAI-compatible SDK request, preserves a model-produced query digest when
+the query stage is cancelled, and records deadline exhaustion as
+model-attributable `TASK_TIMEOUT` rather than infrastructure or
+`HARNESS_ERROR`. Provider-stall and query-stall regression tests cover both
+stages.
+
+The fresh r3 campaign recompiled and recertified every fingerprinted artifact,
+used two infrastructure retries, and raised only the MCP infrastructure
+sub-deadlines to 180 seconds for provider reads and 90 seconds for tool calls.
+Both remained below the minimum 300-second public MCP whole-task budget. Fresh
+offline compilation, three-gate live certification, and 42-Direct / 55-MCP
+no-model readiness passed against graph `fb0b6785e...` with zero provider calls
+and zero tokens. The readiness receipt is
+`docs/evidence/laguna-v29-r3-readiness.json`.
+
+Paid r3 execution then completed every scheduled sample and both post-track
+graph gates. Direct was campaign-valid with 6/42 correct (14.29% effective
+accuracy), 10 completed outputs, 4 `OUTPUT_INVALID`, 28 `TASK_TIMEOUT`, and zero
+proof, infrastructure, harness, or unexecuted failures. MCP was campaign-valid
+with 12/55 correct (21.82% effective accuracy), 15 completed outputs, 36
+`OUTPUT_INVALID`, 3 `PROOF_INSUFFICIENT`, 1 `QUERY_ERROR`, and zero
+infrastructure, harness, or unexecuted failures. The campaign checkpointed
+97/97 samples across 102 provider attempts and observed 6,014,148 tokens. The
+Direct deadline was exercised repeatedly at the public 60-second bound without
+stalling or misclassifying the run.
+
+The outer supervisor initially failed only after valid ORI completion because
+it imported the top-level `scripts` directory as a Python package while running
+from an installed environment. The reusable model-card builder now lives under
+`ori.eval.v2`, the script is a backward-compatible wrapper, and a regression
+test makes any future supervisor dependency on `scripts` fail. Replaying the
+same completed supervisor state produced `valid completion`, set
+`model_card_generated=true` without another provider launch or restart, and
+reproduced the same model-card hashes. The redacted final receipt is
+`docs/evidence/laguna-v29-r3-final.json`; the public-safe card is under
+`docs/assets/offensive-ai-con/laguna-v29-r3/`. A mode-600 private evidence
+archive containing the exact r3 inputs, compilation/certification receipts,
+run state, reports, supervisor state, and model card passed `gzip` integrity
+validation with 51 entries and SHA-256
+`20e285a73b622c1d63397bb58d8f4b1e6937f4d21629345614dd95ff5eedba24`.
+It remains on the controlled host until the NAS is mounted for the second copy.
 
 ### Separate offline compiler-performance slice
 
@@ -259,18 +376,16 @@ from collapsing into one misleading score series.
 | August 13-22 | V29 six-model, five-pass campaign | Direct 42 x 5 per model; MCP 55 x 5 planned | Direct completed 1,260 valid samples; MCP failed after Neo4j loss and circuit amplification | Direct historical development evidence is valid; MCP has no publishable ranking or completion receipt |
 | August 22-29 | Nous Ox Alpha / Laguna investigations | partial Direct/MCP attempts | Provider availability, nullable content, tool-schema, launcher, and recovery defects reproduced | diagnostic only; every pre-`d6ac198` root is stale and non-resumable |
 | August 30 | Release 1 exact-head Nous canaries | one Direct and one MCP task | both campaign-valid `OUTPUT_INVALID`; MCP completed 7 tools / 6 Cypher calls | current interoperability evidence for Nous at `d6ac198`; zero infra/harness failures; public-safe receipt in `docs/evidence/` |
+| August 30 | Integrated supervisor and Dogwalker acceptance | approval, duplicate-lock, executable failure, graceful/unclean recovery, V2 Discord monitor | all readiness recoveries passed with zero provider attempts/tokens; Hermes cron path passed | process-level readiness operations qualified at `698dc52`; paid execution/completion gates remain |
 | Pending | OpenRouter exact-head canaries | one Direct and one MCP task | not run | fixture-covered only until live credential and canaries exist |
-| Authorized next | Laguna S 2.1 full V29 campaign | 42 Direct + 55 MCP, one pass | exact no-model readiness passed with zero provider calls; paid run waits for credential rotation | readiness `67a0632d59e6...`; success requires valid track receipts, full report, and generated model-card image |
+| August 30-31 | Laguna S 2.1 full V29 r3 campaign | 42 Direct + 55 MCP, one pass | Direct 6/42; MCP 12/55; 97/97 checkpointed; 102 attempts; 6,014,148 observed tokens | both tracks campaign-valid with matching graph gates, zero infrastructure/harness/unexecuted failures, redacted receipt and model card published under `docs/` |
 
 ## Known gaps and debt register
 
 | Gap | Why it matters | Exit gate |
 |---|---|---|
 | Release 1 is not on `master` | provider fixes are not yet the default product | OpenRouter canaries, SSO, PR review, signed merge |
-| The operations/conference branch does not contain final `d6ac198` | no single current integrated tree is qualified | restack after Release 1; full tests, compile, live certification, readiness, canaries, and supervisor smoke on one exact head |
-| Outer supervisor recovery is not fully qualified | lock ownership alone does not prove process progress | complete the contract's fault-injection matrix before unattended paid execution |
 | Compiler index is a separate fingerprint-changing slice | performance benefit cannot inherit older certification | integrate intentionally, then regenerate every V2 artifact and receipt |
-| Full current-runtime MCP result is absent | historical MCP campaign is invalid | complete the authorized Laguna Direct+MCP campaign or use an explicitly reduced fallback claim |
 | Official 100/100 selector is absent | V29 is a certified development release, not the promised official public suite | implement policy/quotas, certify seed 67, run post-selector evidence campaign |
 | Official OpenAI Responses is offline-only | there is no live OpenAI key/canary | Release 2 fixtures first; live qualification only when a key is intentionally available |
 | Conference video and rehearsal receipts are absent | HTML/PNG fallback alone does not prove delivery readiness | record and hash video; second-machine QA; timed 25/35/45-minute rehearsals |
@@ -327,6 +442,25 @@ Those attempt, token, and tool totals come from the controlled private forensic
 bundle. They are incident-analysis figures, not yet frozen public conference
 evidence. Keep them out of the deck unless they are independently regenerated,
 redacted, hashed, and bound to a public-safe forensic receipt.
+
+### Current Laguna S 2.1 result
+
+The August 30-31 r3 campaign is the first complete current-runtime Laguna S 2.1
+V29 Direct+MCP result. It is publication-valid as a one-pass model card, not as
+a variance study or the future official 100/100 suite.
+
+| Track | Correct | Effective accuracy | Completed outputs | Model failures | Proof failures | Infra / harness / unexecuted |
+|---|---:|---:|---:|---:|---:|---:|
+| Direct | 6/42 | 14.29% | 10 | 32 | 0 | 0 / 0 / 0 |
+| MCP | 12/55 | 21.82% | 15 | 37 | 3 | 0 / 0 / 0 |
+
+Direct and MCP are different evaluation surfaces and must remain separate. The
+result shows that the hardened harness can complete and publish a difficult,
+tool-using external-provider campaign without turning slow, malformed,
+insufficient, or query-invalid model behavior into infrastructure or harness
+success/failure. It does not establish that Laguna is competitive with the
+historical Codex-model Direct results, because those older runs used a different
+runtime boundary and have no valid paired MCP result.
 
 ## Historical run status that should not be confused with current readiness
 
@@ -452,19 +586,27 @@ ORI is conference-finished by 2026-10-05 only when:
 - The biggest product risk is over-claiming the benchmark as "official" before the `100/100` selector exists.
 - The biggest demo risk is depending on live infrastructure during the talk. BloodHound host state, provider availability, or MCP reachability can all fail independently.
 - The biggest interpretation risk is presenting historical autonomous supervisor artifacts as if they were current-runtime final rankings.
+- The supervisor ceiling is deliberately an observed-token limit, not a provider
+  billing limit. A request cancelled at its whole-task deadline can be billed by
+  the provider even though no final usage object reached ORI and the checkpoint
+  therefore records zero tokens. Paid unattended campaigns still need an
+  independent provider-side spending limit or operator budget alert.
 
 ## Recommended execution sequence
 
 ### 2026-08-30 to 2026-09-02 — close Release 1
 
-- Signed candidate `d6ac198` is pushed; keep it frozen while completing release
-  acceptance.
-- Preserve the completed exact-head Nous Direct/MCP receipt; do not rerun it
-  merely to replace a model-attributable `OUTPUT_INVALID` result.
+- Preserve the completed r3 Direct/MCP campaign, final receipt, and model card;
+  do not rerun it merely to replace model-attributable results.
+- Commit and push the reviewed integrated runtime and evidence after the signing
+  credential is unlocked.
+- Rotate the Nous token used for r3 after the controlled evidence bundle is
+  confirmed.
 - Add `OPENROUTER_API_KEY` on the controlled benchmark host.
 - Run fresh OpenRouter Direct/MCP canaries from two new campaign roots.
-- Open the Release 1 PR.
-- Merge Release 1 after review and canary confirmation.
+- Open the integrated PR and merge after review and canary confirmation, or
+  merge the frozen Release 1 PR first and restack the operations slice if review
+  policy requires two PRs.
 - Preserve the already-passing circuit-safe V13 certification/readiness
   receipts. If the separate compiler-index commit is selected for the next
   campaign, compile, certify, and run readiness again because its fingerprint
@@ -505,14 +647,15 @@ ORI is conference-finished by 2026-10-05 only when:
 
 ### 2026-09-16 to 2026-09-22 — fresh benchmark evidence
 
-- Run one fresh current-runtime Direct+MCP campaign on the frozen V29 release.
-- Use the explicitly authorized Laguna S 2.1 one-pass matrix. Enforce the frozen
-  token/restart ceiling and monitor only through redacted status/progress.
-- Start with one pass per model. Expand repetitions only after the first complete
-  valid track pair publishes successfully.
-- Generate redacted reports, repeat-aware tables, cost/latency summaries, and
-  immutable hashes. Generate the public-safe Laguna model-card JSON and image.
-  Freeze the evidence bundle by September 22.
+- Preserve the completed Laguna S 2.1 one-pass r3 matrix as the primary evidence
+  unless a merged runtime fingerprint changes its validity boundary. Do not
+  spend tokens to cosmetically improve model-attributable results.
+- If integration changes a fingerprinted provider, runner, finalizer, graph, or
+  candidate-release boundary, run one replacement pass from a fresh root under
+  the same token/restart ceiling; otherwise retain r3.
+- Add cost/latency interpretation and immutable hashes to the conference source
+  bundle. The public-safe Laguna JSON/SVG/PNG card already exists; freeze the
+  final bundle by September 22.
 - Record, hash, secret-scan, and second-machine-test a short video fallback by
   September 22.
 
@@ -583,23 +726,20 @@ fill a denominator.
 
 ## Immediate next actions
 
-1. Rotate the controlled-host Nous token before any further Nous model call;
-   retain the exact-head completed canary receipt.
-2. Add `OPENROUTER_API_KEY` on the controlled benchmark host and run the two
+1. Copy the already-verified protected r3 evidence archive to the NAS when it is
+   mounted, then rotate the controlled-host Nous token before any further Nous
+   model call.
+2. Unlock the signing credential, commit and push the reviewed integrated
+   runtime/evidence branch, and authorize GitHub organization SSO for its PR.
+3. Add `OPENROUTER_API_KEY` on the controlled benchmark host and run the two
    OpenRouter Direct/MCP canaries from fresh roots.
-3. Authorize GitHub SSO and open the already-prepared Release 1 PR from
-   `fix/openai-provider-runtime`.
-4. Merge Release 1 to `master` after review.
-5. Finish the campaign-status fail-closed corrections and the full external
-   supervisor fault matrix, then restack `feat/v2-campaign-operations` after
-   Release 1 reaches `master`.
-6. Complete no-model readiness for the authorized Laguna S 2.1 42-Direct / 55-MCP
-   configuration, freeze the token/restart ceiling, then execute after token
-   rotation.
-7. Generate the full redacted Laguna report and deterministic model-card image.
-8. Qualify one integrated head containing Release 1, operations, selected
-   compiler performance, reporting, and conference changes.
-9. Treat the dated October-November official `100/100` selector lane as the next
+4. Merge the integrated changes to `master` after review, or merge Release 1
+   first and restack operations if repository policy requires split PRs.
+5. Keep Dogwalker's redacted monitor active for future runs and retain the r3
+   supervisor incident/replay as the production packaging regression proof.
+6. Complete the conference deck, source map, fallback video, second-machine QA,
+   and timed rehearsals on the dated schedule below.
+7. Treat the dated October-November official `100/100` selector lane as the next
    product release, not as a prerequisite for the October 5 talk.
 
 ## Current working command boundary

@@ -50,6 +50,7 @@ def _call_with_response(
     api_surface: str = "auto",
     base_url: str | None = "https://compatible.example/v1",
     set_compat_key: bool = True,
+    request_timeout_seconds: float | None = None,
 ):
     captured: dict[str, Any] = {}
 
@@ -75,6 +76,7 @@ def _call_with_response(
             system="system",
             base_url=base_url,
             api_surface=api_surface,
+            request_timeout_seconds=request_timeout_seconds,
         )
     )
     return result, captured
@@ -94,6 +96,17 @@ def test_chat_adapter_normalizes_text_usage_and_surface(monkeypatch) -> None:
     assert response.provider_metrics["usage_reported"] is True
     assert response.provider_metrics["usage_complete"] is True
     assert captured["request"]["model"] == "provider/model"
+
+
+def test_openai_compatible_client_receives_explicit_request_timeout(monkeypatch) -> None:
+    response, captured = _call_with_response(
+        monkeypatch,
+        _sdk_response(),
+        request_timeout_seconds=37.5,
+    )
+
+    assert response.error is None
+    assert captured["client"]["timeout"] == 37.5
 
 
 def test_direct_adapter_uses_only_endpoint_scoped_credential(monkeypatch) -> None:

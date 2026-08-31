@@ -735,6 +735,55 @@ def _interrupted_sample(
     )
 
 
+def _task_timeout_sample(
+    task: TaskBundle,
+    oracle: OracleBundle,
+    detail: str,
+) -> SampleResult:
+    return SampleResult(
+        task_id=task.task_id,
+        task_fingerprint=task.task_fingerprint,
+        oracle_fingerprint=oracle.oracle_fingerprint,
+        execution_class=ExecutionClass.MODEL_FAILURE,
+        outcome=SampleOutcomeCode.TASK_TIMEOUT,
+        reasoning_correct=False,
+        detail=detail,
+    )
+
+
+def _task_timeout_provider_record(
+    provider: ProviderRunRecord,
+    *,
+    detail: str,
+    timeout_seconds: float,
+) -> ProviderRunRecord:
+    payload = provider.model_dump(mode="python")
+    metrics = {
+        key: value
+        for key, value in provider.provider_metrics.items()
+        if not key.startswith("infra_")
+    }
+    metrics.update(
+        {
+            "timeout_scope": "whole_task",
+            "task_timeout_seconds": timeout_seconds,
+        }
+    )
+    payload.update(
+        {
+            "elapsed_seconds": timeout_seconds,
+            "provider_error": detail,
+            "provider_metrics": metrics,
+            "record_fingerprint": "0" * 64,
+        }
+    )
+    payload["record_fingerprint"] = canonical_sha256(
+        payload,
+        exclude_fields=("record_fingerprint",),
+    )
+    return ProviderRunRecord.model_validate(payload)
+
+
 def contain_model_runtime_exception(
     *,
     task: TaskBundle,
@@ -817,7 +866,7 @@ def unexecuted_model_record(
 TextTransport = Callable[..., Awaitable[ModelResponse]]
 
 
-async def run_direct_model_task_v2(
+async def _run_direct_model_task_v2_unbounded(
     *,
     coordinator: Any,
     task: TaskBundle,
@@ -841,6 +890,7 @@ async def run_direct_model_task_v2(
             max_tokens=max_tokens,
             ollama_options=ollama_options,
             api_surface=api_surface,
+            request_timeout_seconds=task.binding.bounds.timeout_seconds,
         )
     except asyncio.CancelledError as exc:
         detail = "direct model request interrupted before completion"
@@ -966,6 +1016,77 @@ async def run_direct_model_task_v2(
             direct_receipt=outcome.receipt,
         ),
     )
+
+
+async def run_direct_model_task_v2(
+    *,
+    coordinator: Any,
+    task: TaskBundle,
+    oracle: OracleBundle,
+    resolver: IdentityResolver,
+    model: str,
+    model_base_url: str | None = None,
+    ollama_options: dict[str, Any] | None = None,
+    max_tokens: int = 2048,
+    api_surface: ProviderApiSurface | str = ProviderApiSurface.AUTO,
+    transport: TextTransport = call_provider_text,
+) -> tuple[DirectV2Outcome | None, SampleResult, ProviderRunRecord]:
+    """Run one Direct task inside its solver-visible whole-task deadline."""
+
+    timeout_seconds = task.binding.bounds.timeout_seconds
+    deadline = asyncio.timeout(timeout_seconds)
+    try:
+        async with deadline:
+            return await _run_direct_model_task_v2_unbounded(
+                coordinator=coordinator,
+                task=task,
+                oracle=oracle,
+                resolver=resolver,
+                model=model,
+                model_base_url=model_base_url,
+                ollama_options=ollama_options,
+                max_tokens=max_tokens,
+                api_surface=api_surface,
+                transport=transport,
+            )
+    except V2ModelTaskCancelled as exc:
+        if not deadline.expired():
+            raise
+        detail = "direct task execution budget exhausted"
+        return (
+            None,
+            _task_timeout_sample(task, oracle, detail),
+            _task_timeout_provider_record(
+                exc.provider,
+                detail=detail,
+                timeout_seconds=timeout_seconds,
+            ),
+        )
+    except TimeoutError:
+        if not deadline.expired():
+            raise
+        detail = "direct task execution budget exhausted"
+        response = _failure_response(
+            partial=None,
+            model=model,
+            parse_stage="direct_task_timeout",
+            error=detail,
+            elapsed_seconds=timeout_seconds,
+            metrics={
+                "timeout_scope": "whole_task",
+                "task_timeout_seconds": timeout_seconds,
+            },
+        )
+        return (
+            None,
+            _task_timeout_sample(task, oracle, detail),
+            _record(
+                task=task,
+                model=model,
+                surface=V2RuntimeSurface.DIRECT.value,
+                response=response,
+            ),
+        )
 
 
 def _tool_payload(text: str) -> Mapping[str, Any]:
@@ -4072,6 +4193,7 @@ async def run_mcp_model_task_v2(
     model_base_url: str | None,
     tool_loop: MCPToolLoop | str,
     max_steps: int,
+    max_tokens: int = 2048,
     ollama_options: dict[str, Any] | None = None,
     telemetry_adapter: str = OPENAI_COMPAT_TELEMETRY_AUTO,
     read_timeout_seconds: float = DEFAULT_MCP_OLLAMA_READ_TIMEOUT_SECONDS,
@@ -4107,6 +4229,7 @@ async def run_mcp_model_task_v2(
         "public_question": task.question,
         "model_name": model,
         "base_url": model_base_url,
+        "max_tokens": max_tokens,
         "tools": bundle.tools,
         "max_steps": bounded_steps,
         # The discovered BloodHound prompt describes a different, resource-first

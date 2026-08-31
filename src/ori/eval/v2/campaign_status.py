@@ -290,8 +290,15 @@ def _read_run(
             != base.capability_profile_fingerprint
         ):
             raise CampaignStatusError("private run state disagrees with run provenance")
-        if expected_tasks is not None and len(state.checkpoint.task_bindings) != expected_tasks:
-            raise CampaignStatusError("private run state task schedule disagrees with readiness")
+        # Checkpoints bind the complete compiled artifact so resume validation can
+        # reject stale task/oracle/bounds data.  A candidate release may schedule
+        # only a semantic-unique subset of those bindings (for example V29's
+        # 42/55 release from the larger 46/70 certification inventory).  Compare
+        # readiness with durable scheduled results, not the full binding inventory.
+        if expected_tasks is not None and len(state.checkpoint.results) > expected_tasks:
+            raise CampaignStatusError(
+                "private run state result count exceeds readiness schedule"
+            )
 
     report: ModelPublicReportV2 | None = None
     if report_path.exists():

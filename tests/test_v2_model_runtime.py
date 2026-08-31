@@ -63,6 +63,7 @@ from ori.eval.v2.schema import (
     RouteAcceptanceKind,
     SelectionExpression,
     SetClaim,
+    TaskBundle,
     Track,
 )
 from ori.eval.v2.scoring import SampleOutcomeCode, SampleResult
@@ -1258,6 +1259,7 @@ def test_direct_model_runtime_executes_exactly_once_through_coordinator() -> Non
             oracle=DIRECT_ORACLE,
             resolver=DIRECT_RESOLVER,
             model="codex/gpt-test",
+            max_tokens=8192,
             transport=transport,
         )
     )
@@ -1271,6 +1273,10 @@ def test_direct_model_runtime_executes_exactly_once_through_coordinator() -> Non
     assert provider_request["messages"] == [
         {"role": "user", "content": DIRECT_TASK.question}
     ]
+    assert provider_request["max_tokens"] == 8192
+    assert provider_request["request_timeout_seconds"] == (
+        DIRECT_TASK.binding.bounds.timeout_seconds
+    )
     assert DIRECT_TASK.question not in provider_request["system"]
 
 
@@ -1532,6 +1538,80 @@ def test_direct_execution_cancellation_preserves_model_query() -> None:
     cancellation = asyncio.run(cancel())
     assert cancellation.sample.outcome is SampleOutcomeCode.INTERRUPTED
     assert cancellation.provider.direct_query_digest is not None
+    assert coordinator.queries == [query]
+
+
+def _direct_task_with_timeout(timeout_seconds: float) -> TaskBundle:
+    bounds = DIRECT_TASK.binding.bounds.model_copy(
+        update={"timeout_seconds": timeout_seconds}
+    )
+    return DIRECT_TASK.model_copy(
+        update={
+            "binding": DIRECT_TASK.binding.model_copy(update={"bounds": bounds}),
+            "acceptance_spec": DIRECT_TASK.acceptance_spec.model_copy(
+                update={"bounds": bounds}
+            ),
+        }
+    )
+
+
+def test_direct_provider_stall_becomes_typed_whole_task_timeout() -> None:
+    async def stalled_transport(**_kwargs: Any) -> ModelResponse:
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    task = _direct_task_with_timeout(0.01)
+    outcome, sample, provider = asyncio.run(
+        run_direct_model_task_v2(
+            coordinator=FakeCoordinator(CypherResult(success=True, raw={})),
+            task=task,
+            oracle=DIRECT_ORACLE,
+            resolver=DIRECT_RESOLVER,
+            model="openai-compat/test",
+            transport=stalled_transport,
+        )
+    )
+
+    assert outcome is None
+    assert sample.execution_class is ExecutionClass.MODEL_FAILURE
+    assert sample.outcome is SampleOutcomeCode.TASK_TIMEOUT
+    assert provider.provider_error == "direct task execution budget exhausted"
+    assert provider.provider_metrics["timeout_scope"] == "whole_task"
+    assert provider.provider_metrics["task_timeout_seconds"] == 0.01
+    assert "infra_scope" not in provider.provider_metrics
+    assert provider.direct_query_digest is None
+
+
+def test_direct_query_stall_becomes_timeout_and_preserves_query_digest() -> None:
+    query = "MATCH p=(a)-[:MemberOf]->(b) RETURN p LIMIT 1"
+
+    async def transport(**_kwargs: Any) -> ModelResponse:
+        return _response(json.dumps({"query": query, "assertion": {}}))
+
+    class StalledCoordinator(FakeCoordinator):
+        async def execute(self, submitted_query: str) -> CypherResult:
+            self.queries.append(submitted_query)
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+    task = _direct_task_with_timeout(0.01)
+    coordinator = StalledCoordinator(CypherResult(success=True, raw={}))
+    outcome, sample, provider = asyncio.run(
+        run_direct_model_task_v2(
+            coordinator=coordinator,
+            task=task,
+            oracle=DIRECT_ORACLE,
+            resolver=DIRECT_RESOLVER,
+            model="openai-compat/test",
+            transport=transport,
+        )
+    )
+
+    assert outcome is None
+    assert sample.execution_class is ExecutionClass.MODEL_FAILURE
+    assert sample.outcome is SampleOutcomeCode.TASK_TIMEOUT
+    assert provider.provider_error == "direct task execution budget exhausted"
+    assert provider.direct_query_digest is not None
     assert coordinator.queries == [query]
 
 

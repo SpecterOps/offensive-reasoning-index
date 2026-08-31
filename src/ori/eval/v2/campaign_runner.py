@@ -1831,6 +1831,7 @@ async def _run_model(
                             resolver=resolver,
                             model=model.requested_model,
                             model_base_url=model_base_url,
+                            max_tokens=getattr(model, "max_output_tokens", 2048),
                             api_surface=getattr(model, "api_surface", "auto"),
                             ollama_options=provider_options,
                         )
@@ -1869,6 +1870,7 @@ async def _run_model(
                             bundle=bundle,
                             model=model.requested_model,
                             model_base_url=model_base_url,
+                            max_tokens=getattr(model, "max_output_tokens", 2048),
                             api_surface=getattr(model, "api_surface", "auto"),
                             tool_loop=loop,
                             max_steps=configured_mcp.max_steps,

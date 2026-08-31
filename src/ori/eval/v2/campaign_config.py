@@ -92,6 +92,7 @@ class V2ModelEntry(StrictModel):
         "chat_completions",
         "responses",
     ] = "auto"
+    max_output_tokens: int = Field(default=2048, strict=True, gt=0, le=32768)
     runs_per_model: int | None = Field(default=None, strict=True, gt=0)
     model_base_url: str | None = None
     mcp_tool_loop: (
@@ -118,6 +119,10 @@ class V2ModelEntry(StrictModel):
             )
         if "api_surface" in self.options:
             raise ValueError("set model api_surface instead of model options.api_surface")
+        if "max_output_tokens" in self.options or "max_tokens" in self.options:
+            raise ValueError(
+                "set model max_output_tokens instead of a free-form output-token option"
+            )
         return self
 
     @property

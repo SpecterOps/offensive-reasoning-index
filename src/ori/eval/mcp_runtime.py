@@ -1613,6 +1613,7 @@ async def _openai_compat_chat_turn(
     model_name: str,
     messages: list[dict[str, Any]],
     tools: list[dict[str, Any]],
+    max_tokens: int = 2048,
     extra_body: dict[str, Any] | None = None,
     telemetry_adapter: str = OPENAI_COMPAT_TELEMETRY_GENERIC,
     read_timeout_seconds: float = DEFAULT_MCP_OLLAMA_READ_TIMEOUT_SECONDS,
@@ -1623,6 +1624,7 @@ async def _openai_compat_chat_turn(
         api_surface=ProviderApiSurface.CHAT_COMPLETIONS,
         tools=tuple(tools),
         tool_choice="auto",
+        output_limit=max_tokens,
     )
     payload = chat_completions_payload(
         request,
@@ -2124,6 +2126,7 @@ async def _run_openai_compat_mcp_loop(
     public_question: str | None = None,
     model_name: str,
     base_url: str | None,
+    max_tokens: int = 2048,
     extra_body: dict[str, Any] | None,
     tools: list[Any],
     max_steps: int,
@@ -2240,6 +2243,7 @@ async def _run_openai_compat_mcp_loop(
             model_name=model_name,
             messages=messages_payload,
             tools=[] if use_finalization_guard else tool_specs,
+            max_tokens=max_tokens,
             extra_body=extra_body,
             telemetry_adapter=resolved_telemetry_adapter,
             read_timeout_seconds=read_timeout_seconds,

@@ -380,6 +380,7 @@ def test_openai_compat_chat_turn_posts_tool_payload(monkeypatch) -> None:
             model_name="openai-compat/openai/gpt-5.5",
             messages=[{"role": "user", "content": "q"}],
             tools=[{"type": "function", "function": {"name": "group_info"}}],
+            max_tokens=8192,
             extra_body={"temperature": 0},
             telemetry_adapter="llama-cpp",
         )
@@ -391,6 +392,7 @@ def test_openai_compat_chat_turn_posts_tool_payload(monkeypatch) -> None:
     assert payload["model"] == "openai/gpt-5.5"
     assert payload["stream"] is False
     assert payload["tool_choice"] == "auto"
+    assert payload["max_tokens"] == 8192
     assert payload["temperature"] == 0
     assert turn["content"] == ""
     assert turn["thinking"] == "inspect group"

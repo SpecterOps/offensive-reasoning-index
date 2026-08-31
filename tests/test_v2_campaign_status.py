@@ -627,6 +627,42 @@ def test_interrupted_projection_allows_atomic_report_before_track_receipt(
     assert status.tracks[0].completion_present is False
 
 
+def test_candidate_subset_checkpoint_may_bind_full_compiled_inventory(
+    tmp_path: Path,
+) -> None:
+    config, resolved = _completed_campaign(tmp_path)
+    run_dir = resolved.output_dir / "direct" / "gpt-test" / "run-001"
+    provenance = _provenance(Track.DIRECT)
+    state = _state(provenance, Track.DIRECT)
+    checkpoint_payload = state.checkpoint.model_dump()
+    checkpoint_payload["task_bindings"] = (
+        *state.checkpoint.task_bindings,
+        CheckpointTaskBinding(
+            task_id="compiled-but-not-scheduled",
+            task_fingerprint="7" * 64,
+            oracle_fingerprint="8" * 64,
+            bounds_fingerprint="9" * 64,
+        ),
+    )
+    checkpoint_payload["checkpoint_fingerprint"] = canonical_sha256(
+        checkpoint_payload,
+        exclude_fields=("checkpoint_fingerprint",),
+    )
+    checkpoint = CheckpointV2.model_validate(checkpoint_payload)
+    expanded_state = campaign_runner._state(
+        provenance=provenance,
+        checkpoint=checkpoint,
+        attempts=state.attempts,
+    )
+    _dump(run_dir / "run-state-v5.private.json", expanded_state)
+
+    status = inspect_v2_campaign_status(config)
+
+    assert status.progress.expected_results == 1
+    assert status.progress.checkpointed_results == 1
+    assert status.runs[0].expected_tasks == 1
+
+
 def test_interrupted_campaign_is_resumable(tmp_path: Path) -> None:
     config = _config(tmp_path)
     from ori.eval.v2.campaign_config import load_v2_campaign_config

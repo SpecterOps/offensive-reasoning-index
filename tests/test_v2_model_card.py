@@ -9,9 +9,9 @@ from ori.eval.provider_contract import ProviderApiSurface
 from ori.eval.v2 import campaign_runner
 from ori.eval.v2.campaign import PublicReportV2, PublicResultRow, RunIdentity
 from ori.eval.v2.fingerprint import canonical_sha256
+from ori.eval.v2.model_card import ModelCardBuildError, build_model_card
 from ori.eval.v2.schema import ExecutionClass, Track
 from ori.eval.v2.scoring import CampaignSummary, SampleOutcomeCode
-from scripts.build_v2_model_card import ModelCardBuildError, build_model_card
 
 _CONFIG = "a" * 64
 _GRAPH = "b" * 64

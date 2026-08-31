@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import builtins
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -445,7 +446,7 @@ def test_supervisor_rejects_symlinked_lock(tmp_path: Path) -> None:
         supervisor.run()
 
 
-def test_valid_completion_optionally_builds_model_card(
+def test_valid_completion_builds_packaged_model_card_without_scripts_import(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     calls: list[tuple[Path, Path, str | None, str | None]] = []
@@ -460,7 +461,17 @@ def test_valid_completion_optionally_builds_model_card(
         calls.append((campaign_root, output_dir, model, display_name))
         return {}
 
-    monkeypatch.setattr("scripts.build_v2_model_card.build_model_card", fake_build)
+    monkeypatch.setattr("ori.eval.v2.campaign_supervisor.build_model_card", fake_build)
+    real_import = builtins.__import__
+    scripts_imports: list[str] = []
+
+    def import_without_scripts(name: str, *args: Any, **kwargs: Any) -> Any:
+        if name == "scripts" or name.startswith("scripts."):
+            scripts_imports.append(name)
+            raise ModuleNotFoundError(f"No module named {name!r}")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", import_without_scripts)
     config = _config(tmp_path)
     supervisor = V2CampaignSupervisor(
         config_path=config,
@@ -490,3 +501,4 @@ def test_valid_completion_optionally_builds_model_card(
         )
     ]
     assert supervisor.store.load().model_card_generated is True
+    assert scripts_imports == []

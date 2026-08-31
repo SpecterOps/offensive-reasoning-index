@@ -241,6 +241,7 @@ async def call_provider_text(
     max_tokens: int = 1024,
     ollama_options: dict | None = None,
     api_surface: ProviderApiSurface | str = ProviderApiSurface.AUTO,
+    request_timeout_seconds: float | None = None,
 ) -> ModelResponse:
     """Call a provider without imposing a legacy task or Cypher parse contract.
 
@@ -263,6 +264,7 @@ async def call_provider_text(
             base_url=base_url,
             ollama_options=ollama_options,
             api_surface=resolved_surface,
+            request_timeout_seconds=request_timeout_seconds,
         )
         provider_metrics = {
             **provider_metrics,
@@ -325,6 +327,7 @@ async def _call_provider(
     base_url: str | None,
     ollama_options: dict | None = None,
     api_surface: ProviderApiSurface = ProviderApiSurface.CHAT_COMPLETIONS,
+    request_timeout_seconds: float | None = None,
 ) -> tuple[str, int, int, str, dict[str, object]]:
     """Dispatch to the correct provider SDK.
 
@@ -464,6 +467,8 @@ async def _call_provider(
             if not api_key:
                 raise ProviderAuthenticationError("Gemini requires GEMINI_API_KEY")
             client_kwargs["api_key"] = api_key
+        if request_timeout_seconds is not None:
+            client_kwargs["timeout"] = request_timeout_seconds
         client = openai.AsyncOpenAI(**client_kwargs)
         # Inject system prompt as first message for OpenAI-compat providers
         full_messages = [{"role": "system", "content": system}] + messages
@@ -536,10 +541,13 @@ async def _call_provider(
         params = chat_request_to_codex_responses_params(body)
         thread_id = str(params.get("prompt_cache_key") or "")
         headers = codex_headers(thread_id=thread_id)
-        client = openai.AsyncOpenAI(
-            api_key=headers["Authorization"].removeprefix("Bearer "),
-            base_url=resolved_base,
-        )
+        client_kwargs = {
+            "api_key": headers["Authorization"].removeprefix("Bearer "),
+            "base_url": resolved_base,
+        }
+        if request_timeout_seconds is not None:
+            client_kwargs["timeout"] = request_timeout_seconds
+        client = openai.AsyncOpenAI(**client_kwargs)
         try:
             events = await client.responses.create(**params, stream=True, extra_headers=headers)
             data = codex_responses_events_to_chat_completion(

@@ -29,6 +29,7 @@ from .campaign_status import (
     inspect_v2_campaign_status,
 )
 from .fingerprint import canonical_sha256
+from .model_card import ModelCardBuildError, build_model_card
 from .schema import StrictModel
 
 SUPERVISOR_STATE_SCHEMA_VERSION = "ori-v2-campaign-supervisor-state-v1"
@@ -529,8 +530,6 @@ class V2CampaignSupervisor:
     def _build_model_card(self, state: SupervisorStateV1) -> SupervisorStateV1:
         if self.model_card_output is None or state.model_card_generated:
             return state
-        from scripts.build_v2_model_card import build_model_card
-
         try:
             build_model_card(
                 self.campaign_root,
@@ -538,7 +537,7 @@ class V2CampaignSupervisor:
                 model=self.model,
                 display_name=self.display_name,
             )
-        except ValueError as exc:
+        except (OSError, ModelCardBuildError) as exc:
             raise CampaignSupervisorError(f"model-card validation failed: {exc}") from exc
         state = _updated_state(state, now=self.now(), model_card_generated=True)
         self.store.save(state)
