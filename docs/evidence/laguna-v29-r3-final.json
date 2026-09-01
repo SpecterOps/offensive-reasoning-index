@@ -84,7 +84,9 @@
     "gzip_integrity_passed": true,
     "mode": "0600",
     "sha256": "20e285a73b622c1d63397bb58d8f4b1e6937f4d21629345614dd95ff5eedba24",
-    "nas_copy_pending_mount": true
+    "nas_copy_pending_mount": false,
+    "nas_copy_verified": true,
+    "nas_copy_sha256": "20e285a73b622c1d63397bb58d8f4b1e6937f4d21629345614dd95ff5eedba24"
   },
   "safety": {
     "contains_prompts": false,

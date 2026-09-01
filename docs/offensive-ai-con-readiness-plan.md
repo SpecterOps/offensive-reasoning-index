@@ -275,7 +275,7 @@ archive containing the exact r3 inputs, compilation/certification receipts,
 run state, reports, supervisor state, and model card passed `gzip` integrity
 validation with 51 entries and SHA-256
 `20e285a73b622c1d63397bb58d8f4b1e6937f4d21629345614dd95ff5eedba24`.
-It remains on the controlled host until the NAS is mounted for the second copy.
+A checksum-matched second copy is stored on the controlled NAS.
 
 ### Separate offline compiler-performance slice
 
@@ -726,11 +726,9 @@ fill a denominator.
 
 ## Immediate next actions
 
-1. Copy the already-verified protected r3 evidence archive to the NAS when it is
-   mounted, then rotate the controlled-host Nous token before any further Nous
-   model call.
-2. Unlock the signing credential, commit and push the reviewed integrated
-   runtime/evidence branch, and authorize GitHub organization SSO for its PR.
+1. Rotate the controlled-host Nous token before any further Nous model call.
+2. Authorize GitHub organization SSO and open the PR for the signed, pushed
+   integrated runtime/evidence branch.
 3. Add `OPENROUTER_API_KEY` on the controlled benchmark host and run the two
    OpenRouter Direct/MCP canaries from fresh roots.
 4. Merge the integrated changes to `master` after review, or merge Release 1
