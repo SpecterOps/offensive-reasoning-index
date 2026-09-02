@@ -1632,7 +1632,7 @@ def test_direct_query_stall_becomes_timeout_and_preserves_query_digest() -> None
 
     # Leave enough time for provider parsing to finish on slower/newer Python
     # runtimes; the coordinator itself is the deterministic stalled boundary.
-    task = _direct_task_with_timeout(1.0)
+    task = _direct_task_with_timeout(10.0)
     coordinator = StalledCoordinator(CypherResult(success=True, raw={}))
     outcome, sample, provider = asyncio.run(
         run_direct_model_task_v2(
