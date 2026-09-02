@@ -591,28 +591,39 @@ Pass `--valid-nodes valid_nodes.json` when you have a graph inventory dump; the 
 
 ## Reporting metrics
 
-V2 summaries separate reasoning quality, proof completion, and campaign
-reliability. Let `C` be comparator-correct samples, `W` comparator-incorrect
-completed samples, `M` model-attributable failures, `P` proof failures, `X`
-infrastructure failures, `H` harness failures, `U` unexecuted samples, and `S`
-scheduled tasks. Exact accounting requires:
+V2 summaries separate semantic reasoning, output delivery, proof completion,
+end-to-end effectiveness, and campaign reliability. Let `C` be
+comparator-correct samples, `W` comparator-incorrect completed samples, `M`
+model-attributable failures without a comparator verdict, `P` proof failures,
+`X` infrastructure failures, `H` harness failures, `U` unexecuted samples, and
+`S` scheduled tasks. Exact accounting requires:
 
 ```text
 S = C + W + M + P + X + H + U
-incorrect = W + M
-reasoning_accuracy = C / (C + W + M)
+incorrect = W
+reasoning_accuracy = C / (C + W)
 effective_accuracy = C / S
 campaign_valid = (X = 0) AND (H = 0) AND (U = 0)
 ```
 
-Model failures count as incorrect. `PROOF_INSUFFICIENT` has no reasoning
-verdict and lowers effective accuracy. Infrastructure, harness, and unexecuted
-samples have no reasoning verdict and invalidate the campaign. Historical V1
-summary columns may use older completed-sample terminology and must not be
-presented as the V2 formula.
+Only the shared comparator may assign `reasoning_correct=true|false`. Output
+invalidity, policy/query failure, and whole-task timeout remain model failures
+and lower effective accuracy, but they do not fabricate a semantic verdict.
+`PROOF_INSUFFICIENT` likewise has no reasoning verdict. Infrastructure,
+harness, and unexecuted samples invalidate the campaign.
+
+Output compliance is independently observed. A schema-valid final answer is
+compliant even if its graph facts are wrong or unsupported; a present but
+malformed or missing required final answer is noncompliant; and a task stopped
+by infrastructure, harness failure, or timeout can have no compliance
+observation. ORI reports compliant, noncompliant, normalized-wrapper counts,
+and `output_compliance_rate` over observed outputs only. Exactly one outer
+JSON Markdown fence with no other text may be normalized and is recorded as
+such; arbitrary prose, brace extraction, multiple values, and other fence forms
+are never salvaged.
 
 See [ORI V2 Design Rationale](benchmark-v2-design-rationale.md#campaign-accounting)
-for worked 70-task calculations and the reasons behind each denominator.
+for worked calculations and the reasons behind each denominator.
 
 ## BloodHound Cypher runtime guidance
 

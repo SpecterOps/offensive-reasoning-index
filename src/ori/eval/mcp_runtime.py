@@ -1618,13 +1618,15 @@ async def _openai_compat_chat_turn(
     telemetry_adapter: str = OPENAI_COMPAT_TELEMETRY_GENERIC,
     read_timeout_seconds: float = DEFAULT_MCP_OLLAMA_READ_TIMEOUT_SECONDS,
     event_progress_observer: Callable[[str], None] | None = None,
+    structured_output_schema: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     request = ProviderRequest(
         messages=tuple(messages),
         api_surface=ProviderApiSurface.CHAT_COMPLETIONS,
         tools=tuple(tools),
-        tool_choice="auto",
+        tool_choice="auto" if tools else None,
         output_limit=max_tokens,
+        structured_output_schema=structured_output_schema,
     )
     payload = chat_completions_payload(
         request,
@@ -1862,6 +1864,7 @@ async def _run_ollama_mcp_loop(
     ) = None,
     progress_observer: Callable[[ModelResponse, list[Any]], None] | None = None,
     tool_timeout_seconds: float | None = None,
+    finalization_schema: dict[str, Any] | None = None,
 ) -> tuple[ModelResponse, MCPRunMetadata, list[Any]]:
     question = public_question or (task.question if task is not None else "")
     if not question:
@@ -2143,6 +2146,7 @@ async def _run_openai_compat_mcp_loop(
     ) = None,
     progress_observer: Callable[[ModelResponse, list[Any]], None] | None = None,
     tool_timeout_seconds: float | None = None,
+    finalization_schema: dict[str, Any] | None = None,
 ) -> tuple[ModelResponse, MCPRunMetadata, list[Any]]:
     question = public_question or (task.question if task is not None else "")
     if not question:
@@ -2248,6 +2252,9 @@ async def _run_openai_compat_mcp_loop(
             telemetry_adapter=resolved_telemetry_adapter,
             read_timeout_seconds=read_timeout_seconds,
             event_progress_observer=observe_stream_progress,
+            structured_output_schema=(
+                finalization_schema if use_finalization_guard else None
+            ),
         )
         total_prompt_tokens += int(turn["prompt_tokens"])
         total_completion_tokens += int(turn["completion_tokens"])

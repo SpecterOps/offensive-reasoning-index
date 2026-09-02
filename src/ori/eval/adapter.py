@@ -242,6 +242,7 @@ async def call_provider_text(
     ollama_options: dict | None = None,
     api_surface: ProviderApiSurface | str = ProviderApiSurface.AUTO,
     request_timeout_seconds: float | None = None,
+    structured_output_schema: dict[str, object] | None = None,
 ) -> ModelResponse:
     """Call a provider without imposing a legacy task or Cypher parse contract.
 
@@ -265,6 +266,7 @@ async def call_provider_text(
             ollama_options=ollama_options,
             api_surface=resolved_surface,
             request_timeout_seconds=request_timeout_seconds,
+            structured_output_schema=structured_output_schema,
         )
         provider_metrics = {
             **provider_metrics,
@@ -328,6 +330,7 @@ async def _call_provider(
     ollama_options: dict | None = None,
     api_surface: ProviderApiSurface = ProviderApiSurface.CHAT_COMPLETIONS,
     request_timeout_seconds: float | None = None,
+    structured_output_schema: dict[str, object] | None = None,
 ) -> tuple[str, int, int, str, dict[str, object]]:
     """Dispatch to the correct provider SDK.
 
@@ -476,6 +479,7 @@ async def _call_provider(
             messages=tuple(full_messages),
             api_surface=ProviderApiSurface.CHAT_COMPLETIONS,
             output_limit=max_tokens,
+            structured_output_schema=structured_output_schema,
         )
         resp = await client.chat.completions.create(
             **chat_completions_payload(request, model=name)

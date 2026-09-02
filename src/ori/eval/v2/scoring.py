@@ -40,7 +40,7 @@ from .schema import (
 )
 
 ANSWERS_ARTIFACT_VERSION = "ori-eval-answers-v2"
-SCORING_ARTIFACT_VERSION = "ori-eval-scoring-v2"
+SCORING_ARTIFACT_VERSION = "ori-eval-scoring-v3"
 
 
 class V2ScoringError(ValueError):
@@ -90,12 +90,16 @@ class SampleResult(StrictModel):
     execution_class: ExecutionClass
     outcome: SampleOutcomeCode
     reasoning_correct: bool | None = Field(default=None, strict=True)
+    output_compliant: bool | None = Field(default=None, strict=True)
+    output_normalized: bool = Field(default=False, strict=True)
     evidence: EvidenceIR | None = None
     verdict: Verdict | None = None
     detail: str | None = None
 
     @model_validator(mode="after")
     def execution_and_reasoning_are_separate(self) -> SampleResult:
+        if self.output_normalized and self.output_compliant is not True:
+            raise ValueError("normalized output must be compliant")
         if self.execution_class is ExecutionClass.SUCCESS:
             if self.outcome is not SampleOutcomeCode.COMPLETED:
                 raise ValueError("successful samples must use COMPLETED")
@@ -103,6 +107,8 @@ class SampleResult(StrictModel):
                 raise ValueError("successful samples require evidence and a verdict")
             if self.reasoning_correct is not (self.verdict.status is VerdictStatus.CORRECT):
                 raise ValueError("reasoning correctness must match comparator verdict")
+            if self.output_compliant is not True:
+                raise ValueError("successful samples require compliant output")
         elif self.execution_class is ExecutionClass.PROOF_FAILURE:
             if self.outcome is not SampleOutcomeCode.PROOF_INSUFFICIENT:
                 raise ValueError("proof failures must use PROOF_INSUFFICIENT")
@@ -118,8 +124,10 @@ class SampleResult(StrictModel):
                     "infrastructure, harness, and unexecuted samples have no reasoning verdict"
                 )
         elif self.execution_class is ExecutionClass.MODEL_FAILURE:
-            if self.reasoning_correct is not False:
-                raise ValueError("model-attributable failures count as incorrect")
+            if self.reasoning_correct is not None:
+                raise ValueError(
+                    "ungradeable model failures have no reasoning verdict"
+                )
             if self.verdict is not None:
                 raise ValueError("ungradeable model failures cannot forge a comparator verdict")
         return self
@@ -135,8 +143,17 @@ class CampaignSummary(StrictModel):
     infrastructure_failures: int = Field(strict=True, ge=0)
     harness_failures: int = Field(strict=True, ge=0)
     unexecuted: int = Field(strict=True, ge=0)
+    output_compliant: int = Field(strict=True, ge=0)
+    output_noncompliant: int = Field(strict=True, ge=0)
+    output_normalized: int = Field(strict=True, ge=0)
     reasoning_accuracy: float | None = Field(default=None, strict=True, ge=0, le=1)
     effective_accuracy: float | None = Field(default=None, strict=True, ge=0, le=1)
+    output_compliance_rate: float | None = Field(
+        default=None,
+        strict=True,
+        ge=0,
+        le=1,
+    )
     campaign_valid: bool
     invalid_reasons: tuple[str, ...] = ()
 
@@ -152,13 +169,45 @@ class CampaignSummary(StrictModel):
             != self.scheduled
         ):
             raise ValueError("campaign outcome counts do not match scheduled tasks")
-        if self.correct + self.incorrect != self.completed + self.model_failures:
-            raise ValueError("reasoning denominator does not match gradeable/model failures")
+        if self.correct + self.incorrect != self.completed:
+            raise ValueError("reasoning denominator does not match comparator-graded samples")
+        observed_outputs = self.output_compliant + self.output_noncompliant
+        if observed_outputs > self.scheduled:
+            raise ValueError("output-compliance count exceeds scheduled tasks")
+        if self.output_normalized > self.output_compliant:
+            raise ValueError("normalized-output count exceeds compliant outputs")
+        expected_rate = (
+            self.output_compliant / observed_outputs if observed_outputs else None
+        )
+        if self.output_compliance_rate != expected_rate:
+            raise ValueError("output-compliance rate does not match observed outputs")
+        reasoning_denominator = self.correct + self.incorrect
+        expected_reasoning_accuracy = (
+            self.correct / reasoning_denominator if reasoning_denominator else None
+        )
+        if self.reasoning_accuracy != expected_reasoning_accuracy:
+            raise ValueError("reasoning accuracy does not match comparator verdicts")
+        expected_effective_accuracy = (
+            self.correct / self.scheduled if self.scheduled else None
+        )
+        if self.effective_accuracy != expected_effective_accuracy:
+            raise ValueError("effective accuracy does not match scheduled tasks")
+        expected_invalid_reasons: list[str] = []
+        if self.infrastructure_failures:
+            expected_invalid_reasons.append("UNRESOLVED_INFRASTRUCTURE")
+        if self.harness_failures:
+            expected_invalid_reasons.append("HARNESS_FAILURE")
+        if self.unexecuted:
+            expected_invalid_reasons.append("UNEXECUTED_TASK")
+        if self.invalid_reasons != tuple(expected_invalid_reasons):
+            raise ValueError("campaign invalid reasons do not match failure counts")
+        if self.campaign_valid != (not expected_invalid_reasons):
+            raise ValueError("campaign validity does not match invalid reasons")
         return self
 
 
 class ScoringV2Artifact(StrictModel):
-    schema_version: Literal["ori-eval-scoring-v2"] = SCORING_ARTIFACT_VERSION
+    schema_version: Literal["ori-eval-scoring-v3"] = SCORING_ARTIFACT_VERSION
     protocol_version: Literal["ori-eval-protocol-v2"] = PROTOCOL_VERSION
     product: str
     track: Track
@@ -300,6 +349,10 @@ def summarize_results(
     correct = sum(result.reasoning_correct is True for result in results)
     incorrect = sum(result.reasoning_correct is False for result in results)
     reasoning_denominator = correct + incorrect
+    output_compliant = sum(result.output_compliant is True for result in results)
+    output_noncompliant = sum(result.output_compliant is False for result in results)
+    output_normalized = sum(result.output_normalized for result in results)
+    observed_outputs = output_compliant + output_noncompliant
     invalid_reasons: list[str] = []
     if infrastructure_failures:
         invalid_reasons.append("UNRESOLVED_INFRASTRUCTURE")
@@ -318,8 +371,14 @@ def summarize_results(
         infrastructure_failures=infrastructure_failures,
         harness_failures=harness_failures,
         unexecuted=unexecuted,
+        output_compliant=output_compliant,
+        output_noncompliant=output_noncompliant,
+        output_normalized=output_normalized,
         reasoning_accuracy=(correct / reasoning_denominator if reasoning_denominator else None),
         effective_accuracy=correct / len(expected) if expected else None,
+        output_compliance_rate=(
+            output_compliant / observed_outputs if observed_outputs else None
+        ),
         campaign_valid=not invalid_reasons,
         invalid_reasons=tuple(invalid_reasons),
     )
@@ -360,7 +419,7 @@ def score_answers_v2(
                     oracle_fingerprint=oracle.oracle_fingerprint,
                     execution_class=ExecutionClass.MODEL_FAILURE,
                     outcome=SampleOutcomeCode.OUTPUT_INVALID,
-                    reasoning_correct=False,
+                    output_compliant=False,
                     detail=str(exc),
                 )
             )
@@ -388,6 +447,7 @@ def score_answers_v2(
                 execution_class=ExecutionClass.SUCCESS,
                 outcome=SampleOutcomeCode.COMPLETED,
                 reasoning_correct=verdict.status is VerdictStatus.CORRECT,
+                output_compliant=True,
                 evidence=evidence,
                 verdict=verdict,
             )

@@ -20,6 +20,11 @@ ReasoningEffort = Literal[
     "max",
 ]
 
+StructuredOutputMode = Literal[
+    "prompt_local_validation",
+    "json_schema",
+]
+
 
 class V2TrackArtifactPaths(StrictModel):
     public: str
@@ -92,6 +97,7 @@ class V2ModelEntry(StrictModel):
         "chat_completions",
         "responses",
     ] = "auto"
+    structured_output_mode: StructuredOutputMode = "prompt_local_validation"
     max_output_tokens: int = Field(default=2048, strict=True, gt=0, le=32768)
     runs_per_model: int | None = Field(default=None, strict=True, gt=0)
     model_base_url: str | None = None
@@ -119,9 +125,21 @@ class V2ModelEntry(StrictModel):
             )
         if "api_surface" in self.options:
             raise ValueError("set model api_surface instead of model options.api_surface")
+        if "structured_output_mode" in self.options:
+            raise ValueError(
+                "set model structured_output_mode instead of model options.structured_output_mode"
+            )
         if "max_output_tokens" in self.options or "max_tokens" in self.options:
             raise ValueError(
                 "set model max_output_tokens instead of a free-form output-token option"
+            )
+        if (
+            self.structured_output_mode == "json_schema"
+            and self.provider not in {"openai", "openai-compat", "gemini"}
+        ):
+            raise ValueError(
+                "structured_output_mode='json_schema' is currently supported only "
+                "by Chat Completions providers"
             )
         return self
 

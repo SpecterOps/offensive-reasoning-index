@@ -145,15 +145,16 @@ def test_v12_campaign_schemas_cannot_accept_prior_run_state() -> None:
     runner_source = inspect.getsource(campaign_runner._run_model)
 
     assert provenance_schema["properties"]["schema_version"]["const"] == (
-        "ori-v2-model-campaign-v13"
+        "ori-v2-model-campaign-v14"
     )
     assert state_schema["properties"]["schema_version"]["const"] == (
-        "ori-v2-private-run-state-v5"
+        "ori-v2-private-run-state-v6"
     )
     assert readiness_schema["properties"]["schema_version"]["const"] == (
-        "ori-v2-run-readiness-v9"
+        "ori-v2-run-readiness-v10"
     )
-    assert "run-state-v5.private.json" in runner_source
+    assert campaign_runner.RUN_STATE_NAME == "run-state-v6.private.json"
+    assert "RUN_STATE_NAME" in runner_source
     assert "run-state-v4.private.json" not in runner_source
 
 
@@ -243,13 +244,13 @@ def test_executable_campaign_never_reuses_graph_gate(
             ExecutionClass.MODEL_FAILURE,
             "policy_rejected",
             SampleOutcomeCode.POLICY_REJECTED,
-            False,
+            None,
         ),
         (
             ExecutionClass.MODEL_FAILURE,
             "query_timeout",
             SampleOutcomeCode.QUERY_TIMEOUT,
-            False,
+            None,
         ),
         (
             ExecutionClass.INFRA_FAILURE,

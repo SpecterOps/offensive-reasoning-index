@@ -6,6 +6,7 @@ import asyncio
 import fcntl
 import hashlib
 import json
+import math
 import os
 import signal
 import subprocess
@@ -52,6 +53,7 @@ from .campaign import (
 from .campaign_config import (
     ReasoningEffort,
     ResolvedV2CampaignConfig,
+    StructuredOutputMode,
     V2ModelEntry,
     load_v2_campaign_config,
 )
@@ -65,7 +67,7 @@ from .graph import (
     require_live_graph_match,
 )
 from .identity import IdentityResolver
-from .mcp import MCPToolLoop
+from .mcp import EvidenceEventKind, MCPToolLoop
 from .model_runtime import (
     ProviderRunRecord,
     V2ModelTaskCancelled,
@@ -88,10 +90,11 @@ from .schema import (
 )
 from .scoring import SampleOutcomeCode, SampleResult, summarize_results
 
-RUNNER_VERSION = "ori-v2-model-campaign-v13"
-RUN_STATE_SCHEMA_VERSION = "ori-v2-private-run-state-v5"
-MODEL_REPORT_SCHEMA_VERSION = "ori-v2-model-report-v2"
-READINESS_SCHEMA_VERSION = "ori-v2-run-readiness-v9"
+RUNNER_VERSION = "ori-v2-model-campaign-v14"
+RUN_STATE_SCHEMA_VERSION = "ori-v2-private-run-state-v6"
+RUN_STATE_NAME = "run-state-v6.private.json"
+MODEL_REPORT_SCHEMA_VERSION = "ori-v2-model-report-v3"
+READINESS_SCHEMA_VERSION = "ori-v2-run-readiness-v10"
 CAMPAIGN_LIFECYCLE_SCHEMA_VERSION = "ori-v2-campaign-lifecycle-v1"
 TRACK_COMPLETION_SCHEMA_VERSION = "ori-v2-track-completion-v1"
 _RUNNER_IMPLEMENTATION_SOURCES = {
@@ -220,7 +223,7 @@ def _infrastructure_attempt_progress(
 
 
 class ModelRunProvenanceV2(StrictModel):
-    schema_version: Literal["ori-v2-model-campaign-v13"] = RUNNER_VERSION
+    schema_version: Literal["ori-v2-model-campaign-v14"] = RUNNER_VERSION
     protocol_version: Literal["ori-eval-protocol-v2"] = PROTOCOL_VERSION
     base: RunProvenanceV2
     run_identity: RunIdentity
@@ -233,7 +236,7 @@ class ModelRunProvenanceV2(StrictModel):
     runtime_config_fingerprint: str
     requested_api_surface: ProviderApiSurface
     resolved_api_surface: ProviderApiSurface
-    structured_output_mode: Literal["prompt_local_validation"]
+    structured_output_mode: StructuredOutputMode
     endpoint_family: str
     credential_source: str | None = None
     mcp_launcher_provenance: dict[str, str | None] | None = None
@@ -271,7 +274,7 @@ class ProviderAttemptV2(StrictModel):
 
 
 class PrivateRunStateV2(StrictModel):
-    schema_version: Literal["ori-v2-private-run-state-v5"] = RUN_STATE_SCHEMA_VERSION
+    schema_version: Literal["ori-v2-private-run-state-v6"] = RUN_STATE_SCHEMA_VERSION
     protocol_version: Literal["ori-eval-protocol-v2"] = PROTOCOL_VERSION
     provenance_fingerprint: str
     checkpoint: CheckpointV2
@@ -303,19 +306,63 @@ class PrivateRunStateV2(StrictModel):
         return self
 
 
+class RunOperationalMetricsV2(StrictModel):
+    resource_mode: Literal["off", "not_applicable"]
+    attempts_total: int = Field(strict=True, ge=0)
+    retries_total: int = Field(strict=True, ge=0)
+    tokens_input_total: int = Field(strict=True, ge=0)
+    tokens_output_total: int = Field(strict=True, ge=0)
+    total_tokens_total: int = Field(strict=True, ge=0)
+    elapsed_seconds_total: float = Field(strict=True, ge=0)
+    mcp_tool_calls_total: int = Field(strict=True, ge=0)
+    cypher_query_calls_total: int = Field(strict=True, ge=0)
+    non_cypher_tool_calls_total: int = Field(strict=True, ge=0)
+    failed_tool_calls_total: int = Field(strict=True, ge=0)
+    resource_read_calls_total: int = Field(strict=True, ge=0)
+
+    @model_validator(mode="after")
+    def totals_are_coherent(self) -> RunOperationalMetricsV2:
+        if self.total_tokens_total != self.tokens_input_total + self.tokens_output_total:
+            raise ValueError("operational total token accounting mismatch")
+        if self.non_cypher_tool_calls_total != (
+            self.mcp_tool_calls_total - self.cypher_query_calls_total
+        ):
+            raise ValueError("operational MCP tool accounting mismatch")
+        if not math.isfinite(self.elapsed_seconds_total):
+            raise ValueError("operational elapsed time must be finite")
+        if self.resource_read_calls_total != 0:
+            raise ValueError("certified resource_mode=off cannot report resource reads")
+        return self
+
+
 class ModelPublicReportV2(StrictModel):
-    schema_version: Literal["ori-v2-model-report-v2"] = MODEL_REPORT_SCHEMA_VERSION
+    schema_version: Literal["ori-v2-model-report-v3"] = MODEL_REPORT_SCHEMA_VERSION
     protocol_version: Literal["ori-eval-protocol-v2"] = PROTOCOL_VERSION
     run_identity: RunIdentity
     candidate_release_fingerprint: str
     live_certification_fingerprint: str
     graph_verification_before_fingerprint: str
     graph_verification_after_fingerprint: str
+    operational_metrics: RunOperationalMetricsV2
     report: PublicReportV2
     artifact_fingerprint: str
 
     @model_validator(mode="after")
     def fingerprint_matches(self) -> ModelPublicReportV2:
+        scheduled = self.report.summary.scheduled
+        if self.operational_metrics.attempts_total < scheduled:
+            raise ValueError("operational attempts cannot be below scheduled tasks")
+        if self.operational_metrics.retries_total != (
+            self.operational_metrics.attempts_total - scheduled
+        ):
+            raise ValueError("operational retries do not match attempts minus tasks")
+        if self.run_identity.tool_loop is None:
+            if self.operational_metrics.resource_mode != "not_applicable":
+                raise ValueError("Direct operational metrics require not_applicable resources")
+            if self.operational_metrics.mcp_tool_calls_total != 0:
+                raise ValueError("Direct operational metrics cannot contain MCP tool calls")
+        elif self.operational_metrics.resource_mode != "off":
+            raise ValueError("certified MCP operational metrics require resource_mode=off")
         expected = canonical_sha256(
             self,
             exclude_fields=("artifact_fingerprint",),
@@ -323,6 +370,50 @@ class ModelPublicReportV2(StrictModel):
         if self.artifact_fingerprint != expected:
             raise ValueError("model public report fingerprint mismatch")
         return self
+
+
+def _run_operational_metrics(state: PrivateRunStateV2) -> RunOperationalMetricsV2:
+    attempts = tuple(state.attempts)
+    mcp_tool_calls = sum(len(attempt.provider.mcp_tool_receipts) for attempt in attempts)
+    cypher_query_calls = sum(
+        sum(
+            receipt.tool_name == "cypher_query"
+            for receipt in attempt.provider.mcp_tool_receipts
+        )
+        for attempt in attempts
+    )
+    failed_tool_calls = sum(
+        sum(
+            receipt.tool_error is not None or not receipt.observation.succeeded
+            for receipt in attempt.provider.mcp_tool_receipts
+        )
+        for attempt in attempts
+    )
+    resource_read_calls = sum(
+        sum(event.kind == EvidenceEventKind.RESOURCE_READ for event in attempt.provider.mcp_events)
+        for attempt in attempts
+    )
+    tokens_input = sum(attempt.provider.tokens_input for attempt in attempts)
+    tokens_output = sum(attempt.provider.tokens_output for attempt in attempts)
+    total_tokens = tokens_input + tokens_output
+    elapsed_seconds = sum(attempt.provider.elapsed_seconds for attempt in attempts)
+    retries_total = max(0, len(attempts) - len(state.checkpoint.results))
+    return RunOperationalMetricsV2(
+        resource_mode=(
+            "off" if state.checkpoint.run_identity.tool_loop is not None else "not_applicable"
+        ),
+        attempts_total=len(attempts),
+        retries_total=retries_total,
+        tokens_input_total=tokens_input,
+        tokens_output_total=tokens_output,
+        total_tokens_total=total_tokens,
+        elapsed_seconds_total=elapsed_seconds,
+        mcp_tool_calls_total=mcp_tool_calls,
+        cypher_query_calls_total=cypher_query_calls,
+        non_cypher_tool_calls_total=mcp_tool_calls - cypher_query_calls,
+        failed_tool_calls_total=failed_tool_calls,
+        resource_read_calls_total=resource_read_calls,
+    )
 
 
 class ReadinessTrackV2(StrictModel):
@@ -344,16 +435,16 @@ class ModelReadinessV2(StrictModel):
     capability_check: str
     requested_api_surface: ProviderApiSurface
     resolved_api_surface: ProviderApiSurface
-    structured_output_mode: Literal["prompt_local_validation"]
+    structured_output_mode: StructuredOutputMode
     endpoint_family: str
     credential_source: str | None = None
     reasoning_effort: ReasoningEffort | None = None
 
 
 class CampaignReadinessV2(StrictModel):
-    schema_version: Literal["ori-v2-run-readiness-v9"] = READINESS_SCHEMA_VERSION
+    schema_version: Literal["ori-v2-run-readiness-v10"] = READINESS_SCHEMA_VERSION
     protocol_version: Literal["ori-eval-protocol-v2"] = PROTOCOL_VERSION
-    runner_version: Literal["ori-v2-model-campaign-v13"] = RUNNER_VERSION
+    runner_version: Literal["ori-v2-model-campaign-v14"] = RUNNER_VERSION
     source_config_fingerprint: str
     source_manifest_sha256: str
     archive_sha256: str
@@ -398,7 +489,7 @@ class CampaignCompletedTrackV2(StrictModel):
 class CampaignLifecycleV2(StrictModel):
     schema_version: Literal["ori-v2-campaign-lifecycle-v1"] = CAMPAIGN_LIFECYCLE_SCHEMA_VERSION
     protocol_version: Literal["ori-eval-protocol-v2"] = PROTOCOL_VERSION
-    runner_version: Literal["ori-v2-model-campaign-v13"] = RUNNER_VERSION
+    runner_version: Literal["ori-v2-model-campaign-v14"] = RUNNER_VERSION
     source_config_fingerprint: str
     mode: Literal["readiness", "execution"]
     status: Literal["running", "interrupted", "failed", "completed"]
@@ -442,7 +533,7 @@ class TrackRunCompletionV2(StrictModel):
 class TrackCompletionV2(StrictModel):
     schema_version: Literal["ori-v2-track-completion-v1"] = TRACK_COMPLETION_SCHEMA_VERSION
     protocol_version: Literal["ori-eval-protocol-v2"] = PROTOCOL_VERSION
-    runner_version: Literal["ori-v2-model-campaign-v13"] = RUNNER_VERSION
+    runner_version: Literal["ori-v2-model-campaign-v14"] = RUNNER_VERSION
     source_config_fingerprint: str
     track: Track
     candidate_release_fingerprint: str
@@ -585,7 +676,7 @@ def _campaign_lifecycle(payload: Mapping[str, Any]) -> CampaignLifecycleV2:
 
 def _checkpoint_counts(output_dir: Path) -> dict[str, int]:
     counts: dict[str, int] = {}
-    for state_path in output_dir.glob("*/*/run-*/run-state-v5.private.json"):
+    for state_path in output_dir.glob(f"*/*/run-*/{RUN_STATE_NAME}"):
         try:
             payload = json.loads(state_path.read_text())
             results = payload["checkpoint"]["results"]
@@ -913,7 +1004,7 @@ def _git_revision(path: Path) -> str:
 class _ProviderIdentityV2:
     requested_api_surface: ProviderApiSurface
     resolved_api_surface: ProviderApiSurface
-    structured_output_mode: Literal["prompt_local_validation"]
+    structured_output_mode: StructuredOutputMode
     endpoint_family: str
     credential_source: str | None
 
@@ -986,7 +1077,7 @@ def _provider_identity(
     return _ProviderIdentityV2(
         requested_api_surface=requested,
         resolved_api_surface=selected,
-        structured_output_mode="prompt_local_validation",
+        structured_output_mode=model.structured_output_mode,
         endpoint_family=endpoint_family,
         credential_source=credential_source,
     )
@@ -1513,10 +1604,19 @@ def _model_report(
     provenance: ModelRunProvenanceV2,
     prepared: PreparedTrack,
     results: Sequence[SampleResult],
+    run_dir: Path,
     before: LiveGraphVerification,
     after: LiveGraphVerification,
 ) -> ModelPublicReportV2:
     summary = summarize_results(prepared.task_ids, results)
+    state = _load_state(
+        run_dir / RUN_STATE_NAME,
+        provenance=provenance,
+        prepared=prepared,
+    )
+    if state is None:
+        raise V2CampaignRunError("missing private run state for completed run")
+    operational_metrics = _run_operational_metrics(state)
     report = build_public_report(
         prepared.pair,
         prepared.profile,
@@ -1531,6 +1631,7 @@ def _model_report(
         "live_certification_fingerprint": prepared.live.artifact_fingerprint,
         "graph_verification_before_fingerprint": before.verification_fingerprint,
         "graph_verification_after_fingerprint": after.verification_fingerprint,
+        "operational_metrics": operational_metrics,
         "report": report,
         "artifact_fingerprint": "0" * 64,
     }
@@ -1597,6 +1698,7 @@ def _publish_track_completion(
             provenance=provenance,
             prepared=prepared,
             results=results,
+            run_dir=run_dir,
             before=before,
             after=after,
         )
@@ -1689,7 +1791,7 @@ async def _run_model(
     )
     run_dir = resolved.output_dir / prepared.track.value / model.name / f"run-{run_index:03d}"
     _guard_run_dir(run_dir, provenance)
-    state_path = run_dir / "run-state-v5.private.json"
+    state_path = run_dir / RUN_STATE_NAME
     state = _load_state(
         state_path,
         provenance=provenance,
@@ -1833,6 +1935,11 @@ async def _run_model(
                             model_base_url=model_base_url,
                             max_tokens=getattr(model, "max_output_tokens", 2048),
                             api_surface=getattr(model, "api_surface", "auto"),
+                            structured_output_mode=getattr(
+                                model,
+                                "structured_output_mode",
+                                "prompt_local_validation",
+                            ),
                             ollama_options=provider_options,
                         )
                 else:
@@ -1872,6 +1979,11 @@ async def _run_model(
                             model_base_url=model_base_url,
                             max_tokens=getattr(model, "max_output_tokens", 2048),
                             api_surface=getattr(model, "api_surface", "auto"),
+                            structured_output_mode=getattr(
+                                model,
+                                "structured_output_mode",
+                                "prompt_local_validation",
+                            ),
                             tool_loop=loop,
                             max_steps=configured_mcp.max_steps,
                             ollama_options=provider_options,

@@ -60,6 +60,7 @@ def sample_from_direct_outcome(
             **base,
             execution_class=ExecutionClass.PROOF_FAILURE,
             outcome=SampleOutcomeCode.PROOF_INSUFFICIENT,
+            output_compliant=True,
             detail=outcome.error,
         )
     if (
@@ -72,6 +73,7 @@ def sample_from_direct_outcome(
             execution_class=ExecutionClass.SUCCESS,
             outcome=SampleOutcomeCode.COMPLETED,
             reasoning_correct=outcome.verdict.status is VerdictStatus.CORRECT,
+            output_compliant=True,
             evidence=outcome.evidence,
             verdict=outcome.verdict,
         )
@@ -83,7 +85,7 @@ def sample_from_direct_outcome(
                 receipt.failure_type or "",
                 SampleOutcomeCode.QUERY_ERROR,
             ),
-            reasoning_correct=False,
+            output_compliant=True,
             detail=outcome.error,
         )
     if receipt.execution_class is ExecutionClass.UNEXECUTED:
@@ -107,7 +109,7 @@ def sample_from_direct_outcome(
             **base,
             execution_class=ExecutionClass.MODEL_FAILURE,
             outcome=SampleOutcomeCode.OUTPUT_INVALID,
-            reasoning_correct=False,
+            output_compliant=True,
             detail=outcome.error,
         )
     return SampleResult(
@@ -152,6 +154,13 @@ def run_mcp_task_v2(
     retry_answer: Mapping[str, Any] | None = None,
     observed_identity_ids: Sequence[str] = (),
     graph_fact_registry: GraphFactRegistry | None = None,
+    final_output_normalized: bool = False,
+    retry_output_normalized: bool = False,
+    final_output_compliant: bool | None = None,
+    retry_output_compliant: bool | None = None,
+    final_receipt_attested: bool = True,
+    retry_receipt_attested: bool = True,
+    retry_contract_error: str | None = None,
 ) -> MCPV2Outcome:
     """Dispatch every MCP/Inspect loop through the common finalizer."""
 
@@ -177,4 +186,11 @@ def run_mcp_task_v2(
         retry_answer=retry_answer,
         observed_identity_ids=observed_identity_ids,
         graph_fact_registry=graph_fact_registry,
+        final_output_normalized=final_output_normalized,
+        retry_output_normalized=retry_output_normalized,
+        final_output_compliant=final_output_compliant,
+        retry_output_compliant=retry_output_compliant,
+        final_receipt_attested=final_receipt_attested,
+        retry_receipt_attested=retry_receipt_attested,
+        retry_contract_error=retry_contract_error,
     )

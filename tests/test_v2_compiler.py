@@ -1077,8 +1077,17 @@ def test_offline_scoring_uses_sealed_identity_catalog_and_shared_comparator(
     assert scoring.summary.scheduled == len(public.tasks)
     assert scoring.summary.correct == len(public.tasks)
     assert scoring.summary.incorrect == 0
+    assert scoring.summary.output_compliant == len(public.tasks)
+    assert scoring.summary.output_noncompliant == 0
+    assert scoring.summary.output_normalized == 0
+    assert scoring.summary.output_compliance_rate == 1.0
     assert scoring.summary.campaign_valid is True
-    assert all(result.verdict is not None for result in scoring.results)
+    assert all(
+        result.verdict is not None
+        and result.output_compliant is True
+        and result.output_normalized is False
+        for result in scoring.results
+    )
 
 
 def test_forged_answer_reference_data_cannot_affect_a_v2_verdict(
@@ -1098,9 +1107,16 @@ def test_forged_answer_reference_data_cannot_affect_a_v2_verdict(
     forged = next(result for result in scoring.results if result.task_id == first_task_id)
 
     assert forged.outcome.value == "OUTPUT_INVALID"
-    assert forged.reasoning_correct is False
+    assert forged.reasoning_correct is None
+    assert forged.output_compliant is False
     assert forged.verdict is None
-    assert scoring.summary.incorrect == 1
+    assert scoring.summary.incorrect == 0
+    assert scoring.summary.model_failures == 1
+    assert scoring.summary.output_noncompliant == 1
+    assert scoring.summary.reasoning_accuracy == 1.0
+    assert scoring.summary.effective_accuracy == (len(public.tasks) - 1) / len(
+        public.tasks
+    )
 
 
 def test_offline_scoring_treats_strict_schema_failure_as_output_invalid(
@@ -1121,8 +1137,12 @@ def test_offline_scoring_treats_strict_schema_failure_as_output_invalid(
 
     assert result.execution_class is ExecutionClass.MODEL_FAILURE
     assert result.outcome.value == "OUTPUT_INVALID"
-    assert result.reasoning_correct is False
+    assert result.reasoning_correct is None
+    assert result.output_compliant is False
     assert result.verdict is None
+    assert scoring.summary.incorrect == 0
+    assert scoring.summary.model_failures == 1
+    assert scoring.summary.output_noncompliant == 1
 
 
 def test_offline_scoring_contains_unexpected_comparator_failure(

@@ -469,16 +469,18 @@ V2 enforces:
 
 ```text
 S = C + W + M + P + X + H + U
-reported_incorrect = W + M
-reasoning_accuracy = C / (C + W + M)
+reported_incorrect = W
+reasoning_accuracy = C / (C + W)
 effective_accuracy = C / S
 campaign_valid = (X = 0) AND (H = 0) AND (U = 0)
 ```
 
-This denominator is deliberate:
+These denominators are deliberate:
 
-- A model-attributable syntax error, invalid output, policy rejection, or
-  whole-task timeout is part of model performance and counts as incorrect.
+- Only a completed comparison can establish semantic correctness or
+  incorrectness. A model-attributable syntax error, invalid output, policy
+  rejection, or whole-task timeout lowers effective accuracy but has no
+  fabricated comparator verdict.
 - `PROOF_INSUFFICIENT` has no reasoning verdict. It lowers effective accuracy
   but is not invented as a comparator judgment.
 - Infrastructure, harness, and unexecuted samples have no reasoning verdict and
@@ -490,34 +492,39 @@ This denominator is deliberate:
 ```text
 S = 70
 C = 38
-W + M = 29
+W = 25
+M = 4
 P = 3
 X = H = U = 0
 
-reasoning_accuracy = 38 / (38 + 29) = 38/67 = 56.716%
+reasoning_accuracy = 38 / (38 + 25) = 38/63 = 60.317%
 effective_accuracy = 38/70 = 54.286%
 campaign_valid = true
 ```
 
-Four of the 29 incorrect outcomes were model failures; they remain in the
-reasoning denominator. The three proof failures do not.
+Four additional scheduled outcomes were ungradeable model failures; they lower
+effective accuracy but are not comparator-incorrect. The three proof failures
+also have no semantic verdict.
 
 #### Worked GPT-5.5 MCP example from the historical V10 campaign
 
 ```text
 S = 70
 C = 35
-W + M = 32
+W = 27
+M = 5
 P = 3
 X = H = U = 0
 
-reasoning_accuracy = 35/67 = 52.239%
+reasoning_accuracy = 35/62 = 56.452%
 effective_accuracy = 35/70 = 50.000%
 campaign_valid = true
 ```
 
-Five of the 32 incorrect outcomes were model failures. These numbers describe
-the V10 contract only; they are not V28 results.
+Five additional outcomes were ungradeable model failures. These diagnostic
+recomputations describe historical V10 results under the V30 denominator; they
+are not an official rescore because the models saw an older prompt/runtime
+contract.
 
 ### Fingerprint mathematics
 

@@ -29,12 +29,14 @@ def _config(
     api_surface: str = "auto",
     model_base_url: str | None = None,
     modes: tuple[str, ...] = ("direct",),
+    structured_output_mode: str = "prompt_local_validation",
 ) -> V2CampaignConfig:
     model: dict[str, object] = {
         "name": "test-model",
         "provider": provider,
         "model": "provider/model",
         "api_surface": api_surface,
+        "structured_output_mode": structured_output_mode,
     }
     if model_base_url is not None:
         model["model_base_url"] = model_base_url
@@ -119,6 +121,32 @@ def test_api_surface_is_typed_and_cannot_hide_in_options() -> None:
     payload = _config(provider="openai-compat").model_dump(mode="json")
     payload["models"][0]["options"] = {"api_surface": "responses"}
     with pytest.raises(ValidationError, match="set model api_surface"):
+        V2CampaignConfig.model_validate(payload)
+
+
+def test_json_schema_mode_is_explicit_and_fingerprinted_for_chat_providers() -> None:
+    config = _config(
+        provider="openai-compat",
+        structured_output_mode="json_schema",
+    )
+    identity = _provider_identity(config.models[0], _resolved(config))
+
+    assert identity.structured_output_mode == "json_schema"
+    assert config.models[0].model_dump(mode="json")["structured_output_mode"] == (
+        "json_schema"
+    )
+
+
+@pytest.mark.parametrize("provider", ("codex", "ollama", "anthropic"))
+def test_json_schema_mode_rejects_uncertified_provider_surfaces(provider: str) -> None:
+    with pytest.raises(ValidationError, match="Chat Completions providers"):
+        _config(provider=provider, structured_output_mode="json_schema")
+
+
+def test_structured_output_mode_cannot_hide_in_options() -> None:
+    payload = _config(provider="openai-compat").model_dump(mode="json")
+    payload["models"][0]["options"] = {"structured_output_mode": "json_schema"}
+    with pytest.raises(ValidationError, match="set model structured_output_mode"):
         V2CampaignConfig.model_validate(payload)
 
 

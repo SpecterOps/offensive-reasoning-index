@@ -140,14 +140,19 @@ def _provenance(track: Track, run_index: int = 1) -> campaign_runner.ModelRunPro
     return campaign_runner.ModelRunProvenanceV2.model_validate(payload)
 
 
-def _sample(track: Track) -> SampleResult:
+def _sample(track: Track, *, campaign_valid: bool = True) -> SampleResult:
+    execution_class = (
+        ExecutionClass.MODEL_FAILURE
+        if campaign_valid
+        else ExecutionClass.HARNESS_FAILURE
+    )
     return SampleResult(
         task_id=f"{track.value}-task",
         task_fingerprint="a" * 64,
         oracle_fingerprint="b" * 64,
-        execution_class=ExecutionClass.MODEL_FAILURE,
+        execution_class=execution_class,
         outcome=SampleOutcomeCode.OUTPUT_INVALID,
-        reasoning_correct=False,
+        reasoning_correct=None,
         detail=(
             "SECRET_PROMPT SECRET_TOOL_ARGUMENT SECRET_CREDENTIAL_VALUE "
             "/private/operator/campaign"
@@ -187,9 +192,10 @@ def _state(
     provenance: campaign_runner.ModelRunProvenanceV2,
     track: Track,
     *,
+    campaign_valid: bool = True,
     attempt_count: int = 1,
 ) -> campaign_runner.PrivateRunStateV2:
-    sample = _sample(track)
+    sample = _sample(track, campaign_valid=campaign_valid)
     checkpoint_payload = {
         "schema_version": "ori-eval-checkpoint-v2",
         "protocol_version": "ori-eval-protocol-v2",
@@ -243,22 +249,50 @@ def _report(
     *,
     campaign_valid: bool = True,
 ) -> campaign_runner.ModelPublicReportV2:
-    sample = _sample(track)
-    summary = CampaignSummary(
-        scheduled=1,
-        completed=0,
-        correct=0,
-        incorrect=1,
-        model_failures=1,
-        proof_failures=0,
-        infrastructure_failures=0,
-        harness_failures=0,
-        unexecuted=0,
-        campaign_valid=campaign_valid,
-        invalid_reasons=(() if campaign_valid else ("HARNESS_FAILURE",)),
-    )
+    sample = _sample(track, campaign_valid=campaign_valid)
+    state = _state(provenance, track, campaign_valid=campaign_valid)
+    if campaign_valid:
+        summary = CampaignSummary(
+            scheduled=1,
+            completed=0,
+            correct=0,
+            incorrect=0,
+            model_failures=1,
+            proof_failures=0,
+            infrastructure_failures=0,
+            harness_failures=0,
+            unexecuted=0,
+            output_compliant=0,
+            output_noncompliant=0,
+            output_normalized=0,
+            reasoning_accuracy=None,
+            effective_accuracy=0.0,
+            output_compliance_rate=None,
+            campaign_valid=True,
+            invalid_reasons=(),
+        )
+    else:
+        summary = CampaignSummary(
+            scheduled=1,
+            completed=0,
+            correct=0,
+            incorrect=0,
+            model_failures=0,
+            proof_failures=0,
+            infrastructure_failures=0,
+            harness_failures=1,
+            unexecuted=0,
+            output_compliant=0,
+            output_noncompliant=0,
+            output_normalized=0,
+            reasoning_accuracy=None,
+            effective_accuracy=0.0,
+            output_compliance_rate=None,
+            campaign_valid=False,
+            invalid_reasons=("HARNESS_FAILURE",),
+        )
     report_payload = {
-        "schema_version": "ori-eval-public-report-v2",
+        "schema_version": "ori-eval-public-report-v3",
         "protocol_version": "ori-eval-protocol-v2",
         "product": "complex",
         "track": track,
@@ -274,7 +308,7 @@ def _report(
                 task_fingerprint=sample.task_fingerprint,
                 execution_class=sample.execution_class,
                 outcome=sample.outcome,
-                reasoning_correct=False,
+                reasoning_correct=None,
             ),
         ),
         "summary": summary,
@@ -292,6 +326,7 @@ def _report(
         "live_certification_fingerprint": provenance.live_certification_fingerprint,
         "graph_verification_before_fingerprint": "c" * 64,
         "graph_verification_after_fingerprint": "d" * 64,
+        "operational_metrics": campaign_runner._run_operational_metrics(state),
         "report": body,
         "artifact_fingerprint": "0" * 64,
     }
@@ -440,7 +475,7 @@ def _completed_campaign(
         report = _report(provenance, track, campaign_valid=campaign_valid)
         run_dir = resolved.output_dir / track.value / "gpt-test" / "run-001"
         _dump(run_dir / "campaign-provenance-v2.json", provenance)
-        _dump(run_dir / "run-state-v5.private.json", state)
+        _dump(run_dir / "run-state-v6.private.json", state)
         _dump(run_dir / "public-report-v2.json", report)
         receipt = _track_receipt(resolved.source_config_fingerprint, track, report)
         _dump(resolved.output_dir / track.value / "track-completion-v2.private.json", receipt)
@@ -654,7 +689,7 @@ def test_candidate_subset_checkpoint_may_bind_full_compiled_inventory(
         checkpoint=checkpoint,
         attempts=state.attempts,
     )
-    _dump(run_dir / "run-state-v5.private.json", expanded_state)
+    _dump(run_dir / "run-state-v6.private.json", expanded_state)
 
     status = inspect_v2_campaign_status(config)
 
@@ -801,7 +836,7 @@ def test_config_fingerprint_mismatch_fails_closed(tmp_path: Path) -> None:
     "relative",
     (
         "campaign-lifecycle-v2.private.json",
-        "direct/gpt-test/run-001/run-state-v5.private.json",
+        "direct/gpt-test/run-001/run-state-v6.private.json",
         "direct/gpt-test/run-001/public-report-v2.json",
         "direct/track-completion-v2.private.json",
     ),
@@ -842,7 +877,7 @@ def test_status_usage_counts_every_durable_provider_attempt(tmp_path: Path) -> N
         / "direct"
         / "gpt-test"
         / "run-001"
-        / "run-state-v5.private.json",
+        / "run-state-v6.private.json",
         _state(provenance, Track.DIRECT, attempt_count=2),
     )
 

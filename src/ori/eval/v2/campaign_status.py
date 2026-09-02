@@ -32,7 +32,7 @@ _LIFECYCLE_NAME = "campaign-lifecycle-v2.private.json"
 _READINESS_NAME = "v2-run-readiness.private.json"
 _LOCK_NAME = ".ori-v2-campaign.lock"
 _PROVENANCE_NAME = "campaign-provenance-v2.json"
-_STATE_NAME = "run-state-v5.private.json"
+_STATE_NAME = "run-state-v6.private.json"
 _REPORT_NAME = "public-report-v2.json"
 _TRACK_RECEIPT_NAME = "track-completion-v2.private.json"
 

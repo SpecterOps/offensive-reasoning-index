@@ -1,4 +1,4 @@
-"""Build a public-safe V29 model card from a completed V2 campaign."""
+"""Build a public-safe V30 model card from a completed V2 campaign."""
 
 # SVG elements remain one line each so the generated image is deterministic and
 # reviewable without an XML formatter.
@@ -18,20 +18,23 @@ from html import escape
 from pathlib import Path
 from typing import Any, TypeVar
 
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from ori.eval.v2.campaign_runner import (
     CampaignLifecycleV2,
     CampaignReadinessV2,
     ModelPublicReportV2,
+    PrivateRunStateV2,
     TrackCompletionV2,
+    _run_operational_metrics,
 )
-from ori.eval.v2.schema import ExecutionClass, Track
+from ori.eval.v2.schema import ExecutionClass, StrictModel, Track
 from ori.eval.v2.scoring import CampaignSummary
 
-SCHEMA_VERSION = "ori-v29-model-card-v1"
-JSON_NAME = "v29-model-card.json"
-SVG_NAME = "v29-model-card.svg"
+SCHEMA_VERSION = "ori-v30-model-card-v2"
+JSON_NAME = "v30-model-card.json"
+SVG_NAME = "v30-model-card.svg"
+RUN_STATE_NAME = "run-state-v6.private.json"
 
 _MODEL = TypeVar("_MODEL", bound=BaseModel)
 _SENSITIVE_LABEL = re.compile(
@@ -47,7 +50,9 @@ class ModelCardBuildError(ValueError):
 @dataclass(frozen=True)
 class LoadedRun:
     report: ModelPublicReportV2
+    state: PrivateRunStateV2
     sha256: str
+    state_sha256: str
 
     @property
     def key(self) -> tuple[str, str, int]:
@@ -83,6 +88,141 @@ def _public_label(value: str, label: str) -> str:
     return value
 
 
+def _run_operational_summary(state: PrivateRunStateV2) -> OperationalSummary:
+    metrics = _run_operational_metrics(state)
+    runs = 1
+    return OperationalSummary(
+        runs=runs,
+        attempts_total=metrics.attempts_total,
+        attempts_average=metrics.attempts_total / runs,
+        retries_total=metrics.retries_total,
+        retries_average=metrics.retries_total / runs,
+        tokens_input_total=metrics.tokens_input_total,
+        tokens_input_average=metrics.tokens_input_total / runs,
+        tokens_output_total=metrics.tokens_output_total,
+        tokens_output_average=metrics.tokens_output_total / runs,
+        total_tokens_total=metrics.total_tokens_total,
+        total_tokens_average=metrics.total_tokens_total / runs,
+        elapsed_seconds_total=metrics.elapsed_seconds_total,
+        elapsed_seconds_average=metrics.elapsed_seconds_total / runs,
+        mcp_tool_calls_total=metrics.mcp_tool_calls_total,
+        mcp_tool_calls_average=metrics.mcp_tool_calls_total / runs,
+        cypher_query_calls_total=metrics.cypher_query_calls_total,
+        cypher_query_calls_average=metrics.cypher_query_calls_total / runs,
+        non_cypher_tool_calls_total=metrics.non_cypher_tool_calls_total,
+        non_cypher_tool_calls_average=metrics.non_cypher_tool_calls_total / runs,
+        failed_tool_calls_total=metrics.failed_tool_calls_total,
+        failed_tool_calls_average=metrics.failed_tool_calls_total / runs,
+        resource_read_calls_total=metrics.resource_read_calls_total,
+        resource_read_calls_average=metrics.resource_read_calls_total / runs,
+    )
+
+
+def _aggregate_operational_summaries(
+    summaries: Iterable[OperationalSummary],
+) -> OperationalSummary:
+    items = tuple(summaries)
+    if not items:
+        raise ModelCardBuildError("operational summary requires at least one run")
+    total_runs = sum(item.runs for item in items)
+    payload: dict[str, Any] = {
+        "runs": total_runs,
+        "attempts_total": sum(item.attempts_total for item in items),
+        "retries_total": sum(item.retries_total for item in items),
+        "tokens_input_total": sum(item.tokens_input_total for item in items),
+        "tokens_output_total": sum(item.tokens_output_total for item in items),
+        "total_tokens_total": sum(item.total_tokens_total for item in items),
+        "elapsed_seconds_total": sum(item.elapsed_seconds_total for item in items),
+        "mcp_tool_calls_total": sum(item.mcp_tool_calls_total for item in items),
+        "cypher_query_calls_total": sum(item.cypher_query_calls_total for item in items),
+        "non_cypher_tool_calls_total": sum(item.non_cypher_tool_calls_total for item in items),
+        "failed_tool_calls_total": sum(item.failed_tool_calls_total for item in items),
+        "resource_read_calls_total": sum(item.resource_read_calls_total for item in items),
+    }
+    for field_name in (
+        "attempts",
+        "retries",
+        "tokens_input",
+        "tokens_output",
+        "total_tokens",
+        "elapsed_seconds",
+        "mcp_tool_calls",
+        "cypher_query_calls",
+        "non_cypher_tool_calls",
+        "failed_tool_calls",
+        "resource_read_calls",
+    ):
+        payload[f"{field_name}_average"] = payload[f"{field_name}_total"] / total_runs
+    return OperationalSummary.model_validate(payload)
+
+
+def _assert_run_state_matches_report(
+    report: ModelPublicReportV2,
+    state: PrivateRunStateV2,
+) -> None:
+    if report.run_identity != state.checkpoint.run_identity:
+        raise ModelCardBuildError("public report run identity disagrees with private state")
+    if len(report.report.rows) != len(state.checkpoint.results):
+        raise ModelCardBuildError("private state result count disagrees with public report")
+    rows_by_task = {row.task_id: row for row in report.report.rows}
+    results_by_task = {result.task_id: result for result in state.checkpoint.results}
+    if set(rows_by_task) != set(results_by_task):
+        raise ModelCardBuildError("private state task set disagrees with public report")
+    for task_id, row in rows_by_task.items():
+        result = results_by_task[task_id]
+        if row.execution_class != result.execution_class or row.outcome != result.outcome:
+            raise ModelCardBuildError(f"private state outcome disagrees for {task_id}")
+        if row.reasoning_correct != result.reasoning_correct:
+            raise ModelCardBuildError(f"private state reasoning flag disagrees for {task_id}")
+    if report.operational_metrics != _run_operational_metrics(state):
+        raise ModelCardBuildError("private state operational metrics disagree with public report")
+
+
+class OperationalSummary(StrictModel):
+    runs: int = Field(strict=True, ge=0)
+    attempts_total: int = Field(strict=True, ge=0)
+    attempts_average: float = Field(strict=True, ge=0)
+    retries_total: int = Field(strict=True, ge=0)
+    retries_average: float = Field(strict=True, ge=0)
+    tokens_input_total: int = Field(strict=True, ge=0)
+    tokens_input_average: float = Field(strict=True, ge=0)
+    tokens_output_total: int = Field(strict=True, ge=0)
+    tokens_output_average: float = Field(strict=True, ge=0)
+    total_tokens_total: int = Field(strict=True, ge=0)
+    total_tokens_average: float = Field(strict=True, ge=0)
+    elapsed_seconds_total: float = Field(strict=True, ge=0)
+    elapsed_seconds_average: float = Field(strict=True, ge=0)
+    mcp_tool_calls_total: int = Field(strict=True, ge=0)
+    mcp_tool_calls_average: float = Field(strict=True, ge=0)
+    cypher_query_calls_total: int = Field(strict=True, ge=0)
+    cypher_query_calls_average: float = Field(strict=True, ge=0)
+    non_cypher_tool_calls_total: int = Field(strict=True, ge=0)
+    non_cypher_tool_calls_average: float = Field(strict=True, ge=0)
+    failed_tool_calls_total: int = Field(strict=True, ge=0)
+    failed_tool_calls_average: float = Field(strict=True, ge=0)
+    resource_read_calls_total: int = Field(strict=True, ge=0)
+    resource_read_calls_average: float = Field(strict=True, ge=0)
+
+    @model_validator(mode="after")
+    def averages_are_finite(self) -> OperationalSummary:
+        for field_name in (
+            "attempts_average",
+            "retries_average",
+            "tokens_input_average",
+            "tokens_output_average",
+            "total_tokens_average",
+            "elapsed_seconds_average",
+            "mcp_tool_calls_average",
+            "cypher_query_calls_average",
+            "non_cypher_tool_calls_average",
+            "failed_tool_calls_average",
+            "resource_read_calls_average",
+        ):
+            if not math.isfinite(getattr(self, field_name)):
+                raise ValueError(f"{field_name} must be finite")
+        return self
+
+
 def _readiness_track(
     readiness: CampaignReadinessV2,
     track: Track,
@@ -105,6 +245,10 @@ def _assert_summary_matches_rows(
     correct = sum(row.reasoning_correct is True for row in rows)
     incorrect = sum(row.reasoning_correct is False for row in rows)
     reasoning_denominator = correct + incorrect
+    output_compliant = sum(row.output_compliant is True for row in rows)
+    output_noncompliant = sum(row.output_compliant is False for row in rows)
+    output_normalized = sum(row.output_normalized for row in rows)
+    observed_outputs = output_compliant + output_noncompliant
     infrastructure = classes[ExecutionClass.INFRA_FAILURE]
     harness = classes[ExecutionClass.HARNESS_FAILURE]
     unexecuted = classes[ExecutionClass.UNEXECUTED]
@@ -125,10 +269,16 @@ def _assert_summary_matches_rows(
         infrastructure_failures=infrastructure,
         harness_failures=harness,
         unexecuted=unexecuted,
+        output_compliant=output_compliant,
+        output_noncompliant=output_noncompliant,
+        output_normalized=output_normalized,
         reasoning_accuracy=(
             correct / reasoning_denominator if reasoning_denominator else None
         ),
         effective_accuracy=(correct / len(rows) if rows else None),
+        output_compliance_rate=(
+            output_compliant / observed_outputs if observed_outputs else None
+        ),
         campaign_valid=not invalid_reasons,
         invalid_reasons=tuple(invalid_reasons),
     )
@@ -154,6 +304,11 @@ def _load_track_reports(
     loaded: dict[tuple[str, str, int], LoadedRun] = {}
     for path in paths:
         report, raw = _load_model(path, ModelPublicReportV2, f"{track.value} public report")
+        state, state_raw = _load_model(
+            path.parent / RUN_STATE_NAME,
+            PrivateRunStateV2,
+            f"{track.value} private run state",
+        )
         key = (
             report.run_identity.provider,
             report.run_identity.model,
@@ -161,7 +316,12 @@ def _load_track_reports(
         )
         if key in loaded:
             raise ModelCardBuildError(f"duplicate {track.value} public run identity")
-        loaded[key] = LoadedRun(report=report, sha256=_sha256(raw))
+        loaded[key] = LoadedRun(
+            report=report,
+            state=state,
+            sha256=_sha256(raw),
+            state_sha256=_sha256(state_raw),
+        )
 
     if set(loaded) != set(expected_runs):
         raise ModelCardBuildError(
@@ -196,6 +356,7 @@ def _load_track_reports(
             raise ModelCardBuildError(f"{track.value} graph fingerprint mismatch")
         if body.public_artifact_fingerprint != track_readiness.public_artifact_fingerprint:
             raise ModelCardBuildError(f"{track.value} public artifact mismatch")
+        _assert_run_state_matches_report(report, loaded_run.state)
         if body.catalog_fingerprint == "":
             raise ModelCardBuildError(f"{track.value} catalog fingerprint is empty")
         if (
@@ -279,15 +440,63 @@ def _aggregate(
             f"{receipt.track.value} public reports disagree on catalog fingerprint"
         )
     summaries = tuple(item.report.report.summary for item in runs)
+    operational_summaries = tuple(
+        _run_operational_summary(item.state) for item in runs
+    )
     scheduled = sum(summary.scheduled for summary in summaries)
     correct = sum(summary.correct for summary in summaries)
+    incorrect = sum(summary.incorrect for summary in summaries)
+    output_compliant = sum(summary.output_compliant for summary in summaries)
+    output_noncompliant = sum(summary.output_noncompliant for summary in summaries)
+    observed_outputs = output_compliant + output_noncompliant
+    operations = _aggregate_operational_summaries(operational_summaries).model_dump()
+    operations["resource_mode"] = (
+        "off" if receipt.track is Track.MCP else "not_applicable"
+    )
+    attempts = operations["attempts_total"]
+    operations.update(
+        {
+            "attempts_average_per_task": attempts / scheduled,
+            "tokens_average_per_task": operations["total_tokens_total"] / scheduled,
+            "tokens_average_per_attempt": (
+                operations["total_tokens_total"] / attempts if attempts else None
+            ),
+            "elapsed_seconds_average_per_attempt": (
+                operations["elapsed_seconds_total"] / attempts if attempts else None
+            ),
+            "mcp_tool_calls_average_per_task": (
+                operations["mcp_tool_calls_total"] / scheduled
+            ),
+            "cypher_query_calls_average_per_task": (
+                operations["cypher_query_calls_total"] / scheduled
+            ),
+            "non_cypher_tool_calls_average_per_task": (
+                operations["non_cypher_tool_calls_total"] / scheduled
+            ),
+            "failed_tool_calls_average_per_task": (
+                operations["failed_tool_calls_total"] / scheduled
+            ),
+            "resource_read_calls_average_per_task": (
+                operations["resource_read_calls_total"] / scheduled
+            ),
+        }
+    )
     payload: dict[str, Any] = {
         "runs": len(runs),
         "scheduled": scheduled,
         "completed": sum(summary.completed for summary in summaries),
         "correct": correct,
-        "incorrect": sum(summary.incorrect for summary in summaries),
+        "incorrect": incorrect,
+        "reasoning_accuracy": (
+            correct / (correct + incorrect) if correct + incorrect else None
+        ),
         "effective_accuracy": correct / scheduled,
+        "output_compliant": output_compliant,
+        "output_noncompliant": output_noncompliant,
+        "output_normalized": sum(summary.output_normalized for summary in summaries),
+        "output_compliance_rate": (
+            output_compliant / observed_outputs if observed_outputs else None
+        ),
         "model_failures": sum(summary.model_failures for summary in summaries),
         "proof_failures": sum(summary.proof_failures for summary in summaries),
         "infrastructure_failures": sum(
@@ -306,6 +515,8 @@ def _aggregate(
             item.report.artifact_fingerprint for item in runs
         ),
         "public_report_sha256": sorted(item.sha256 for item in runs),
+        "public_run_state_sha256": sorted(item.state_sha256 for item in runs),
+        "operational_metrics": operations,
     }
     if not math.isfinite(payload["effective_accuracy"]):
         raise ModelCardBuildError("effective accuracy is not finite")
@@ -323,11 +534,11 @@ def _svg_bytes(card: dict[str, Any]) -> bytes:
     runner = escape(card["runner_version"])
     lines = [
         '<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720" viewBox="0 0 1280 720" role="img" aria-labelledby="title description">',
-        f'<title id="title">ORI V29 model card for {model}</title>',
+        f'<title id="title">ORI V30 model card for {model}</title>',
         f'<desc id="description">Separate graph-gated Direct and MCP results for {model}. No combined score is reported.</desc>',
         '<rect width="1280" height="720" fill="#0b1020"/>',
         '<style>text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;fill:#f7f9fc}.muted{fill:#aeb8cb}.accent{fill:#66d9ef}.panel{fill:#151d33;stroke:#33415f;stroke-width:2}.good{fill:#70e1a1}.label{fill:#aeb8cb;font-size:16px}.value{fill:#f7f9fc;font-size:18px;font-weight:600}</style>',
-        '<text x="54" y="48" font-size="15" font-weight="700" class="accent">OFFENSIVE REASONING INDEX · V29 DEVELOPMENT BOUNDARY</text>',
+        '<text x="54" y="48" font-size="15" font-weight="700" class="accent">OFFENSIVE REASONING INDEX · V30 SCORING BOUNDARY</text>',
         f'<text x="54" y="104" font-size="38" font-weight="700">{model}</text>',
         f'<text x="54" y="136" font-size="17" class="muted">Provider {provider} · graph {graph} · {runner}</text>',
         '<rect x="1016" y="52" width="210" height="54" rx="27" fill="#143b2b"/>',
@@ -338,12 +549,15 @@ def _svg_bytes(card: dict[str, Any]) -> bytes:
         item = card["tracks"][track]
         x = panel_x[track]
         title = "DIRECT" if track == "direct" else "MCP"
+        ops = item["operational_metrics"]
         lines.extend(
             [
                 f'<rect x="{x}" y="174" width="576" height="430" rx="18" class="panel"/>',
                 f'<text x="{x + 28}" y="216" font-size="20" font-weight="700" class="accent">{title}</text>',
                 f'<text x="{x + 28}" y="286" font-size="58" font-weight="700">{_percent(item["effective_accuracy"])}</text>',
                 f'<text x="{x + 30}" y="316" font-size="16" class="muted">effective accuracy · {item["correct"]}/{item["scheduled"]} correct · {item["runs"]} run(s)</text>',
+                f'<text x="{x + 30}" y="338" font-size="14" class="muted">semantic {_percent(item["reasoning_accuracy"]) if item["reasoning_accuracy"] is not None else "n/a"} · output compliance {_percent(item["output_compliance_rate"]) if item["output_compliance_rate"] is not None else "n/a"} · normalized {item["output_normalized"]}</text>',
+                f'<text x="{x + 30}" y="358" font-size="14" class="muted">ops · attempts {ops["attempts_total"]} · retries {ops["retries_total"]} · tokens {ops["total_tokens_total"]} · tools {ops["mcp_tool_calls_total"]} ({ops["mcp_tool_calls_average_per_task"]:.2f}/task) · resources {ops["resource_read_calls_total"]}</text>',
             ]
         )
         rows = (
@@ -354,7 +568,7 @@ def _svg_bytes(card: dict[str, Any]) -> bytes:
             ("Unexecuted", item["unexecuted"]),
         )
         for index, (label, value) in enumerate(rows):
-            row_y = 365 + index * 44
+            row_y = 390 + index * 40
             lines.append(
                 f'<text x="{x + 30}" y="{row_y}" class="label">{label}</text>'
             )
@@ -362,12 +576,12 @@ def _svg_bytes(card: dict[str, Any]) -> bytes:
                 f'<text x="{x + 546}" y="{row_y}" text-anchor="end" class="value">{value}</text>'
             )
         lines.append(
-            f'<text x="{x + 30}" y="578" font-size="14" class="good">Graph-gated track completion verified</text>'
+            f'<text x="{x + 30}" y="590" font-size="14" class="good">Graph-gated track completion verified</text>'
         )
     lines.extend(
         [
             '<text x="54" y="650" font-size="18" font-weight="700">Direct and MCP are separate evaluation surfaces. No combined score is reported.</text>',
-            '<text x="54" y="680" font-size="15" class="muted">Public-safe summary generated from validated lifecycle, readiness, completion receipts, and public reports only.</text>',
+            '<text x="54" y="680" font-size="15" class="muted">Public-safe aggregates verified against fingerprinted private attempts; no prompts, answers, tool bodies, paths, endpoints, or credentials are included.</text>',
             '</svg>',
         ]
     )
@@ -467,9 +681,19 @@ def build_model_card(
         track.value: _aggregate(selected[track], receipts[track])
         for track in (Track.DIRECT, Track.MCP)
     }
+    operational_metrics = _aggregate_operational_summaries(
+        OperationalSummary.model_validate(
+            {
+                key: value
+                for key, value in tracks[track.value]["operational_metrics"].items()
+                if key in OperationalSummary.model_fields
+            }
+        )
+        for track in (Track.DIRECT, Track.MCP)
+    )
     card: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
-        "claim_boundary": "completed_graph_gated_v29_direct_mcp_campaign",
+        "claim_boundary": "completed_graph_gated_v30_direct_mcp_campaign",
         "product": product,
         "provider": provider,
         "model": selected_model,
@@ -480,9 +704,10 @@ def build_model_card(
         "readiness_fingerprint": readiness.readiness_fingerprint,
         "graph_fingerprint": readiness.graph_fingerprint,
         "campaign_valid": True,
+        "operational_metrics": operational_metrics.model_dump(),
         "tracks": tracks,
         "warnings": [
-            "V29 development evidence; not the future official 100/100 suite.",
+            "V30 scoring over the development schedule; not the future official 100/100 suite.",
             "Direct and MCP are separate surfaces; no combined score is valid.",
             "This card contains no prompts, responses, tool bodies, credentials, or local paths.",
         ],

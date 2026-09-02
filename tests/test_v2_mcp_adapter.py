@@ -189,6 +189,7 @@ def test_mcp_adapter_uses_comparator_for_wrong_but_well_formed_evidence() -> Non
 
     assert outcome.sample.execution_class is ExecutionClass.SUCCESS
     assert outcome.sample.reasoning_correct is False
+    assert outcome.sample.output_compliant is True
     assert outcome.sample.verdict is not None
     assert outcome.sample.verdict.status is VerdictStatus.INCORRECT
 
@@ -217,7 +218,8 @@ def test_mcp_adapter_contains_nonfinite_malformed_output() -> None:
     assert outcome.finalization.phase is FinalizationPhase.OUTPUT_INVALID
     assert outcome.sample.execution_class is ExecutionClass.MODEL_FAILURE
     assert outcome.sample.outcome is SampleOutcomeCode.OUTPUT_INVALID
-    assert outcome.sample.reasoning_correct is False
+    assert outcome.sample.reasoning_correct is None
+    assert outcome.sample.output_compliant is False
 
 
 def test_tool_proven_identity_missing_from_catalog_is_harness_failure() -> None:
@@ -259,7 +261,8 @@ def test_unproven_unknown_identity_remains_invalid_model_output() -> None:
     assert outcome.finalization.phase is FinalizationPhase.OUTPUT_INVALID
     assert outcome.sample.execution_class is ExecutionClass.MODEL_FAILURE
     assert outcome.sample.outcome is SampleOutcomeCode.OUTPUT_INVALID
-    assert outcome.sample.reasoning_correct is False
+    assert outcome.sample.reasoning_correct is None
+    assert outcome.sample.output_compliant is False
 
 
 def test_mcp_adapter_contains_unexpected_comparator_failure(
@@ -420,7 +423,7 @@ def test_positive_exact_scope_count_overrides_conflicting_negative_answer() -> N
         (EvidenceEventKind.INVALID_ARGUMENTS, SampleOutcomeCode.QUERY_ERROR),
     ),
 )
-def test_model_authored_mcp_query_failures_count_as_incorrect(
+def test_model_authored_mcp_query_failures_are_separate_from_reasoning(
     kind: EvidenceEventKind,
     expected: SampleOutcomeCode,
 ) -> None:
@@ -443,7 +446,8 @@ def test_model_authored_mcp_query_failures_count_as_incorrect(
 
     assert outcome.sample.execution_class is ExecutionClass.MODEL_FAILURE
     assert outcome.sample.outcome is expected
-    assert outcome.sample.reasoning_correct is False
+    assert outcome.sample.reasoning_correct is None
+    assert outcome.sample.output_compliant is True
 
 
 def test_one_schema_retry_and_infrastructure_have_distinct_accounting() -> None:

@@ -620,13 +620,17 @@ models:
   - name: nous-portal-model
     model: openai-compat/<nous-model-id>
     model_base_url: https://inference-api.nousresearch.com/v1
+    structured_output_mode: json_schema
     mcp_tool_loop: native-openai-compatible
     openai_compat_telemetry_adapter: generic
 ```
 
 Replace `<nous-model-id>` with the exact model ID shown in the [Nous Portal API
 Docs](https://portal.nousresearch.com/api-docs). Use a model that supports the
-OpenAI chat-completions/tool-calling surface for MCP runs.
+OpenAI chat-completions/tool-calling and JSON-Schema response-format surfaces
+for MCP runs. Confirm that combination with a bounded provider canary before a
+full paid campaign; no-model readiness records the requested capability but
+does not claim to have contacted the provider.
 
 The top-level `manifest` and `output_dir` make a model-matrix config
 self-contained. Relative paths are resolved from the config file's directory.
@@ -974,7 +978,10 @@ reopened while model-attributable and successful results remain terminal;
 attempt numbers continue monotonically and the lifetime retry budget cannot
 reset across processes. Every provider attempt is checkpointed before a retry.
 Private run state retains raw provider and execution receipts;
-`public-report-v2.json` contains only redacted task outcomes. One
+`public-report-v2.json` contains redacted task outcomes plus fingerprinted
+aggregate attempt, retry, token/time, MCP/Cypher/failed-tool, and resource-call
+counters derived from those private attempts. It never contains prompts,
+answers, queries, tool arguments or bodies, endpoints, paths, or credentials. One
 manifest/policy-bound deny cache and circuit are shared by every model,
 repetition, and track in the campaign. A circuit-open direct task is
 health-checked before any provider call; if BloodHound is still unavailable,
@@ -1078,12 +1085,18 @@ negative reason shapes. MCP finalization, its single schema-only retry, fixture
 certification, and offline replay all cross the same JSON-Schema-plus-
 `EvidenceIR` validation boundary. A count-only query may use any alias only when
 its tool response contains exactly one unambiguous non-negative scalar literal.
-Malformed or non-finite output becomes `OUTPUT_INVALID`; fenced JSON or JSON
-with surrounding commentary is not silently salvaged. The one schema-only
-retry is available only after claim-relevant evidence, within the original
-whole-task deadline, and cannot add answer facts absent from the malformed
-attempt. A schema-valid answer that lacks claim-relevant completeness evidence
-is instead public `PROOF_INSUFFICIENT` with no reasoning verdict.
+Malformed or non-finite output becomes `OUTPUT_INVALID`. One exact outer JSON
+Markdown fence with whitespace only outside it is deterministically removed and
+recorded as normalized; prose, arbitrary brace extraction, multiple JSON
+values, unlabeled or other-language fences, and trailing material are rejected.
+The one schema-only retry is available only after claim-relevant evidence,
+preserves the complete tool transcript, disables tools, and remains inside the
+original whole-task deadline. Models configured with
+`structured_output_mode: json_schema` send the public submission schema on
+Direct calls and MCP finalization-only calls; unsupported provider capability
+is a provider failure, not model-invalid output. A schema-valid answer that
+lacks claim-relevant completeness evidence is instead public
+`PROOF_INSUFFICIENT` with no reasoning verdict.
 
 Private run state retains cancellation-safe direct queries and MCP cumulative
 token usage, partial transcripts, tool arguments and raw results, mechanical

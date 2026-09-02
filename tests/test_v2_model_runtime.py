@@ -1280,6 +1280,42 @@ def test_direct_model_runtime_executes_exactly_once_through_coordinator() -> Non
     assert DIRECT_TASK.question not in provider_request["system"]
 
 
+def test_direct_json_schema_mode_sends_exact_public_submission_schema() -> None:
+    request: dict[str, Any] = {}
+    query = "MATCH p=(a)-[:MemberOf]->(b) RETURN p LIMIT 1"
+
+    async def transport(**kwargs: Any) -> ModelResponse:
+        request.update(kwargs)
+        return _response(json.dumps({"query": query, "assertion": {}}))
+
+    coordinator = FakeCoordinator(
+        CypherResult(
+            success=True,
+            raw=_raw_route(),
+            query_executed=True,
+            execution_attempts=1,
+        )
+    )
+    _outcome, sample, _record = asyncio.run(
+        run_direct_model_task_v2(
+            coordinator=coordinator,
+            task=DIRECT_TASK,
+            oracle=DIRECT_ORACLE,
+            resolver=DIRECT_RESOLVER,
+            model="openai-compat/test",
+            structured_output_mode="json_schema",
+            transport=transport,
+        )
+    )
+
+    assert sample.reasoning_correct is True
+    assert request["structured_output_schema"] == {
+        "name": "ori_direct_submission",
+        "strict": True,
+        "schema": model_runtime.direct_submission_schema(DIRECT_TASK),
+    }
+
+
 def test_invalid_direct_output_never_reaches_bloodhound() -> None:
     async def transport(**_kwargs: Any) -> ModelResponse:
         return _response('{"query": "MATCH (n) RETURN n LIMIT 1"}')
@@ -3583,6 +3619,84 @@ def test_schema_only_retry_runs_once_after_useful_evidence(
     assert record.mcp_tool_receipts[0].event.kind is EvidenceEventKind.USEFUL_POSITIVE
 
 
+def test_mcp_json_schema_retry_preserves_transcript_and_disables_tools(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loop_arguments: dict[str, Any] = {}
+    retry_arguments: dict[str, Any] = {}
+
+    async def fake_loop(**kwargs: Any):
+        loop_arguments.update(kwargs)
+        _observe_route_evidence(kwargs["tool_result_observer"])
+        malformed = "commentary " + json.dumps(_answer())
+        return (
+            _response(malformed),
+            object(),
+            [
+                {"role": "system", "content": "authoritative"},
+                {"role": "user", "content": MCP_TASK.question},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "id": "private-message-id",
+                    "metadata": {"private": True},
+                    "tool_calls": [
+                        {
+                            "id": "call-1",
+                            "type": "function",
+                            "function": "cypher_query",
+                            "arguments": {"info_type": "run"},
+                        }
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "call-1",
+                    "content": "claim-bound-result",
+                },
+                {"role": "assistant", "content": malformed},
+            ],
+        )
+
+    async def retry_transport(**kwargs: Any) -> ModelResponse:
+        retry_arguments.update(kwargs)
+        return _response(json.dumps(_answer()))
+
+    monkeypatch.setattr(model_runtime, "_run_openai_compat_mcp_loop", fake_loop)
+    outcome, _record = asyncio.run(
+        run_mcp_model_task_v2(
+            task=MCP_TASK,
+            oracle=MCP_ORACLE,
+            resolver=MCP_RESOLVER,
+            profile=PROFILE,
+            bundle=MCPServerBundle(tools=[]),
+            model="openai-compat/test",
+            model_base_url=None,
+            tool_loop=MCPToolLoop.NATIVE_OPENAI_COMPATIBLE,
+            max_steps=4,
+            structured_output_mode="json_schema",
+            transport=retry_transport,
+        )
+    )
+
+    expected_schema = {
+        "name": "ori_mcp_submission",
+        "strict": True,
+        "schema": MCP_TASK.answer_schema,
+    }
+    assert loop_arguments["finalization_schema"] == expected_schema
+    assert retry_arguments["structured_output_schema"] == expected_schema
+    assert retry_arguments["messages"][1]["role"] == "assistant"
+    assert set(retry_arguments["messages"][1]) == {"role", "content", "tool_calls"}
+    assert retry_arguments["messages"][1]["tool_calls"][0]["function"] == {
+        "name": "cypher_query",
+        "arguments": '{"info_type":"run"}',
+    }
+    assert retry_arguments["messages"][2]["role"] == "tool"
+    assert retry_arguments["messages"][2]["content"] == "claim-bound-result"
+    assert outcome.sample.reasoning_correct is True
+
+
 def test_certified_mcp_loop_suppresses_contradictory_discovered_server_prompt(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3724,7 +3838,7 @@ def test_unknown_final_identity_uses_successful_cypher_receipt_for_classificatio
         }
 
 
-def test_schema_only_retry_uses_schema_and_normalization_boundary(
+def test_schema_only_retry_rejects_facts_absent_from_malformed_output(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     retry_calls: list[dict[str, Any]] = []
@@ -3759,7 +3873,10 @@ def test_schema_only_retry_uses_schema_and_normalization_boundary(
 
     assert len(retry_calls) == 1
     assert outcome.sample.execution_class is ExecutionClass.MODEL_FAILURE
-    assert outcome.sample.reasoning_correct is False
+    assert outcome.sample.outcome is SampleOutcomeCode.OUTPUT_INVALID
+    assert outcome.sample.reasoning_correct is None
+    assert outcome.sample.output_compliant is False
+    assert outcome.sample.detail == "SCHEMA_RETRY_ADDED_NEW_FACTS"
     assert record.mcp_finalization is not None
     assert record.mcp_finalization["schema_retry_count"] == 1
 
@@ -4128,7 +4245,7 @@ def test_schema_retry_cancellation_carries_initial_attempt(
     assert cancellation.provider.mcp_tool_receipts
 
 
-def test_loop_exhaustion_cannot_use_schema_retry_as_a_fresh_solver_turn(
+def test_loop_exhaustion_uses_one_transcript_preserving_schema_retry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     retry_calls: list[dict[str, Any]] = []
@@ -4161,21 +4278,40 @@ def test_loop_exhaustion_cannot_use_schema_retry_as_a_fresh_solver_turn(
         )
     )
 
-    assert retry_calls == []
+    assert len(retry_calls) == 1
     assert outcome.sample.execution_class is ExecutionClass.MODEL_FAILURE
     assert outcome.sample.outcome is SampleOutcomeCode.OUTPUT_INVALID
+    assert outcome.sample.detail == "SCHEMA_RETRY_ADDED_NEW_FACTS"
+
+
+def test_mcp_output_parser_rejects_surrounding_commentary() -> None:
+    with pytest.raises(V2ModelRuntimeError, match="one JSON object"):
+        model_runtime._extract_json_object('commentary {"count": 1} after')
+
+
+def test_mcp_output_parser_normalizes_exactly_one_json_fence() -> None:
+    parsed = model_runtime._parse_json_object('```json\n{"count": 1}\n```')
+    assert parsed.payload == {"count": 1}
+    assert parsed.raw_protocol_compliant is False
+    assert parsed.format_normalized is True
 
 
 @pytest.mark.parametrize(
     "raw",
     (
-        'commentary {"count": 1} after',
-        '```json\n{"count": 1}\n```',
+        "```\n{\"count\": 1}\n```",
+        "```javascript\n{\"count\": 1}\n```",
+        "```json\n{\"count\": 1}\n``` trailing",
+        "```json\n{\"count\": 1}\n```\n```json\n{\"count\": 2}\n```",
+        "{\"count\": 1} {\"count\": 2}",
+        "[{\"count\": 1}]",
+        "1",
+        "{\"count\":",
     ),
 )
-def test_mcp_output_parser_requires_exact_json_object(raw: str) -> None:
-    with pytest.raises(V2ModelRuntimeError, match="exactly one JSON object"):
-        model_runtime._extract_json_object(raw)
+def test_mcp_output_parser_rejects_every_other_salvage_shape(raw: str) -> None:
+    with pytest.raises(V2ModelRuntimeError):
+        model_runtime._parse_json_object(raw)
 
 
 def test_whole_task_timeout_is_model_failure_and_preserves_partial_audit(
@@ -4426,7 +4562,7 @@ def test_v2_campaign_progress_is_model_blind_and_non_fatal() -> None:
         oracle_fingerprint=DIRECT_ORACLE.oracle_fingerprint,
         execution_class=ExecutionClass.MODEL_FAILURE,
         outcome=SampleOutcomeCode.QUERY_TIMEOUT,
-        reasoning_correct=False,
+        output_compliant=True,
         detail="query rejected as too complex",
     )
     provider = model_runtime._record(
@@ -4449,9 +4585,9 @@ def test_v2_campaign_progress_is_model_blind_and_non_fatal() -> None:
     )
 
     assert "QUERY_TIMEOUT" in line
-    assert "score=0.0" in line
+    assert "score=n/a" in line
     assert "elapsed=12.5s" in line
-    assert "running_correct=0/1" in line
+    assert "running_correct=0/0" in line
     assert DIRECT_ORACLE.oracle_id not in line
     assert "reference_cypher" not in line
 
@@ -4546,7 +4682,7 @@ def test_v2_run_model_emits_task_retry_completion_and_resume_progress(
         oracle_fingerprint=DIRECT_ORACLE.oracle_fingerprint,
         execution_class=ExecutionClass.MODEL_FAILURE,
         outcome=SampleOutcomeCode.QUERY_TIMEOUT,
-        reasoning_correct=False,
+        output_compliant=True,
         detail="query too complex",
     )
     provider = model_runtime._record(
@@ -4670,7 +4806,7 @@ def test_v2_run_model_emits_task_retry_completion_and_resume_progress(
     assert any("[1/1]" in message and DIRECT_TASK.task_id in message for message in progress)
     assert any("INFRA_ERROR" in message and "retrying" in message for message in progress)
     assert any(
-        "QUERY_TIMEOUT" in message and "running_correct=0/1" in message for message in progress
+        "QUERY_TIMEOUT" in message and "running_correct=0/0" in message for message in progress
     )
     assert any("run 1/1 complete" in message for message in progress)
 
@@ -5149,7 +5285,8 @@ def test_final_route_facts_are_projected_from_claim_bound_receipt(
         )
     )
 
-    assert outcome.sample.reasoning_correct is False
+    assert outcome.sample.reasoning_correct is None
+    assert outcome.sample.output_compliant is True
     assert outcome.sample.outcome is SampleOutcomeCode.OUTPUT_INVALID
     assert outcome.sample.verdict is None
     assert outcome.sample.evidence is None

@@ -7,11 +7,23 @@ import pytest
 
 from ori.eval.provider_contract import ProviderApiSurface
 from ori.eval.v2 import campaign_runner
-from ori.eval.v2.campaign import PublicReportV2, PublicResultRow, RunIdentity
+from ori.eval.v2.campaign import (
+    CheckpointTaskBinding,
+    CheckpointV2,
+    PublicReportV2,
+    PublicResultRow,
+    RunIdentity,
+)
 from ori.eval.v2.fingerprint import canonical_sha256
 from ori.eval.v2.model_card import ModelCardBuildError, build_model_card
+from ori.eval.v2.model_runtime import ProviderRunRecord
 from ori.eval.v2.schema import ExecutionClass, Track
-from ori.eval.v2.scoring import CampaignSummary, SampleOutcomeCode
+from ori.eval.v2.scoring import (
+    CampaignSummary,
+    SampleOutcomeCode,
+    SampleResult,
+    summarize_results,
+)
 
 _CONFIG = "a" * 64
 _GRAPH = "b" * 64
@@ -32,34 +44,27 @@ def _dump(path: Path, model: object) -> None:
 
 
 def _summary(track: Track, *, contradict_rows: bool = False) -> CampaignSummary:
+    samples = _samples(track)
+    summary = summarize_results(tuple(sample.task_id for sample in samples), samples)
+    if not contradict_rows:
+        return summary
     if track is Track.DIRECT:
-        if contradict_rows:
-            return CampaignSummary(
-                scheduled=2,
-                completed=1,
-                correct=0,
-                incorrect=2,
-                model_failures=1,
-                proof_failures=0,
-                infrastructure_failures=0,
-                harness_failures=0,
-                unexecuted=0,
-                reasoning_accuracy=0.0,
-                effective_accuracy=0.0,
-                campaign_valid=True,
-            )
         return CampaignSummary(
             scheduled=2,
             completed=1,
-            correct=1,
+            correct=0,
             incorrect=1,
             model_failures=1,
             proof_failures=0,
             infrastructure_failures=0,
             harness_failures=0,
             unexecuted=0,
-            reasoning_accuracy=0.5,
-            effective_accuracy=0.5,
+            output_compliant=0,
+            output_noncompliant=0,
+            output_normalized=0,
+            reasoning_accuracy=0.0,
+            effective_accuracy=0.0,
+            output_compliance_rate=None,
             campaign_valid=True,
         )
     return CampaignSummary(
@@ -72,48 +77,151 @@ def _summary(track: Track, *, contradict_rows: bool = False) -> CampaignSummary:
         infrastructure_failures=0,
         harness_failures=0,
         unexecuted=0,
+        output_compliant=0,
+        output_noncompliant=0,
+        output_normalized=0,
         reasoning_accuracy=0.0,
         effective_accuracy=0.0,
+        output_compliance_rate=None,
         campaign_valid=True,
     )
 
 
+def _samples(track: Track) -> tuple[SampleResult, SampleResult]:
+    if track is Track.DIRECT:
+        return (
+            SampleResult(
+                task_id=f"{track.value}-one",
+                task_fingerprint="1" * 64,
+                oracle_fingerprint="3" * 64,
+                execution_class=ExecutionClass.MODEL_FAILURE,
+                outcome=SampleOutcomeCode.OUTPUT_INVALID,
+            ),
+            SampleResult(
+                task_id=f"{track.value}-two",
+                task_fingerprint="2" * 64,
+                oracle_fingerprint="4" * 64,
+                execution_class=ExecutionClass.MODEL_FAILURE,
+                outcome=SampleOutcomeCode.OUTPUT_INVALID,
+            ),
+        )
+    return (
+        SampleResult(
+            task_id=f"{track.value}-one",
+            task_fingerprint="1" * 64,
+            oracle_fingerprint="3" * 64,
+            execution_class=ExecutionClass.MODEL_FAILURE,
+            outcome=SampleOutcomeCode.OUTPUT_INVALID,
+        ),
+        SampleResult(
+            task_id=f"{track.value}-two",
+            task_fingerprint="2" * 64,
+            oracle_fingerprint="4" * 64,
+            execution_class=ExecutionClass.PROOF_FAILURE,
+            outcome=SampleOutcomeCode.PROOF_INSUFFICIENT,
+        ),
+    )
+
+
 def _public_rows(track: Track) -> tuple[PublicResultRow, ...]:
-    first = PublicResultRow(
-        product="complex",
-        track=track,
-        task_id=f"{track.value}-one",
-        task_fingerprint="1" * 64,
-        execution_class=(
-            ExecutionClass.SUCCESS
-            if track is Track.DIRECT
-            else ExecutionClass.MODEL_FAILURE
-        ),
-        outcome=(
-            SampleOutcomeCode.COMPLETED
-            if track is Track.DIRECT
-            else SampleOutcomeCode.OUTPUT_INVALID
-        ),
-        reasoning_correct=(True if track is Track.DIRECT else False),
+    return tuple(
+        PublicResultRow(
+            product="complex",
+            track=track,
+            task_id=sample.task_id,
+            task_fingerprint=sample.task_fingerprint,
+            execution_class=sample.execution_class,
+            outcome=sample.outcome,
+            reasoning_correct=sample.reasoning_correct,
+        )
+        for sample in _samples(track)
     )
-    second = PublicResultRow(
-        product="complex",
-        track=track,
-        task_id=f"{track.value}-two",
-        task_fingerprint="2" * 64,
-        execution_class=(
-            ExecutionClass.MODEL_FAILURE
-            if track is Track.DIRECT
-            else ExecutionClass.PROOF_FAILURE
-        ),
-        outcome=(
-            SampleOutcomeCode.OUTPUT_INVALID
-            if track is Track.DIRECT
-            else SampleOutcomeCode.PROOF_INSUFFICIENT
-        ),
-        reasoning_correct=(False if track is Track.DIRECT else None),
+
+
+def _provider(sample: SampleResult, track: Track) -> ProviderRunRecord:
+    payload = {
+        "task_id": sample.task_id,
+        "task_fingerprint": sample.task_fingerprint,
+        "provider_model": _MODEL,
+        "surface": track.value,
+        "raw_response": "SECRET_PROVIDER_RESPONSE",
+        "response_digest": canonical_sha256("SECRET_PROVIDER_RESPONSE"),
+        "tokens_input": 1,
+        "tokens_output": 1,
+        "elapsed_seconds": 0.1,
+        "provider_error": None,
+        "provider_metrics": {},
+        "direct_query_digest": None,
+        "direct_receipt": None,
+        "mcp_events": (),
+        "mcp_tool_receipts": (),
+        "mcp_finalization": None,
+        "mcp_transcript": (),
+        "transcript_digest": None,
+        "record_fingerprint": "0" * 64,
+    }
+    payload["record_fingerprint"] = canonical_sha256(
+        payload, exclude_fields=("record_fingerprint",)
     )
-    return first, second
+    return ProviderRunRecord.model_validate(payload)
+
+
+def _state(track: Track, *, model: str = _MODEL) -> campaign_runner.PrivateRunStateV2:
+    samples = _samples(track)
+    checkpoint_payload = {
+        "schema_version": "ori-eval-checkpoint-v2",
+        "protocol_version": "ori-eval-protocol-v2",
+        "product": "complex",
+        "track": track,
+        "public_artifact_fingerprint": _PUBLIC,
+        "oracle_artifact_fingerprint": "b" * 64,
+        "catalog_fingerprint": _catalog(track),
+        "graph_fingerprint": _GRAPH,
+        "compiler_fingerprint": "c" * 64,
+        "comparator_fingerprint": "d" * 64,
+        "capability_profile_id": "test-profile",
+        "capability_profile_fingerprint": _CAPABILITY,
+        "containment_policy_version": "policy" if track is Track.DIRECT else None,
+        "finalization_policy_fingerprint": "2" * 64 if track is Track.MCP else None,
+        "run_identity": RunIdentity(
+            provider=_PROVIDER,
+            model=model,
+            run_index=1,
+            target_fingerprint=_TARGET,
+            tool_loop=(None if track is Track.DIRECT else "native-openai-compatible"),
+        ),
+        "task_bindings": tuple(
+            CheckpointTaskBinding(
+                task_id=sample.task_id,
+                task_fingerprint=sample.task_fingerprint,
+                oracle_fingerprint=sample.oracle_fingerprint,
+                bounds_fingerprint="3" * 64,
+            )
+            for sample in samples
+        ),
+        "results": samples,
+        "checkpoint_fingerprint": "0" * 64,
+    }
+    checkpoint_payload["checkpoint_fingerprint"] = canonical_sha256(
+        checkpoint_payload, exclude_fields=("checkpoint_fingerprint",)
+    )
+    checkpoint = CheckpointV2.model_validate(checkpoint_payload)
+    attempts = tuple(
+        campaign_runner._attempt(sample.task_id, 1, sample, _provider(sample, track))
+        for sample in samples
+    )
+    state_payload = {
+        "schema_version": campaign_runner.RUN_STATE_SCHEMA_VERSION,
+        "protocol_version": "ori-eval-protocol-v2",
+        "provenance_fingerprint": "9" * 64,
+        "checkpoint": checkpoint,
+        "attempts": attempts,
+        "state_fingerprint": "0" * 64,
+    }
+    state_payload["state_fingerprint"] = canonical_sha256(
+        state_payload, exclude_fields=("state_fingerprint",)
+    )
+    return campaign_runner.PrivateRunStateV2.model_validate(state_payload)
 
 
 def _model_report(
@@ -123,8 +231,9 @@ def _model_report(
     graph: str = _GRAPH,
     summary_mismatch: bool = False,
 ) -> campaign_runner.ModelPublicReportV2:
+    state = _state(track, model=model)
     report_payload = {
-        "schema_version": "ori-eval-public-report-v2",
+        "schema_version": "ori-eval-public-report-v3",
         "protocol_version": "ori-eval-protocol-v2",
         "product": "complex",
         "track": track,
@@ -133,7 +242,7 @@ def _model_report(
         "graph_fingerprint": graph,
         "capability_profile_fingerprint": _CAPABILITY,
         "rows": _public_rows(track),
-        "summary": _summary(track, contradict_rows=summary_mismatch),
+        "summary": _summary(track),
         "report_fingerprint": "0" * 64,
     }
     report_payload["report_fingerprint"] = canonical_sha256(
@@ -154,6 +263,7 @@ def _model_report(
         "live_certification_fingerprint": f"live-{track.value}",
         "graph_verification_before_fingerprint": f"before-{track.value}",
         "graph_verification_after_fingerprint": f"after-{track.value}",
+        "operational_metrics": campaign_runner._run_operational_metrics(state),
         "report": report,
         "artifact_fingerprint": "0" * 64,
     }
@@ -308,10 +418,26 @@ def _campaign(
         for track, report in reports.items()
     }
     for track, report in reports.items():
+        state = _state(track, model=(mcp_model if track is Track.MCP else _MODEL))
         _dump(
             root / track.value / "local-config-name" / "run-001" / "public-report-v2.json",
             report,
         )
+        _dump(
+            root / track.value / "local-config-name" / "run-001" / "run-state-v6.private.json",
+            state,
+        )
+        if track is Track.DIRECT and summary_mismatch:
+            report_path = (
+                root / track.value / "local-config-name" / "run-001" / "public-report-v2.json"
+            )
+            report_data = json.loads(report_path.read_text())
+            report_data["report"]["summary"]["model_failures"] = 1
+            report_data["report"]["summary"]["correct"] = 1
+            report_data["report"]["summary"]["incorrect"] = 0
+            report_data["report"]["summary"]["reasoning_accuracy"] = 1.0
+            report_data["report"]["summary"]["effective_accuracy"] = 0.5
+            report_path.write_text(json.dumps(report_data, indent=2) + "\n")
         _dump(root / track.value / "track-completion-v2.private.json", receipts[track])
     _dump(root / "v2-run-readiness.private.json", _readiness(reports))
     _dump(root / "campaign-lifecycle-v2.private.json", _lifecycle(receipts, status=status))
@@ -340,15 +466,27 @@ def test_build_model_card_is_deterministic_separate_and_public_safe(
 
     assert card["campaign_valid"] is True
     assert card["tracks"]["direct"]["scheduled"] == 2
-    assert card["tracks"]["direct"]["correct"] == 1
-    assert card["tracks"]["direct"]["effective_accuracy"] == 0.5
+    assert card["tracks"]["direct"]["model_failures"] == 2
+    assert card["tracks"]["direct"]["effective_accuracy"] == 0.0
+    assert card["tracks"]["direct"]["reasoning_accuracy"] is None
+    assert card["tracks"]["direct"]["output_compliance_rate"] is None
     assert card["tracks"]["direct"]["catalog_fingerprint"] == _catalog(Track.DIRECT)
     assert card["tracks"]["mcp"]["proof_failures"] == 1
     assert card["tracks"]["mcp"]["effective_accuracy"] == 0.0
     assert card["tracks"]["mcp"]["catalog_fingerprint"] == _catalog(Track.MCP)
+    assert card["operational_metrics"]["attempts_total"] == 4
+    assert card["operational_metrics"]["tokens_input_total"] == 4
+    assert card["tracks"]["direct"]["operational_metrics"]["attempts_total"] == 2
+    assert card["tracks"]["direct"]["operational_metrics"]["resource_mode"] == (
+        "not_applicable"
+    )
+    assert card["tracks"]["mcp"]["operational_metrics"]["resource_mode"] == "off"
+    assert card["tracks"]["mcp"]["operational_metrics"][
+        "mcp_tool_calls_average_per_task"
+    ] == 0.0
     assert set(path.name for path in first.iterdir()) == {
-        "v29-model-card.json",
-        "v29-model-card.svg",
+        "v30-model-card.json",
+        "v30-model-card.svg",
     }
     for path in first.iterdir():
         assert path.read_bytes() == (second / path.name).read_bytes()
@@ -356,7 +494,7 @@ def test_build_model_card_is_deterministic_separate_and_public_safe(
         assert str(tmp_path) not in text
         assert "private-campaign-root" not in text
         assert "NOUS_API_KEY" not in text
-    svg = (first / "v29-model-card.svg").read_text()
+    svg = (first / "v30-model-card.svg").read_text()
     assert 'width="1280" height="720"' in svg
     assert "No combined score is reported" in svg
 
@@ -392,9 +530,12 @@ def test_build_model_card_rejects_mismatched_direct_mcp_models(tmp_path: Path) -
 def test_build_model_card_rejects_extra_public_report(tmp_path: Path) -> None:
     campaign = _campaign(tmp_path)
     source = next((campaign / "direct").glob("*/run-*/public-report-v2.json"))
+    state_source = next((campaign / "direct").glob("*/run-*/run-state-v6.private.json"))
     extra = campaign / "direct" / "stale-local-name" / "run-001" / source.name
+    extra_state = campaign / "direct" / "stale-local-name" / "run-001" / state_source.name
     extra.parent.mkdir(parents=True)
     extra.write_bytes(source.read_bytes())
+    extra_state.write_bytes(state_source.read_bytes())
 
     with pytest.raises(ModelCardBuildError, match="duplicate direct public run identity"):
         build_model_card(campaign, tmp_path / "output", model=_MODEL)
@@ -417,7 +558,7 @@ def test_build_model_card_rejects_summary_that_disagrees_with_rows(
 ) -> None:
     campaign = _campaign(tmp_path, summary_mismatch=True)
 
-    with pytest.raises(ModelCardBuildError, match="direct public summary disagrees"):
+    with pytest.raises(ModelCardBuildError, match="invalid direct public report"):
         build_model_card(campaign, tmp_path / "output", model=_MODEL)
 
 
@@ -428,7 +569,7 @@ def test_build_model_card_json_contains_no_rows_or_private_payloads(
     output = tmp_path / "output"
     build_model_card(campaign, output, model=_MODEL)
 
-    payload = json.loads((output / "v29-model-card.json").read_text())
+    payload = json.loads((output / "v30-model-card.json").read_text())
     serialized = json.dumps(payload).casefold()
     for forbidden in (
         '"rows":',
