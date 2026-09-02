@@ -85,7 +85,7 @@ class V2ModelRuntimeError(ValueError):
     """Raised when a model-facing v2 contract is mixed, stale, or unsupported."""
 
 
-MCP_RESULT_CONTRACT_VERSION = "ori-mcp-result-contract-v22"
+MCP_RESULT_CONTRACT_VERSION = "ori-mcp-result-contract-v23"
 QuerySelector = tuple[Literal["objectid", "name"], str]
 
 
@@ -4248,6 +4248,7 @@ async def _schema_only_retry(
     transport: TextTransport,
     max_tokens: int,
     api_surface: ProviderApiSurface | str,
+    request_timeout_seconds: float,
     transcript: tuple[dict[str, Any], ...] = (),
     structured_output_schema: dict[str, Any] | None = None,
 ) -> ModelResponse:
@@ -4309,6 +4310,7 @@ async def _schema_only_retry(
         max_tokens=max_tokens,
         ollama_options=ollama_options,
         api_surface=api_surface,
+        request_timeout_seconds=request_timeout_seconds,
         structured_output_schema=structured_output_schema,
     )
 
@@ -4393,7 +4395,8 @@ async def run_mcp_model_task_v2(
         else V2RuntimeSurface.MCP_NATIVE_OLLAMA
     )
     task_started = asyncio.get_running_loop().time()
-    deadline = asyncio.timeout(task.binding.bounds.timeout_seconds)
+    task_deadline = task_started + task.binding.bounds.timeout_seconds
+    deadline = asyncio.timeout_at(task_deadline)
     try:
         async with deadline:
             if resolved_loop is MCPToolLoop.NATIVE_OPENAI_COMPATIBLE:
@@ -4605,8 +4608,7 @@ async def run_mcp_model_task_v2(
     ):
         remaining_seconds = max(
             0.0,
-            task.binding.bounds.timeout_seconds
-            - (asyncio.get_running_loop().time() - task_started),
+            task_deadline - asyncio.get_running_loop().time(),
         )
         retry_max_tokens = min(
             32_768,
@@ -4616,6 +4618,8 @@ async def run_mcp_model_task_v2(
             ),
         )
         try:
+            if remaining_seconds <= 0.0:
+                raise TimeoutError
             retry_response = await asyncio.wait_for(
                 _schema_only_retry(
                     task=task,
@@ -4626,6 +4630,7 @@ async def run_mcp_model_task_v2(
                     transport=transport,
                     max_tokens=retry_max_tokens,
                     api_surface=requested_api_surface,
+                    request_timeout_seconds=remaining_seconds,
                     transcript=_transcript_payload(messages),
                     structured_output_schema=(
                         _json_schema_response_format(

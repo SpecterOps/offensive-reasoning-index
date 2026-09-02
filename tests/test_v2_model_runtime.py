@@ -3401,7 +3401,7 @@ def test_mcp_prompt_declares_mechanical_result_contract() -> None:
     prompt = mcp_system_prompt(MCP_TASK)
     request = json.loads(prompt.split("\n\n", maxsplit=1)[1])
 
-    assert '"version": "ori-mcp-result-contract-v22"' in prompt
+    assert '"version": "ori-mcp-result-contract-v23"' in prompt
     assert "evidence_result_contract" in prompt
     assert "include_properties=false" in prompt
     assert "mechanically materializes the final entities" in mcp_system_prompt(
@@ -3613,12 +3613,76 @@ def test_schema_only_retry_runs_once_after_useful_evidence(
     assert len(retry_calls) == 1
     assert retry_calls[0]["messages"][-1]["content"].startswith("Return only one JSON object")
     assert retry_calls[0]["max_tokens"] == 16_384
+    assert 0.0 < retry_calls[0]["request_timeout_seconds"] <= (
+        MCP_TASK.binding.bounds.timeout_seconds
+    )
     assert outcome.sample.execution_class is ExecutionClass.SUCCESS
     assert outcome.sample.reasoning_correct is True
     assert record.mcp_finalization is not None
     assert record.mcp_finalization["schema_retry_count"] == 1
     assert len(record.mcp_tool_receipts) == 1
     assert record.mcp_tool_receipts[0].event.kind is EvidenceEventKind.USEFUL_POSITIVE
+
+
+def test_schema_retry_deadline_propagates_timeout_and_waits_for_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    timed_bounds = MCP_TASK.binding.bounds.model_copy(update={"timeout_seconds": 0.03})
+    timed_task = MCP_TASK.model_copy(
+        update={
+            "binding": MCP_TASK.binding.model_copy(update={"bounds": timed_bounds}),
+            "acceptance_spec": MCP_TASK.acceptance_spec.model_copy(
+                update={"bounds": timed_bounds}
+            ),
+        }
+    )
+
+    async def scenario() -> tuple[Any, Any, float, list[float]]:
+        observed_timeouts: list[float] = []
+        cleanup_finished = False
+
+        async def fake_loop(**kwargs: Any):
+            _observe_route_evidence(kwargs["tool_result_observer"])
+            malformed = "commentary " + json.dumps(_answer())
+            return _response(malformed), object(), []
+
+        async def bounded_retry(**kwargs: Any) -> ModelResponse:
+            nonlocal cleanup_finished
+            observed_timeouts.append(kwargs["request_timeout_seconds"])
+            try:
+                await asyncio.sleep(60)
+            except asyncio.CancelledError:
+                await asyncio.sleep(0.01)
+                cleanup_finished = True
+                raise
+
+        monkeypatch.setattr(model_runtime, "_run_openai_compat_mcp_loop", fake_loop)
+        started = asyncio.get_running_loop().time()
+        outcome, record = await run_mcp_model_task_v2(
+            task=timed_task,
+            oracle=MCP_ORACLE,
+            resolver=MCP_RESOLVER,
+            profile=PROFILE,
+            bundle=MCPServerBundle(tools=[]),
+            model="openai-compat/test",
+            model_base_url=None,
+            tool_loop=MCPToolLoop.NATIVE_OPENAI_COMPATIBLE,
+            max_steps=4,
+            transport=bounded_retry,
+        )
+        elapsed = asyncio.get_running_loop().time() - started
+        return outcome, record, elapsed, observed_timeouts, cleanup_finished
+
+    outcome, record, elapsed, observed_timeouts, cleanup_finished = asyncio.run(scenario())
+
+    assert elapsed < 0.15
+    assert observed_timeouts and 0.0 < observed_timeouts[0] <= 0.03
+    assert cleanup_finished is True
+    assert outcome.finalization.phase is FinalizationPhase.TASK_TIMEOUT
+    assert outcome.sample.outcome is SampleOutcomeCode.TASK_TIMEOUT
+    assert outcome.sample.reasoning_correct is None
+    assert record.mcp_finalization is not None
+    assert record.mcp_finalization["schema_retry_count"] == 0
 
 
 def test_mcp_json_schema_retry_preserves_transcript_and_disables_tools(

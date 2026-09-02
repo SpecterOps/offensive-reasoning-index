@@ -856,7 +856,7 @@ The exact current complex boundary is:
 | Compiler | `ori-claim-compiler-v2.11.0` |
 | Comparator | `ori-v2-comparator-8` |
 | Direct result contract | `ori-direct-result-contract-v14` |
-| MCP result contract | `ori-mcp-result-contract-v22` |
+| MCP result contract | `ori-mcp-result-contract-v23` |
 | MCP evidence/finalization | `ori-mcp-evidence-v22` |
 | MCP capability profile | `ori-mcp-92a37dd-bhce-9.1-cypher-v7` |
 | Campaign runner | `ori-v2-model-campaign-v12` |
