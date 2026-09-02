@@ -1101,19 +1101,36 @@ async def run_direct_model_task_v2(
     deadline = asyncio.timeout(timeout_seconds)
     try:
         async with deadline:
-            return await _run_direct_model_task_v2_unbounded(
-                coordinator=coordinator,
-                task=task,
-                oracle=oracle,
-                resolver=resolver,
-                model=model,
-                model_base_url=model_base_url,
-                ollama_options=ollama_options,
-                max_tokens=max_tokens,
-                api_surface=api_surface,
-                structured_output_mode=structured_output_mode,
-                transport=transport,
-            )
+            try:
+                return await _run_direct_model_task_v2_unbounded(
+                    coordinator=coordinator,
+                    task=task,
+                    oracle=oracle,
+                    resolver=resolver,
+                    model=model,
+                    model_base_url=model_base_url,
+                    ollama_options=ollama_options,
+                    max_tokens=max_tokens,
+                    api_surface=api_surface,
+                    structured_output_mode=structured_output_mode,
+                    transport=transport,
+                )
+            except V2ModelTaskCancelled as exc:
+                # Consume deadline-triggered cancellation before leaving the
+                # asyncio.timeout context. Python 3.14 otherwise converts the
+                # carried cancellation to TimeoutError and drops its receipt.
+                if not deadline.expired():
+                    raise
+                detail = "direct task execution budget exhausted"
+                return (
+                    None,
+                    _task_timeout_sample(task, oracle, detail),
+                    _task_timeout_provider_record(
+                        exc.provider,
+                        detail=detail,
+                        timeout_seconds=timeout_seconds,
+                    ),
+                )
     except V2ModelTaskCancelled as exc:
         if not deadline.expired():
             raise
