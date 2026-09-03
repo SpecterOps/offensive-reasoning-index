@@ -59,7 +59,7 @@ class V2MCPConfig(StrictModel):
         "vllm",
         "lm-studio",
     ] = "auto"
-    read_timeout_seconds: float = Field(default=120.0, strict=True, gt=0)
+    read_timeout_seconds: float = Field(default=240.0, strict=True, gt=0)
     tool_timeout_seconds: float = Field(default=60.0, strict=True, gt=0)
 
 

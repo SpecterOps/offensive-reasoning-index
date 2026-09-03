@@ -43,7 +43,7 @@ defaults:
     telemetry_adapter: auto
     # Provider and tool sub-deadlines must remain below every task deadline so
     # stalls are classified as infrastructure instead of model task timeouts.
-    read_timeout_seconds: 120.0
+    read_timeout_seconds: 240.0
     tool_timeout_seconds: 60.0
 
 models:

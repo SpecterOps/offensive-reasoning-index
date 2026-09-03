@@ -70,13 +70,18 @@ from .schema import (
 )
 from .selection import evaluate_selection
 
-COMPILER_VERSION = "ori-claim-compiler-v2.11.0"
+COMPILER_VERSION = "ori-claim-compiler-v2.12.0"
 DIRECT_RESULT_CONTRACT_VERSION = "ori-direct-result-contract-v14"
 DIRECT_CAPABILITY_PROFILE = f"ori-direct-policy-v3-bhce-9.1-{DIRECT_RESULT_CONTRACT_VERSION}"
 MCP_CAPABILITY_PROFILE = "ori-mcp-92a37dd-bhce-9.1-cypher-v7"
 COMPLETE_SET_RESULT_CAPACITY = 1000
 MCP_SET_PAGE_SIZE = 500
 MCP_SERVER_REVISION = "92a37dd481ce675fe552f14c9957a31dbbcd212e"
+DIRECT_WHOLE_TASK_TIMEOUT_SECONDS = 180.0
+MCP_WHOLE_TASK_MIN_TIMEOUT_SECONDS = 600.0
+MCP_WHOLE_TASK_MAX_TIMEOUT_SECONDS = 1200.0
+MCP_TOOL_CALL_ALLOWANCE_SECONDS = 50.0
+MCP_SET_SERIALIZATION_SECONDS_PER_ENTITY = 1.2
 
 _FORBIDDEN_PUBLIC_KEYS = frozenset(
     {
@@ -2190,7 +2195,7 @@ def _binding(
             max_output_bytes=524_288,
             max_transcript_bytes=1_048_576,
             max_tool_calls=0,
-            timeout_seconds=60.0,
+            timeout_seconds=DIRECT_WHOLE_TASK_TIMEOUT_SECONDS,
         )
         return TrackBinding(
             track=track,
@@ -2224,7 +2229,11 @@ def _binding(
         require_total_count = claim.kind == "count"
         require_stable_ordering = False
     max_tool_calls = max(12, max_pages + 4)
-    result_serialization_seconds = max_result_cardinality * 0.75 if claim.kind == "set" else 0.0
+    result_serialization_seconds = (
+        max_result_cardinality * MCP_SET_SERIALIZATION_SECONDS_PER_ENTITY
+        if claim.kind == "set"
+        else 0.0
+    )
     bounds = ExecutionBounds(
         max_hops=max_hops,
         max_result_cardinality=max_result_cardinality,
@@ -2237,12 +2246,13 @@ def _binding(
         max_transcript_bytes=2_097_152,
         max_tool_calls=max_tool_calls,
         timeout_seconds=max(
-            180.0,
+            MCP_WHOLE_TASK_MIN_TIMEOUT_SECONDS,
             min(
-                600.0,
+                MCP_WHOLE_TASK_MAX_TIMEOUT_SECONDS,
                 max(
-                    max_tool_calls * 25.0,
-                    180.0 + result_serialization_seconds,
+                    max_tool_calls * MCP_TOOL_CALL_ALLOWANCE_SECONDS,
+                    MCP_WHOLE_TASK_MIN_TIMEOUT_SECONDS
+                    + result_serialization_seconds,
                 ),
             ),
         ),

@@ -219,6 +219,13 @@ def test_simple_corpus_is_completely_migrated(simple_compiled) -> None:
     assert len({task.migration.legacy_task_id for task in mcp.tasks}) == 40
     assert all(task.public.binding.track is Track.DIRECT for task in direct.tasks)
     assert all(task.public.binding.track is Track.MCP for task in mcp.tasks)
+    assert all(
+        task.public.binding.bounds.timeout_seconds == 180.0 for task in direct.tasks
+    )
+    assert all(
+        600.0 <= task.public.binding.bounds.timeout_seconds <= 1200.0
+        for task in mcp.tasks
+    )
 
 
 def test_complex_corpus_replaces_oversized_enumerations(complex_compiled) -> None:
@@ -254,7 +261,10 @@ def test_complex_corpus_replaces_oversized_enumerations(complex_compiled) -> Non
             for task in pages
         )
     assert all(not task.public.binding.bounds.require_total_count for task in native_mcp_pages)
-    assert all(task.public.binding.bounds.timeout_seconds == 555.0 for task in native_mcp_pages)
+    assert all(
+        task.public.binding.bounds.timeout_seconds == 1200.0
+        for task in native_mcp_pages
+    )
 
     page = native_mcp_pages[1]
     mismatched_binding = page.public.binding.model_copy(
@@ -433,10 +443,11 @@ def test_vertical_slice_claims_are_typed_and_correct(complex_compiled) -> None:
     assert mcp_da_members.public.binding.bounds.max_result_cardinality == 1000
     assert mcp_da_members.public.binding.bounds.require_total_count is True
     assert mcp_da_members.public.binding.bounds.require_stable_ordering is True
-    assert mcp_da_members.public.binding.bounds.timeout_seconds == 600.0
+    assert mcp_da_members.public.binding.bounds.timeout_seconds == 1200.0
 
     direct_members = _by_legacy(mcp, "mcp-global-da-direct-members")[0]
     direct_count = _by_legacy(mcp, "mcp-global-da-direct-member-count")[0]
+    assert direct_count.public.binding.bounds.timeout_seconds == 600.0
     privileged_groups = _by_legacy(mcp, "mcp-user-privileged-group-memberships")[0]
     active_sessions = _by_legacy(
         mcp,

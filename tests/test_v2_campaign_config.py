@@ -71,7 +71,7 @@ def test_v2_config_is_strict_and_resolves_paths_from_config(
     assert set(resolved.tracks) == {Track.DIRECT}
     assert resolved.config.models[0].requested_model == "codex/gpt-test"
     assert resolved.config.models[0].max_output_tokens == 2048
-    assert resolved.config.defaults.mcp.read_timeout_seconds == 120.0
+    assert resolved.config.defaults.mcp.read_timeout_seconds == 240.0
     assert resolved.config.defaults.mcp.tool_timeout_seconds == 60.0
 
 

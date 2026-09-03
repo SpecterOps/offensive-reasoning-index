@@ -642,6 +642,20 @@ scalars were still inconclusive. V10 preferred real graph cardinality for
 route/decision witnesses and tightened selector, label, ordering, count/page
 population, and distinctness bindings.
 
+### API latency calibration: turn bounds plus wall-clock safety
+
+The first Flash-model API campaign showed that a 60-second Direct deadline
+measured provider latency more often than reasoning: 28 of 42 Qwen Direct
+requests reached the deadline before any Cypher query executed. Two large MCP
+page tasks also exhausted 555 seconds after only four to six tool calls, so the
+existing turn/tool allowance was not the binding limit. ORI therefore retains
+finite model-step and tool-call budgets while increasing Direct whole-task time
+to 180 seconds, MCP provider reads to 240 seconds, and public MCP whole-task time
+to a 600-second floor with a capacity-derived allowance capped at 1,200 seconds.
+The wall clock remains a runaway safety boundary rather than the primary unit of
+agent work. A whole-task timeout remains operationally model-attributable but
+receives no semantic correctness verdict.
+
 ### V11 and V15: strict scoring must also be fair and public
 
 The V10 score drop contained genuine model errors and harness-created false

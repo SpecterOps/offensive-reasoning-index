@@ -350,13 +350,16 @@ the sealed total or expected identities.
 Route and decision receipts prefer positive graph cardinality over auxiliary
 endpoint scalar literals, while zero/unknown graph shapes remain inconclusive.
 
-Complete MCP set claims use a fixed public capacity of 1,000 identities over
-500-row pages. The capacity is deliberately independent of the sealed expected
-set size, so it neither leaks the answer count nor turns one extra identity into
-an adapter failure. Its public task deadline remains capped at 600 seconds. A
-deterministic 500-row window receives 555 seconds; a complete set receives at
-most two pages and 600 seconds. These values are compiled into the task
-fingerprint and cannot be changed by runtime-only configuration.
+Direct tasks use a 180-second whole-task deadline. Complete MCP set claims use a
+fixed public capacity of 1,000 identities over 500-row pages. The capacity is
+deliberately independent of the sealed expected set size, so it neither leaks
+the answer count nor turns one extra identity into an adapter failure. MCP tasks
+receive a 600-second floor plus a capacity-derived set-serialization allowance,
+capped at 1,200 seconds; both a deterministic 500-row window and a complete
+1,000-identity set reach that cap. These values are compiled into the task
+fingerprint and cannot be changed by runtime-only configuration. The default
+MCP provider read sub-deadline is 240 seconds and remains separately
+fingerprinted in campaign readiness.
 
 The compiler publishes strict nested answer schemas for entities, edges,
 entity-property facts, and the generic bounded-negative reason vocabulary.

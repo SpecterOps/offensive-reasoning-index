@@ -1073,12 +1073,13 @@ are also undeclared filters, so they cannot establish negative proof.
 MCP `circuit_open` receipts are infrastructure failures and never become model
 query errors.
 
-The compiler uses a fixed public 1,000-identity capacity with 500-row pages for
-complete MCP set enumeration. This capacity—not the sealed expected set
-cardinality—determines the public whole-task deadline, capped at 600 seconds.
-Deterministic 500-row windows receive the corresponding capacity allowance.
-These are public, fingerprinted execution bounds, not expected-answer leaks,
-hidden retries, or model hints.
+The compiler gives Direct tasks a 180-second whole-task deadline. It uses a
+fixed public 1,000-identity capacity with 500-row pages for complete MCP set
+enumeration. MCP tasks receive a 600-second floor plus a capacity-derived
+set-serialization allowance, capped at 1,200 seconds. Deterministic 500-row
+windows receive the corresponding capacity allowance. The default MCP provider
+read sub-deadline is 240 seconds. These are public, fingerprinted execution
+bounds, not expected-answer leaks, hidden retries, or model hints.
 
 Compiled answer schemas define nested entity, edge, property, and bounded-
 negative reason shapes. MCP finalization, its single schema-only retry, fixture

@@ -190,11 +190,12 @@ indistinguishable from a complete answer.
 For complete MCP set claims, the compiler currently uses a fixed public
 1,000-identity capacity over 500-row pages and requires a companion total. The
 capacity must not be derived from the sealed expected set size. This lets the
-exact-set comparator grade extras while avoiding answer-count leakage. The
-whole-task deadline includes the capacity-derived serialization allowance,
-capped at 600 seconds. Do not override these values with smaller hidden
-model-loop, tool, or read deadlines; campaign readiness rejects runtime caps
-that contradict certified bounds.
+exact-set comparator grade extras while avoiding answer-count leakage. Direct
+tasks receive a 180-second whole-task deadline. MCP tasks receive a 600-second
+floor plus a capacity-derived set-serialization allowance, capped at 1,200
+seconds. The default MCP provider read sub-deadline is 240 seconds. Do not
+override these values with smaller hidden model-loop, tool, or read deadlines;
+campaign readiness rejects runtime caps that contradict certified bounds.
 
 ## Fixture contract
 
