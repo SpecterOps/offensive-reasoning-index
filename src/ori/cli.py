@@ -34,6 +34,7 @@ from .generator.serializer import (
     serialize_to_dir,
     serialize_to_zip,
 )
+from .generator.templates.phase4 import stabilize_phase4_timestamps
 from .mcp_launcher import (
     MCPLauncherConfig,
     resolve_mcp_launcher_config,
@@ -988,6 +989,7 @@ def benchmark_generate(name: str, seed: int, output_dir: str, output_prefix: str
         )
         apply_baseline_security(graph)
         plant_all_paths(graph)
+        stabilize_phase4_timestamps(graph)
         generator_profile = benchmark.graph_profile
     elif benchmark.name == "complex":
         graph = build_phase4_complex_graph(

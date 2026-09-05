@@ -32,6 +32,23 @@ ORI has three separate surfaces. Keep them separate when debugging:
 
 If a run fails, first decide which surface failed: generation, ingest, or model execution. Most confusing failures come from using a manifest that does not match the graph currently loaded in BloodHound CE.
 
+### Simple generator timestamp correction
+
+Named `simple` generation now records `generator_version: seeded-benchmark-v2`.
+Earlier simple archives included wall-clock user/computer timestamps, so the
+same seed could produce different ZIP bytes at different times even when its
+manifest was identical. The corrected generator applies deterministic timestamps
+after planting paths. Seeded identity, scale and graph structure retain their
+existing RNG namespace; the `complex` generator is unchanged.
+
+The product filename remains `simple-v1-seed-<seed>`; the generator version in
+manifest metadata distinguishes the correction. Use a new output directory,
+regenerate the matched ZIP/manifest, and repeat any applicable certification and
+readiness before a new campaign. Never substitute a new archive into an old
+campaign or resume old simple evidence with the corrected generator. Preserve
+historical artifacts as their original evidence. Unnamed legacy generation is
+unchanged and is not covered by this named-product correction.
+
 ## Setup
 
 Install dependencies:

@@ -48,6 +48,9 @@ class BenchmarkGenerationProfile:
 
 
 GENERATOR_VERSION = "seeded-benchmark-v1"
+# Keep identity and scale RNG streams stable when an artifact encoding changes.
+_RNG_NAMESPACE_VERSION = "seeded-benchmark-v1"
+_SIMPLE_GENERATOR_VERSION = "seeded-benchmark-v2"
 BENCHMARK_VERSION = "v1"
 
 _SIZE_BANDS: dict[str, SizeBand] = {
@@ -89,7 +92,7 @@ _TLDS = ("LOCAL", "CORP", "INTERNAL", "LAN")
 
 
 def _rng_for(*, benchmark: str, seed: int, namespace: str) -> random.Random:
-    material = f"{GENERATOR_VERSION}:{benchmark}:{seed}:{namespace}"
+    material = f"{_RNG_NAMESPACE_VERSION}:{benchmark}:{seed}:{namespace}"
     return random.Random(material)
 
 
@@ -126,7 +129,9 @@ def build_benchmark_generation_profile(
     return BenchmarkGenerationProfile(
         benchmark=normalized,
         benchmark_version=BENCHMARK_VERSION,
-        generator_version=GENERATOR_VERSION,
+        generator_version=(
+            _SIMPLE_GENERATOR_VERSION if normalized == "simple" else GENERATOR_VERSION
+        ),
         seed=seed,
         company_name=company_name,
         domain=domain,

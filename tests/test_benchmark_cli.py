@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 
+import pytest
 from click.testing import CliRunner
 
 from ori.cli import main
@@ -67,7 +68,7 @@ def test_benchmark_generate_simple_writes_seeded_artifacts(tmp_path) -> None:
     assert manifest["seed"] == 1234
     assert manifest["domain"] == manifest["metadata"]["identity"]["domain"]
     assert manifest["metadata"]["benchmark"] == "simple"
-    assert manifest["metadata"]["generator_version"] == "seeded-benchmark-v1"
+    assert manifest["metadata"]["generator_version"] == "seeded-benchmark-v2"
     assert manifest["metadata"]["shared_dataset_across_tracks"] is True
     assert set(manifest["metadata"]["benchmark_tracks"]) == {"direct", "mcp"}
     assert manifest["metadata"]["benchmark_tracks"]["direct"]["task_count"] == 40
@@ -117,6 +118,36 @@ def test_generate_simple_alias_writes_seeded_artifacts(tmp_path) -> None:
     assert result.exit_code == 0, result.output
     assert (tmp_path / "simple-v1-seed-1234.zip").exists()
     assert (tmp_path / "simple-v1-seed-1234_manifest.json").exists()
+
+
+@pytest.mark.parametrize(
+    ("command", "output_option"),
+    [(["benchmark", "generate", "simple"], "--output-dir"), (["generate", "simple"], "--output")],
+)
+def test_simple_artifacts_ignore_wall_clock_but_vary_by_seed(
+    tmp_path, monkeypatch, command, output_option
+) -> None:
+    artifacts = []
+    for index, (clock, seed) in enumerate(
+        [(1_000_000_000, 67), (2_000_000_000, 67), (2_000_000_000, 68)]
+    ):
+        monkeypatch.setattr("time.time", lambda: clock)
+        output_dir = tmp_path / str(index)
+        result = CliRunner().invoke(
+            main, [*command, "--seed", str(seed), output_option, str(output_dir)]
+        )
+        assert result.exit_code == 0, result.output
+        prefix = output_dir / f"simple-v1-seed-{seed}"
+        artifacts.append(
+            (
+                prefix.with_suffix(".zip").read_bytes(),
+                prefix.with_name(prefix.name + "_manifest.json").read_bytes(),
+            )
+        )
+
+    assert artifacts[0] == artifacts[1]
+    assert artifacts[0][0] != artifacts[2][0]
+    assert artifacts[0][1] != artifacts[2][1]
 
 
 def test_preflight_tasks_accepts_public_direct_track_name(tmp_path) -> None:

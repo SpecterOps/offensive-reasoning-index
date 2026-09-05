@@ -7,6 +7,8 @@ These tests do not certify live graph parity, providers, or remote deployment.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import selectors
 import signal
@@ -23,21 +25,24 @@ from ori.eval.v2.campaign_supervisor import (
     SupervisorAlreadyRunningError,
     SupervisorStateStore,
 )
+from tests.test_v2_campaign_status import _completed_campaign, _config
 
 _TIMEOUT = 30
-_CHILD = r"""
-import asyncio
-import os
+_ISOLATION = r"""
 import sys
-from pathlib import Path
-from types import SimpleNamespace
-
 # Fail closed if a future import or test seam attempts networking or a launcher.
 def prohibit_external(event, args):
-    if event in {"socket.connect", "socket.connect_ex", "socket.getaddrinfo",
+    if event in {"socket.connect", "socket.connect_ex", "socket.getaddrinfo", "socket.sendto",
                  "subprocess.Popen", "os.system", "os.posix_spawn"}:
         raise RuntimeError("external access forbidden in process acceptance")
 sys.addaudithook(prohibit_external)
+"""
+
+_CHILD = _ISOLATION + r"""
+import asyncio
+import os
+from pathlib import Path
+from types import SimpleNamespace
 
 from ori.eval.v2 import campaign_runner as runner
 from ori.eval.v2.campaign_supervisor import SupervisorStateStore
@@ -61,11 +66,16 @@ elif mode == "supervisor_lock":
     with SupervisorStateStore(root / "supervisor.json", root / "campaign"):
         wait_for_parent()
 else:
-    resolved = SimpleNamespace(
-        output_dir=root / "campaign",
-        source_config_fingerprint="a" * 64,
-        config=SimpleNamespace(models=(), track_modes=()),
-    )
+    config_path = root / "models-v2.yaml"
+    if mode in {"readiness", "execution"}:
+        from ori.eval.v2.campaign_config import load_v2_campaign_config
+        resolved = load_v2_campaign_config(config_path)
+    else:
+        resolved = SimpleNamespace(
+            output_dir=root / "campaign",
+            source_config_fingerprint="a" * 64,
+            config=SimpleNamespace(models=(), track_modes=()),
+        )
     runner.prepare_v2_campaign = lambda _: (resolved, None, {}, "test", ())
 
     async def controlled_body(**kwargs):
@@ -75,7 +85,9 @@ else:
 
     runner._run_prepared_v2_campaign = controlled_body
     try:
-        asyncio.run(runner.run_v2_campaign(root / "unused.yaml"))
+        asyncio.run(runner.run_v2_campaign(
+            config_path, preflight_only=mode == "readiness"
+        ))
     except runner.V2CampaignRunError as exc:
         if str(exc) != "v2 campaign interrupted by SIGTERM":
             raise
@@ -83,10 +95,9 @@ else:
 """
 
 
-@contextmanager
-def _child(root: Path, mode: str) -> Iterator[subprocess.Popen[str]]:
+def _environment(root: Path) -> dict[str, str]:
     # Do not inherit credentials, proxy settings, or user package configuration.
-    environment = {
+    return {
         "PATH": os.defpath,
         "HOME": str(root),
         "TMPDIR": str(root),
@@ -94,10 +105,14 @@ def _child(root: Path, mode: str) -> Iterator[subprocess.Popen[str]]:
         "PYTHONDONTWRITEBYTECODE": "1",
         "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src"),
     }
+
+
+@contextmanager
+def _child(root: Path, mode: str) -> Iterator[subprocess.Popen[str]]:
     process = subprocess.Popen(
         [sys.executable, "-u", "-c", _CHILD, str(root), mode],
         cwd=root,
-        env=environment,
+        env=_environment(root),
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
@@ -210,3 +225,88 @@ def test_real_runner_interruption_is_durable_and_recoverable(
     assert final.checkpointed_results == 0
     assert final.completed_tracks == ()
     assert not campaign_status._lock_is_contended(output)
+
+
+def _status_cli(root: Path, config: Path) -> subprocess.CompletedProcess[str]:
+    # Launch the real Click dispatcher in another interpreter, with no test
+    # replacements of status/config/evidence code and external access denied.
+    command = _ISOLATION + "\nfrom ori.cli import main\nmain()\n"
+    before = _file_snapshot(root)
+    result = subprocess.run(
+        [sys.executable, "-c", command, "campaign-status", "--config", str(config), "--json"],
+        cwd=root,
+        env=_environment(root),
+        capture_output=True,
+        text=True,
+        timeout=_TIMEOUT,
+        check=False,
+    )
+    assert _file_snapshot(root) == before, "status changed campaign/config evidence"
+    output = result.stdout + result.stderr
+    for forbidden in (
+        str(root), "SECRET_PROMPT", "SECRET_PROVIDER_RESPONSE",
+        "SECRET_TOOL_ARGUMENT", "SECRET_CREDENTIAL_VALUE", "/private/operator/campaign",
+        '"raw_response"', '"mcp_transcript"', '"mcp_tool_receipts"',
+        '"credential_source"', '"detail"',
+    ):
+        assert forbidden not in output
+    return result
+
+
+def _file_snapshot(root: Path) -> dict[Path, tuple[int, str]]:
+    return {
+        path.relative_to(root): (
+            path.stat().st_mtime_ns, hashlib.sha256(path.read_bytes()).hexdigest(),
+        )
+        for path in root.rglob("*") if path.is_file()
+    }
+
+
+@pytest.mark.parametrize("mode", ["readiness", "execution"])
+@pytest.mark.parametrize("termination", [signal.SIGTERM, signal.SIGKILL])
+def test_status_cli_observes_live_process_and_safe_recovery_action(
+    tmp_path: Path, mode: str, termination: signal.Signals,
+) -> None:
+    config = _config(tmp_path)
+    with _child(tmp_path, mode) as process:
+        active = _status_cli(tmp_path, config)
+        assert active.returncode == 0, active.stderr
+        status = json.loads(active.stdout)
+        assert status["observed_state"] == "running"
+        assert status["next_action"] == "monitor"
+        assert status["resume_allowed"] is False
+        process.send_signal(termination)
+        assert process.wait(timeout=_TIMEOUT) == (
+            0 if termination == signal.SIGTERM else -signal.SIGKILL
+        )
+    stopped = _status_cli(tmp_path, config)
+    assert stopped.returncode == 0, stopped.stderr
+    status = json.loads(stopped.stdout)
+    assert status["observed_state"] == (
+        "interrupted" if termination == signal.SIGTERM else "stale_running"
+    )
+    assert status["resume_allowed"] is True
+    assert status["next_action"] == (
+        "run_readiness" if mode == "readiness" else "resume_campaign"
+    )
+    assert status["progress"]["provider_attempts"] == 0
+    assert status["progress"]["total_tokens"] == 0
+
+
+def test_status_cli_redacts_private_evidence_and_refuses_corruption(tmp_path: Path) -> None:
+    config, resolved = _completed_campaign(tmp_path)
+    valid = _status_cli(tmp_path, config)
+    assert valid.returncode == 0, valid.stderr
+    status = json.loads(valid.stdout)
+    assert status["observed_state"] == "completed"
+    assert status["progress"]["provider_attempts"] == 1
+    # These are synthetic receipts, not an actual completed provider campaign.
+    receipt = resolved.output_dir / "campaign-lifecycle-v2.private.json"
+    payload = json.loads(receipt.read_text())
+    payload["source_config_fingerprint"] = "f" * 64
+    for untrusted in (json.dumps(payload), "{broken"):
+        receipt.write_text(untrusted)
+        rejected = _status_cli(tmp_path, config)
+        assert rejected.returncode != 0
+        assert "Error:" in rejected.stderr
+        assert "ori-v2-campaign-status-v2" not in rejected.stdout

@@ -49,3 +49,25 @@ def test_same_seed_differs_between_simple_and_complex() -> None:
     assert complex_profile.benchmark == "complex"
     assert simple.domain != complex_profile.domain
     assert simple.users < complex_profile.users
+
+
+def test_timestamp_version_preserves_existing_identity_and_scale() -> None:
+    simple = build_benchmark_generation_profile("simple", seed=67)
+    complex_profile = build_benchmark_generation_profile("complex", seed=67)
+
+    assert simple.generator_version == "seeded-benchmark-v2"
+    assert complex_profile.generator_version == "seeded-benchmark-v1"
+    assert (
+        simple.company_name,
+        simple.domain,
+        simple.users,
+        simple.workstations,
+        simple.servers,
+    ) == ("Delta Dynamics", "DELTADYNAMICS.CORP", 99, 38, 20)
+    assert (
+        complex_profile.company_name,
+        complex_profile.domain,
+        complex_profile.users,
+        complex_profile.workstations,
+        complex_profile.servers,
+    ) == ("Ironwood Foods", "IRONWOODFOODS.LAN", 4555, 1769, 437)

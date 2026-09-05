@@ -17,7 +17,7 @@ existing 29-commit development lineage above master without rewriting it.
 | P1-W01 inventory | complete | branch reviewer | Full ancestry/patch/lock comparison below; no missing patch identified |
 | P1-W02 consolidated worktree | complete | integration | Development lineage preserved; remote branch verified at 82e2c7a with plan and process tests |
 | P1-W03 V30 independent review | manual pass | independent reviewer | Exact 10a979e..0f0eaa8 and new process tests: no confirmed findings; automated review unavailable |
-| P1-W04 host acceptance | incomplete | operations | Six local real-process tests pass; controlled-host source is still 8ad6f94, not qualified HEAD |
+| P1-W04 host acceptance | incomplete | operations | Eleven local real-process checks pass; full graph/transport acceptance and merged-source binding remain |
 | P1-W05 PR/merge | blocked | integration/user | GitHub CLI SAML authorization missing; connector cannot access repository |
 | P2 cleanup | pending dependency | engineering | Requires P1 gate |
 | P3 local Qwen | pending endpoint qualification | operations | Operator-provisioned inference; no reservation or agent dependency in ORI |
@@ -55,6 +55,8 @@ existing 29-commit development lineage above master without rewriting it.
   authorization. Git fetch succeeds; the configured connector returns inaccessible
   repository errors. Branch push succeeded, but draft PR creation was rejected
   by SAML enforcement. No PR exists yet. No authentication values are copied here.
+  Rechecked on the first active-goal continuation: CLI SAML still blocks access;
+  the available in-app browser was signed out, so it could not create the PR.
 - Phone alert delivery requires end-to-end user confirmation.
 - Local inference is provisioned outside ORI. The previously recorded GPU
   reservation blocker is withdrawn: no such mechanism is an ORI prerequisite.
@@ -94,6 +96,30 @@ No benchmark model calls, remote host operations or service configuration change
 were needed.
 
 ## Findings
+
+P1 installed-wheel acceptance at `3114921` exposed a reproducibility defect in
+named `simple` generation: identical seeds produced different ZIP bytes because
+user/computer properties used wall-clock timestamps. Manifests were identical,
+so successful preflight alone did not detect it. The private failed receipt is
+retained; it is not a passing qualification artifact.
+
+The narrow correction normalizes timestamps only for named simple generation,
+advances its generator metadata to `seeded-benchmark-v2`, and freezes existing
+identity/scale RNG namespaces. Complex and unnamed legacy generation are
+unchanged. Regression checks cover both named CLI aliases under widely different
+clocks, exact ZIP/manifest bytes, and variation across seeds. Old simple evidence
+must not be resumed with regenerated archives; see the products runbook.
+
+Additional P1 process tests now use the real CLI dispatcher in separate
+interpreters to check active/interrupted/stale readiness and execution status,
+correct recovery actions, corrupt-evidence refusal, redaction and read-only
+inspection. Controlled preparation/execution seams remain fake, so these tests
+do not prove live graph or provider behavior.
+The combined process/status gate passed 47 tests; the simple generator/profile
+gate passed 15 tests. Independent manual review found no actionable issues in
+these changes. This is prerequisite hardening, not admission to later phases.
+Full updated validation passed: 1,061 tests in 279.18s; Ruff, lock, diff and
+secret checks passed. Installed-wheel revalidation follows this source commit.
 
 Independent manual review of exactly `10a979e..0f0eaa8` found no confirmed
 production defects. A separate review of the new process-acceptance test file
