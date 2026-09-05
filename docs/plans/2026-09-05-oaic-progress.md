@@ -17,7 +17,7 @@ existing 29-commit development lineage above master without rewriting it.
 | P1-W01 inventory | complete | branch reviewer | Full ancestry/patch/lock comparison below; no missing patch identified |
 | P1-W02 consolidated worktree | running | integration | Clean branch created from master and fast-forwarded to 0f0eaa8; push pending |
 | P1-W03 V30 independent review | running | independent reviewer | Review scope 10a979e..0f0eaa8; no provider calls |
-| P1-W04 host acceptance | running | operations | Host reachable; old checkout at 8ad6f94; real-process tests being added |
+| P1-W04 host acceptance | incomplete | operations | Six local real-process tests pass; controlled-host source is still 8ad6f94, not qualified HEAD |
 | P1-W05 PR/merge | blocked | integration/user | GitHub CLI SAML authorization missing; connector cannot access repository |
 | P2 cleanup | pending dependency | engineering | Requires P1 gate |
 | P3 local Qwen | blocked | operations/user | Known reservation wrappers invoke a retired inert script; governed successor unidentified |
@@ -122,10 +122,18 @@ metadata only was inspected, and neither is staged.
 ## Current validation
 
 - Fresh isolated environment installed with `uv sync --frozen` on Python 3.12.13.
-- Gitleaks scanned `origin/master..HEAD`: 28 non-merge commits, no leaks.
+- Gitleaks scanned integrated history including the execution-plan commit:
+  29 non-merge commits, no leaks. Documentation and test directory scans passed.
 - Focused supervisor/status/durability/runtime/scoring gate: 92 passed in 7.82s.
 - Ruff, lockfile validation and diff checks passed in the isolated worktree.
-- Full pytest running in the fresh Python 3.12 environment.
+- Fresh Python 3.12 baseline full suite: 1,042 passed in 250.15s.
+- New process acceptance file, run separately: 6 passed in 11.47s.
+  This is additional coverage, not a claim that the preceding full-suite run
+  collected the new file.
+- Real-process coverage includes campaign/supervisor lock exclusion and release,
+  SIGTERM durability, SIGKILL stale state, and second-interpreter recovery.
+  Artifact preparation and execution bodies are replaced; these checks do not
+  certify live graph parity, providers, remote deployment or task-checkpoint resume.
 
 ## Controlled-host discovery
 
