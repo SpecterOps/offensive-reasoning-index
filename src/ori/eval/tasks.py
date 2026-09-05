@@ -6,6 +6,16 @@ import re
 from dataclasses import dataclass, field, replace
 from typing import Any
 
+from ori.eval.task_recipes import (
+    RecipeClaimKind,
+    RecipeTrack,
+    TaskRecipeRegistry,
+    TaskVariantRecipe,
+    TrackExclusion,
+    claim_kind_for_grade_mode,
+    validate_generated_recipe_coverage,
+    validate_manifest_recipe_coverage,
+)
 from ori.relationships import canonical_relationship_kind, live_relationship_kinds
 
 
@@ -228,6 +238,43 @@ _TIER6_NEGATIVE_CONTROL_QUESTIONS: list[tuple[str, str, str, list[str], str | No
     ),
 ]
 
+_TIER6_COMPLEX_TEMPLATE_IDS = {
+    "t6_host_session_pivot_tier0",
+    "t6_host_session_pivot_rbcd_tier0",
+    "t6_host_session_pivot_three_host_tier0",
+    "t6_constrained_delegation_bridge_tier0",
+    "t6_constrained_delegation_session_bridge_tier0",
+    "t6_rbcd_computer_takeover_tier0",
+    "t6_rbcd_session_pivot_tier0",
+    "t6_unconstrained_delegation_tgt_capture_tier0",
+    "t6_unconstrained_delegation_bridge_admin_tier0",
+    "t6_acl_group_nesting_tier0",
+    "t6_acl_forcechange_group_pivot_tier0",
+    "t6_gpo_ou_control_tier0",
+    "t6_laps_session_pivot_tier0",
+    "t6_trust_hopping_tier0",
+    "t6_kerberoast_privilege_chain_tier0",
+    "t6_adcs_identity_transition_tier0",
+    "t6_path_selection_decoy_routes",
+    "t6_stale_session_contingency",
+}
+
+_DECISION_RECIPE_IDS = {
+    "t3_unconstrained_delegation-01",
+    "t4_adcs_esc1-01",
+    "t5_adcs_to_delegation_composite-01",
+}
+
+_TRANSITIVE_RECIPE_IDS = {
+    "t1_has_session-01",
+    "global-da-members",
+    "global-privileged-sessions",
+    "mcp-global-privileged-sessions",
+    "mcp-user-privileged-group-memberships",
+    "mcp-user-group-memberships-mmoore",
+    "mcp-group-memberships-infra-team",
+}
+
 
 def _return_projection_aliases(projection: str) -> list[str]:
     """Return stable aliases for a Cypher projection used across a WITH boundary."""
@@ -361,9 +408,14 @@ def _questions_for_template(
 ) -> list[tuple[str, str, str, list[str], str | None]]:
     if template_id == "t6_negative_control_invalid_cert":
         return _TIER6_NEGATIVE_CONTROL_QUESTIONS
-    if template_id.startswith("t6_"):
+    if template_id in _TIER6_COMPLEX_TEMPLATE_IDS:
         return _TIER6_COMPLEX_QUESTIONS
-    return _TEMPLATE_QUESTIONS.get(template_id, [])
+    if template_id.startswith("t6_"):
+        raise ValueError(f"Unsupported Tier 6 template: {template_id}")
+    questions = _TEMPLATE_QUESTIONS.get(template_id)
+    if questions is None:
+        raise ValueError(f"Unknown template: {template_id}")
+    return questions
 
 
 _GLOBAL_TASKS: list[tuple[str, str, str, str, list[str]]] = [
@@ -405,6 +457,131 @@ _GLOBAL_TASKS: list[tuple[str, str, str, str, list[str]]] = [
         ["has_session", "lateral_movement"],
     ),
 ]
+
+# MCP-native tasks are authored below because their questions and resolvers depend on
+# seeded graph identities. This compact declaration is the fail-closed recipe surface:
+# every supported task has a stable logical ID, and its unsupported Direct variant has
+# an explicit exclusion rather than disappearing implicitly.
+_MCP_NATIVE_RECIPE_SPECS: tuple[tuple[str, str, int, str], ...] = (
+    ("mcp-global-admin-to", "global", 1, "node_set"),
+    ("mcp-global-privileged-sessions", "global", 1, "node_set"),
+    ("mcp-global-da-direct-members", "global", 1, "node_set"),
+    ("mcp-global-da-direct-member-count", "global", 1, "row_count"),
+    ("mcp-user-privileged-group-memberships", "t1_group_membership", 1, "node_set"),
+    ("mcp-user-group-memberships-mmoore", "t1_group_membership", 1, "node_set"),
+    ("mcp-computer-active-sessions", "t1_has_session", 1, "node_set"),
+    ("mcp-user-session-locations-privileged-user", "t1_has_session", 1, "node_set"),
+    ("mcp-shortest-path-has-session", "t1_has_session", 1, "path_exists"),
+    ("mcp-shortest-path-admin-to", "t1_admin_to", 1, "path_exists"),
+    ("mcp-computer-admin-users-dc01", "t1_admin_to", 1, "node_set"),
+    ("mcp-shortest-path-nested-groups", "t2_nested_groups", 2, "path_exists"),
+    ("mcp-group-members-server-admins", "t2_nested_groups", 2, "node_set"),
+    ("mcp-group-memberships-infra-team", "t2_nested_groups", 2, "node_set"),
+    ("mcp-group-admin-rights-server-admins", "t2_nested_groups", 2, "node_set"),
+    ("mcp-computer-admin-users-srv-file-01", "t2_nested_groups", 2, "node_set"),
+    ("mcp-shortest-path-kerberoast-chain", "t2_kerberoast_chain", 2, "path_exists"),
+    ("mcp-shortest-path-acl-chain", "t2_acl_chain", 2, "path_exists"),
+    (
+        "mcp-computer-active-sessions-unconstrained",
+        "t3_unconstrained_delegation",
+        3,
+        "node_set",
+    ),
+    (
+        "mcp-user-constrained-delegation-targets",
+        "t3_constrained_delegation",
+        3,
+        "node_set",
+    ),
+)
+
+
+def _recipe_claim_kind(task_id: str, grade_mode: str) -> RecipeClaimKind:
+    if task_id in _DECISION_RECIPE_IDS:
+        return "decision"
+    return claim_kind_for_grade_mode(grade_mode)
+
+
+def _task_recipe_registry() -> TaskRecipeRegistry:
+    recipes: list[TaskVariantRecipe] = []
+    template_questions = {
+        **_TEMPLATE_QUESTIONS,
+        **{template_id: _TIER6_COMPLEX_QUESTIONS for template_id in _TIER6_COMPLEX_TEMPLATE_IDS},
+        "t6_negative_control_invalid_cert": _TIER6_NEGATIVE_CONTROL_QUESTIONS,
+    }
+    for template_id, questions in sorted(template_questions.items()):
+        for index, (_, _, grade_mode, _, _) in enumerate(questions, start=1):
+            task_id = f"{template_id}-{index:02d}"
+            recipes.append(
+                TaskVariantRecipe(
+                    recipe_id=task_id,
+                    template_id=template_id,
+                    legacy_task_id=task_id,
+                    supported_tracks=("direct", "mcp"),
+                    claim_kind=_recipe_claim_kind(task_id, grade_mode),
+                    family=template_id,
+                    tier=int(template_id[1]) if template_id.startswith("t") else 1,
+                    semantics=("transitive" if task_id in _TRANSITIVE_RECIPE_IDS else "direct"),
+                    concentration_key=f"legacy:{template_id}",
+                )
+            )
+    for task_id, _, _, grade_mode, _ in _GLOBAL_TASKS:
+        recipes.append(
+            TaskVariantRecipe(
+                recipe_id=task_id,
+                template_id="global",
+                legacy_task_id=task_id,
+                supported_tracks=("direct", "mcp"),
+                claim_kind=_recipe_claim_kind(task_id, grade_mode),
+                family="global",
+                tier=1,
+                semantics=("transitive" if task_id in _TRANSITIVE_RECIPE_IDS else "direct"),
+                concentration_key="legacy:global",
+                requires_planted_template=False,
+            )
+        )
+    for task_id, template_id, tier, grade_mode in _MCP_NATIVE_RECIPE_SPECS:
+        recipes.append(
+            TaskVariantRecipe(
+                recipe_id=task_id,
+                template_id=template_id,
+                legacy_task_id=task_id,
+                supported_tracks=("mcp",),
+                claim_kind=_recipe_claim_kind(task_id, grade_mode),
+                family=template_id,
+                tier=tier,
+                semantics=("transitive" if task_id in _TRANSITIVE_RECIPE_IDS else "direct"),
+                concentration_key=f"legacy:{template_id}",
+                track_exclusions=(
+                    TrackExclusion(
+                        exclusion_id=f"exclude-direct:{task_id}",
+                        track="direct",
+                        reason="MCP-native task requires the MCP tool track",
+                    ),
+                ),
+                requires_planted_template=template_id != "global",
+            )
+        )
+    return TaskRecipeRegistry(tuple(recipes))
+
+
+TASK_RECIPE_REGISTRY = _task_recipe_registry()
+
+
+def _recipe_metadata(
+    task_id: str,
+    manifest: dict[str, Any],
+    track: RecipeTrack,
+) -> dict[str, Any]:
+    recipe = TASK_RECIPE_REGISTRY.recipe_for_task(manifest, track, task_id)
+    return {
+        "logical_recipe_id": recipe.recipe_id,
+        "recipe_family": recipe.family,
+        "recipe_tier": recipe.tier,
+        "recipe_claim_kind": recipe.claim_kind,
+        "recipe_semantics": recipe.semantics,
+        "recipe_concentration_key": recipe.concentration_key,
+    }
 
 
 def _official_internal_grade_mode(task: dict[str, Any]) -> str:
@@ -513,6 +690,7 @@ def generate_tasks(manifest: dict) -> list[Task]:
     official_tasks = _generate_official_tasks(manifest)
     if official_tasks:
         return official_tasks
+    validate_manifest_recipe_coverage(manifest, TASK_RECIPE_REGISTRY)
 
     domain = manifest.get("domain", "CORP.LOCAL")
     tasks: list[Task] = []
@@ -586,6 +764,7 @@ def generate_tasks(manifest: dict) -> list[Task]:
                     grade_mode=grade_mode,
                     tags=tags,
                     metadata={
+                        **_recipe_metadata(f"{tid}-{i:02d}", manifest, "direct"),
                         "source_name": source_name,
                         "target_name": target_name,
                         "reference_scope": (
@@ -686,6 +865,7 @@ def generate_tasks(manifest: dict) -> list[Task]:
                 grade_mode=grade_mode,
                 tags=tags,
                 metadata={
+                    **_recipe_metadata(id_suffix, manifest, "direct"),
                     "domain": domain,
                     "reference_scope": "reference_defined",
                     "answer_contract": {
@@ -698,6 +878,12 @@ def generate_tasks(manifest: dict) -> list[Task]:
             )
         )
 
+    validate_generated_recipe_coverage(
+        manifest,
+        TASK_RECIPE_REGISTRY,
+        "direct",
+        tasks,
+    )
     return tasks
 
 
@@ -736,6 +922,12 @@ def generate_mcp_tasks(manifest: dict) -> list[Task]:
         tasks.append(replace(task, metadata=metadata))
 
     tasks.extend(_generate_mcp_native_tasks(manifest))
+    validate_generated_recipe_coverage(
+        manifest,
+        TASK_RECIPE_REGISTRY,
+        "mcp",
+        tasks,
+    )
     return tasks
 
 
@@ -767,6 +959,7 @@ def _generate_mcp_native_tasks(manifest: dict) -> list[Task]:
         metadata: dict | None = None,
     ) -> None:
         task_metadata = {
+            **_recipe_metadata(id, manifest, "mcp"),
             "domain": domain,
             "mcp_track": "mcp_non_cypher_analysis",
             "preferred_tool_family": "non_cypher",

@@ -293,7 +293,7 @@ def test_score_answers_flattens_paths_and_rejects_extra_node(tmp_path) -> None:
         "domain": "CORP.LOCAL",
         "planted_paths": [
             {
-                "template_id": "custom_path",
+                "template_id": "t1_admin_to",
                 "tier": 1,
                 "source_name": "ALICE@CORP.LOCAL",
                 "target_name": "DC01.CORP.LOCAL",
@@ -346,7 +346,7 @@ def test_score_answers_requires_reference_input_for_non_contract_tasks(tmp_path)
         "domain": "CORP.LOCAL",
         "planted_paths": [
             {
-                "template_id": "custom_path",
+                "template_id": "t1_admin_to",
                 "tier": 1,
                 "source_name": "ALICE@CORP.LOCAL",
                 "target_name": "DC01.CORP.LOCAL",
@@ -399,7 +399,7 @@ def test_score_answers_uses_reference_sidecar_for_non_contract_tasks(tmp_path) -
         "domain": "CORP.LOCAL",
         "planted_paths": [
             {
-                "template_id": "custom_path",
+                "template_id": "t1_admin_to",
                 "tier": 1,
                 "source_name": "ALICE@CORP.LOCAL",
                 "target_name": "DC01.CORP.LOCAL",
@@ -448,7 +448,7 @@ def test_score_answers_does_not_treat_answer_nodes_as_valid_inventory(tmp_path) 
         "domain": "CORP.LOCAL",
         "planted_paths": [
             {
-                "template_id": "custom_path",
+                "template_id": "t1_admin_to",
                 "tier": 1,
                 "source_name": "ALICE@CORP.LOCAL",
                 "target_name": "DC01.CORP.LOCAL",
@@ -493,7 +493,7 @@ def test_score_answers_uses_sidecar_rows_id_key_and_count(tmp_path) -> None:
         "domain": "CORP.LOCAL",
         "planted_paths": [
             {
-                "template_id": "custom_path",
+                "template_id": "t1_admin_to",
                 "tier": 1,
                 "source_name": "ALICE@CORP.LOCAL",
                 "target_name": "DC01.CORP.LOCAL",

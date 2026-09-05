@@ -17,7 +17,7 @@ from typing import Any, Literal
 
 from pydantic import Field, model_validator
 
-from ori.eval.tasks import Task, generate_mcp_tasks, generate_tasks
+from ori.eval.tasks import TASK_RECIPE_REGISTRY, Task, generate_mcp_tasks, generate_tasks
 from ori.relationships import canonical_relationship_kind
 
 from .fingerprint import canonical_sha256
@@ -69,6 +69,7 @@ from .schema import (
     TrackBinding,
 )
 from .selection import evaluate_selection
+from .task_recipes import TaskRecipeRegistryError, validate_generated_recipe_coverage
 
 COMPILER_VERSION = "ori-claim-compiler-v2.12.0"
 DIRECT_RESULT_CONTRACT_VERSION = "ori-direct-result-contract-v14"
@@ -258,9 +259,15 @@ def compiler_fingerprint() -> str:
         Path(__file__),
         Path(__file__).with_name("schema.py"),
         Path(__file__).with_name("selection.py"),
+        Path(__file__).with_name("task_recipes.py"),
+        Path(__file__).parents[1] / "task_recipes.py",
+        Path(__file__).parents[1] / "tasks.py",
     )
     source_digests = {
-        path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in module_paths
+        str(path.relative_to(Path(__file__).parents[2])): hashlib.sha256(
+            path.read_bytes()
+        ).hexdigest()
+        for path in module_paths
     }
     return canonical_sha256(
         {
@@ -2463,20 +2470,39 @@ def compile_legacy_product(
     if str(manifest.get("domain")) != snapshot.domain:
         raise V2CompileError("source manifest domain does not match graph snapshot")
     paths = _paths_by_template(manifest)
-    legacy_tasks = (
-        generate_tasks(dict(manifest))
-        if track is Track.DIRECT
-        else generate_mcp_tasks(dict(manifest))
-    )
+    try:
+        legacy_tasks = (
+            generate_tasks(dict(manifest))
+            if track is Track.DIRECT
+            else generate_mcp_tasks(dict(manifest))
+        )
+    except TaskRecipeRegistryError as exc:
+        raise V2CompileError(f"task recipe coverage failed: {exc}") from exc
     graph_fact_registry = build_graph_fact_registry(snapshot)
 
     compiled: list[CompiledTask] = []
     for legacy in legacy_tasks:
+        try:
+            recipe = TASK_RECIPE_REGISTRY.recipe_for_task(
+                manifest, track.value, legacy.id
+            )
+        except TaskRecipeRegistryError as exc:
+            raise V2CompileError(f"task recipe coverage failed: {exc}") from exc
         drafts = _drafts_for_task(legacy, snapshot, paths)
         candidate_ids = tuple(
             _candidate_id(product, track, legacy.id, draft.claim) for draft in drafts
         )
         for candidate_id, draft in zip(candidate_ids, drafts, strict=True):
+            if draft.claim.kind != recipe.claim_kind:
+                raise V2CompileError(
+                    f"task {legacy.id!r} compiled as {draft.claim.kind!r}, but its recipe "
+                    f"declares {recipe.claim_kind!r}"
+                )
+            if draft.claim.semantics.value != recipe.semantics:
+                raise V2CompileError(
+                    f"task {legacy.id!r} compiled with {draft.claim.semantics.value!r} "
+                    f"semantics, but its recipe declares {recipe.semantics!r}"
+                )
             expected_cardinality = (
                 draft.expected_count
                 if draft.expected_count is not None
@@ -2518,10 +2544,10 @@ def compile_legacy_product(
                 legacy_task_id=legacy.id,
                 legacy_template_id=legacy.template_id,
                 legacy_grade_mode=legacy.grade_mode,
-                family=legacy.template_id,
-                tier=legacy.tier,
+                family=recipe.family,
+                tier=recipe.tier,
                 cost_band=_cost_band(binding),
-                path_concentration_key=f"legacy:{legacy.template_id}",
+                path_concentration_key=recipe.concentration_key,
                 candidate_task_ids=candidate_ids,
                 status=draft.status,
                 claim_kind=draft.claim.kind,
@@ -2562,6 +2588,16 @@ def compile_legacy_product(
             f"incomplete migration: missing={sorted(legacy_ids - migrated_ids)} "
             f"unknown={sorted(migrated_ids - legacy_ids)}"
         )
+    try:
+        validate_generated_recipe_coverage(
+            manifest,
+            TASK_RECIPE_REGISTRY,
+            track.value,
+            legacy_tasks,
+            corpus.tasks,
+        )
+    except TaskRecipeRegistryError as exc:
+        raise V2CompileError(f"task recipe coverage failed: {exc}") from exc
     return corpus
 
 
