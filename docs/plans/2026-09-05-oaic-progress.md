@@ -119,7 +119,23 @@ The combined process/status gate passed 47 tests; the simple generator/profile
 gate passed 15 tests. Independent manual review found no actionable issues in
 these changes. This is prerequisite hardening, not admission to later phases.
 Full updated validation passed: 1,061 tests in 279.18s; Ruff, lock, diff and
-secret checks passed. Installed-wheel revalidation follows this source commit.
+secret checks passed.
+
+Installed-wheel revalidation passed at `c08bd7afaced067a1c77c116f02236393203f11d`:
+
+- Fresh non-editable installation with 94 locked runtime dependencies on
+  macOS arm64/Python 3.12.13, outside the source checkout.
+- Direct CLI and isolated subprocess driver generated identical seed-67 ZIP
+  and manifest bytes under different clocks. The driver denied network/launcher
+  operations and source-checkout access; no personal-agent environment was used.
+- Direct and MCP task preflight returned successful receipts; zero model calls.
+- Wheel SHA-256: `8c4181fdb1a27576b971de83e0f2eace4f530f569c1f62b27af5a65b54243fa2`.
+
+This qualifies the named simple offline path on a fresh local environment only.
+It does not establish Linux portability, live graph equivalence, V30 campaign
+qualification or merged-source publication eligibility. Remaining P1 work includes
+real runner fake-transport crash/resume attempt/cooldown evidence, graph-drift and
+publication-refusal acceptance, and the required PR review/merge.
 
 Independent manual review of exactly `10a979e..0f0eaa8` found no confirmed
 production defects. A separate review of the new process-acceptance test file
