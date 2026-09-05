@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import json
 from dataclasses import replace
-from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from ori.cli import _build_manifest
 from ori.eval.tasks import TASK_RECIPE_REGISTRY, generate_mcp_tasks, generate_tasks
 from ori.eval.v2.task_recipes import (
     TaskRecipeRegistry,
@@ -16,8 +16,9 @@ from ori.eval.v2.task_recipes import (
     validate_generated_recipe_coverage,
     validate_manifest_recipe_coverage,
 )
-
-MANIFEST_PATH = Path("datasets/benchmarks/complex-v1-seed-4401_manifest.json")
+from ori.generator.benchmark_profiles import build_benchmark_generation_profile
+from ori.generator.phase4 import build_phase4_complex_graph
+from ori.generator.serializer import _build_zip
 
 
 def _recipe(**overrides: object) -> TaskVariantRecipe:
@@ -34,6 +35,19 @@ def _recipe(**overrides: object) -> TaskVariantRecipe:
     }
     values.update(overrides)
     return TaskVariantRecipe(**values)  # type: ignore[arg-type]
+
+
+@pytest.fixture(scope="module")
+def complex_manifest() -> dict[str, object]:
+    profile = build_benchmark_generation_profile("complex", seed=4401)
+    graph = build_phase4_complex_graph(
+        domain=profile.domain,
+        seed=4401,
+        users=profile.users,
+        workstations=profile.workstations,
+        servers=profile.servers,
+    )
+    return _build_manifest(graph, 4401, archive=_build_zip(graph))
 
 
 def test_registry_rejects_duplicate_recipe_and_task_emission_ids() -> None:
@@ -104,8 +118,10 @@ def test_support_only_template_requires_stable_exclusion_and_emits_no_task() -> 
         )
 
 
-def test_current_complex_manifest_has_deterministic_complete_recipe_coverage() -> None:
-    manifest = json.loads(MANIFEST_PATH.read_text())
+def test_current_complex_manifest_has_deterministic_complete_recipe_coverage(
+    complex_manifest: dict[str, object],
+) -> None:
+    manifest = complex_manifest
     planted_templates = {
         str(path["template_id"]) for path in manifest["planted_paths"]
     }
@@ -129,3 +145,53 @@ def test_current_complex_manifest_has_deterministic_complete_recipe_coverage() -
     assert len(mcp) == 62
     assert len({task.metadata["logical_recipe_id"] for task in direct}) == 42
     assert len({task.metadata["logical_recipe_id"] for task in mcp}) == 62
+
+    with pytest.raises(TaskRecipeRegistryError, match="duplicate IDs"):
+        validate_generated_recipe_coverage(
+            manifest,
+            TASK_RECIPE_REGISTRY,
+            "direct",
+            (*direct, direct[0]),
+        )
+
+
+@pytest.mark.parametrize(
+    "metadata_key",
+    ("recipe_family", "recipe_semantics", "recipe_concentration_key"),
+)
+def test_generated_tasks_must_retain_all_recipe_metadata(
+    metadata_key: str,
+    complex_manifest: dict[str, object],
+) -> None:
+    manifest = complex_manifest
+    tasks = generate_tasks(manifest)
+    changed_metadata = {**tasks[0].metadata, metadata_key: "drifted"}
+    changed = replace(tasks[0], metadata=changed_metadata)
+    with pytest.raises(TaskRecipeRegistryError, match=metadata_key):
+        validate_generated_recipe_coverage(
+            manifest,
+            TASK_RECIPE_REGISTRY,
+            "direct",
+            (changed, *tasks[1:]),
+        )
+
+
+def test_compiled_candidates_must_have_unique_public_task_ids(
+    complex_manifest: dict[str, object],
+) -> None:
+    tasks = generate_tasks(complex_manifest)
+    compiled = tuple(
+        SimpleNamespace(
+            public=SimpleNamespace(task_id=f"candidate:{task.id}"),
+            migration=SimpleNamespace(legacy_task_id=task.id),
+        )
+        for task in tasks
+    )
+    with pytest.raises(TaskRecipeRegistryError, match="duplicate IDs"):
+        validate_generated_recipe_coverage(
+            complex_manifest,
+            TASK_RECIPE_REGISTRY,
+            "direct",
+            tasks,
+            (*compiled, compiled[0]),
+        )

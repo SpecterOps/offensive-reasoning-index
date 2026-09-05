@@ -44,7 +44,14 @@ from ori.eval.v2.compiler import (
 from ori.eval.v2.determinism import corpus_contract_shape_fingerprint
 from ori.eval.v2.evidence import _KNOWN_TOP_LEVEL_FIELDS
 from ori.eval.v2.fingerprint import canonical_sha256, certifier_fingerprint
-from ori.eval.v2.fixtures import REQUIRED_FIXTURES, offline_certify
+from ori.eval.v2.fixtures import (
+    POLICY_COVERAGE_REGISTRY_FINGERPRINT,
+    REQUIRED_FIXTURES,
+    TaskFixtureManifest,
+    offline_certify,
+    policy_coverage_artifacts,
+    validate_fixture_coverage_artifacts,
+)
 from ori.eval.v2.graph import LiveGraphVerification, build_archive_snapshot
 from ori.eval.v2.mcp import build_mcp_capability_profile, classify_mcp_binding
 from ori.eval.v2.profiles import capability_profile_for_track
@@ -204,6 +211,65 @@ def test_seed_4401_set_and_count_oracles_retain_phase1_identity_digest(
             if task.oracle.claim.kind in {"set", "count"}
         ]
         assert canonical_sha256(rows) == expected[track]
+
+
+def test_fixture_exemption_registry_binds_executable_micrograph_artifacts(
+    complex_compiled,
+) -> None:
+    _, snapshot, direct, _ = complex_compiled
+    certifications = tuple(offline_certify(task, snapshot) for task in direct.tasks)
+    validate_fixture_coverage_artifacts(certifications)
+    assert {artifact["fixture_name"] for artifact in policy_coverage_artifacts()} == {
+        "alias",
+        "decoy",
+        "alternate_route",
+    }
+    fixture_manifest = offline_certify(direct.tasks[0], snapshot).fixtures
+    payload = fixture_manifest.model_dump(mode="python")
+    payload["coverage_registry_fingerprint"] = "0" * 64
+    with pytest.raises(ValueError, match="coverage registry is stale"):
+        TaskFixtureManifest.model_validate(payload)
+    assert (
+        fixture_manifest.coverage_registry_fingerprint
+        == POLICY_COVERAGE_REGISTRY_FINGERPRINT
+    )
+
+
+@pytest.mark.parametrize(
+    "migration_update",
+    (
+        {"family": "conflicting-family"},
+        {"tier": 6},
+        {"track": Track.DIRECT},
+        {"cost_band": "conflicting-cost"},
+        {"path_concentration_key": "conflicting:key"},
+    ),
+)
+def test_equivalent_candidates_must_agree_on_selector_metadata(
+    complex_compiled,
+    migration_update,
+) -> None:
+    _, _, _, mcp = complex_compiled
+    profile = capability_profile_for_track(Track.MCP)
+    by_semantics: dict[str, list[CompiledTask]] = {}
+    for task in mcp.tasks:
+        by_semantics.setdefault(public_semantic_fingerprint(task.public), []).append(task)
+    equivalent = next(tasks for tasks in by_semantics.values() if len(tasks) > 1)
+    changed_id = equivalent[-1].public.task_id
+    changed_tasks = tuple(
+        task.model_copy(
+            update={
+                "migration": task.migration.model_copy(update=migration_update)
+            }
+        )
+        if task.public.task_id == changed_id
+        else task
+        for task in mcp.tasks
+    )
+    changed_corpus = mcp.model_copy(update={"tasks": changed_tasks})
+    certifications = _candidate_certifications(changed_corpus, profile)
+    with pytest.raises(CertificationError, match="contradictory selector metadata"):
+        build_catalog_release(changed_corpus, certifications, profile)
 
 
 def _candidate_certifications(corpus, profile):

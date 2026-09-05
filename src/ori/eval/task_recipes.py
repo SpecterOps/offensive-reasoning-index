@@ -236,6 +236,14 @@ def validate_generated_recipe_coverage(
         for recipe in registry.recipes_for_track(manifest, track)
         for task_id in recipe.resolve_task_ids(manifest)
     }
+    actual_ids = [str(task.id) for task in generated_tasks]
+    duplicate_generated = sorted(
+        task_id for task_id, count in Counter(actual_ids).items() if count > 1
+    )
+    if duplicate_generated:
+        raise TaskRecipeRegistryError(
+            f"generated tasks contain duplicate IDs: {duplicate_generated}"
+        )
     actual = {str(task.id): task for task in generated_tasks}
     if set(actual) != set(expected):
         raise TaskRecipeRegistryError(
@@ -254,10 +262,19 @@ def validate_generated_recipe_coverage(
             raise TaskRecipeRegistryError(
                 f"generated task {task_id!r} disagrees with its template recipe"
             )
-        if int(getattr(task, "tier", -1)) != recipe.tier:
+        if metadata.get("recipe_tier") != recipe.tier:
             raise TaskRecipeRegistryError(
-                f"generated task {task_id!r} disagrees with its recipe tier"
+                f"generated task {task_id!r} lacks its declared recipe tier"
             )
+        for metadata_key, expected_value in (
+            ("recipe_family", recipe.family),
+            ("recipe_semantics", recipe.semantics),
+            ("recipe_concentration_key", recipe.concentration_key),
+        ):
+            if metadata.get(metadata_key) != expected_value:
+                raise TaskRecipeRegistryError(
+                    f"generated task {task_id!r} disagrees with {metadata_key}"
+                )
         generated_claim_kind = metadata.get(
             "recipe_claim_kind",
             _claim_kind(str(getattr(task, "grade_mode", ""))),
@@ -269,6 +286,14 @@ def validate_generated_recipe_coverage(
 
     if compiled_tasks is None:
         return
+    compiled_ids = [str(task.public.task_id) for task in compiled_tasks]
+    duplicate_compiled = sorted(
+        task_id for task_id, count in Counter(compiled_ids).items() if count > 1
+    )
+    if duplicate_compiled:
+        raise TaskRecipeRegistryError(
+            f"compiled candidates contain duplicate IDs: {duplicate_compiled}"
+        )
     compiled_by_legacy = Counter(
         str(task.migration.legacy_task_id) for task in compiled_tasks
     )

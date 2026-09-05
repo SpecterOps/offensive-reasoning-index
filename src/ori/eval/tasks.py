@@ -275,6 +275,15 @@ _TRANSITIVE_RECIPE_IDS = {
     "mcp-group-memberships-infra-team",
 }
 
+# These recipes are public-semantic duplicates of existing global selections.
+# Bind their selector-facing metadata explicitly to the already-released global
+# representative instead of inheriting metadata from task sort order later.
+_RECIPE_SELECTOR_METADATA_OVERRIDES = {
+    "t1_has_session-01": ("global", 1, "legacy:global"),
+    "t2_kerberoast_chain-02": ("global", 1, "legacy:global"),
+    "t3_unconstrained_delegation-02": ("global", 1, "legacy:global"),
+}
+
 
 def _return_projection_aliases(projection: str) -> list[str]:
     """Return stable aliases for a Cypher projection used across a WITH boundary."""
@@ -512,6 +521,10 @@ def _task_recipe_registry() -> TaskRecipeRegistry:
     for template_id, questions in sorted(template_questions.items()):
         for index, (_, _, grade_mode, _, _) in enumerate(questions, start=1):
             task_id = f"{template_id}-{index:02d}"
+            family, tier, concentration_key = _RECIPE_SELECTOR_METADATA_OVERRIDES.get(
+                task_id,
+                (template_id, int(template_id[1]), f"legacy:{template_id}"),
+            )
             recipes.append(
                 TaskVariantRecipe(
                     recipe_id=task_id,
@@ -519,10 +532,10 @@ def _task_recipe_registry() -> TaskRecipeRegistry:
                     legacy_task_id=task_id,
                     supported_tracks=("direct", "mcp"),
                     claim_kind=_recipe_claim_kind(task_id, grade_mode),
-                    family=template_id,
-                    tier=int(template_id[1]) if template_id.startswith("t") else 1,
+                    family=family,
+                    tier=tier,
                     semantics=("transitive" if task_id in _TRANSITIVE_RECIPE_IDS else "direct"),
-                    concentration_key=f"legacy:{template_id}",
+                    concentration_key=concentration_key,
                 )
             )
     for task_id, _, _, grade_mode, _ in _GLOBAL_TASKS:

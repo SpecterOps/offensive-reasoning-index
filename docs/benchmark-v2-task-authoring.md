@@ -329,9 +329,17 @@ The release contains one deterministic representative per unique public
 semantic fingerprint. Every equivalent task ID remains compiled,
 oracle-bound, and certified and is recorded in `equivalent_task_ids`. Promotion
 fails if two public-equivalent tasks have different sealed scorer outcomes.
+It also fails if equivalent tasks disagree on family, tier, track, cost band,
+or concentration key; representative ordering cannot choose quota metadata.
 The selector may consume only candidate-certified entries and must preserve all
 bound fingerprints. Selection policy, quotas, new attack paths, and official
 100/100 suites are intentionally separate from task correctness.
+
+The ordinary test suite includes an offline expansion matrix for complex seeds
+4401, 67, and fixed canary 4402. Each seed is generated twice and both tracks
+cross recipe coverage, compilation, fixtures, adapters, and semantic-equivalence
+validation. Seed 67 is a robustness input only; the matrix defines no selector,
+quota, taxonomy, or official-suite policy.
 
 The machine-readable contract is
 [`schemas/ori-v2-candidate-catalog.schema.json`](schemas/ori-v2-candidate-catalog.schema.json).

@@ -2,14 +2,20 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
+from functools import cache
 from typing import Any
 
 from pydantic import model_validator
 
 from .comparator import COMPARATOR_FINGERPRINT, compare
 from .compiler import CompiledTask, compiler_fingerprint
-from .evidence import EvidenceNormalizationError, validate_and_normalize_evidence
+from .evidence import (
+    EvidenceNormalizationError,
+    normalize_evidence,
+    validate_and_normalize_evidence,
+)
 from .fingerprint import canonical_sha256, certifier_fingerprint
 from .graph import GraphSnapshot, graph_identity_resolver
 from .identity import IdentityResolver
@@ -20,12 +26,21 @@ from .schema import (
     DecisionPolicy,
     EdgeWitness,
     EntityPropertyFact,
+    EntityRef,
     EvidenceIR,
     ExactCountPolicy,
     ExactRoutePolicy,
     ExactSetPolicy,
     MechanismValidRoutePolicy,
     NegativeReasonCode,
+    OracleBundle,
+    PathStatus,
+    PopulationScope,
+    RelationshipSemantics,
+    RouteClaim,
+    RouteVariant,
+    SelectionExpression,
+    SetClaim,
     StrictModel,
     TaskCertification,
     VerdictStatus,
@@ -48,11 +63,213 @@ ROUTE_ADVERSARIAL_FIXTURES = (
     "source_mismatch",
 )
 
-_POLICY_COVERAGE = {
-    "alias_not_applicable": "micrograph.identity-alias-v2",
-    "decoy_not_applicable": "micrograph.route-decoy-v2",
-    "alternate_not_applicable": "micrograph.route-alternative-v2",
+_FP = "a" * 64
+
+
+def _micro_entity(object_id: str, name: str, *, aliases: tuple[str, ...] = ()) -> EntityRef:
+    return EntityRef(
+        object_id=object_id,
+        object_type="User" if object_id != "TARGET" else "Group",
+        role="fixture",
+        canonical_name=f"{name}@EXAMPLE.LOCAL",
+        domain="EXAMPLE.LOCAL",
+        aliases=aliases,
+    )
+
+
+_MICRO_ALICE = _micro_entity("ALICE", "alice", aliases=("alice",))
+_MICRO_BOB = _micro_entity("BOB", "bob")
+_MICRO_CAROL = _micro_entity("CAROL", "carol")
+_MICRO_TARGET = _micro_entity("TARGET", "target")
+_MICRO_CANONICAL = (
+    EdgeWitness(source_id="ALICE", relationship="GenericAll", target_id="BOB"),
+    EdgeWitness(source_id="BOB", relationship="MemberOf", target_id="TARGET"),
+)
+_MICRO_ALTERNATE = (
+    EdgeWitness(source_id="ALICE", relationship="GenericAll", target_id="CAROL"),
+    EdgeWitness(source_id="CAROL", relationship="MemberOf", target_id="TARGET"),
+)
+
+
+def _micro_oracle(
+    task_id: str,
+    *,
+    expected_entities: tuple[EntityRef, ...] = (),
+    route_variants: tuple[RouteVariant, ...] = (),
+    graph_edges: tuple[EdgeWitness, ...] = (),
+    forbidden_entity_ids: tuple[str, ...] = (),
+):
+    claim = (
+        RouteClaim(
+            kind="route",
+            claim_id=task_id,
+            source={"role": "source", "object_type": "User"},
+            target={"role": "target", "object_type": "Group"},
+            semantics=RelationshipSemantics.DIRECT,
+            population_scope=PopulationScope.DECLARED,
+            required_mechanisms=("GenericAll", "MemberOf"),
+            max_hops=2,
+        )
+        if route_variants
+        else SetClaim(
+            kind="set",
+            claim_id=task_id,
+            selection=SelectionExpression(
+                projection_role="result",
+                projection_type="User",
+            ),
+            semantics=RelationshipSemantics.DIRECT,
+            population_scope=PopulationScope.DECLARED,
+        )
+    )
+    return OracleBundle.model_construct(
+        oracle_id=f"oracle:{task_id}",
+        task_id=task_id,
+        claim=claim,
+        claim_fingerprint=_FP,
+        task_fingerprint=_FP,
+        graph_fingerprint=_FP,
+        graph_fact_registry_fingerprint=_FP,
+        expected_entities=expected_entities,
+        route_variants=route_variants,
+        graph_edge_registry=graph_edges,
+        required_mechanisms=("GenericAll", "MemberOf") if route_variants else (),
+        source_id="ALICE" if route_variants else None,
+        target_id="TARGET" if route_variants else None,
+        forbidden_entity_ids=forbidden_entity_ids,
+        oracle_fingerprint=_FP,
+    )
+
+
+@cache
+def _prove_identity_alias() -> bool:
+    task_id = "micrograph.identity-alias-v3"
+    resolver = IdentityResolver((_MICRO_ALICE,))
+    evidence = normalize_evidence(
+        {"task_id": task_id, "entities": ["alice"]},
+        resolver=resolver,
+        task_id=task_id,
+    )
+    oracle = _micro_oracle(task_id, expected_entities=(_MICRO_ALICE,))
+    return (
+        compare(ExactSetPolicy(kind="exact_set"), oracle, evidence).status
+        is VerdictStatus.CORRECT
+    )
+
+
+def _route_evidence(task_id: str) -> EvidenceIR:
+    return EvidenceIR(
+        task_id=task_id,
+        entities=(_MICRO_ALICE, _MICRO_CAROL, _MICRO_TARGET),
+        edges=_MICRO_ALTERNATE,
+        path_status=PathStatus.FOUND,
+        raw_digest=_FP,
+    )
+
+
+@cache
+def _prove_route_decoy() -> bool:
+    task_id = "micrograph.route-decoy-v3"
+    oracle = _micro_oracle(
+        task_id,
+        route_variants=(RouteVariant(variant_id="canonical", edges=_MICRO_CANONICAL),),
+        graph_edges=(*_MICRO_CANONICAL, *_MICRO_ALTERNATE),
+        forbidden_entity_ids=("CAROL",),
+    )
+    return (
+        compare(
+            MechanismValidRoutePolicy(kind="mechanism_valid_route"),
+            oracle,
+            _route_evidence(task_id),
+        ).status
+        is VerdictStatus.INCORRECT
+    )
+
+
+@cache
+def _prove_route_alternative() -> bool:
+    task_id = "micrograph.route-alternative-v3"
+    oracle = _micro_oracle(
+        task_id,
+        route_variants=(RouteVariant(variant_id="canonical", edges=_MICRO_CANONICAL),),
+        graph_edges=(*_MICRO_CANONICAL, *_MICRO_ALTERNATE),
+    )
+    return (
+        compare(
+            MechanismValidRoutePolicy(kind="mechanism_valid_route"),
+            oracle,
+            _route_evidence(task_id),
+        ).status
+        is VerdictStatus.CORRECT
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _CoverageProof:
+    artifact_id: str
+    fixture_name: str
+    expectation: str
+    prover: Callable[[], bool]
+
+
+_POLICY_COVERAGE_PROOFS = {
+    "micrograph.identity-alias-v3": _CoverageProof(
+        "micrograph.identity-alias-v3",
+        "alias",
+        "unambiguous aliases normalize and satisfy an exact set",
+        _prove_identity_alias,
+    ),
+    "micrograph.route-decoy-v3": _CoverageProof(
+        "micrograph.route-decoy-v3",
+        "decoy",
+        "a graph-attested route through a forbidden identity is rejected",
+        _prove_route_decoy,
+    ),
+    "micrograph.route-alternative-v3": _CoverageProof(
+        "micrograph.route-alternative-v3",
+        "alternate_route",
+        "a graph-attested alternate mechanism route is accepted",
+        _prove_route_alternative,
+    ),
 }
+_POLICY_COVERAGE = {
+    "alias_not_applicable": "micrograph.identity-alias-v3",
+    "decoy_not_applicable": "micrograph.route-decoy-v3",
+    "alternate_not_applicable": "micrograph.route-alternative-v3",
+}
+POLICY_COVERAGE_REGISTRY_FINGERPRINT = canonical_sha256(
+    tuple(
+        {
+            "artifact_id": proof.artifact_id,
+            "fixture_name": proof.fixture_name,
+            "expectation": proof.expectation,
+            "prover": proof.prover.__name__,
+        }
+        for _, proof in sorted(_POLICY_COVERAGE_PROOFS.items())
+    )
+)
+
+
+def _require_executable_coverage(coverage_id: str) -> None:
+    proof = _POLICY_COVERAGE_PROOFS.get(coverage_id)
+    if proof is None:
+        raise ValueError(f"unknown or stale fixture coverage ID: {coverage_id!r}")
+    if not proof.prover():
+        raise ValueError(f"fixture coverage proof failed: {coverage_id!r}")
+
+
+def policy_coverage_artifacts() -> tuple[Mapping[str, str], ...]:
+    """Return fingerprinted metadata for each executable micrograph proof."""
+
+    return tuple(
+        {
+            "artifact_id": proof.artifact_id,
+            "fixture_name": proof.fixture_name,
+            "expectation": proof.expectation,
+            "prover": proof.prover.__name__,
+        }
+        for _, proof in sorted(_POLICY_COVERAGE_PROOFS.items())
+    )
 
 
 class FixtureCase(StrictModel):
@@ -91,6 +308,8 @@ class FixtureCase(StrictModel):
             )
         elif self.answer_payload is not None:
             raise ValueError("inapplicable fixtures cannot carry an answer payload")
+        if not self.applicable and self.coverage_id is not None:
+            _require_executable_coverage(self.coverage_id)
         return self
 
 
@@ -99,11 +318,14 @@ class TaskFixtureManifest(StrictModel):
     task_fingerprint: str
     oracle_fingerprint: str
     comparator_fingerprint: str
+    coverage_registry_fingerprint: str
     cases: tuple[FixtureCase, ...]
     fixture_fingerprint: str
 
     @model_validator(mode="after")
     def manifest_is_complete(self) -> TaskFixtureManifest:
+        if self.coverage_registry_fingerprint != POLICY_COVERAGE_REGISTRY_FINGERPRINT:
+            raise ValueError("fixture coverage registry is stale")
         names = [case.name for case in self.cases]
         if len(names) != len(set(names)):
             raise ValueError("fixture names must be unique")
@@ -119,6 +341,24 @@ class TaskFixtureManifest(StrictModel):
 class OfflineCertification(StrictModel):
     certification: TaskCertification
     fixtures: TaskFixtureManifest
+
+
+def validate_fixture_coverage_artifacts(
+    certifications: Sequence[OfflineCertification],
+) -> None:
+    """Require every exemption ID to bind an executed, gradeable fixture artifact."""
+
+    used_ids = {
+        case.coverage_id
+        for certification in certifications
+        for case in certification.fixtures.cases
+        if not case.applicable and case.coverage_id is not None
+    }
+    unknown_ids = sorted(used_ids - set(_POLICY_COVERAGE_PROOFS))
+    if unknown_ids:
+        raise ValueError(f"unknown fixture coverage IDs: {unknown_ids}")
+    for coverage_id in sorted(_POLICY_COVERAGE_PROOFS):
+        _require_executable_coverage(coverage_id)
 
 
 def _entity_token(snapshot: GraphSnapshot, object_id: str) -> str:
@@ -717,6 +957,7 @@ def build_fixture_manifest(
         "task_fingerprint": task.public.task_fingerprint,
         "oracle_fingerprint": task.oracle.oracle_fingerprint,
         "comparator_fingerprint": COMPARATOR_FINGERPRINT,
+        "coverage_registry_fingerprint": POLICY_COVERAGE_REGISTRY_FINGERPRINT,
         "cases": tuple(cases),
         "fixture_fingerprint": "0" * 64,
     }
