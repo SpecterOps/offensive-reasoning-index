@@ -17,7 +17,7 @@ existing 29-commit development lineage above master without rewriting it.
 | P1-W01 inventory | complete | branch reviewer | Full ancestry/patch/lock comparison below; no missing patch identified |
 | P1-W02 consolidated worktree | complete | integration | Development lineage preserved; remote branch verified at 82e2c7a with plan and process tests |
 | P1-W03 V30 independent review | manual pass | independent reviewer | Exact 10a979e..0f0eaa8 and new process tests: no confirmed findings; automated review unavailable |
-| P1-W04 host acceptance | incomplete | operations | Eleven local real-process checks pass; full graph/transport acceptance and merged-source binding remain |
+| P1-W04 host acceptance | incomplete | operations | Local CLI/process checks plus real scheduler recovery and graph-publication refusal coverage; controlled-host qualification and merged-source binding remain |
 | P1-W05 PR/merge | blocked | integration/user | GitHub CLI SAML authorization missing; connector cannot access repository |
 | P2 cleanup | pending dependency | engineering | Requires P1 gate |
 | P3 local Qwen | pending endpoint qualification | operations | Operator-provisioned inference; no reservation or agent dependency in ORI |
@@ -134,8 +134,49 @@ Installed-wheel revalidation passed at `c08bd7afaced067a1c77c116f02236393203f11d
 This qualifies the named simple offline path on a fresh local environment only.
 It does not establish Linux portability, live graph equivalence, V30 campaign
 qualification or merged-source publication eligibility. Remaining P1 work includes
-real runner fake-transport crash/resume attempt/cooldown evidence, graph-drift and
-publication-refusal acceptance, and the required PR review/merge.
+controlled-host replay of the acceptance scenarios, live graph qualification,
+and the required PR review/merge. Local scheduler and publication coverage added
+below closes the previously identified offline test gaps, not those host gates.
+
+## Additional P1 recovery and publication acceptance
+
+Two test files exercise the previously missing production boundaries without
+contacting model providers or live graph services:
+
+- `test_v2_attempt_process_acceptance.py`: five fresh interpreters cross the real
+  scheduler, Direct task runtime, atomic checkpoint writes and validated reload.
+  Synthetic provider failure drives two durable cooldown interruptions, recovery
+  rounds, monotonic attempts 1/2/3 and lifetime retry exhaustion. Restart retains
+  the persisted not-before deadline and cannot reset the retry allowance. Task,
+  certification and provenance fixtures are synthetic; the campaign-wide wrapper
+  is covered separately by the existing process tests.
+- `test_v2_publication_acceptance.py`: matching-graph execution and drift at each
+  of the four independent Direct/MCP pre/post gates cross actual orchestration,
+  scheduling, graph comparison, checkpoints, lifecycle and report publication.
+  Drift refuses new reports; already published Direct evidence stays byte-identical
+  when a later MCP gate fails. Preparation, task runtime, graph acquisition and
+  MCP launch are test doubles. These tests do not qualify candidate admission,
+  real model transports, MCP behavior or a live BloodHound graph.
+
+Fresh complex seed-4401 generation and both offline compilation commands passed
+against source `0585f78fd2ef32ad4e300974a8932707135a7738`. The Direct inventory
+contains 46 offline-certified tasks and 462 fixture cases; MCP contains 70 and
+655 respectively. Both certification receipts contain zero failures.
+
+- Archive SHA-256: `a00e60e0f7ba8a02bcfee74e0ef1b99d7e46107d25b5172ffb1231e51f8f5edb`.
+- Manifest SHA-256: `d2dd22a037a3d8f2d4055c2792a5abee8806a43a2900519378e0b1822c314be9`.
+- Archive-derived graph: `fb0b6785e524d40abcc9033ea2c7887eaa88e13bb6cb1f329636a4ce4b74b1c4`.
+
+Private compiler/oracle/certification artifacts remain under ignored results.
+This is existing V30 proof-inventory evidence, not a live certificate, the future
+unique-contract pool, or the OAIC selected 50/50 release. No source production
+code changed during this additional acceptance pass.
+
+The six new acceptance scenarios passed together in 11.73s. The full suite passed:
+1,067 tests in 284.79s. Independent manual review of both files found no actionable
+issues. Ruff and lockfile checks passed;
+the staged test/documentation secret scan was clean. These results are offline
+acceptance evidence only, not permission to bypass the P1 merge/host gate.
 
 Independent manual review of exactly `10a979e..0f0eaa8` found no confirmed
 production defects. A separate review of the new process-acceptance test file
