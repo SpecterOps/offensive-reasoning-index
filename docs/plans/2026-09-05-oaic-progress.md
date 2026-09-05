@@ -15,7 +15,7 @@ existing 29-commit development lineage above master without rewriting it.
 | P0-W01 durable plan | complete | integration | Approved contract saved with this ledger |
 | P0-N01/N02 mobile pairing/test | pending user | user/integration | Native readiness question issued; delivery not verified |
 | P1-W01 inventory | complete | branch reviewer | Full ancestry/patch/lock comparison below; no missing patch identified |
-| P1-W02 consolidated worktree | running | integration | Clean branch created from master and fast-forwarded to 0f0eaa8; push pending |
+| P1-W02 consolidated worktree | complete | integration | Development lineage preserved; remote branch verified at 82e2c7a with plan and process tests |
 | P1-W03 V30 independent review | running | independent reviewer | Review scope 10a979e..0f0eaa8; no provider calls |
 | P1-W04 host acceptance | incomplete | operations | Six local real-process tests pass; controlled-host source is still 8ad6f94, not qualified HEAD |
 | P1-W05 PR/merge | blocked | integration/user | GitHub CLI SAML authorization missing; connector cannot access repository |
@@ -53,7 +53,8 @@ existing 29-commit development lineage above master without rewriting it.
 
 - GitHub CLI authenticated repository API access requires organization SAML
   authorization. Git fetch succeeds; the configured connector returns inaccessible
-  repository errors. No authentication values are copied into this ledger.
+  repository errors. Branch push succeeded, but draft PR creation was rejected
+  by SAML enforcement. No PR exists yet. No authentication values are copied here.
 - Phone alert delivery requires end-to-end user confirmation.
 - The known GPU reservation/release wrappers invoke an intentionally retired
   implementation that returns success without acquiring a reservation. Bounded
@@ -122,8 +123,8 @@ metadata only was inspected, and neither is staged.
 ## Current validation
 
 - Fresh isolated environment installed with `uv sync --frozen` on Python 3.12.13.
-- Gitleaks scanned integrated history including the execution-plan commit:
-  29 non-merge commits, no leaks. Documentation and test directory scans passed.
+- Gitleaks scanned integrated history through the process-test commit:
+  30 non-merge commits, no leaks. Documentation and test directory scans passed.
 - Focused supervisor/status/durability/runtime/scoring gate: 92 passed in 7.82s.
 - Ruff, lockfile validation and diff checks passed in the isolated worktree.
 - Fresh Python 3.12 baseline full suite: 1,042 passed in 250.15s.
