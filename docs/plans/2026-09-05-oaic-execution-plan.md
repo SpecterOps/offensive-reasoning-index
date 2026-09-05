@@ -18,13 +18,29 @@ an offline conference package, and a vendor-neutral OpenGraph framework design.
 - Publication baseline: reviewed code merged into `master`.
 - Hosted ceiling: USD 2,000 including canaries.
 - Main release: 50 Direct plus 50 MCP tasks; never combine track scores.
-- Local development: frozen Qwen3.8-27B deployment under its reservation boundary.
+- Local development: frozen Qwen3.8-27B inference endpoint provisioned externally.
 
 V30 qualification is a hard prerequisite for dependent implementation. Historical
 V29 evidence does not certify new code. Deadline arrival, passing tests, an open
 PR, or partial results do not mean the complete program is finished.
 
 ## Execution and ownership
+
+ORI is a portable benchmark, not a machine or model-service manager. It must
+run without a personal agent installation, private hostname, workstation layout,
+GPU reservation command or service-control integration. Operators provision
+inference and BloodHound independently; ORI consumes explicit endpoint/model,
+credential-source and artifact configuration. Local and remote inference use
+the same supported provider interfaces. No machine-specific provisioning hook
+is an ORI readiness, installation, execution or reporting prerequisite.
+Controlled-host acceptance may run on any declared machine satisfying the
+documented requirements; no historical operator machine is required.
+Both an interactive operator and an external automation agent use the same
+documented CLI. External automation may invoke ORI locally or on a configured
+execution host; transport and process supervision remain outside the benchmark.
+Preserve config-file inputs, meaningful exit codes, no-provider readiness,
+redacted `campaign-status --json`, durable results, exclusive campaign locks,
+and fingerprint-checked resume. No agent-specific API or alternate scoring path.
 
 Root owns integration, shared schemas, gates and evidence reconciliation. Assign
 non-overlapping compiler/scorer, runtime/MCP, and operations/reporting work to
@@ -100,22 +116,42 @@ the V30 baseline is merged. Downstream cleanup/features cannot bypass this gate.
   environment. Retain only repeatable improvements with equivalent behavior.
 - P2-W07: independent review, differential checks, full pytest/Ruff/lock/diff and
   secret checks; merge cleanup before dependent implementation.
+- P2-W08: qualify public installation on clean Linux and macOS machines using
+  documented dependencies only, with no private agent files or operator tools.
+  Exercise arbitrary checkout/config/output paths (including spaces), explicit
+  local and remote inference URLs, and a controlled BloodHound endpoint. Run
+  model-free config/credential-routing tests plus no-provider readiness, using
+  offline doubles for deterministic tests. Verify missing credentials/endpoints
+  produce actionable typed failures, never discovery of private installations.
+  Test executable campaign behavior with fake transports before model admission.
+  Qualify both direct terminal invocation and a generic external CLI driver:
+  readiness without `--execute`, explicit execution admission, status polling,
+  duplicate-launch rejection, interruption and exact-config resume. Driver tests
+  must not import or install a particular personal agent. Preserve the existing
+  supervisor CLI as optional tooling, not a prerequisite for standalone use.
+  Record exact OS/Python/dependency versions and receipts. Do not claim Windows
+  support without separate qualification of POSIX lock/signal dependencies.
+  Public examples use loopback or reserved placeholder domains; preserve legacy
+  config parsing and privately held operator configs when sanitizing examples.
 
 Source refactors may invalidate fingerprints despite equivalent behavior. Update
 coverage for moved modules; regenerate evidence instead of weakening fingerprints.
 
 ## P3: local Qwen qualification (September 7-9)
 
-- P3-W01: inspect actual host, services/routes, GPU use, files, engine revisions
-  and reservation mechanism. Historical notes are not current configuration proof.
-- P3-W02: acquire the existing reservation; record scope and ownership; do not
-  interrupt unrelated jobs or promote production routes.
-- P3-W03: freeze model repository/revision/files/sizes/SHA-256, quantization,
+- P3-W01: obtain an operator-provisioned endpoint, exact served model ID and
+  deployment metadata. Provisioning and any scheduling remain outside ORI.
+  Do not add reservation, SSH, agent, model-loading or service-management code.
+- P3-W02: validate explicit endpoint configuration and protocol compatibility;
+  missing or unavailable inference is an endpoint prerequisite, not a requirement
+  to install an orchestration service. No provider calls during readiness.
+- P3-W03: record operator-supplied model repository/revision/files/sizes/SHA-256, quantization,
   tokenizer/template, llama.cpp and llama-swap revisions, context/output reserve,
   KV/GPU placement, slots/batches/cache, sampler/seed/thinking and launch controls.
 - P3-W04: verify fit, actual placement, no truncation, native calls/arguments,
   dependent turns, schema finalization, cancellation/accounting and restart.
-- P3-W05: restore prior state and release the reservation, with a receipt.
+- P3-W05: close ORI-owned client connections and checkpoint artifacts. Do not
+  stop, unload, reserve or release externally managed model services.
 
 All model-in-the-loop development uses this profile; material changes invalidate
 affected qualification. Deterministic unit/compiler/scorer tests remain model-free.
@@ -265,7 +301,7 @@ affected qualification. Deterministic unit/compiler/scorer tests remain model-fr
 
 ## P10: offline package (September 19-29)
 
-- P10-W01: copy-pasteable setup/reserve/generate/certify/select/readiness/budget/
+- P10-W01: copy-pasteable setup/configure-endpoint/generate/certify/select/readiness/budget/
   execute/status/resume/stop/export/read-results runbook.
 - P10-W02: separate hosted Direct/main MCP, native-MCP comparison and local charts;
   display validity/denominators/repeats/missing telemetry/uncertainty; no composite.

@@ -3,6 +3,12 @@
 These templates show common ways to connect ORI to local or hosted inference
 providers. They are intentionally sanitized and disabled by default.
 
+ORI connects to an already running inference API. It does not require a personal
+agent, GPU reservation helper, particular hostname or model-service manager.
+Replace the endpoint with your local or remote service address. Provisioning and
+service lifecycle are operator responsibilities outside the benchmark; the
+chosen deployment tool does not change ORI's configuration contract.
+
 Use them as copy-and-edit starting points:
 
 1. Copy one template to a local run config, for example:
@@ -42,7 +48,7 @@ Use them as copy-and-edit starting points:
 
 These examples are public-safe templates. Real inference routing files should
 remain local-only when they contain private hostnames, private model aliases,
-local output directories, reservation state, or internal network details.
+local output directories or internal network details.
 
 The Nous template includes disabled direct and MCP profiles for the current Ox
 Alpha catalog entry, `openai-compat/stealth/ox-alpha`. Set `NOUS_API_KEY` (or

@@ -32,17 +32,16 @@ def test_phase3_m4_preflight_loads_with_unquoted_resource_mode_off() -> None:
     assert resolved.resource_mode == "off"
 
 
-def test_death_star_profiles_use_openai_compatible_endpoint() -> None:
+def test_legacy_profiles_use_portable_openai_compatible_endpoint() -> None:
     resolved = load_run_profile(
         Path("run-config-death-star.yaml"), profile_name="death_star_qwen_fast_mcp"
     )
 
     assert resolved.kind == "baseline_mcp"
     assert resolved.concurrency == 1
-    assert resolved.model_base_url == "http://death-star:8080/v1"
-    assert resolved.manifest == (
-        "/Users/anton/projects/ori-run-artifacts/"
-        "phase4b-v2-medium-corp-20260603/medium/manifest.json"
+    assert resolved.model_base_url == "http://127.0.0.1:8080/v1"
+    assert resolved.manifest == str(
+        Path("datasets/benchmarks/complex-v1-seed-4401_manifest.json").resolve()
     )
     assert resolved.output_dir is not None
     assert resolved.output_dir.endswith("results/death-star/phase4b-v2-medium/qwen-fast-mcp")
@@ -57,6 +56,26 @@ def test_death_star_profiles_use_openai_compatible_endpoint() -> None:
             "options": {"temperature": 0},
         }
     ]
+
+
+def test_legacy_profiles_relocate_and_accept_remote_endpoint(tmp_path: Path, monkeypatch) -> None:
+    source = Path("run-config-death-star.yaml").read_text()
+    config = tmp_path / "run.yaml"
+    config.write_text(source)
+    monkeypatch.setattr("os.environ", {})
+    for profile in list_run_profiles(config):
+        resolved = load_run_profile(
+            config,
+            profile_name=profile.profile_name,
+            overrides=RunConfigOverrides(model_base_url="https://inference.example.test/v1"),
+        )
+        assert resolved.model_base_url == "https://inference.example.test/v1"
+        assert resolved.manifest == str(
+            tmp_path / "datasets/benchmarks/complex-v1-seed-4401_manifest.json"
+        )
+        assert resolved.output_dir is not None
+        assert Path(resolved.output_dir).is_relative_to(tmp_path)
+        assert resolved.mcp_dir == str((tmp_path / "../bloodhound-mcp").resolve())
 
 
 def test_load_run_profile_resolves_paths_and_defaults(tmp_path: Path) -> None:

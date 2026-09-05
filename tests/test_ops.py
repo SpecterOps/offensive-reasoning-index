@@ -998,17 +998,32 @@ models:
     }
 
 
-def test_death_star_models_file_uses_openai_compat_qwen_fast() -> None:
+def test_legacy_models_file_uses_portable_openai_compat_qwen_fast() -> None:
     spec = _build_run_specs(models=(), models_file="models-death-star.yaml")[0]
 
     assert spec.run_name == "death-star-qwen-fast-64k"
     assert spec.requested_model == "openai-compat/qwen-fast"
-    assert spec.model_base_url == "http://death-star:8080/v1"
+    assert spec.model_base_url == "http://127.0.0.1:8080/v1"
     assert spec.concurrency == 1
     assert spec.mcp_tool_loop == "native-openai-compatible"
     assert spec.openai_compat_telemetry_adapter == "llama-cpp"
     assert spec.mcp_ollama_read_timeout_seconds == 1800
     assert spec.ollama_options == {"temperature": 0}
+
+
+def test_legacy_models_file_accepts_relocated_remote_server(tmp_path: Path, monkeypatch) -> None:
+    contents = yaml.safe_load(Path("models-death-star.yaml").read_text())
+    for entry in contents["models"]:
+        entry["model_base_url"] = "https://inference.example.test/v1"
+    relocated = tmp_path / "models.yaml"
+    relocated.write_text(yaml.safe_dump(contents))
+    monkeypatch.setattr("os.environ", {})
+
+    specs = _build_run_specs(models=(), models_file=str(relocated))
+
+    assert len(specs) == len(contents["models"])
+    assert all(spec.model_base_url == "https://inference.example.test/v1" for spec in specs)
+    assert [spec.run_name for spec in specs] == [entry["name"] for entry in contents["models"]]
 
 
 def test_build_run_specs_auto_names_same_model_different_options(tmp_path: Path) -> None:

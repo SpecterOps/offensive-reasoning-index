@@ -151,8 +151,8 @@ profiles:
       options:
         temperature: 0
 
-  # Current Nous Portal Ox Alpha model. Start with the direct profile because
-  # the Nous/Hermes tracker has an open report for some tool-enabled requests.
+  # Nous Portal Ox Alpha example. Validate direct behavior first, then check
+  # tool-enabled compatibility independently before running the MCP profile.
   phase4_nous_ox_alpha_direct:
     enabled: false
     kind: eval

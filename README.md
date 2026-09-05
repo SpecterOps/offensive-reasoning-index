@@ -39,6 +39,21 @@ you are deliberately reproducing one of those older phase runs.
 
 ## Quick Start
 
+ORI runs as a standalone CLI; no personal agent or orchestration service is
+required. Inference may run on the same machine, another machine, or a hosted
+provider. Configure its endpoint and exact model ID using the
+[inference examples](examples/inference/README.md), and configure your controlled
+BloodHound environment separately. Provisioning, GPU scheduling and model-service
+lifecycle management are outside ORI; ORI does not reserve hardware or start/stop
+your inference service. Keep machine-specific configuration and credentials local.
+
+You can invoke the same CLI manually or from an external automation agent.
+Automation uses config files, exit codes, persisted results and
+`ori campaign-status --config <config.yaml> --json`; it does not need a separate
+agent-specific benchmark integration. See the
+[campaign supervisor contract](docs/v2-campaign-supervisor-contract.md) for
+readiness, execution approval, status and safe resume behavior.
+
 Install dependencies:
 
 ```bash

@@ -20,7 +20,7 @@ existing 29-commit development lineage above master without rewriting it.
 | P1-W04 host acceptance | incomplete | operations | Six local real-process tests pass; controlled-host source is still 8ad6f94, not qualified HEAD |
 | P1-W05 PR/merge | blocked | integration/user | GitHub CLI SAML authorization missing; connector cannot access repository |
 | P2 cleanup | pending dependency | engineering | Requires P1 gate |
-| P3 local Qwen | blocked | operations/user | Known reservation wrappers invoke a retired inert script; governed successor unidentified |
+| P3 local Qwen | pending endpoint qualification | operations | Operator-provisioned inference; no reservation or agent dependency in ORI |
 | P4 library/selector | pending dependency | compiler | Requires stable P1/P2/P3 interfaces |
 | P5 native MCP/providers | pending dependency | runtime | Requires stable P1/P2/P3 interfaces |
 | P6 scorecard/budget | pending dependency | operations | Requires stable P1/P2 interfaces |
@@ -56,10 +56,42 @@ existing 29-commit development lineage above master without rewriting it.
   repository errors. Branch push succeeded, but draft PR creation was rejected
   by SAML enforcement. No PR exists yet. No authentication values are copied here.
 - Phone alert delivery requires end-to-end user confirmation.
-- The known GPU reservation/release wrappers invoke an intentionally retired
-  implementation that returns success without acquiring a reservation. Bounded
-  read-only discovery found no governed successor. Do not treat exit zero as
-  reservation evidence, reactivate old installers, or load the model.
+- Local inference is provisioned outside ORI. The previously recorded GPU
+  reservation blocker is withdrawn: no such mechanism is an ORI prerequisite.
+  Qualification still requires the configured endpoint and reproducibility
+  metadata, not any particular machine or agent installation.
+
+## Portability boundary correction
+
+The operator clarified that local model-service management is external to the
+public benchmark. Both standalone terminal use and an external automation agent
+driving the same CLI are required; neither gets a separate scoring/runtime path.
+The execution contract now explicitly forbids ORI-owned
+reservation, personal-agent, SSH or service-control dependencies. Source and
+package-dependency inspection found no existing dependency on those private
+systems. Public setup guidance describes endpoint configuration only. Clean
+Linux/macOS qualification is a release gate, not a claim of completed testing.
+
+Legacy example filenames/profile IDs remain compatible, but defaults now use
+loopback inference and config-relative dataset paths. Operators must set their
+own served model ID and endpoint; previous private configs are not rewritten.
+The historical rich-report helper requires `--run-root` and accepts an optional
+fresh `--output-dir`; existing outputs are preserved rather than overwritten.
+Its output remains private historical diagnostics, not certified public evidence.
+The archived-attribution test now runs against deterministic temporary fixtures
+instead of silently passing when a private artifact directory is unavailable.
+
+Validation of this correction: 163 focused configuration, provider, launcher,
+credential-routing and helper tests passed; Ruff, lock and diff checks passed.
+The complete updated suite passed: 1,053 tests in 255.14s on Python 3.12.13.
+Source distribution and wheel builds passed. The installed CLI help command
+also passed outside the checkout with an empty environment except system PATH.
+Independent manual review of all 16 changed files found no actionable issues;
+the automated review CLI remained unavailable. Clean-machine OS qualification
+is still pending, so these local checks do not establish that release gate.
+The package/runtime source has no personal-agent or private-host dependency.
+No benchmark model calls, remote host operations or service configuration changes
+were needed.
 
 ## Findings
 

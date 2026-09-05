@@ -32,9 +32,9 @@ profiles:
         temperature: 0
 
   # Ox Alpha is available through the same OpenAI-compatible Nous endpoint.
-  # Keep this disabled until the BloodHound health/ingest gates pass. The
-  # current Nous/Hermes compatibility issue affects some tool-enabled Ox Alpha
-  # requests, so validate the direct profile first.
+  # Keep this disabled until the BloodHound health/ingest gates pass.
+  # Validate direct behavior first, then independently check tool-enabled
+  # compatibility before enabling the MCP profile.
   eval_direct_nous_ox_alpha:
     enabled: false
     kind: eval

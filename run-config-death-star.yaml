@@ -1,18 +1,20 @@
 version: 1
 
-# Local/private ORI config for using death-star as an OpenAI-compatible
-# inference provider. Keep real benchmark runs concurrency=1 and reserve
-# death-star first so Hermes crons do not contend with the model under test.
+# Portable OpenAI-compatible example; legacy filename and profile IDs retained.
+# Profile IDs do not select a machine. Set model_base_url and model IDs for
+# your own local or remote inference server. Authentication, when needed, uses
+# OPENAI_COMPAT_API_KEY; BloodHound uses the documented BLOODHOUND_* environment
+# fields. No personal-agent installation or host reservation is required by ORI.
 #
-# Reserve/release pattern:
-#   deathstar-reserve --owner dogwalker --reason 'ORI run using death-star inference' --model qwen-fast --artifact-root results/death-star/phase4b-v2-medium/qwen-fast-mcp
-#   ori run run-config-death-star.yaml --profile death_star_qwen_fast_mcp
-#   deathstar-release
+# Generate the matching dataset and configure your MCP checkout before running:
+#   ori generate complex --seed 4401 --output datasets/benchmarks
+#   ori run --config run-config-death-star.yaml --profile death_star_qwen_fast_mcp
+# Paths below resolve relative to this config file, including after relocation.
 
 defaults:
   bhce_url: null
   concurrency: 1
-  model_base_url: http://death-star:8080/v1
+  model_base_url: http://127.0.0.1:8080/v1
   max_model_reruns_on_infra: 1
   health:
     timeout_seconds: 60
@@ -31,7 +33,7 @@ profiles:
   death_star_qwen_fast_direct:
     enabled: false
     kind: baseline
-    manifest: /Users/anton/projects/ori-run-artifacts/phase4b-v2-medium-corp-20260603/medium/manifest.json
+    manifest: datasets/benchmarks/complex-v1-seed-4401_manifest.json
     output_dir: results/death-star/phase4b-v2-medium/qwen-fast-direct
     models:
       - name: death-star-qwen-fast-64k
@@ -43,7 +45,7 @@ profiles:
   death_star_qwen_fast_mcp:
     enabled: false
     kind: baseline-mcp
-    manifest: /Users/anton/projects/ori-run-artifacts/phase4b-v2-medium-corp-20260603/medium/manifest.json
+    manifest: datasets/benchmarks/complex-v1-seed-4401_manifest.json
     output_dir: results/death-star/phase4b-v2-medium/qwen-fast-mcp
     mcp:
       max_steps: 20
@@ -61,7 +63,7 @@ profiles:
   death_star_qwen_large_mcp:
     enabled: false
     kind: baseline-mcp
-    manifest: /Users/anton/projects/ori-run-artifacts/phase4b-v2-medium-corp-20260603/medium/manifest.json
+    manifest: datasets/benchmarks/complex-v1-seed-4401_manifest.json
     output_dir: results/death-star/phase4b-v2-medium/qwen-large-mcp
     mcp:
       max_steps: 20

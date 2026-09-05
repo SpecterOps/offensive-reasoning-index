@@ -1,14 +1,13 @@
-# ORI model definitions for Matthew's death-star OpenAI-compatible llama-swap endpoint.
+# Portable OpenAI-compatible model examples (legacy filename retained).
 #
 # Use these with config-driven profiles or the baseline/baseline-mcp commands:
 #   ori baseline-mcp --manifest <manifest.json> --models-file models-death-star.yaml --output-dir <out>
 #
-# Operational rule: before any real benchmark where death-star is the model under
-# test, reserve the host so Hermes cron/agent traffic does not contend with the
-# eval:
-#   deathstar-reserve --owner dogwalker --reason 'ORI run using death-star inference' --model qwen-fast --artifact-root <run-root>
-#   ...run ORI...
-#   deathstar-release
+# Legacy model names are stable identifiers, not required hostnames. Set
+# model_base_url and model to the endpoint and model ID of your own server.
+# The loopback default works with a locally hosted OpenAI-compatible server.
+# Configure authentication through OPENAI_COMPAT_API_KEY when needed; never
+# put credentials in this file. Inference service management is external to ORI.
 
 defaults:
   concurrency: 1
@@ -16,7 +15,7 @@ defaults:
 models:
   - name: death-star-qwen-fast-64k
     model: openai-compat/qwen-fast
-    model_base_url: http://death-star:8080/v1
+    model_base_url: http://127.0.0.1:8080/v1
     mcp_tool_loop: native-openai-compatible
     openai_compat_telemetry_adapter: llama-cpp
     mcp_ollama_read_timeout_seconds: 1800
@@ -26,7 +25,7 @@ models:
 
   - name: death-star-qwen-large-262k
     model: openai-compat/qwen3.6-27b
-    model_base_url: http://death-star:8080/v1
+    model_base_url: http://127.0.0.1:8080/v1
     mcp_tool_loop: native-openai-compatible
     openai_compat_telemetry_adapter: llama-cpp
     mcp_ollama_read_timeout_seconds: 2400

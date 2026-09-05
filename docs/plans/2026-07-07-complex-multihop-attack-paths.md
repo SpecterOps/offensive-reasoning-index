@@ -1,6 +1,6 @@
 # Complex Multi-Hop Attack Paths and Questions Implementation Plan
 
-> **For Hermes:** Use subagent-driven-development skill to implement this plan task-by-task.
+> **Implementation note:** Follow the repository's engineering guidance when implementing this historical plan; no particular agent or orchestration tool is required.
 
 **Goal:** Build the next ORI complex benchmark layer: richer multi-hop attack paths, decoy/negative-control structures, and decision-oriented questions before enabling seeded selection across complex benchmark instances.
 

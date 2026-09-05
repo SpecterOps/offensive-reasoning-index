@@ -235,8 +235,8 @@ models:
     mcp_tool_loop: native-openai-compatible
 ```
 
-ORI normally resolves `uv` and `uvx` from `PATH`. If Hermes, Dogwalker, cron,
-or another non-interactive supervisor deliberately supplies a restricted
+ORI normally resolves `uv` and `uvx` from `PATH`. If a non-interactive
+supervisor deliberately supplies a restricted
 `PATH`, declare the operator-approved absolute executables in that supervisor's
 environment:
 
