@@ -10,13 +10,14 @@ mathematics behind these authoring rules.
 
 ## Authoring boundary
 
-Add a declarative claim recipe in `src/ori/eval/v2/compiler.py`. A recipe must
+Add a typed logical recipe through the task recipe registry exposed by
+`src/ori/eval/v2/task_recipes.py`, then add its declarative claim compiler. A recipe must
 define:
 
 1. a stable logical task and claim ID;
 2. one claim kind: route, set, count, decision, or absence;
 3. logical input/output roles and seed-resolved selectors;
-4. direct, transitive, or effective semantics;
+4. direct or explicitly bounded transitive semantics;
 5. population scope, mechanisms, ordering, context, and exclusions;
 6. one explicit answer policy;
 7. one solver-visible `AcceptanceSpec` compiled from that claim and policy;
@@ -27,6 +28,16 @@ Do not add a comparator branch keyed by task ID, template ID, family, tier, or
 prompt text. Do not parse reference Cypher to infer semantics. If a legacy
 capability cannot be expressed and certified, compilation must block it or
 replace it with an explicitly bounded equivalent.
+
+Selection relationships must use exact canonical BloodHound identifiers. Their
+role graph must be a connected, acyclic tree rooted at the projection role, and
+may contain at most 16 edges. The product of every declared relationship's
+`max_hops` cannot exceed 256. `effective`
+relationship semantics require a separately certified derivation and are not an
+authorable selection shape. `ClosedRouteVariants` remains a compatibility schema
+for previously sealed artifacts; new recipes must use `ExactRoute` or
+`MechanismValidRoute` until a dedicated closed-variant authoring and certification
+workflow is approved.
 
 The `AcceptanceSpec` must expose every semantic fact that can change the
 verdict without disclosing seed-resolved answer identities. This includes route
@@ -43,8 +54,8 @@ Use the narrowest correct policy:
 - `ExactRoute` for one exact ordered witness.
 - `MechanismValidRoute` when any sealed graph-valid route satisfying the
   declared objective, mechanism order, context, and exclusions is valid.
-- `ClosedRouteVariants` for a finite, explicitly sealed set of acceptable
-  routes.
+- `ClosedRouteVariants` is compatibility-only for previously sealed artifacts;
+  it is not available to new task recipes.
 - `BoundedNegative` for absence with a bounded proof and a mutation that would
   flip the oracle. Its declared proof operation and submitted answer must be
   compatible; for a count-zero route proof, do not additionally require hidden

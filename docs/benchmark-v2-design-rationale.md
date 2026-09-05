@@ -160,12 +160,15 @@ to ask the model to do.
 ### 1. One semantic source of truth
 
 `ClaimSpec` declares what is being asked: source and objective, population,
-direct/transitive/effective semantics, mechanisms, ordering, context,
+direct or bounded transitive semantics, mechanisms, ordering, context,
 exclusions, and bounds. The compiler derives the question, public acceptance
 specification, answer policy, oracle, and track bindings from that claim.
 
 This prevents a common benchmark failure: the prompt asks one thing while a
 hidden grader checks another.
+
+`effective` remains available only in capability metadata. It is not an
+authorable claim semantic until a separately certified derivation exists.
 
 ### 2. Identity before display text
 

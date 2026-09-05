@@ -27,8 +27,9 @@ scenario roles to seed-specific `EntityRef` identities and compiles:
 - a scorer-only `OracleBundle`;
 - certified execution bounds.
 
-Route, set, count, decision, and absence claims declare their direct,
-transitive, or effective semantics. Human-authored question text is a validated
+Route, set, count, decision, and absence claims declare direct or bounded
+transitive semantics. `effective` is capability metadata only until a separately
+certified derivation is implemented. Human-authored question text is a validated
 template over claim roles and requested answer fields; it cannot add hidden
 grading requirements. `AcceptanceSpec` is the complete public grading contract:
 policy, mechanisms and ordering, context, properties, exclusions, truthful-extra

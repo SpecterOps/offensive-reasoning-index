@@ -29,6 +29,7 @@ from .schema import (
     AbsenceClaim,
     AcceptanceSpec,
     AnswerPolicy,
+    AuthorableAnswerPolicy,
     BoundedNegativePolicy,
     ClaimSpec,
     ClosedRouteVariantsPolicy,
@@ -230,7 +231,7 @@ class MigrationInventoryArtifact(StrictModel):
 class _ClaimDraft:
     legacy: Task
     claim: ClaimSpec
-    policy: AnswerPolicy
+    policy: AuthorableAnswerPolicy
     question_template: str
     resolved_roles: tuple[EntityRef, ...]
     expected_entities: tuple[EntityRef, ...] = ()
@@ -583,7 +584,7 @@ def _route_draft(
     # for a single public source-to-target edge. Longer routes use the public
     # mechanism language and accept any graph-valid witness satisfying it.
     exact_route = len(path_edges) == 1
-    policy: AnswerPolicy = (
+    policy: AuthorableAnswerPolicy = (
         ExactRoutePolicy(kind="exact_route")
         if exact_route
         else MechanismValidRoutePolicy(kind="mechanism_valid_route")
@@ -1270,7 +1271,7 @@ def _selection_drafts(
                 f"limit {page_selection.limit}."
             )
         claim: ClaimSpec
-        policy: AnswerPolicy
+        policy: AuthorableAnswerPolicy
         if is_count:
             claim = CountClaim(
                 kind="count",
@@ -1767,7 +1768,7 @@ def _completeness_contract(
 
 def compile_acceptance_spec(
     claim: ClaimSpec,
-    policy: AnswerPolicy,
+    policy: AuthorableAnswerPolicy,
     binding: TrackBinding,
 ) -> AcceptanceSpec:
     """Compile the complete public grading contract without resolved witnesses."""
@@ -2281,7 +2282,7 @@ def _fingerprinted_task_bundle(
     task_id: str,
     product: str,
     claim: ClaimSpec,
-    policy: AnswerPolicy,
+    policy: AuthorableAnswerPolicy,
     binding: TrackBinding,
     input_entities: tuple[EntityRef, ...],
     question: str,

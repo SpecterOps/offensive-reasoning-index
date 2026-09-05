@@ -183,6 +183,29 @@ def _by_legacy(corpus, legacy_task_id: str):
     return [task for task in corpus.tasks if task.migration.legacy_task_id == legacy_task_id]
 
 
+def test_seed_4401_set_and_count_oracles_retain_phase1_identity_digest(
+    complex_compiled,
+) -> None:
+    _, _, direct, mcp = complex_compiled
+    expected = {
+        Track.DIRECT: "54ab18792f9b440b70f630f5f56aaad2f34356fd2bedb6d46cd7317a9c6aee19",
+        Track.MCP: "15db3964e16fbd5db88e6ddf75ce3794e937bf104307cffd8c2b5f596d19ab17",
+    }
+    for track, corpus in ((Track.DIRECT, direct), (Track.MCP, mcp)):
+        rows = [
+            {
+                "task": task.public.task_id,
+                "legacy": task.migration.legacy_task_id,
+                "kind": task.oracle.claim.kind,
+                "ids": [entity.object_id for entity in task.oracle.expected_entities],
+                "count": task.oracle.expected_count,
+            }
+            for task in corpus.tasks
+            if task.oracle.claim.kind in {"set", "count"}
+        ]
+        assert canonical_sha256(rows) == expected[track]
+
+
 def _candidate_certifications(corpus, profile):
     candidates = {}
     for task in corpus.tasks:
