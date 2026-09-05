@@ -24,15 +24,17 @@ from .campaign_runner import (
     ModelRunProvenanceV2,
     PrivateRunStateV2,
     TrackCompletionV2,
+    _attempt_consumes_retry_budget,
+    _attempt_is_retry_eligible,
 )
 from .schema import PROTOCOL_VERSION, StrictModel, Track
 
-CAMPAIGN_STATUS_SCHEMA_VERSION = "ori-v2-campaign-status-v1"
+CAMPAIGN_STATUS_SCHEMA_VERSION = "ori-v2-campaign-status-v2"
 _LIFECYCLE_NAME = "campaign-lifecycle-v2.private.json"
 _READINESS_NAME = "v2-run-readiness.private.json"
 _LOCK_NAME = ".ori-v2-campaign.lock"
 _PROVENANCE_NAME = "campaign-provenance-v2.json"
-_STATE_NAME = "run-state-v6.private.json"
+_STATE_NAME = "run-state-v7.private.json"
 _REPORT_NAME = "public-report-v2.json"
 _TRACK_RECEIPT_NAME = "track-completion-v2.private.json"
 
@@ -59,6 +61,12 @@ class CampaignRunStatusV1(StrictModel):
     expected_tasks: int | None = Field(default=None, strict=True, gt=0)
     started: bool
     checkpointed_results: int = Field(strict=True, ge=0)
+    terminal_results: int = Field(default=0, strict=True, ge=0)
+    pending_infra_retries: int = Field(default=0, strict=True, ge=0)
+    active_phase: Literal[
+        "not_started", "primary", "deferred_cooldown", "deferred_retry", "complete"
+    ] = "not_started"
+    recovery_round: int = Field(default=0, strict=True, ge=0)
     provider_attempts: int = Field(default=0, strict=True, ge=0)
     tokens_input: int = Field(default=0, strict=True, ge=0)
     tokens_output: int = Field(default=0, strict=True, ge=0)
@@ -73,6 +81,8 @@ class CampaignTrackStatusV1(StrictModel):
     expected_runs: int = Field(strict=True, gt=0)
     expected_tasks_per_run: int | None = Field(default=None, strict=True, gt=0)
     checkpointed_results: int = Field(strict=True, ge=0)
+    terminal_results: int = Field(default=0, strict=True, ge=0)
+    pending_infra_retries: int = Field(default=0, strict=True, ge=0)
     completed_results: int = Field(strict=True, ge=0)
     provider_attempts: int = Field(default=0, strict=True, ge=0)
     tokens_input: int = Field(default=0, strict=True, ge=0)
@@ -92,6 +102,8 @@ class CampaignProgressV1(StrictModel):
     runs_reported: int = Field(strict=True, ge=0)
     expected_results: int | None = Field(default=None, strict=True, gt=0)
     checkpointed_results: int = Field(strict=True, ge=0)
+    terminal_results: int = Field(default=0, strict=True, ge=0)
+    pending_infra_retries: int = Field(default=0, strict=True, ge=0)
     completed_results: int = Field(strict=True, ge=0)
     provider_attempts: int = Field(default=0, strict=True, ge=0)
     tokens_input: int = Field(default=0, strict=True, ge=0)
@@ -100,7 +112,7 @@ class CampaignProgressV1(StrictModel):
 
 
 class CampaignStatusV1(StrictModel):
-    schema_version: Literal["ori-v2-campaign-status-v1"] = CAMPAIGN_STATUS_SCHEMA_VERSION
+    schema_version: Literal["ori-v2-campaign-status-v2"] = CAMPAIGN_STATUS_SCHEMA_VERSION
     protocol_version: Literal["ori-eval-protocol-v2"] = PROTOCOL_VERSION
     source_config_fingerprint: str
     lifecycle_state: Literal[
@@ -124,6 +136,10 @@ class CampaignStatusV1(StrictModel):
     updated_at_utc: str | None = None
     resume_count: int = Field(default=0, strict=True, ge=0)
     active_run: ActiveRunIdentityV1 | None = None
+    active_phase: Literal[
+        "not_started", "primary", "deferred_cooldown", "deferred_retry", "complete"
+    ] = "not_started"
+    recovery_round: int = Field(default=0, strict=True, ge=0)
     completed_tracks: tuple[Track, ...] = ()
     progress: CampaignProgressV1
     tracks: tuple[CampaignTrackStatusV1, ...]
@@ -153,9 +169,7 @@ def _lock_is_contended(output_dir: Path) -> bool:
 
     lock_path = output_dir / _LOCK_NAME
     if not lock_path.exists():
-        raise CampaignStatusError(
-            "campaign lifecycle exists without its persistent campaign lock"
-        )
+        raise CampaignStatusError("campaign lifecycle exists without its persistent campaign lock")
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
     flags |= getattr(os, "O_NOFOLLOW", 0)
     try:
@@ -189,8 +203,7 @@ def _expected_runs(
 def _outcome_counts(values: list[str]) -> tuple[OutcomeCountV1, ...]:
     counts = Counter(values)
     return tuple(
-        OutcomeCountV1(outcome=outcome, count=count)
-        for outcome, count in sorted(counts.items())
+        OutcomeCountV1(outcome=outcome, count=count) for outcome, count in sorted(counts.items())
     )
 
 
@@ -211,9 +224,7 @@ def _assert_no_unexpected_run_directories(
                 raise ValueError
             run_index = int(run_component.removeprefix("run-"))
         except (IndexError, ValueError) as exc:
-            raise CampaignStatusError(
-                f"unexpected v2 run-state location: {relative}"
-            ) from exc
+            raise CampaignStatusError(f"unexpected v2 run-state location: {relative}") from exc
         if (track, model, run_index) not in expected:
             raise CampaignStatusError(f"run state is not selected by config: {relative}")
 
@@ -227,6 +238,7 @@ def _read_run(
     provider_model: str,
     run_index: int,
     expected_tasks: int | None,
+    max_infra_retries: int,
     track_receipt: TrackCompletionV2 | None,
     allow_uncommitted_report: bool,
 ) -> tuple[CampaignRunStatusV1, ModelRunProvenanceV2 | None]:
@@ -251,9 +263,7 @@ def _read_run(
             None,
         )
 
-    provenance = _load_model(
-        provenance_path, ModelRunProvenanceV2, "model-run provenance"
-    )
+    provenance = _load_model(provenance_path, ModelRunProvenanceV2, "model-run provenance")
     assert isinstance(provenance, ModelRunProvenanceV2)
     identity = provenance.run_identity
     if (
@@ -278,16 +288,13 @@ def _read_run(
         base = provenance.base
         checkpoint = state.checkpoint
         if (
-            checkpoint.public_artifact_fingerprint
-            != base.public_artifact_fingerprint
-            or checkpoint.oracle_artifact_fingerprint
-            != base.oracle_artifact_fingerprint
+            checkpoint.public_artifact_fingerprint != base.public_artifact_fingerprint
+            or checkpoint.oracle_artifact_fingerprint != base.oracle_artifact_fingerprint
             or checkpoint.catalog_fingerprint != base.catalog_fingerprint
             or checkpoint.graph_fingerprint != base.graph_fingerprint
             or checkpoint.compiler_fingerprint != base.compiler_fingerprint
             or checkpoint.comparator_fingerprint != base.comparator_fingerprint
-            or checkpoint.capability_profile_fingerprint
-            != base.capability_profile_fingerprint
+            or checkpoint.capability_profile_fingerprint != base.capability_profile_fingerprint
         ):
             raise CampaignStatusError("private run state disagrees with run provenance")
         # Checkpoints bind the complete compiled artifact so resume validation can
@@ -296,9 +303,7 @@ def _read_run(
         # 42/55 release from the larger 46/70 certification inventory).  Compare
         # readiness with durable scheduled results, not the full binding inventory.
         if expected_tasks is not None and len(state.checkpoint.results) > expected_tasks:
-            raise CampaignStatusError(
-                "private run state result count exceeds readiness schedule"
-            )
+            raise CampaignStatusError("private run state result count exceeds readiness schedule")
 
     report: ModelPublicReportV2 | None = None
     if report_path.exists():
@@ -308,15 +313,12 @@ def _read_run(
         if report.run_identity != identity or report.report.track is not track:
             raise CampaignStatusError("model public report identity does not match provenance")
         if (
-            report.candidate_release_fingerprint
-            != provenance.candidate_release_fingerprint
-            or report.live_certification_fingerprint
-            != provenance.live_certification_fingerprint
+            report.candidate_release_fingerprint != provenance.candidate_release_fingerprint
+            or report.live_certification_fingerprint != provenance.live_certification_fingerprint
         ):
             raise CampaignStatusError("model public report release evidence is incompatible")
         if (
-            report.report.public_artifact_fingerprint
-            != provenance.base.public_artifact_fingerprint
+            report.report.public_artifact_fingerprint != provenance.base.public_artifact_fingerprint
             or report.report.catalog_fingerprint != provenance.base.catalog_fingerprint
             or report.report.graph_fingerprint != provenance.base.graph_fingerprint
             or report.report.capability_profile_fingerprint
@@ -368,18 +370,18 @@ def _read_run(
         outcomes = _outcome_counts([row.outcome.value for row in report.report.rows])
         campaign_valid = summary.campaign_valid
     elif state is not None:
-        outcomes = _outcome_counts(
-            [result.outcome.value for result in state.checkpoint.results]
-        )
+        outcomes = _outcome_counts([result.outcome.value for result in state.checkpoint.results])
         campaign_valid = None
     else:
         outcomes = ()
         campaign_valid = None
     provider_attempts = len(state.attempts) if state is not None else 0
+    terminal_results, pending_infra_retries = _run_retry_progress(
+        state,
+        max_infra_retries=max_infra_retries,
+    )
     tokens_input = (
-        sum(attempt.provider.tokens_input for attempt in state.attempts)
-        if state is not None
-        else 0
+        sum(attempt.provider.tokens_input for attempt in state.attempts) if state is not None else 0
     )
     tokens_output = (
         sum(attempt.provider.tokens_output for attempt in state.attempts)
@@ -393,9 +395,11 @@ def _read_run(
             run_index=run_index,
             expected_tasks=expected_tasks,
             started=True,
-            checkpointed_results=(
-                len(state.checkpoint.results) if state is not None else 0
-            ),
+            checkpointed_results=(len(state.checkpoint.results) if state is not None else 0),
+            terminal_results=terminal_results,
+            pending_infra_retries=pending_infra_retries,
+            active_phase=(state.scheduler.phase if state is not None else "not_started"),
+            recovery_round=(state.scheduler.recovery_round if state is not None else 0),
             provider_attempts=provider_attempts,
             tokens_input=tokens_input,
             tokens_output=tokens_output,
@@ -406,6 +410,30 @@ def _read_run(
         ),
         provenance,
     )
+
+
+def _run_retry_progress(
+    state: PrivateRunStateV2 | None,
+    *,
+    max_infra_retries: int,
+) -> tuple[int, int]:
+    if state is None:
+        return 0, 0
+    attempts_by_task = {
+        task_id: tuple(item for item in state.attempts if item.task_id == task_id)
+        for task_id in {item.task_id for item in state.attempts}
+    }
+    pending = 0
+    for rows in attempts_by_task.values():
+        latest = rows[-1]
+        consumed = sum(_attempt_consumes_retry_budget(item) for item in rows)
+        if _attempt_is_retry_eligible(
+            latest,
+            consumed_attempts=consumed,
+            max_attempts=max_infra_retries + 1,
+        ):
+            pending += 1
+    return len(state.checkpoint.results) - pending, pending
 
 
 def inspect_v2_campaign_status(config_path: Path) -> CampaignStatusV1:
@@ -491,17 +519,13 @@ def inspect_v2_campaign_status(config_path: Path) -> CampaignStatusV1:
         configured_models = {
             item.name: (item.provider, item.model) for item in resolved.config.models
         }
-        readiness_models = {
-            item.name: (item.provider, item.model) for item in readiness.models
-        }
+        readiness_models = {item.name: (item.provider, item.model) for item in readiness.models}
         if len(readiness.models) != len(configured_models) or (
             readiness_models != configured_models
         ):
             raise CampaignStatusError("campaign readiness models do not match config")
     else:
-        execution_evidence = lifecycle.checkpointed_results > 0 or bool(
-            lifecycle.completed_tracks
-        )
+        execution_evidence = lifecycle.checkpointed_results > 0 or bool(lifecycle.completed_tracks)
         if not execution_evidence:
             for artifact_name in (
                 _PROVENANCE_NAME,
@@ -538,10 +562,8 @@ def inspect_v2_campaign_status(config_path: Path) -> CampaignStatusV1:
         ready = readiness_by_track.get(track)
         if ready is not None and (
             receipt.expected_task_count_per_run != ready.task_count
-            or receipt.candidate_release_fingerprint
-            != ready.candidate_release_fingerprint
-            or receipt.live_certification_fingerprint
-            != ready.live_certification_fingerprint
+            or receipt.candidate_release_fingerprint != ready.candidate_release_fingerprint
+            or receipt.live_certification_fingerprint != ready.live_certification_fingerprint
         ):
             raise CampaignStatusError("track completion disagrees with readiness")
         track_receipts[track] = receipt
@@ -553,9 +575,11 @@ def inspect_v2_campaign_status(config_path: Path) -> CampaignStatusV1:
             raise CampaignStatusError("lifecycle completed-track evidence is missing or stale")
     if lifecycle.status != "running" and set(track_receipts) != set(lifecycle_completed):
         raise CampaignStatusError("track completion receipts disagree with lifecycle")
-    if lifecycle.status == "completed" and lifecycle.mode == "execution" and set(
-        track_receipts
-    ) != set(resolved.config.track_modes):
+    if (
+        lifecycle.status == "completed"
+        and lifecycle.mode == "execution"
+        and set(track_receipts) != set(resolved.config.track_modes)
+    ):
         raise CampaignStatusError("completed execution is missing a track receipt")
 
     _assert_no_unexpected_run_directories(output_dir, expected_keys)
@@ -571,6 +595,7 @@ def inspect_v2_campaign_status(config_path: Path) -> CampaignStatusV1:
             provider_model=provider_model,
             run_index=run_index,
             expected_tasks=(ready.task_count if ready is not None else None),
+            max_infra_retries=resolved.config.defaults.max_infra_retries,
             track_receipt=track_receipts.get(track),
             allow_uncommitted_report=lifecycle.status in {"running", "interrupted"},
         )
@@ -583,14 +608,10 @@ def inspect_v2_campaign_status(config_path: Path) -> CampaignStatusV1:
         receipt = track_receipts.get(track)
         for provenance in provenances:
             if ready is not None and (
-                provenance.candidate_release_fingerprint
-                != ready.candidate_release_fingerprint
-                or provenance.live_certification_fingerprint
-                != ready.live_certification_fingerprint
-                or provenance.base.public_artifact_fingerprint
-                != ready.public_artifact_fingerprint
-                or provenance.base.oracle_artifact_fingerprint
-                != ready.oracle_artifact_fingerprint
+                provenance.candidate_release_fingerprint != ready.candidate_release_fingerprint
+                or provenance.live_certification_fingerprint != ready.live_certification_fingerprint
+                or provenance.base.public_artifact_fingerprint != ready.public_artifact_fingerprint
+                or provenance.base.oracle_artifact_fingerprint != ready.oracle_artifact_fingerprint
                 or provenance.base.capability_profile_fingerprint
                 != ready.capability_profile_fingerprint
                 or provenance.source_manifest_sha256 != readiness.source_manifest_sha256
@@ -598,8 +619,7 @@ def inspect_v2_campaign_status(config_path: Path) -> CampaignStatusV1:
             ):
                 raise CampaignStatusError("run provenance disagrees with readiness")
             if receipt is not None and (
-                provenance.candidate_release_fingerprint
-                != receipt.candidate_release_fingerprint
+                provenance.candidate_release_fingerprint != receipt.candidate_release_fingerprint
                 or provenance.live_certification_fingerprint
                 != receipt.live_certification_fingerprint
             ):
@@ -629,6 +649,8 @@ def inspect_v2_campaign_status(config_path: Path) -> CampaignStatusV1:
                     else None
                 ),
                 checkpointed_results=sum(item.checkpointed_results for item in track_runs),
+                terminal_results=sum(item.terminal_results for item in track_runs),
+                pending_infra_retries=sum(item.pending_infra_retries for item in track_runs),
                 completed_results=(receipt.result_count if receipt is not None else 0),
                 provider_attempts=sum(item.provider_attempts for item in track_runs),
                 tokens_input=sum(item.tokens_input for item in track_runs),
@@ -651,14 +673,10 @@ def inspect_v2_campaign_status(config_path: Path) -> CampaignStatusV1:
                     else None
                 ),
                 graph_verification_before_fingerprint=(
-                    receipt.graph_verification_before_fingerprint
-                    if receipt is not None
-                    else None
+                    receipt.graph_verification_before_fingerprint if receipt is not None else None
                 ),
                 graph_verification_after_fingerprint=(
-                    receipt.graph_verification_after_fingerprint
-                    if receipt is not None
-                    else None
+                    receipt.graph_verification_after_fingerprint if receipt is not None else None
                 ),
             )
         )
@@ -678,11 +696,7 @@ def inspect_v2_campaign_status(config_path: Path) -> CampaignStatusV1:
         resume_allowed, next_action = False, "monitor"
     elif observed_state in {"stale_running", "interrupted"}:
         resume_allowed = True
-        next_action = (
-            "run_readiness"
-            if lifecycle.mode == "readiness"
-            else "resume_campaign"
-        )
+        next_action = "run_readiness" if lifecycle.mode == "readiness" else "resume_campaign"
     elif observed_state == "failed":
         resume_allowed, next_action = False, "investigate_failure"
     elif observed_state == "readiness_complete":
@@ -704,12 +718,27 @@ def inspect_v2_campaign_status(config_path: Path) -> CampaignStatusV1:
         and lifecycle.active_run_index is not None
         else None
     )
-    if active_run is not None and (
-        active_run.track,
-        active_run.model,
-        active_run.run_index,
-    ) not in expected_keys:
+    if (
+        active_run is not None
+        and (
+            active_run.track,
+            active_run.model,
+            active_run.run_index,
+        )
+        not in expected_keys
+    ):
         raise CampaignStatusError("lifecycle active run is not selected by config")
+    active_run_status = next(
+        (
+            item
+            for item in run_statuses
+            if active_run is not None
+            and item.track is active_run.track
+            and item.model == active_run.model
+            and item.run_index == active_run.run_index
+        ),
+        None,
+    )
 
     return CampaignStatusV1(
         source_config_fingerprint=resolved.source_config_fingerprint,
@@ -720,15 +749,19 @@ def inspect_v2_campaign_status(config_path: Path) -> CampaignStatusV1:
         updated_at_utc=lifecycle.updated_at_utc,
         resume_count=lifecycle.resume_count,
         active_run=active_run,
+        active_phase=(
+            active_run_status.active_phase if active_run_status is not None else "not_started"
+        ),
+        recovery_round=(active_run_status.recovery_round if active_run_status is not None else 0),
         completed_tracks=tuple(item.track for item in lifecycle.completed_tracks),
         progress=CampaignProgressV1(
             expected_runs=len(expected_runs),
-            runs_started=sum(
-                item.started for item in run_statuses
-            ),
+            runs_started=sum(item.started for item in run_statuses),
             runs_reported=sum(item.report_present for item in run_statuses),
             expected_results=expected_results,
             checkpointed_results=actual_checkpointed,
+            terminal_results=sum(item.terminal_results for item in run_statuses),
+            pending_infra_retries=sum(item.pending_infra_retries for item in run_statuses),
             completed_results=completed_results,
             provider_attempts=sum(item.provider_attempts for item in run_statuses),
             tokens_input=sum(item.tokens_input for item in run_statuses),

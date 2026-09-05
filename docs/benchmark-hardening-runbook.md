@@ -387,8 +387,12 @@ runtime implementation, and every provider attempt. Resume rejects incompatible
 provenance. Within compatible provenance, infrastructure and unexecuted samples
 are rescheduled, their prior terminal row is replaced, and provider attempt
 numbers remain contiguous. The configured infrastructure retry allowance is a
-lifetime per-task budget across resumes, not a fresh budget per process. Every
-attempt is written before the retry decision. Successful and
+lifetime per-task budget across resumes, not a fresh budget per process. The
+hybrid scheduler permits the configured immediate retries, completes the
+primary pass, and then revisits unresolved tasks in certified release order.
+Each deferred round waits until its persisted UTC `not_before` time and gives
+each eligible task at most one attempt. A restart waits only the remaining
+cooldown. Every attempt is written before the retry decision. Successful and
 model-attributable samples are not replayed. Private attempts retain direct
 query provenance or MCP cumulative token usage, partial messages, tool
 arguments and raw results, mechanical observations, evidence events, and policy
@@ -403,11 +407,25 @@ unclean prior process remain distinguishable. An interrupted provider attempt
 stays durably numbered but does not consume the next process's original
 infrastructure-retry allowance.
 
+Operational recovery counts are terminal-outcome based. A task is recovered
+only when an earlier retryable infrastructure attempt finishes with a
+non-infrastructure terminal result. `exhausted_infrastructure_tasks` includes
+every task whose final result is still infrastructure failure, including
+non-retryable authentication, configuration, capability, or protocol failures.
+
+The hybrid scheduler is bound to runner v15 and private run-state v7. Campaign
+roots created by earlier runner/run-state versions are intentionally
+incompatible: retain them as evidence, run fresh no-model readiness, and use a
+new output root before any later provider execution.
+
 Use `ori campaign-status --config <exact-v2-config>` to project lifecycle,
 checkpoint, report, and track-completion state without preparing the campaign
 or contacting models, MCP, BloodHound, or the graph. The command validates the
-stored fingerprints and accounting before reporting progress. `--json` emits a
-redacted supervisor-safe document. A `running` lifecycle with a free campaign
+stored fingerprints and accounting before reporting progress. Its terminal
+result count excludes retryable infrastructure work that is merely
+checkpointed; the status also exposes pending retries, scheduler phase, and
+recovery round. `--json` emits a redacted supervisor-safe document. A `running`
+lifecycle with a free campaign
 lock is surfaced as `stale_running`; interrupted or stale readiness is rerun
 without `--execute`, while interrupted or stale execution uses the same
 `run-v2 --config ... --execute` command. Corrupt, incompatible, or failed
@@ -424,14 +442,18 @@ The harness-owned `graph_page_size` can be increased up to its validated
 2,000-row ceiling to reduce readiness round trips without changing task,
 prompt, oracle, scorer, or model execution semantics.
 
-Only external availability failures—HTTP, transport, authentication, server,
+Only typed, retryable external availability failures—transport, server,
 rate-limit, provider-read timeouts, and native turn/no-progress watchdog
-timeouts—are retryable infrastructure. The private receipt retains the narrower
-`MCP_TURN_TIMEOUT` or `NO_PROGRESS_TIMEOUT` subtype.
-Provider and MCP-tool failures retry without probing or changing BloodHound's
-circuit. BloodHound-scoped failures alone require health recovery. An open
-direct circuit is checked before calling the model, and generic transport/server
-failures never poison the shared query deny cache.
+timeouts—enter infrastructure recovery. Authentication, capability, protocol,
+model, proof, output, whole-task timeout, and harness failures never do. Unknown
+infrastructure scopes fail closed instead of opting into retries from an
+untrusted metrics flag. The private receipt retains narrower subtypes such as
+`MCP_TURN_TIMEOUT` or `NO_PROGRESS_TIMEOUT`.
+Typed provider and MCP-tool availability failures retry without probing or
+changing BloodHound's circuit. BloodHound-scoped failures alone require health
+recovery before every retry, including after a restart or an interrupted
+attempt. An open direct circuit is checked before calling the model, and generic
+transport/server failures never poison the shared query deny cache.
 Exhausting the finite whole-task execution budget is model-attributable
 `TASK_TIMEOUT`; it is not retried after a BloodHound-only health probe. An
 internal projector, schema, adapter, or runner exception is `HARNESS_ERROR`; it

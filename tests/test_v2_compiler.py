@@ -1156,6 +1156,30 @@ def test_offline_scoring_treats_strict_schema_failure_as_output_invalid(
     assert scoring.summary.output_noncompliant == 1
 
 
+@pytest.mark.parametrize("nonfinite", (float("nan"), float("inf"), float("-inf")))
+def test_offline_scoring_rejects_nonfinite_output_at_shared_boundary(
+    simple_compiled,
+    nonfinite: float,
+) -> None:
+    _, snapshot, _, mcp = simple_compiled
+    public, private = build_artifacts(
+        mcp,
+        identity_catalog=snapshot.entities,
+    )
+    raw_answers = _perfect_answers(mcp, snapshot)
+    count_task = next(task for task in public.tasks if task.claim_kind == "count")
+    raw_answers[count_task.task_id]["count"] = nonfinite
+    answers = build_answers_artifact(public, raw_answers)
+
+    scoring = score_answers_v2(public, private, answers)
+    result = next(item for item in scoring.results if item.task_id == count_task.task_id)
+
+    assert result.execution_class is ExecutionClass.MODEL_FAILURE
+    assert result.outcome.value == "OUTPUT_INVALID"
+    assert result.output_compliant is False
+    assert result.detail == "structured output contains a non-finite number"
+
+
 def test_offline_scoring_contains_unexpected_comparator_failure(
     simple_compiled,
     monkeypatch: pytest.MonkeyPatch,

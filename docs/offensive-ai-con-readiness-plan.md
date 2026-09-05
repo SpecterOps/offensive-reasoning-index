@@ -197,7 +197,7 @@ executables so the supervised child inherits the same launcher boundary that
 readiness certified.
 
 Dogwalker's local ORI monitor and runbook now understand `ori run-v2`, consume
-only the redacted `ori-v2-campaign-status-v1` projection, keep Direct and MCP
+only the redacted `ori-v2-campaign-status-v2` projection, keep Direct and MCP
 progress separate, and normalize legacy naive timestamps instead of crashing
 discovery. Its Hermes no-agent monitor is scheduled every five minutes. A
 forced scheduler run completed successfully while no campaign was active and

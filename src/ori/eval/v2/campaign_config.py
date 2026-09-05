@@ -43,6 +43,11 @@ class V2HealthConfig(StrictModel):
     poll_interval: float = Field(default=5.0, strict=True, gt=0)
 
 
+class V2InfrastructureRetryConfig(StrictModel):
+    immediate_retries: int = Field(default=1, strict=True, ge=0, le=1)
+    deferred_cooldown_seconds: float = Field(default=300.0, strict=True, ge=300.0)
+
+
 class V2MCPConfig(StrictModel):
     mcp_dir: str
     max_steps: int = Field(default=16, strict=True, gt=0)
@@ -70,6 +75,7 @@ class V2Defaults(StrictModel):
     model_base_url: str | None = None
     reasoning_effort: ReasoningEffort | None = None
     max_infra_retries: int = Field(default=1, strict=True, ge=0)
+    infra_retry: V2InfrastructureRetryConfig = V2InfrastructureRetryConfig()
     graph_page_size: int = Field(default=500, strict=True, gt=0, le=2000)
     health: V2HealthConfig = V2HealthConfig()
     mcp: V2MCPConfig | None = None
@@ -78,6 +84,10 @@ class V2Defaults(StrictModel):
     def certified_concurrency_is_serial(self) -> V2Defaults:
         if self.concurrency != 1:
             raise ValueError("certified v2 campaigns currently require concurrency=1")
+        if self.infra_retry.immediate_retries > self.max_infra_retries:
+            raise ValueError(
+                "defaults.infra_retry.immediate_retries cannot exceed defaults.max_infra_retries"
+            )
         return self
 
 
@@ -133,10 +143,11 @@ class V2ModelEntry(StrictModel):
             raise ValueError(
                 "set model max_output_tokens instead of a free-form output-token option"
             )
-        if (
-            self.structured_output_mode == "json_schema"
-            and self.provider not in {"openai", "openai-compat", "gemini"}
-        ):
+        if self.structured_output_mode == "json_schema" and self.provider not in {
+            "openai",
+            "openai-compat",
+            "gemini",
+        }:
             raise ValueError(
                 "structured_output_mode='json_schema' is currently supported only "
                 "by Chat Completions providers"
@@ -181,9 +192,7 @@ class V2CampaignConfig(StrictModel):
             raise ValueError("v2 model names must be unique")
         if "mcp" in self.modes:
             if self.defaults.mcp is None:
-                raise ValueError(
-                    "v2 MCP campaigns require defaults.mcp configuration"
-                )
+                raise ValueError("v2 MCP campaigns require defaults.mcp configuration")
             unsupported = sorted(
                 model.name
                 for model in self.models
@@ -256,9 +265,7 @@ def load_v2_campaign_config(path: Path) -> ResolvedV2CampaignConfig:
         tracks=resolved_tracks,
         output_dir=_resolve(base, config.output_dir),
         mcp_dir=(
-            _resolve(base, config.defaults.mcp.mcp_dir)
-            if config.defaults.mcp is not None
-            else None
+            _resolve(base, config.defaults.mcp.mcp_dir) if config.defaults.mcp is not None else None
         ),
         config=config,
         source_config_fingerprint=canonical_sha256(raw),

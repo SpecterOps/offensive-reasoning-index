@@ -60,6 +60,11 @@ from .mcp import (
     validate_certified_mcp_loop,
 )
 from .mcp_adapter import MCPV2Outcome
+from .output_compliance import (
+    OutputComplianceError,
+    is_schema_compliant_json,
+    require_finite_json,
+)
 from .public_surfaces import (
     PublicSurface,
     assert_solver_visible,
@@ -364,6 +369,10 @@ def _parse_json_object(text: str) -> ParsedJsonObject:
         ) from exc
     if not isinstance(parsed, Mapping):
         raise V2ModelRuntimeError("model output must be exactly one JSON object")
+    try:
+        require_finite_json(parsed)
+    except OutputComplianceError as exc:
+        raise V2ModelRuntimeError(str(exc)) from exc
     return ParsedJsonObject(
         payload=parsed,
         raw_protocol_compliant=not normalized,
@@ -4774,16 +4783,14 @@ async def run_mcp_model_task_v2(
     # answers can be materialized from complete identity pages so a 500-row
     # proof does not depend on the model echoing every ID; witness assertions
     # fail closed when unsupported edges or properties are asserted.
-    final_output_compliant = (
-        Draft202012Validator(task.answer_schema).is_valid(dict(final_answer))
-        if final_answer is not None
-        else False
-    )
-    retry_output_compliant = (
-        Draft202012Validator(task.answer_schema).is_valid(dict(retry_answer))
-        if retry_answer is not None
-        else False
-    )
+    final_output_compliant = is_schema_compliant_json(
+        final_answer,
+        task.answer_schema,
+    ) is True
+    retry_output_compliant = is_schema_compliant_json(
+        retry_answer,
+        task.answer_schema,
+    ) is True
     submitted_final_answer = final_answer
     bound_final_answer = _bind_final_answer_to_receipts(
         task,

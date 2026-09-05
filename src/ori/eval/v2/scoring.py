@@ -23,6 +23,7 @@ from .evidence import (
 )
 from .fingerprint import canonical_sha256
 from .identity import IdentityResolver
+from .output_compliance import OutputComplianceError, require_finite_json
 from .protocol import (
     OracleRegistry,
     OracleV2Artifact,
@@ -401,6 +402,7 @@ def score_answers_v2(
         oracle = registry.for_task(task.task_id)
         submission = submissions[task.task_id]
         try:
+            require_finite_json(submission.answer)
             evidence = validate_and_normalize_evidence(
                 submission.answer,
                 answer_schema=task.answer_schema,
@@ -411,7 +413,7 @@ def score_answers_v2(
                 evidence,
                 private.graph_fact_registry,
             )
-        except (EvidenceNormalizationError, ValueError) as exc:
+        except (EvidenceNormalizationError, OutputComplianceError, ValueError) as exc:
             results.append(
                 SampleResult(
                     task_id=task.task_id,

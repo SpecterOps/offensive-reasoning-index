@@ -100,7 +100,8 @@ For every poll:
 
 1. Run `campaign-status --json` against the exact config.
 2. If the command exits non-zero, stop and alert.
-3. Require the expected `schema_version` and source-config fingerprint.
+3. Require the expected `ori-v2-campaign-status-v2` schema and source-config
+   fingerprint.
 4. Read only `observed_state`, `resume_allowed`, `next_action`, progress,
    per-track completion/validity, and safe outcome counts.
 5. Apply the state table exactly once.
@@ -109,6 +110,11 @@ For every poll:
 Do not parse private provider responses, prompts, MCP transcripts, tool
 arguments, credentials, or BloodHound results. Do not read a private receipt to
 invent a more permissive action than `campaign-status` reports.
+
+Progress percentages use `terminal_results`, never `checkpointed_results`.
+During `deferred_cooldown` or `deferred_retry`, surface the active recovery
+round and pending-infrastructure count; a full checkpoint count is not campaign
+completion while those tasks remain eligible.
 
 ## Fail-closed rules
 

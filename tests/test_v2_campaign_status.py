@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -8,7 +9,7 @@ from click.testing import CliRunner
 
 from ori.cli import main
 from ori.eval.provider_contract import ProviderApiSurface
-from ori.eval.v2 import campaign_runner
+from ori.eval.v2 import campaign_runner, campaign_status
 from ori.eval.v2.campaign import (
     CheckpointTaskBinding,
     CheckpointV2,
@@ -142,9 +143,7 @@ def _provenance(track: Track, run_index: int = 1) -> campaign_runner.ModelRunPro
 
 def _sample(track: Track, *, campaign_valid: bool = True) -> SampleResult:
     execution_class = (
-        ExecutionClass.MODEL_FAILURE
-        if campaign_valid
-        else ExecutionClass.HARNESS_FAILURE
+        ExecutionClass.MODEL_FAILURE if campaign_valid else ExecutionClass.HARNESS_FAILURE
     )
     return SampleResult(
         task_id=f"{track.value}-task",
@@ -154,8 +153,7 @@ def _sample(track: Track, *, campaign_valid: bool = True) -> SampleResult:
         outcome=SampleOutcomeCode.OUTPUT_INVALID,
         reasoning_correct=None,
         detail=(
-            "SECRET_PROMPT SECRET_TOOL_ARGUMENT SECRET_CREDENTIAL_VALUE "
-            "/private/operator/campaign"
+            "SECRET_PROMPT SECRET_TOOL_ARGUMENT SECRET_CREDENTIAL_VALUE /private/operator/campaign"
         ),
     )
 
@@ -475,7 +473,7 @@ def _completed_campaign(
         report = _report(provenance, track, campaign_valid=campaign_valid)
         run_dir = resolved.output_dir / track.value / "gpt-test" / "run-001"
         _dump(run_dir / "campaign-provenance-v2.json", provenance)
-        _dump(run_dir / "run-state-v6.private.json", state)
+        _dump(run_dir / "run-state-v7.private.json", state)
         _dump(run_dir / "public-report-v2.json", report)
         receipt = _track_receipt(resolved.source_config_fingerprint, track, report)
         _dump(resolved.output_dir / track.value / "track-completion-v2.private.json", receipt)
@@ -505,6 +503,38 @@ def test_not_started_is_read_only_and_does_not_create_output(tmp_path: Path) -> 
     assert status.observed_state == "not_started"
     assert status.next_action == "run_readiness"
     assert output.exists() is False
+
+
+def test_status_does_not_count_pending_infrastructure_as_terminal() -> None:
+    sample = SampleResult(
+        task_id="direct-task",
+        task_fingerprint="a" * 64,
+        oracle_fingerprint="b" * 64,
+        execution_class=ExecutionClass.INFRA_FAILURE,
+        outcome=SampleOutcomeCode.INFRA_ERROR,
+        detail="provider unavailable",
+    )
+    provider = _provider(sample, Track.DIRECT).model_copy(
+        update={
+            "provider_metrics": {
+                "infra_scope": "provider",
+                "infra_retryable": True,
+            }
+        }
+    )
+    state = SimpleNamespace(
+        checkpoint=SimpleNamespace(results=(sample,)),
+        attempts=(
+            SimpleNamespace(
+                task_id=sample.task_id,
+                attempt=1,
+                sample=sample,
+                provider=provider,
+            ),
+        ),
+    )
+
+    assert campaign_status._run_retry_progress(state, max_infra_retries=2) == (0, 1)
 
 
 @pytest.mark.parametrize("artifact_name", (".ori-v2-campaign.lock", "partial.tmp"))
@@ -689,7 +719,7 @@ def test_candidate_subset_checkpoint_may_bind_full_compiled_inventory(
         checkpoint=checkpoint,
         attempts=state.attempts,
     )
-    _dump(run_dir / "run-state-v6.private.json", expanded_state)
+    _dump(run_dir / "run-state-v7.private.json", expanded_state)
 
     status = inspect_v2_campaign_status(config)
 
@@ -836,7 +866,7 @@ def test_config_fingerprint_mismatch_fails_closed(tmp_path: Path) -> None:
     "relative",
     (
         "campaign-lifecycle-v2.private.json",
-        "direct/gpt-test/run-001/run-state-v6.private.json",
+        "direct/gpt-test/run-001/run-state-v7.private.json",
         "direct/gpt-test/run-001/public-report-v2.json",
         "direct/track-completion-v2.private.json",
     ),
@@ -873,11 +903,7 @@ def test_status_usage_counts_every_durable_provider_attempt(tmp_path: Path) -> N
     config, resolved = _completed_campaign(tmp_path)
     provenance = _provenance(Track.DIRECT)
     _dump(
-        resolved.output_dir
-        / "direct"
-        / "gpt-test"
-        / "run-001"
-        / "run-state-v6.private.json",
+        resolved.output_dir / "direct" / "gpt-test" / "run-001" / "run-state-v7.private.json",
         _state(provenance, Track.DIRECT, attempt_count=2),
     )
 
@@ -1004,7 +1030,7 @@ def test_campaign_status_cli_supports_human_and_json_output(tmp_path: Path) -> N
     assert "Next action: run readiness" in human.output
     assert "Usage: 0 total tokens (0 input + 0 output) across 0 provider attempts" in human.output
     assert machine.exit_code == 0
-    assert '"schema_version": "ori-v2-campaign-status-v1"' in machine.output
+    assert '"schema_version": "ori-v2-campaign-status-v2"' in machine.output
 
 
 @pytest.mark.parametrize("failure", ("corrupt", "incompatible"))
@@ -1030,4 +1056,4 @@ def test_campaign_status_cli_exits_nonzero_on_untrusted_evidence(
 
     assert result.exit_code != 0
     assert "Error:" in result.output
-    assert "ori-v2-campaign-status-v1" not in result.output
+    assert "ori-v2-campaign-status-v2" not in result.output

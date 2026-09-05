@@ -1336,8 +1336,10 @@ def campaign_status_command(config_path: str, json_output: bool) -> None:
     click.echo(f"  Mode: {status.mode or 'not-started'}")
     click.echo(
         "  Progress: "
-        f"{status.progress.checkpointed_results}/"
-        f"{status.progress.expected_results or 'unknown'} checkpointed results; "
+        f"{status.progress.terminal_results}/"
+        f"{status.progress.expected_results or 'unknown'} terminal results; "
+        f"{status.progress.checkpointed_results} checkpointed; "
+        f"{status.progress.pending_infra_retries} pending infrastructure retries; "
         f"{status.progress.runs_reported}/{status.progress.expected_runs} runs reported"
     )
     click.echo(
@@ -1353,6 +1355,10 @@ def campaign_status_command(config_path: str, json_output: bool) -> None:
             f"{status.active_run.track.value}/{status.active_run.model}/"
             f"run-{status.active_run.run_index:03d}"
         )
+        click.echo(
+            f"  Phase: {status.active_phase.replace('_', ' ')}"
+            + (f" (recovery round {status.recovery_round})" if status.recovery_round else "")
+        )
     for track in status.tracks:
         validity = (
             "valid"
@@ -1362,7 +1368,9 @@ def campaign_status_command(config_path: str, json_output: bool) -> None:
             else "pending"
         )
         click.echo(
-            f"  {track.track.value}: {track.checkpointed_results} checkpointed, "
+            f"  {track.track.value}: {track.terminal_results} terminal, "
+            f"{track.checkpointed_results} checkpointed, "
+            f"{track.pending_infra_retries} pending infrastructure retries, "
             f"{track.completed_results} completed ({validity})"
         )
     click.echo(f"  Next action: {status.next_action.replace('_', ' ')}")

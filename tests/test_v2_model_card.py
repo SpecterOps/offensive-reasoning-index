@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from ori.eval.provider_contract import ProviderApiSurface
-from ori.eval.v2 import campaign_runner
+from ori.eval.v2 import campaign_runner, model_card
 from ori.eval.v2.campaign import (
     CheckpointTaskBinding,
     CheckpointV2,
@@ -216,6 +216,7 @@ def _state(track: Track, *, model: str = _MODEL) -> campaign_runner.PrivateRunSt
         "provenance_fingerprint": "9" * 64,
         "checkpoint": checkpoint,
         "attempts": attempts,
+        "scheduler": campaign_runner.RetrySchedulerStateV2(phase="complete"),
         "state_fingerprint": "0" * 64,
     }
     state_payload["state_fingerprint"] = canonical_sha256(
@@ -372,26 +373,26 @@ def _lifecycle(
 ) -> campaign_runner.CampaignLifecycleV2:
     return campaign_runner._campaign_lifecycle(
         {
-        "source_config_fingerprint": _CONFIG,
-        "mode": "execution",
-        "status": status,
-        "started_at_utc": "2026-08-30T11:00:00+00:00",
-        "updated_at_utc": "2026-08-30T12:00:00+00:00",
-        "pid": 123,
-        "resume_count": 0,
-        "checkpointed_results": sum(item.result_count for item in receipts.values()),
-        "active_track": None,
-        "active_model": None,
-        "active_run_index": None,
-        "completed_tracks": tuple(
-            campaign_runner.CampaignCompletedTrackV2(
-                track=track,
-                receipt_fingerprint=receipt.receipt_fingerprint,
-            )
-            for track, receipt in receipts.items()
-        ),
-        "interruptions": (),
-        "failure_type": None,
+            "source_config_fingerprint": _CONFIG,
+            "mode": "execution",
+            "status": status,
+            "started_at_utc": "2026-08-30T11:00:00+00:00",
+            "updated_at_utc": "2026-08-30T12:00:00+00:00",
+            "pid": 123,
+            "resume_count": 0,
+            "checkpointed_results": sum(item.result_count for item in receipts.values()),
+            "active_track": None,
+            "active_model": None,
+            "active_run_index": None,
+            "completed_tracks": tuple(
+                campaign_runner.CampaignCompletedTrackV2(
+                    track=track,
+                    receipt_fingerprint=receipt.receipt_fingerprint,
+                )
+                for track, receipt in receipts.items()
+            ),
+            "interruptions": (),
+            "failure_type": None,
         }
     )
 
@@ -414,8 +415,7 @@ def _campaign(
         Track.MCP: _model_report(Track.MCP, model=mcp_model, graph=mcp_graph),
     }
     receipts = {
-        track: _track_receipt(track, report, valid=valid)
-        for track, report in reports.items()
+        track: _track_receipt(track, report, valid=valid) for track, report in reports.items()
     }
     for track, report in reports.items():
         state = _state(track, model=(mcp_model if track is Track.MCP else _MODEL))
@@ -424,7 +424,7 @@ def _campaign(
             report,
         )
         _dump(
-            root / track.value / "local-config-name" / "run-001" / "run-state-v6.private.json",
+            root / track.value / "local-config-name" / "run-001" / "run-state-v7.private.json",
             state,
         )
         if track is Track.DIRECT and summary_mismatch:
@@ -477,13 +477,9 @@ def test_build_model_card_is_deterministic_separate_and_public_safe(
     assert card["operational_metrics"]["attempts_total"] == 4
     assert card["operational_metrics"]["tokens_input_total"] == 4
     assert card["tracks"]["direct"]["operational_metrics"]["attempts_total"] == 2
-    assert card["tracks"]["direct"]["operational_metrics"]["resource_mode"] == (
-        "not_applicable"
-    )
+    assert card["tracks"]["direct"]["operational_metrics"]["resource_mode"] == ("not_applicable")
     assert card["tracks"]["mcp"]["operational_metrics"]["resource_mode"] == "off"
-    assert card["tracks"]["mcp"]["operational_metrics"][
-        "mcp_tool_calls_average_per_task"
-    ] == 0.0
+    assert card["tracks"]["mcp"]["operational_metrics"]["mcp_tool_calls_average_per_task"] == 0.0
     assert set(path.name for path in first.iterdir()) == {
         "v30-model-card.json",
         "v30-model-card.svg",
@@ -530,7 +526,7 @@ def test_build_model_card_rejects_mismatched_direct_mcp_models(tmp_path: Path) -
 def test_build_model_card_rejects_extra_public_report(tmp_path: Path) -> None:
     campaign = _campaign(tmp_path)
     source = next((campaign / "direct").glob("*/run-*/public-report-v2.json"))
-    state_source = next((campaign / "direct").glob("*/run-*/run-state-v6.private.json"))
+    state_source = next((campaign / "direct").glob("*/run-*/run-state-v7.private.json"))
     extra = campaign / "direct" / "stale-local-name" / "run-001" / source.name
     extra_state = campaign / "direct" / "stale-local-name" / "run-001" / state_source.name
     extra.parent.mkdir(parents=True)
@@ -560,6 +556,30 @@ def test_build_model_card_rejects_summary_that_disagrees_with_rows(
 
     with pytest.raises(ModelCardBuildError, match="invalid direct public report"):
         build_model_card(campaign, tmp_path / "output", model=_MODEL)
+
+
+@pytest.mark.parametrize(
+    ("field_name", "field_value", "match"),
+    (
+        ("output_compliant", False, "output compliance flag disagrees"),
+        ("output_normalized", True, "output normalization flag disagrees"),
+    ),
+)
+def test_model_card_rejects_output_compliance_state_mismatch(
+    field_name: str,
+    field_value: bool,
+    match: str,
+) -> None:
+    state = _state(Track.DIRECT)
+    report = _model_report(Track.DIRECT)
+    rows = list(report.report.rows)
+    rows[0] = rows[0].model_copy(update={field_name: field_value})
+    report = report.model_copy(
+        update={"report": report.report.model_copy(update={"rows": tuple(rows)})}
+    )
+
+    with pytest.raises(ModelCardBuildError, match=match):
+        model_card._assert_run_state_matches_report(report, state)
 
 
 def test_build_model_card_json_contains_no_rows_or_private_payloads(

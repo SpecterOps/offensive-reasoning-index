@@ -257,6 +257,10 @@ projection and follow the
 process managers own persistence, backoff, notifications, credential injection,
 and archival; ORI remains authoritative for locking, readiness, checkpoints,
 resume eligibility, graph gates, and completion.
+The V2 status projection reports `terminal_results` separately from durable
+`checkpointed_results`; monitors must use terminal results for completion and
+display deferred cooldown/retry phases rather than treating a full checkpoint
+count as 100 percent complete.
 
 For OpenRouter, set `OPENROUTER_API_KEY` in the environment and use the
 OpenAI-compatible provider. ORI uses `OPENAI_COMPAT_API_KEY` as the explicit

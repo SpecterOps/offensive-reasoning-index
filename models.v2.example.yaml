@@ -30,7 +30,11 @@ defaults:
   # One explicit effort applies to every Codex model and both tracks. Readiness
   # fails if any selected model does not advertise this level locally.
   reasoning_effort: high
-  max_infra_retries: 1
+  # Two lifetime infrastructure retries: one immediate, then one deferred.
+  max_infra_retries: 2
+  infra_retry:
+    immediate_retries: 1
+    deferred_cooldown_seconds: 300
   graph_page_size: 500
   health:
     timeout_seconds: 60.0

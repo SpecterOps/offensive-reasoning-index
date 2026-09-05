@@ -4,13 +4,14 @@ import asyncio
 import inspect
 import json
 import subprocess
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from ori.eval.v2 import campaign_runner, runtime
-from ori.eval.v2.campaign_config import V2ModelEntry
+from ori.eval.v2.campaign_config import V2Defaults, V2ModelEntry
 from ori.eval.v2.campaign_runner import _RUNNER_IMPLEMENTATION_SOURCES
 from ori.eval.v2.direct_adapter import DirectV2Outcome
 from ori.eval.v2.mcp import EvidenceEventKind, classify_evidence_event
@@ -70,6 +71,7 @@ def test_runner_fingerprint_covers_shared_runtime_contracts() -> None:
         "mcp_adapter",
         "mcp_state_machine",
         "model_runtime",
+        "output_compliance",
         "provider_loops",
         "runtime",
         "schema",
@@ -84,15 +86,67 @@ def test_one_reasoning_effort_is_propagated_to_both_campaign_tracks() -> None:
         model="gpt-test",
         options={"existing": 1},
     )
-
     assert campaign_runner._provider_options(model, "high") == {
         "existing": 1,
         "reasoning_effort": "high",
     }
     assert model.options == {"existing": 1}
-    assert inspect.getsource(campaign_runner._run_model).count(
-        "ollama_options=provider_options"
-    ) == 2
+    assert (
+        inspect.getsource(campaign_runner._run_model).count("ollama_options=provider_options") == 2
+    )
+
+
+def test_hybrid_infrastructure_retry_defaults_are_bounded() -> None:
+    defaults = V2Defaults(max_infra_retries=2)
+
+    assert defaults.infra_retry.immediate_retries == 1
+    assert defaults.infra_retry.deferred_cooldown_seconds == 300.0
+
+    with pytest.raises(ValueError, match="immediate_retries cannot exceed"):
+        V2Defaults(
+            max_infra_retries=0,
+            infra_retry={
+                "immediate_retries": 1,
+                "deferred_cooldown_seconds": 300.0,
+            },
+        )
+
+    with pytest.raises(ValueError, match="greater than or equal to 300"):
+        V2Defaults(
+            max_infra_retries=2,
+            infra_retry={
+                "immediate_retries": 1,
+                "deferred_cooldown_seconds": 299.0,
+            },
+        )
+
+    with pytest.raises(ValueError, match="less than or equal to 1"):
+        V2Defaults(
+            max_infra_retries=3,
+            infra_retry={
+                "immediate_retries": 2,
+                "deferred_cooldown_seconds": 300.0,
+            },
+        )
+
+
+def test_deferred_cooldown_resumes_with_only_remaining_time() -> None:
+    not_before = "2026-09-03T12:05:00+00:00"
+
+    assert (
+        campaign_runner._remaining_cooldown_seconds(
+            not_before,
+            now=datetime.fromisoformat("2026-09-03T12:03:00+00:00"),
+        )
+        == 120.0
+    )
+    assert (
+        campaign_runner._remaining_cooldown_seconds(
+            not_before,
+            now=datetime.fromisoformat("2026-09-03T12:06:00+00:00"),
+        )
+        == 0.0
+    )
 
 
 def test_codex_readiness_requires_and_records_requested_effort(
@@ -145,15 +199,11 @@ def test_v12_campaign_schemas_cannot_accept_prior_run_state() -> None:
     runner_source = inspect.getsource(campaign_runner._run_model)
 
     assert provenance_schema["properties"]["schema_version"]["const"] == (
-        "ori-v2-model-campaign-v14"
+        "ori-v2-model-campaign-v15"
     )
-    assert state_schema["properties"]["schema_version"]["const"] == (
-        "ori-v2-private-run-state-v6"
-    )
-    assert readiness_schema["properties"]["schema_version"]["const"] == (
-        "ori-v2-run-readiness-v10"
-    )
-    assert campaign_runner.RUN_STATE_NAME == "run-state-v6.private.json"
+    assert state_schema["properties"]["schema_version"]["const"] == ("ori-v2-private-run-state-v7")
+    assert readiness_schema["properties"]["schema_version"]["const"] == ("ori-v2-run-readiness-v11")
+    assert campaign_runner.RUN_STATE_NAME == "run-state-v7.private.json"
     assert "RUN_STATE_NAME" in runner_source
     assert "run-state-v4.private.json" not in runner_source
 

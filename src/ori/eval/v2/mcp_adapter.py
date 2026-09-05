@@ -2,12 +2,9 @@
 
 from __future__ import annotations
 
-import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
-
-from jsonschema import Draft202012Validator
 
 from .comparator import compare
 from .evidence import (
@@ -30,6 +27,7 @@ from .mcp import (
     initial_finalization_state,
     reduce_finalization,
 )
+from .output_compliance import is_schema_compliant_json
 from .schema import (
     CapabilityProfile,
     EvidenceIR,
@@ -55,21 +53,7 @@ def _schema_compliant_answer(
     answer: Mapping[str, Any] | None,
     task: TaskBundle,
 ) -> bool | None:
-    if answer is None:
-        return None
-
-    def finite(value: Any) -> bool:
-        if isinstance(value, float):
-            return math.isfinite(value)
-        if isinstance(value, Mapping):
-            return all(finite(item) for item in value.values())
-        if isinstance(value, (list, tuple)):
-            return all(finite(item) for item in value)
-        return True
-
-    return finite(answer) and Draft202012Validator(task.answer_schema).is_valid(
-        dict(answer)
-    )
+    return is_schema_compliant_json(answer, task.answer_schema)
 
 
 def _output_attempt(

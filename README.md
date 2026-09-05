@@ -905,6 +905,10 @@ to every Codex model in both direct and MCP tracks:
 ```yaml
 defaults:
   reasoning_effort: high
+  max_infra_retries: 2
+  infra_retry:
+    immediate_retries: 1
+    deferred_cooldown_seconds: 300
 ```
 
 Do not hide this value in a model's free-form `options`. V2 readiness checks
@@ -971,16 +975,19 @@ the complete state/action and stop-condition boundary.
 
 The executable path derives its schedule from the candidate-certified catalog,
 keeps direct and MCP tracks separate, routes direct and MCP-issued Cypher
-through policy v3, checkpoints each completed task atomically, retries genuine
-infrastructure failures, and withholds public reports until the post-track graph
-fingerprint still matches. On resume, infrastructure and unexecuted results are
-reopened while model-attributable and successful results remain terminal;
+through policy v3, checkpoints each completed task atomically, and retries
+genuine infrastructure failures using one immediate retry followed by ordered
+deferred recovery rounds after a fingerprinted cooldown. It withholds public
+reports until the post-track graph fingerprint still matches. On resume,
+infrastructure and unexecuted results are reopened while model-attributable and
+successful results remain terminal;
 attempt numbers continue monotonically and the lifetime retry budget cannot
 reset across processes. Every provider attempt is checkpointed before a retry.
 Private run state retains raw provider and execution receipts;
 `public-report-v2.json` contains redacted task outcomes plus fingerprinted
 aggregate attempt, retry, token/time, MCP/Cypher/failed-tool, and resource-call
-counters derived from those private attempts. It never contains prompts,
+counters derived from those private attempts, including immediate/deferred
+retry and recovered/exhausted-task counts. It never contains prompts,
 answers, queries, tool arguments or bodies, endpoints, paths, or credentials. One
 manifest/policy-bound deny cache and circuit are shared by every model,
 repetition, and track in the campaign. A circuit-open direct task is
