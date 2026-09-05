@@ -17,7 +17,7 @@ existing 29-commit development lineage above master without rewriting it.
 | P1-W01 inventory | complete | branch reviewer | Full ancestry/patch/lock comparison below; no missing patch identified |
 | P1-W02 consolidated worktree | complete | integration | Development lineage preserved; remote branch verified at 82e2c7a with plan and process tests |
 | P1-W03 V30 independent review | manual pass | independent reviewer | Exact 10a979e..0f0eaa8 and new process tests: no confirmed findings; automated review unavailable |
-| P1-W04 host acceptance | incomplete | operations | Local CLI/process checks plus real scheduler recovery and graph-publication refusal coverage; controlled-host qualification and merged-source binding remain |
+| P1-W04 host acceptance | unmerged evidence passed | operations | Second-machine offline suite/CLI and three-snapshot live certification passed at 22cf478; merged-source binding remains |
 | P1-W05 PR/merge | blocked | integration/user | GitHub CLI SAML authorization missing; connector cannot access repository |
 | P2 cleanup | pending dependency | engineering | Requires P1 gate |
 | P3 local Qwen | pending endpoint qualification | operations | Operator-provisioned inference; no reservation or agent dependency in ORI |
@@ -260,10 +260,64 @@ metadata only was inspected, and neither is staged.
   Artifact preparation and execution bodies are replaced; these checks do not
   certify live graph parity, providers, remote deployment or task-checkpoint resume.
 
-## Controlled-host discovery
+## Earlier controlled-host discovery (historical)
 
 Read-only identity checks succeeded on both the benchmark host and GPU host.
-The existing benchmark checkout is clean at detached 8ad6f94, not consolidated
-HEAD. Its prior artifacts do not qualify the new source. A verified absolute uv
-executable exists on the benchmark host but is absent from its noninteractive
+At that inspection, the benchmark checkout was clean at detached 8ad6f94, not
+consolidated HEAD. Its prior artifacts do not qualify the new source. An absolute uv
+executable was verified on the benchmark host but was absent from its noninteractive
 PATH. No provider calls, model loads, reservation actions or service changes ran.
+
+## Independent-machine qualification at 22cf478
+
+A second macOS 26.3.1 arm64 machine qualified an isolated source copy at
+`22cf478e3d74f9a013166ec29e365db9cf1034cd`, using Python 3.12.13 and uv 0.10.9.
+The source archive SHA-256 matched before extraction:
+`20402b766ace92951f0e14ef1af42deafb6dafcb7f12a8fe76fa20c45c3680ad`.
+
+Frozen dependency installation, all 1,067 tests (222.86s), Ruff and standalone
+CLI startup passed. The private external driver used explicit installed-tool
+paths and a minimal environment, with no personal-agent installation or model
+service operation. Its durable session survived observer reconnection. The
+receipt and full test log were retrieved and their checksums matched remotely
+and locally:
+
+- Qualification receipt: `918354b6c7cb2e6f1177f19450732810fe087ed28881aae03a0d300d2eb1fffc`.
+- Test log: `1683bb04f0c1cba8a5a05292b0af85d65dfd6914cbd06228019993ff9b474654`.
+
+The machine's existing checkout was not used or changed. Its committed branch
+at `cf458fb` is already included in the consolidation; its uncommitted legacy
+MCP-launcher compatibility patch is also represented in the current implementation
+and was preserved in place. No source branches or unrelated files were removed.
+
+Separately, controlled BloodHound health and the fresh seed-4401 ingest check
+passed: all declared object counts and 30/30 planted paths matched. Both legacy
+manifest structural preflights passed with zero errors/warnings (42 Direct and
+62 MCP tasks). These counts are not the V30 certification or OAIC release counts.
+The exact three-snapshot live-certification command also passed. Pre, middle and
+post snapshots each matched 17,088 canonical objects and 60,342 relationships,
+with 40 object queries and 159 relationship queries per snapshot. All three
+observed graph fingerprints equal the archive-derived graph
+`fb0b6785e524d40abcc9033ea2c7887eaa88e13bb6cb1f329636a4ce4b74b1c4`.
+Their content-derived verification fingerprint is
+`5a832aaf6d15972eaf4f75c44d442f0e839004b185777eb0947b5bb939f12f53`;
+identical receipts reflect identical observations, not reuse of one acquisition.
+
+Direct has 46 candidate-certified tasks and MCP has 70, each with zero failures.
+Their semantic candidate releases contain 42 and 55 representatives respectively.
+Each exported candidate catalog exactly matches its embedded certification copy.
+
+| Evidence | Direct | MCP |
+| --- | --- | --- |
+| Live certification fingerprint | `c8135cba7403fb916ffd0949421cf1b9ad939635e363b1832cc442a5f36b85ed` | `cebb3c39c0f8955ac709672a07ecd6d302f240315c5238b11e3d6d203217601c` |
+| Candidate release fingerprint | `d684e85b1bd491e1acb44c4031e16e15a608f5fb7bf0d7460bc2eba358433a7d` | `ef78a49a8f72350bf2345a2e5954e6903004e89bf2e7b1c4fc353c09eed4372c` |
+
+These are V30 baseline receipts, not the future OAIC 50/50 selected release or
+evidence of a real-model campaign. No provider calls or graph mutations were
+requested. Private artifacts and operational paths remain outside public Git.
+
+This is independent-machine offline acceptance, not Linux/Windows qualification,
+live model/MCP transport qualification, or publication from merged code. P1 remains
+open pending merged-source evidence binding and PR review/merge. GitHub CLI
+repository access was rechecked and still fails organization SAML authorization. Public
+documentation contains no private host paths, credentials or raw graph evidence.
