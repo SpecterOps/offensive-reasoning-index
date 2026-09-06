@@ -329,3 +329,26 @@ def test_armadin_native_route_replay_preserves_directed_witness(simple_compiled)
     certified = offline_certify(task, snapshot, native_profile=profile)
     assert certified.certification.state is CertificationState.OFFLINE_CERTIFIED
     assert certified.certification.live_proof_fingerprint is None
+
+
+def test_native_absence_offline_certification_replays_generated_contracts(subtests):
+    from ori.eval.v2.fixtures import offline_certify
+    from ori.eval.v2.schema import CertificationState
+    from tests.support.v2_compiler import _generated_product
+
+    manifest, snapshot = _generated_product("complex", 4401)
+    for implementation in ("mwnickerson", "mordavid"):
+        with subtests.test(implementation=implementation):
+            profile = _profile(implementation)
+            corpus = compile_legacy_product(
+                manifest, snapshot, product="complex", track=Track.MCP, native_profile=profile,
+            )
+            tasks = [task for task in corpus.tasks if task.public.claim_kind == "absence"]
+            assert tasks
+            for task in tasks:
+                certified = offline_certify(task, snapshot, native_profile=profile)
+                assert certified.certification.state is CertificationState.OFFLINE_CERTIFIED
+                assert certified.certification.live_proof_fingerprint is None
+                assert certified.certification.capability_profile_fingerprint == (
+                    profile.profile_fingerprint
+                )

@@ -274,6 +274,25 @@ and 70 subtests in 29.12 seconds**. Ruff and whitespace checks passed. This is
 offline Stage 4 progress, not native live admission. General set/absence proof,
 complete selected-cell feasibility and shared runner admission/dispatch remain.
 
+Native bounded absence now crosses actual scalar projection, the shared public
+query-scope check and offline fixture certification for main and MorDavid.
+Broader zero counts can establish absence; only exact-scope nonzero counts can
+contradict it. Wrong selectors, relationships, narrower bounds, filters and
+intermediate stages remain non-unlocking. Armadin no-path output is unchanged
+and cannot prove bounded absence. The implementation also fixes a shared
+correctness bug: OPTIONAL MATCH with COUNT(*) counts a preserved null-path row,
+so that form is rejected; COUNT(p), COUNT(DISTINCT p), and nonoptional COUNT(*)
+retain their valid semantics. Existing certifier source fingerprints cover the
+correction; prior artifacts require fresh certification.
+Independent review confirmed the fix and passed four existing Direct absence
+tests. Final focused native compilation/proof and Direct/MCP adapter validation
+passed **70 tests and 92 subtests in 47.45 seconds**, including generated complex
+absence contracts for both implementations. Ruff and whitespace checks passed.
+An earlier in-flight test correctly rejected its profile after source changed;
+the final run used unchanged source and passed. No live graph/model operations
+or remote Git operations occurred. General native sets, selected-cell feasibility
+and campaign admission/dispatch remain in the open Stage 4 batch.
+
 One deferred backlog: unrelated dead-code/cosmetic cleanup, additional test-count
 consolidation without demonstrated payoff, broader partial-usage knownness and
 nonblocking provider edge cases. Accounting required by the scorecard remains in

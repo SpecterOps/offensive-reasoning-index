@@ -12,11 +12,14 @@ from ori.eval.v2.native_capability import build_native_capability_profile
 from ori.eval.v2.native_mcp_profiles import get_native_implementation
 from ori.eval.v2.native_mcp_runtime import NativeCallDecision, NativeMCPSession
 from ori.eval.v2.schema import (
+    AbsenceClaim,
+    BoundedNegativePolicy,
     CountClaim,
     EntityRef,
     ExactCountPolicy,
     ExactRoutePolicy,
     ExactSetPolicy,
+    NegativeReasonCode,
     PopulationScope,
     RelationshipPattern,
     RouteClaim,
@@ -24,6 +27,71 @@ from ori.eval.v2.schema import (
     SetClaim,
     Track,
 )
+
+
+@pytest.mark.parametrize("implementation", ["mwnickerson", "mordavid"])
+def test_native_absence_requires_complete_scope_and_zero_preserving_counts(
+    implementation, subtests,
+):
+    exact = ("MATCH p=(s {objectid:'user-1'})-[:MemberOf*1..2]->"
+             "(t {objectid:'group-1'}) RETURN count(p) AS total")
+    optional = ("MATCH (s {objectid:'user-1'}), (t {objectid:'group-1'}) "
+                "OPTIONAL MATCH p=(s)-[:MemberOf*1..2]->(t) RETURN count(p) AS total")
+    cases = (
+        (exact, 0, "valid_negative"),
+        (exact, 1, "useful_positive"),
+        (exact.replace("count(p)", "count(*)"), 1, "useful_positive"),
+        (optional, 0, "valid_negative"),
+        (optional.replace("count(p)", "count(DISTINCT p)"), 0, "valid_negative"),
+        (optional.replace("count(p)", "count(*)"), 1, "irrelevant"),
+        (exact.replace("1..2", "1..3"), 0, "valid_negative"),
+        (exact.replace("1..2", "1..3"), 1, "irrelevant"),
+        (exact.replace("1..2", "1..1"), 0, "irrelevant"),
+        (exact.replace("->", "-"), 0, "valid_negative"),
+        (exact.replace("->", "-"), 1, "irrelevant"),
+        (exact.replace("MemberOf", "AdminTo"), 0, "irrelevant"),
+        (exact.replace("user-1", "other-user"), 0, "irrelevant"),
+        (exact.replace("RETURN", "WITH p LIMIT 1 RETURN"), 0, "irrelevant"),
+        (exact.replace("RETURN", "WHERE s.enabled = true RETURN"), 0, "irrelevant"),
+        ("RETURN 0 AS total", 0, "irrelevant"),
+    )
+    for query, count, expected in cases:
+        with subtests.test(query=query, count=count):
+            payload = (
+                {"success": True, "info_type": "run", "has_results": True,
+                 "node_count": 0, "edge_count": 0,
+                 "data": {"nodes": {}, "edges": [],
+                          "literals": [{"key": "total", "value": count}]}}
+                if implementation == "mwnickerson"
+                else {"success": True, "data": [{"total": count}]}
+            )
+            profile, session, calls = _native_session(implementation, payload)
+            claim = AbsenceClaim(
+                kind="absence", claim_id="bounded-no-path",
+                source={"role": "source", "object_type": "User"},
+                target={"role": "target", "object_type": "Group"},
+                relationships=("MemberOf",), max_hops=2, semantics="direct",
+                reason_codes=(NegativeReasonCode.OBJECTIVE_UNREACHABLE,),
+                population_scope=PopulationScope.BENCHMARK_NAMESPACE,
+            )
+            task = _fingerprinted_task_bundle(
+                task_id="native-absence", product="simple", claim=claim,
+                policy=BoundedNegativePolicy(kind="bounded_negative"),
+                binding=_binding(Track.MCP, claim=claim, expected_cardinality=0,
+                                 native_profile=profile),
+                input_entities=(
+                    EntityRef(object_id="user-1", object_type="User", role="source"),
+                    EntityRef(object_id="group-1", object_type="Group", role="target"),
+                ), question="Return no_path with reason codes for the bounded absence claim.",
+            )
+            arguments = {"query": query}
+            if implementation == "mwnickerson":
+                arguments["info_type"] = "run"
+            tool = get_native_implementation(implementation).generic_query_tool
+            outcome = asyncio.run(session.call_tool(tool, arguments, task))
+            assert calls == [(tool, arguments)]
+            assert outcome.executed and outcome.failure is None
+            assert outcome.proof_event.kind.value == expected
 
 
 def _native_session(implementation, payload):

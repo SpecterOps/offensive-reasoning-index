@@ -145,6 +145,21 @@ qualified backend guard. A fabricated dictionary is not an execution receipt.
     if projection.status != "observed" or projection.evidence is None:
         return event(EvidenceEventKind.IRRELEVANT, "native_evidence_inconclusive")
     if (
+        task.claim_kind == "absence"
+        and profile.implementation_id in {"mwnickerson", "mordavid"}
+        and any(alt.result_kind == "scalar_count" for alt in alternatives)
+    ):
+        from .query_contract import negative_query_scope_mode
+
+        query, count = arguments.get("query"), projection.evidence.count
+        scope = negative_query_scope_mode(task, query) if isinstance(query, str) else None
+        if scope is None or count is None or (scope == "broader" and count > 0):
+            return event(EvidenceEventKind.IRRELEVANT, "native_absence_scope_unproven")
+        return event(
+            EvidenceEventKind.VALID_NEGATIVE if count == 0 else EvidenceEventKind.USEFUL_POSITIVE,
+            "native_complete_bounded_absence" if count == 0 else "native_exact_scope_contradiction",
+        )
+    if (
         profile.implementation_id == "armadin" and tool_name == "find_domains"
         and task.claim_kind == "set"
         and any(alt.result_kind == "entities" for alt in alternatives)

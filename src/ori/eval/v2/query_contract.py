@@ -572,6 +572,10 @@ def negative_query_scope_mode(
     )
     if count_target != "*" and _identifier(count_target) != path_variable:
         return None
+    if assignment.group("optional") and count_target == "*":
+        # OPTIONAL MATCH preserves the endpoint row even when p is null.
+        # Counting rows would report a false positive path; count(p) instead.
+        return None
 
     body = relationship_body
     body_match = _RELATIONSHIP_BODY.fullmatch(body)

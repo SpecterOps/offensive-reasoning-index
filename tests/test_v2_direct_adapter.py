@@ -655,6 +655,12 @@ def test_direct_absence_accepts_exact_optional_match_zero_proof() -> None:
     )
 
     assert negative_query_scope_mode(task, query) == "exact"
+    # A null OPTIONAL MATCH path still leaves an endpoint row. COUNT(*)=1
+    # cannot establish that a path exists; COUNT(p) remains zero-preserving.
+    assert negative_query_scope_mode(task, query.replace("count(p)", "count(*)")) is None
+    assert negative_query_scope_mode(
+        task, query.replace("count(p)", "count(DISTINCT p)"),
+    ) == "exact"
     outcome = asyncio.run(
         execute_direct_v2(
             coordinator,

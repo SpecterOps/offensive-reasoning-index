@@ -14,7 +14,7 @@ Compilation preserves claim and recipe identities while creating new public
 task, oracle and catalog fingerprints. Native contracts name the actual server
 tools, not a normalized Cypher facade. Unsupported Armadin contracts fail closed.
 Offline certification accepts an explicit native profile for currently implemented
-replay shapes: main/MorDavid counts, main positive routes, Armadin complete
+replay shapes: main/MorDavid counts and bounded absence, main positive routes, Armadin complete
 Domain sets and Armadin unconstrained positive routes. Use
 `offline_certify(task, snapshot, native_profile=profile)` or pass the native profile
 to `build_offline_certification_catalog`. Replay crosses the actual native
@@ -47,6 +47,13 @@ explicit native count. Filtered/windowed tasks and truncated results cannot use
 that proof. This follows the pinned server's
 [unbounded Domain query](https://github.com/armadin-public/bloodhound-mcp-server/blob/6ad4a4703d1117c3019400539911ca689a537197/tools/active_directory/domain_tools.py)
 and [complete record iteration](https://github.com/armadin-public/bloodhound-mcp-server/blob/6ad4a4703d1117c3019400539911ca689a537197/lib/bloodhound_client.py).
+Main and MorDavid scalar absence proofs must bind the complete public endpoint,
+relationship, direction and hop scope. A zero over an admitted broader search
+can prove absence; a nonzero result contradicts absence only for the exact scope.
+`OPTIONAL MATCH ... COUNT(*)` is rejected because it counts a preserved null-path
+row; use `COUNT(p)` or `COUNT(DISTINCT p)` for that zero-preserving form. The same
+scope correction applies to historical Direct/MCP proof checks. Existing
+certifier fingerprints bind this change, so prior certification must be regenerated.
 Other proof shapes remain non-unlocking until their native adjudicators are
 implemented. Native offline replay explicitly uses `certified=False` in the
 shared finalizer; the default certified native path still raises until live

@@ -37,6 +37,7 @@ from .schema import (
     EvidenceIR,
     ExecutionClass,
     OracleBundle,
+    PathStatus,
     TaskBundle,
     Verdict,
 )
@@ -763,19 +764,23 @@ def project_native_fixture(
     if case.answer_payload is None:
         raise ValueError("applicable native fixture has no answer payload")
     alternative = task.binding.mcp_evidence_contract.alternatives[0]
-    if task.claim_kind == "count" and profile.implementation_id in {"mwnickerson", "mordavid"}:
-        if perfect_evidence.count is None:
+    if (task.claim_kind in {"count", "absence"}
+            and profile.implementation_id in {"mwnickerson", "mordavid"}):
+        if task.claim_kind == "absence" and perfect_evidence.path_status is not PathStatus.NO_PATH:
+            raise ValueError("native absence fixture lacks a bounded no-path verdict")
+        count = 0 if task.claim_kind == "absence" else perfect_evidence.count
+        if count is None:
             raise ValueError("native count fixture lacks a mechanical count")
         arguments = {"query": _mcp_fixture_query(task, count=True)}
         if profile.implementation_id == "mordavid":
-            payload = {"success": True, "data": [{"certified_count": perfect_evidence.count}]}
+            payload = {"success": True, "data": [{"certified_count": count}]}
         else:
             arguments["info_type"] = "run"
             payload = {
                 "success": True, "info_type": "run", "has_results": True,
                 "node_count": 0, "edge_count": 0,
                 "data": {"nodes": {}, "edges": [], "literals": [
-                    {"key": "certified_count", "value": perfect_evidence.count},
+                    {"key": "certified_count", "value": count},
                 ]},
             }
     elif task.claim_kind == "route" and profile.implementation_id == "mwnickerson":
