@@ -24,7 +24,103 @@ V30 qualification is a hard prerequisite for dependent implementation. Historica
 V29 evidence does not certify new code. Deadline arrival, passing tests, an open
 PR, or partial results do not mean the complete program is finished.
 
+### Approved gate amendment (September 5)
+
+After V30 review, two-machine validation and live certification passed, the
+operator explicitly approved deferring PR creation/merge while away and continuing
+the plan. Development begins with P2 code review, cleanup, optimization and
+regression testing on the single
+consolidated branch from qualified implementation `22cf478` (evidence recorded
+at `afa9542`). This is a narrow exception to the pre-P2 merge requirement, not a
+waiver of validation, behavior preservation, provider-spend admission, or evidence
+rules. Subsequent development still requires its predecessor's review and
+qualification, but a deferred merge alone does not block that work. PR review and
+merge remain outstanding. Final campaign admission and
+public results still require merged code and current certification. Refactors
+invalidate affected receipts normally; never relabel the old receipts as current.
+
 ## Execution and ownership
+
+### Stage 4 stop boundary (September 6 operator correction)
+
+Finish through Stage 4 for operator-run local-model testing, including native
+MorDavid and Armadin compatibility, then stop for operator input. Do not advance
+Stage 5 or later work automatically. This supersedes the earlier Stage 3 stop
+request. The full roadmap remains recorded for later resumption.
+Current offline acceptance is not a claim of production/live qualification:
+exact graph certification, the operator's local inference setup and no-model
+campaign readiness still gate real-model testing. Local checkpoint commits are
+now explicitly authorized; pushes, PR and merge remain deferred. Public benchmark
+results still require merged certified code.
+
+### Capability-first execution strategy (September 6 operator override)
+
+This replaces the earlier per-step planning/review process, including conflicting
+micro-slice requirements in subordinate plans. The entire roadmap, dates and
+acceptance requirements below remain intact. Deliver remaining capabilities;
+validation supports delivery and is not the primary deliverable.
+
+- A step is a substantial subsystem deliverable or roadmap phase. Reuse approved
+  architecture and plans; revise detailed design only for a material decision.
+- Use one Devil's Advocate review per substantial batch, resolve blockers, then
+  implement the complete batch. Ordinary implementation details do not restart
+  planning or review; material design changes or newly demonstrated correctness/
+  security blockers do.
+- Choose the next deliverable by critical-path impact. Map stages to completed
+  capabilities, missing capabilities, actual blockers and next implementation.
+  Finish coherent end-to-end capabilities and batch related fixes/refactors.
+- Stop expanding cleanup. Its remaining exit conditions are completion of the
+  in-flight repair-accounting correction, focused regression and independent
+  review of that behavior, and no unresolved release-blocking regression. Move
+  unrelated cleanup, cosmetic work and nonblocking edge cases to one backlog.
+- Use focused existing tests in development and a full regression once per
+  coherent batch, repeating only when later changes materially invalidate it.
+  Preserve meaningful assertions and independent negative coverage; test-count
+  targets never justify deletion alone.
+- Reuse existing validation. Do not add bespoke receipt systems, cloned fault
+  drivers or reconciliation scripts unless an explicit release requirement
+  cannot otherwise be met. Existing historical evidence remains preserved.
+- Keep certification, exact-graph checks, privacy, budget and publication gates
+  at their appropriate integration/release boundaries. Do not weaken or waive
+  tests or claim acceptance without evidence.
+- After focused validation and independent review, advance. Do not revalidate an
+  unchanged accepted baseline repeatedly. Record deferred external dependencies
+  and continue independent implementation. A no-implementation turn must identify
+  the concrete blocker or decision it resolved.
+- Local checkpoint commits are authorized; label unfinished work as WIP and keep
+  credentials/private results excluded. Pushes, PRs and merge remain deferred. Merge
+  is a publication/final-campaign gate, not a local-development blocker. Hosted
+  spending, live models, graph changes and host operations need authorization.
+- ORI remains a portable standalone CLI with no personal-agent or private-host
+  dependency. OpenGraph implementation remains post-conference; vendor-neutral
+  design is required before the talk.
+- Progress reports lead with user-facing capability, tests/review, blockers and
+  next roadmap capability—not internal slice IDs, hashes or artifact counts.
+  Overall completion still requires every original roadmap requirement.
+
+| User stage | Existing package | Accountable owner | Dates | Exit gate |
+| --- | --- | --- | --- | --- |
+| 0 Consolidate and qualify V30 | P1 | Integration lead | Sept 5–7 | Reviewed merged baseline and V30 acceptance; development-only merge exception remains explicit |
+| 1 Review, cleanup, tests, optimization | P2 | Engineering lead | Sept 7–10 | Preserved behavior, independent review, measured optimization and installation acceptance |
+| 2 Freeze local inference | P3 | Infrastructure engineer | Sept 7–9 | Externally provisioned reproducible local inference qualified; no ORI reservation dependency |
+| 3 Expand and select tasks | P4 | Benchmark/compiler engineer | Sept 10–14 | Certified pool and deterministic 50 Direct / 50 MCP release |
+| 4 Native MCP and providers | P5 | Runtime/MCP engineer | Sept 10–16 | Three native implementations exercised with local Qwen |
+| 5 Scorecard and budget | P6 | Reporting/operations engineer | Sept 10–16 | Auditable separate metrics and enforced spend limits |
+| 6 Qualification and model lock | P7 | QA/campaign lead | Sept 16–18 | Merged campaign boundary and complete readiness |
+| 7 Frozen campaign | P8 | Campaign operator | Sept 18–25 | Valid graph-gated evidence and reconciled costs |
+| 8 Evidence freeze | P9 | Release lead | Sept 26 | Signed evidence manifest and accepted public claims |
+| 9 Demo/deck/technical freeze | P10 | Presentation owner | Sept 19–29 | Offline package verified on two machines |
+| 10 Delivery | P11 | Presentation owner | Sept 30–Oct 5 | Rehearsed unchanged technical package |
+| Parallel OpenGraph design | P12 | Architecture owner | Sept 10–24 | Reviewed design; implementation remains post-conference |
+
+P0 remains cross-stage progress/mobile coordination. Shared schema changes belong
+to the integration lead. One agent may hold multiple ownership roles, but not
+independent approval of its own work. Stage plans identify the actual assigned
+reviewer, not only a role label. Critical path remains V30 qualification → cleanup
+baseline → task/MCP/reporting integration → local qualification → merged release
+and certification → hosted campaign → evidence freeze. Dates never waive gates.
+
+Current stage plan: [Stage 1 cleanup](2026-09-05-oaic-stage-1-cleanup-plan.md).
 
 ORI is a portable benchmark, not a machine or model-service manager. It must
 run without a personal agent installation, private hostname, workstation layout,
@@ -91,8 +187,9 @@ blocked. Email, SMS or another service is not an automatic substitute.
 - P1-W05: submit the baseline PR with integration ledger and validation; obtain
   required review/merge and bind acceptance to the merged source boundary.
 
-Gate: full validation, independent review and controlled-host acceptance pass;
-the V30 baseline is merged. Downstream cleanup/features cannot bypass this gate.
+Gate: full validation, independent review and controlled-host acceptance pass.
+The September 5 amendment permits development before the outstanding merge;
+validation dependencies and final campaign/publication gates are unchanged.
 
 ## P2: review, cleanup and optimization (September 7-10)
 
@@ -115,7 +212,8 @@ the V30 baseline is merged. Downstream cleanup/features cannot bypass this gate.
   reports, tests and peak memory. Compare one warmup/five measurements on the same
   environment. Retain only repeatable improvements with equivalent behavior.
 - P2-W07: independent review, differential checks, full pytest/Ruff/lock/diff and
-  secret checks; merge cleanup before dependent implementation.
+  secret checks; qualify cleanup before dependent implementation. Its merge may
+  be deferred under the September 5 amendment, not its review or validation.
 - P2-W08: qualify public installation on clean Linux and macOS machines using
   documented dependencies only, with no private agent files or operator tools.
   Exercise arbitrary checkout/config/output paths (including spaces), explicit
@@ -160,18 +258,26 @@ affected qualification. Deterministic unit/compiler/scorer tests remain model-fr
 
 - P4-W01: version the new `oaic-2026-v1` release. Preserve simple smoke and
   historical products. Conference seed 67; robustness seeds 4401 and 4402.
-- P4-W02: certify at least 60 main semantic-unique contracts per track plus ten
+- P4-W02: certify 100 main semantic-unique contracts per track plus ten
   reserved diagnostics per track (two per claim kind). Diagnostics are excluded
   from main selection across seeds by recipe and semantic identity.
 
+September 6 scope correction confirmed by the operator: **100 unique certified
+Direct candidates and 100 unique certified MCP candidates**, with each seeded
+release selecting **50 Direct + 50 MCP = 100 tasks total**. The ten reserved
+diagnostics per track are separate from those main candidate pools. The prior
+60-candidate implementation is an intermediate baseline, not the exit gate.
+The expanded recipe roster is reviewed as one material batch change; ordinary
+implementation details retain the capability-first cadence.
+
 | Claim | Main eligible minimum per track | Selected per track |
 | --- | ---: | ---: |
-| set | 12 | 10 |
-| count | 10 | 8 |
+| set | 32 | 10 |
+| count | 30 | 8 |
 | route | 24 | 20 |
 | decision | 7 | 6 |
 | bounded absence | 7 | 6 |
-| total | 60 | 50 |
+| total | 100 | 50 |
 
 - P4-W03: recipes declare stable identity, graph template, tracks/exclusions,
   claim/family/tier/concentration, eligibility, public selectors/acceptance/bounds,
@@ -188,9 +294,235 @@ affected qualification. Deterministic unit/compiler/scorer tests remain model-fr
   scores, hidden difficulty or oracle performance.
 - P4-W06: test repeatability, catalog reorder invariance, graph and logical-subset
   seed variation, disjointness, no duplicate inflation and exact 50/50 scheduling.
+
+Implementation batch boundary (September 6): deliver authoring, certification,
+selection artifacts/CLI and campaign admission together. Reuse the existing
+compiler/oracle/fixture engine and existing candidate-certification checks.
+Do not change historical simple/complex task products or silently add fields to
+their hashed catalogs. A release-specific recipe registry and metadata artifact
+will carry stable recipe/variant identity and main/diagnostic eligibility, bound
+to task/public-semantic fingerprints. Selection must validate these bindings
+against the compiled/certified source, not trust an arbitrary self-hashed subset.
+The official selected release is a new artifact; it does not replace or relabel
+the full certified candidate catalog. Campaign readiness validates both and
+schedules only selected identities, binding selection into resume provenance.
+
+The concrete authoring target is 110 unique contracts per track: 34 sets, 32 counts,
+26 routes, nine decisions and nine absences, with two diagnostic recipes per kind.
+Existing route/selection builders cover the starting roster. Six additional
+decision builders and eight genuinely distinct bounded-negative contracts require
+authoring and offline qualification. Do not fill the negative quota with renamed
+contracts, hop-limit padding or unverified assumptions about reversed paths.
+Resolve this material roster decision in the one batch review; other ordinary
+implementation details do not restart planning. Live certification remains a
+later authorized gate, never emulated to label offline candidates publishable.
+
+The operator's 100-main-candidate expansion adds twenty genuine populations,
+each with a distinct set and count contract: users on the planted session host;
+SERVER-ADMINS' administered computers; direct principals administering SRV-FILE-01;
+users on the unconstrained-delegation host; the constrained service user's
+delegation targets; admincount users; high-value groups; domain controllers;
+subject-supplied certificate templates; authentication-enabled and explicitly
+authentication-disabled certificate templates; GPOs; OUs; admincount groups;
+enterprise certificate authorities; and RBCD, ACL, GPO-control, AllExtendedRights group
+targets in the LAPS/session scenario, and enrollment targets anchored to their
+declared source. Enumerate entire matching populations,
+not only planted edges. Missing/null properties must not silently mean false.
+No additional window padding or capacity increase is authorized. Independent
+batch review approved this expansion subject to existing three-seed capacity and
+certification tests. OAIC decisions expose all exact subject selectors required
+by their evidence policy; this fixes a hidden identity constraint without changing
+historical decision tasks or weakening the comparator.
+
+The negative roster is resolved by eight explicit OAIC-only near-miss fixtures,
+not by interpreting existing decoy/invalidated edges as absent: archive inspection
+found those edges actually present. Add dedicated identities after base random
+edge assignment, with a real alternate-target edge and a missing declared target
+connection. Exact source/target selectors, direction and bounds enter each claim.
+
+| Fixture | Missing transition | Bound | Eligibility |
+| --- | --- | --- | --- |
+| admin target | User → Computer, AdminTo | 1 | main |
+| session target | Computer → User, HasSession | 1 | main |
+| membership bridge | Group → Group, MemberOf | 1–3 | main |
+| delegation target | User → Computer, AllowedToDelegate | 1 | main |
+| RBCD target | Computer → Computer, AllowedToAct | 1 | main |
+| ACL target | User → Group, GenericAll | 1 | main |
+| GPO control | Group → GPO, GenericWrite | 1 | diagnostic |
+| identity transition | Group → User, GenericWrite | 1 | diagnostic |
+
+Together with the existing invalid-certificate contract this supplies seven main
+and two diagnostic absences. Require archive-derived negative proof and positive
+near-miss fixture checks for seeds 67/4401/4402; no live graph operations are implied.
+`oaic-2026-v1` is an explicit new generation/compilation product using the complex
+base graph plus these fixtures. Historical simple/complex behavior is preserved.
+
+Selection integration keeps the full certified catalog authoritative. Add optional
+per-track metadata/selection artifact paths and an optional prepared selection;
+OAIC product identity is independently present in compiled artifacts, so omission
+of selection cannot downgrade it to a historical release. Readiness validates
+existing full-catalog certification first, rederives known recipe bindings and
+recomputes selection, then requires exact receipt equality. Scheduling uses only
+the validated selected IDs. `ori select-v2` validates both tracks before emitting
+the two 50-task receipts and a common 100-task release manifest. Bind all selection
+inputs into existing configuration/readiness/resume provenance. A direct-only
+campaign may consume its track from that paired release without combining scores.
+
+Batch review disposition: the paired release must reject otherwise-valid track
+catalogs with differing product, seed, source manifest/archive or canonical graph.
+Its common manifest binds both exact selection receipts. OAIC configuration
+requires that manifest and artifact paths for both tracks even when executing only
+Direct; file-only admission revalidates the complete pair, then launches only the
+requested track. No second live graph/provider/tool check is introduced merely to
+validate the unexecuted track's files. A standalone self-hashed 50-task receipt is
+not an admitted OAIC release. With this cross-track binding enforced, the single
+batch design review is approved; proceed without additional microplans.
   Finite selection space does not promise a unique subset for every possible seed.
 
 ## P5: native MCP and providers (September 10-16)
+
+### Source-backed integration constraints (September 6)
+
+This is a material backend/interface decision, not a restart of the roadmap.
+Source inspection is not runtime discovery or qualification. The main server's
+locally inspected pin is `92a37dd481ce675fe552f14c9957a31dbbcd212e`.
+The alternate implementation pins and native surfaces are:
+
+| Implementation | Exact revision | Backend | Source-registered surfaces |
+| --- | --- | --- | --- |
+| MorDavid/BloodHound-MCP-AI | `1eb21b01da14fd2eda941234e3a545e876bef296` | Neo4j Bolt | 75 tools, no prompts or resources; generic `query_bloodhound` plus 74 fixed helpers |
+| armadin-public/bloodhound-mcp-server | `6ad4a4703d1117c3019400539911ca689a537197` | Neo4j Bolt | 95 tools, `bloodhound_prompt`, no resources; no generic Cypher tool |
+
+Primary evidence: [MorDavid executor and startup](https://github.com/MorDavid/BloodHound-MCP-AI/blob/1eb21b01da14fd2eda941234e3a545e876bef296/BloodHound-MCP.py#L1-L72),
+[Armadin client](https://github.com/armadin-public/bloodhound-mcp-server/blob/6ad4a4703d1117c3019400539911ca689a537197/lib/bloodhound_client.py#L20-L53),
+[Armadin registrations](https://github.com/armadin-public/bloodhound-mcp-server/blob/6ad4a4703d1117c3019400539911ca689a537197/main.py#L48-L142).
+
+The historical main loader changes descriptions and substitutes the CE query
+coordinator's response for native Cypher execution. Preserve that historical
+certified lane; it must not be relabeled as a native multi-server comparison.
+The native lane needs an explicit capability version, actual native invocation,
+unmodified discovered descriptors/results, and separate implementation-specific
+projectors. Changes to profile, dependency closure, backend binding, discovery,
+admission or projection invalidate native certification/readiness/resume.
+Never silently migrate an existing campaign or normalize an alternate into
+`cypher_query.run`.
+
+Native prompt policy: preserve discovered definitions, arguments and content in
+private provenance and expose supported prompts through the native MCP prompt
+protocol. Do not silently append a server prompt to the authoritative benchmark
+system contract or invent prompt tools. Freeze this client policy in the native
+capability fingerprint. Compiler/certifier fingerprints must transitively bind
+the new runtime and projector implementations; historical CE certification is
+not an admission credential for the native lane.
+
+Both Bolt backends need independent bounded canonical snapshots equivalent to
+the selected graph, including CE-derived identities and directed relationships.
+The same source archive does not prove backend parity. Provisioning or loading
+a mirror is a later separately authorized operation; do not add private host
+assumptions or automatic graph-copy behavior to ORI. Read-only principals and
+backend execution limits are admission requirements because CE containment
+cannot control queries issued internally by a native Bolt server.
+
+MorDavid retries both `neo4j` and `bloodhound` databases after any exception and
+does not report which supplied a result. Native admission must therefore prove
+confinement for every database reachable by that principal, not merely test a
+default database. Successful fallback can conceal an earlier failure: do not
+claim to detect it from the returned envelope. Require all effective destinations
+to be enumerated, canonical-equal and read-only/quiescent across track gates;
+otherwise refuse the profile. An inaccessible alternate is acceptable only with
+enforced access confinement, not a one-time failed connectivity probe.
+Its generic query is not inherently read-only. Bolt admission must independently
+restrict procedures, external network/file access and writes, with backend
+transaction deadlines; passing CE's CySQL policy is not Bolt safety evidence.
+Both upstream
+dependency lists are unlocked and both load environment files; use an isolated,
+explicitly qualified dependency/environment boundary, not a user checkout's
+ambient configuration. MorDavid's README claims MIT but its pinned tree has no
+license file; redistribution remains unresolved, and ORI must not vendor it or
+represent licensing as verified.
+
+Native evidence limits are real benchmark differences. MorDavid's `record.data()`
+serialization can omit path direction, labels and relationship properties;
+missing facts cannot be recovered from the oracle. Armadin's shortest-path
+tool provides an ordered native witness but its empty result is not a bounded
+absence proof, and limited lists do not establish global completeness. Unsupported
+proof coverage must remain explicit, not repaired by fabricated tools or hidden
+queries. Wire discovery, serialization and claim-specific qualification remain
+unverified until authorized runtime checks.
+
+Before admitting an implementation cell, certify native proof feasibility for
+every selected task. If its native surface cannot support the selected 50 MCP
+contracts, record an unsupported implementation cell and exclude it from ranking;
+do not blame the model, replace the selected subset, or synthesize capabilities.
+Distinguish this structural failure from a model failing to supply available
+proof. This constraint can prevent an alternate's final campaign admission even
+when its launcher and discovery work correctly.
+
+Next implementation deliverable: one native profile-to-runner path covering
+backend binding, preserved discovery, admission, native invocation and typed
+projection, integrated with the existing compiler/certifier/readiness gates.
+Offline replay tests can be implemented now; graph provisioning, native live
+qualification, local-model runs and publication remain deferred gates.
+
+### Native contract migration decision (September 6)
+
+The backend-verification batch is accepted offline. Its follow-on admission batch
+has one completed adversarial design review. Use the following interfaces; do not
+restart design review for ordinary implementation details.
+
+- Define a separate exact `NativeCapabilityProfile`, not a subclass of the
+  historical `CapabilityProfile` and not a Bolt profile with a fictitious
+  `bloodhound_ce_version`. Bind implementation/source revision, private resolved
+  runtime/dependency and backend identity, discovered surface fingerprint, and
+  admission/projector/finalizer implementation closure. A configured profile is
+  a binding of expectations, not evidence of backend qualification.
+- Preserve the historical `CapabilityProfile` class, serialized defaults and
+  strict validator. Dispatch the profile union explicitly at shared certification
+  and campaign-admission boundaries. The default profile resolver remains
+  historical; native operation requires explicit selection.
+- Preserve `MCPClaimEvidenceContract`. Extend only the existing
+  `TrackBinding.mcp_evidence_contract` field to accept it or a distinct
+  `NativeClaimEvidenceContract` with a required native `contract_version` literal.
+  Add a distinct native binding-mode value. Do not add default fields to
+  historical bindings or rewrite Bolt operations to `cypher_query.run`.
+  The native public contract contains safe implementation/profile identifiers
+  and exact solver-visible native proof alternatives; private paths, endpoints,
+  runtime configuration and backend credentials never enter it.
+- Explicit native compilation must derive public question, acceptance clauses,
+  evidence alternatives and sealed expectations from the same typed claim.
+  Retain the recipe roster and selected 50 identities; compute new native task,
+  oracle, semantic-class and catalog fingerprints because the public binding is
+  materially different. Recompile and recertify rather than copying historical
+  candidate/live receipts. An unsupported binding must not become a certified
+  candidate.
+- Native proof adjudication consumes actual native call arguments, native result
+  and public task only. Check selectors, population/filter scope, direction/hop
+  limits, projection, ordering/window and completeness as applicable. Reuse
+  existing public query-proof analysis where its semantics apply; do not reuse
+  a CE execution receipt or supply facts from a graph/oracle. A scalar from
+  `RETURN 3` is an observation, not a count proof. Empty Armadin shortest paths
+  cannot prove bounded absence; limited lists cannot establish complete sets.
+- Extend existing fixture certification with explicit native dispatch through
+  the real implementation projector and adjudicator. Bind the complete native
+  source closure to certification freshness. Unknown, truncated, ambiguous and
+  unsupported outputs retain independent negative coverage.
+- Admit the complete unchanged selected 50-task MCP cell before any provider
+  request, then route supported native execution through the existing campaign
+  lifecycle, accounting, checkpoint, graph-gate and reporting infrastructure.
+  Unsupported cells remain typed and unranked; no subset substitution or
+  synthetic tools. Historical runner dispatch remains unchanged.
+- Native graph verification remains necessary but insufficient: explicit
+  database identity, all MorDavid fallback destinations, enforced privileges,
+  quiescence, pinned runtime/source and live certification must be independently
+  qualified. Constructors and caller-supplied booleans cannot satisfy these gates.
+
+Acceptance for this coherent batch is native compilation through certified
+admission and actual native-session dispatch under offline test transports, with
+historical compatibility, changed-binding resume rejection, unchanged selected
+roster and zero-provider unsupported-cell rejection. Live admission remains
+deferred. Do not label profile/schema scaffolding alone as native campaign
+completion. Use focused existing tests during implementation and one full
+regression at the completed batch boundary.
 
 - P5-W01: immutable profiles for mwnickerson/bloodhound_mcp,
   MorDavid/BloodHound-MCP-AI and armadin-public/bloodhound-mcp-server. Record full
@@ -319,6 +651,10 @@ Present frozen package with immediate fallback, no on-stage infrastructure debug
 The physical presentation is user-owned; agent verifies engineering readiness.
 
 ## P12: OpenGraph design (September 10-24)
+
+Design artifact: [OpenGraph extension framework](../opengraph-extension-framework-design.md).
+Its review status is recorded in the progress ledger; this link does not imply
+runtime implementation or certification.
 
 - P12-W01: vendor-neutral manifest/namespace/version/dependencies/schema/identity/
   relationships/recipes/fixtures/projector/certifier/content fingerprints.

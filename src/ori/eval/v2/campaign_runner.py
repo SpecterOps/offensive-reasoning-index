@@ -9,31 +9,57 @@ import json
 import math
 import os
 import signal
+import stat
 import subprocess
 import tempfile
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Literal
 
 from pydantic import Field, model_validator
 
+from ori.eval.adapter import call_provider_text
+from ori.eval.anthropic_binding import (
+    AnthropicBinding,
+    anthropic_binding_identity,
+    anthropic_private_headers,
+    prepare_anthropic_binding,
+)
 from ori.eval.bhce import BHCEClient, parse_bhce_url, resolve_bhce_target
+from ori.eval.codex_oauth import (
+    codex_endpoint_binding,
+    codex_request_base_url,
+    resolve_codex_credential,
+)
 from ori.eval.direct_query_safety import (
     DirectQueryCoordinator,
     DirectQuerySafetyConfig,
     QueryDenyCache,
 )
 from ori.eval.mcp_runtime import _load_bloodhound_mcp_bundle
+from ori.eval.ollama_binding import (
+    OllamaEndpoint,
+    ollama_model_name,
+    prepare_ollama_endpoint,
+)
 from ori.eval.provider_auth import (
     official_openai_endpoint_is_secure,
     openai_compat_endpoint_is_local,
     resolve_openai_compat_credential,
 )
-from ori.eval.provider_contract import ProviderApiSurface, resolve_api_surface
+from ori.eval.provider_contract import (
+    GEMINI_OPENAI_BASE_URL,
+    ProviderApiSurface,
+    ProviderContractError,
+    resolve_api_surface,
+    validate_release1_api_surface,
+)
 from ori.mcp_launcher import (
     MCPLauncherConfig,
     MCPLauncherRuntime,
@@ -53,6 +79,7 @@ from .campaign import (
 from .campaign_config import (
     ReasoningEffort,
     ResolvedV2CampaignConfig,
+    ResolvedV2TrackPaths,
     StructuredOutputMode,
     V2ModelEntry,
     load_v2_campaign_config,
@@ -94,11 +121,14 @@ RUNNER_VERSION = "ori-v2-model-campaign-v15"
 RUN_STATE_SCHEMA_VERSION = "ori-v2-private-run-state-v7"
 RUN_STATE_NAME = "run-state-v7.private.json"
 MODEL_REPORT_SCHEMA_VERSION = "ori-v2-model-report-v4"
-READINESS_SCHEMA_VERSION = "ori-v2-run-readiness-v11"
+READINESS_SCHEMA_VERSION = "ori-v2-run-readiness-v12"
 CAMPAIGN_LIFECYCLE_SCHEMA_VERSION = "ori-v2-campaign-lifecycle-v2"
 TRACK_COMPLETION_SCHEMA_VERSION = "ori-v2-track-completion-v1"
 _RUNNER_IMPLEMENTATION_SOURCES = {
+    "release_selection": Path(__file__).with_name("release_selection.py"),
+    "oaic_recipes": Path(__file__).with_name("oaic_recipes.py"),
     "adapter": Path(__file__).parent.parent / "adapter.py",
+    "anthropic_binding": Path(__file__).parent.parent / "anthropic_binding.py",
     "bhce": Path(__file__).parent.parent / "bhce.py",
     "campaign": Path(__file__).with_name("campaign.py"),
     "campaign_runner": Path(__file__),
@@ -112,10 +142,13 @@ _RUNNER_IMPLEMENTATION_SOURCES = {
     "mcp_launcher": Path(__file__).parent.parent.parent / "mcp_launcher.py",
     "mcp_state_machine": Path(__file__).with_name("mcp.py"),
     "model_runtime": Path(__file__).with_name("model_runtime.py"),
+    "ollama_binding": Path(__file__).parent.parent / "ollama_binding.py",
     "output_compliance": Path(__file__).with_name("output_compliance.py"),
     "query_contract": Path(__file__).with_name("query_contract.py"),
     "provider_auth": Path(__file__).parent.parent / "provider_auth.py",
     "provider_contract": Path(__file__).parent.parent / "provider_contract.py",
+    "provider_transport": Path(__file__).parent.parent / "provider_transport.py",
+    "ollama_stream": Path(__file__).parent.parent / "ollama_stream.py",
     "provider_loops": Path(__file__).parent.parent / "mcp_runtime.py",
     "runtime": Path(__file__).with_name("runtime.py"),
     "schema": Path(__file__).with_name("schema.py"),
@@ -518,10 +551,17 @@ class ModelReadinessV2(StrictModel):
     endpoint_family: str
     credential_source: str | None = None
     reasoning_effort: ReasoningEffort | None = None
+    anthropic_binding_fingerprint: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def anthropic_binding_matches_provider(self) -> ModelReadinessV2:
+        if (self.provider == "anthropic") != (self.anthropic_binding_fingerprint is not None):
+            raise ValueError("Anthropic binding fingerprint does not match provider")
+        return self
 
 
 class CampaignReadinessV2(StrictModel):
-    schema_version: Literal["ori-v2-run-readiness-v11"] = READINESS_SCHEMA_VERSION
+    schema_version: Literal["ori-v2-run-readiness-v12"] = READINESS_SCHEMA_VERSION
     protocol_version: Literal["ori-eval-protocol-v2"] = PROTOCOL_VERSION
     runner_version: Literal["ori-v2-model-campaign-v15"] = RUNNER_VERSION
     source_config_fingerprint: str
@@ -655,9 +695,14 @@ class PreparedTrack:
     release: CatalogRelease
     live: LiveCertificationCatalog
     certifications: Mapping[str, TaskCertification]
+    selected_task_ids: tuple[str, ...] | None = None
+    selection_fingerprint: str | None = None
+    paired_release_fingerprint: str | None = None
 
     @property
     def task_ids(self) -> tuple[str, ...]:
+        if self.selected_task_ids is not None:
+            return self.selected_task_ids
         return tuple(entry.task_id for entry in self.release.entries)
 
 
@@ -983,7 +1028,15 @@ def _prepare_track(
     track: Track,
     snapshot: GraphSnapshot,
 ) -> PreparedTrack:
-    paths = resolved.tracks[track]
+    return prepare_track_artifacts(resolved.tracks[track], track, snapshot)
+
+
+def prepare_track_artifacts(
+    paths: ResolvedV2TrackPaths,
+    track: Track,
+    snapshot: GraphSnapshot,
+) -> PreparedTrack:
+    """Validate the complete artifact inventory without contacting external services."""
     pair = load_v2_pair(paths.public, paths.oracles)
     profile = capability_profile_for_track(track)
     release = _load_release(paths.candidates)
@@ -1058,6 +1111,62 @@ def _prepare_track(
     )
 
 
+def prepare_selected_tracks(
+    resolved: ResolvedV2CampaignConfig,
+    snapshot: GraphSnapshot,
+    prepared: Mapping[Track, PreparedTrack],
+) -> dict[Track, PreparedTrack]:
+    """Rederive both certified selections, including the non-executed sibling track."""
+    from .oaic_recipes import OAICRecipeMetadata
+    from .release_selection import (
+        PairedSelectedRelease,
+        SelectedReleaseReceipt,
+        pair_selected_tracks,
+        select_candidate_track,
+    )
+
+    if resolved.selected_release is None or set(prepared) != {Track.DIRECT, Track.MCP}:
+        raise V2CampaignRunError(
+            "OAIC requires both certified tracks and a paired selected release"
+        )
+    selections = {}
+    for track, item in prepared.items():
+        paths = resolved.tracks[track]
+        if paths.release_metadata is None or paths.selection is None:
+            raise V2CampaignRunError("OAIC requires per-track metadata and selected receipts")
+        metadata = OAICRecipeMetadata.model_validate_json(paths.release_metadata.read_text())
+        selection = select_candidate_track(
+            public=item.pair.public,
+            candidates=item.release,
+            metadata=metadata,
+            source_archive_sha256=_sha256(resolved.archive),
+        )
+        if selection != SelectedReleaseReceipt.model_validate_json(paths.selection.read_text()):
+            raise V2CampaignRunError("OAIC selected receipt differs from certified selection")
+        if (
+            selection.seed != snapshot.seed
+            or selection.graph_fingerprint != snapshot.graph_fingerprint
+        ):
+            raise V2CampaignRunError("OAIC selection seed or graph mismatch")
+        if selection.source_manifest_fingerprint != canonical_sha256(
+            json.loads(resolved.source_manifest.read_text())
+        ):
+            raise V2CampaignRunError("OAIC selection source manifest mismatch")
+        selections[track] = selection
+    paired = pair_selected_tracks(selections[Track.DIRECT], selections[Track.MCP])
+    if paired != PairedSelectedRelease.model_validate_json(resolved.selected_release.read_text()):
+        raise V2CampaignRunError("OAIC paired selected release mismatch")
+    return {
+        track: replace(
+            item,
+            selected_task_ids=selections[track].selected_task_ids,
+            selection_fingerprint=selections[track].selection_fingerprint,
+            paired_release_fingerprint=paired.release_fingerprint,
+        )
+        for track, item in prepared.items()
+    }
+
+
 def _git_revision(path: Path) -> str:
     try:
         revision = subprocess.run(
@@ -1086,6 +1195,194 @@ class _ProviderIdentityV2:
     structured_output_mode: StructuredOutputMode
     endpoint_family: str
     credential_source: str | None
+    anthropic_binding_fingerprint: str | None = None
+
+
+def _anthropic_mutation_projection(resolved: ResolvedV2CampaignConfig) -> list[dict[str, Any]]:
+    return sorted(
+        (
+            {
+                "name": model.name,
+                "model": model.model,
+                "api_surface": model.api_surface,
+                "structured_output_mode": model.structured_output_mode,
+                "configured_base_url": (
+                    model.model_base_url or resolved.config.defaults.model_base_url
+                ),
+            }
+            for model in resolved.config.models
+            if model.provider == "anthropic"
+        ),
+        key=lambda entry: entry["name"],
+    )
+
+
+def _prepare_anthropic_bindings(resolved: ResolvedV2CampaignConfig) -> None:
+    # Validate the whole selection before opening any provider configuration.
+    for model in resolved.config.models:
+        _model_api_surfaces(model)
+        if model.provider == "codex":
+            _codex_model_slug(model)
+        elif model.provider == "anthropic":
+            slug = model.model.removeprefix("anthropic/").split("@", 1)[0]
+            if not slug.strip():
+                raise V2CampaignRunError("Anthropic model slug must be explicit and nonempty")
+    fingerprint = canonical_sha256(_anthropic_mutation_projection(resolved))
+    if getattr(resolved, "_anthropic_bindings", None) is not None:
+        if resolved._anthropic_mutation_fingerprint != fingerprint:
+            raise V2CampaignRunError(
+                "Prepared Anthropic configuration changed; reload configuration"
+            )
+        return
+    pending: dict[str, AnthropicBinding] = {}
+    for model in resolved.config.models:
+        if model.provider == "anthropic":
+            try:
+                pending[model.name] = prepare_anthropic_binding(
+                    model.requested_model,
+                    model.model_base_url or resolved.config.defaults.model_base_url,
+                )
+            except ProviderContractError as exc:
+                raise V2CampaignRunError(str(exc)) from None
+    resolved._anthropic_mutation_fingerprint = fingerprint
+    resolved._anthropic_bindings = MappingProxyType(pending)
+
+
+def _anthropic_binding(model: V2ModelEntry, resolved: ResolvedV2CampaignConfig) -> AnthropicBinding:
+    bindings = getattr(resolved, "_anthropic_bindings", None)
+    if bindings is None or model.name not in bindings:
+        raise V2CampaignRunError("Anthropic configuration has not been prepared")
+    if resolved._anthropic_mutation_fingerprint != canonical_sha256(
+        _anthropic_mutation_projection(resolved)
+    ):
+        raise V2CampaignRunError("Prepared Anthropic configuration changed; reload configuration")
+    return bindings[model.name]
+
+
+def _guard_anthropic_headers(resolved: ResolvedV2CampaignConfig) -> None:
+    """Compare secret-bearing header configuration only inside the campaign lock."""
+
+    selected = [model for model in resolved.config.models if model.provider == "anthropic"]
+    if not selected:
+        return
+    expected = {
+        "schema_version": 1,
+        "source_config_fingerprint": resolved.source_config_fingerprint,
+        "models": {
+            model.name: {
+                "model_slug": (binding := _anthropic_binding(model, resolved)).model_slug,
+                "binding_fingerprint": binding.config_fingerprint,
+                "headers": anthropic_private_headers(binding),
+            }
+            for model in sorted(selected, key=lambda item: item.name)
+        },
+    }
+    private_dir = resolved.output_dir / ".ori-private"
+    guard = private_dir / "anthropic-headers-v1.private.json"
+    safe_error = "Anthropic private header configuration is unavailable or incompatible"
+
+    def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(safe_error)
+            result[key] = value
+        return result
+
+    try:
+        root_entries = {entry.name for entry in resolved.output_dir.iterdir()}
+        if private_dir.exists() or private_dir.is_symlink():
+            info = private_dir.lstat()
+            if not stat.S_ISDIR(info.st_mode) or info.st_mode & 0o077:
+                raise ValueError(safe_error)
+        else:
+            if root_entries - {".ori-v2-campaign.lock"}:
+                raise ValueError(safe_error)
+            private_dir.mkdir(mode=0o700)
+
+        if guard.exists() or guard.is_symlink():
+            info = guard.lstat()
+            if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077:
+                raise ValueError(safe_error)
+            descriptor = os.open(
+                guard,
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
+            )
+            with os.fdopen(descriptor, "r", encoding="utf-8") as stream:
+                info = os.fstat(stream.fileno())
+                if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077:
+                    raise ValueError(safe_error)
+                actual = json.load(stream, object_pairs_hook=unique_object)
+            if (
+                not isinstance(actual, dict)
+                or type(actual.get("schema_version")) is not int
+                or actual != expected
+            ):
+                raise ValueError(safe_error)
+            return
+
+        if root_entries - {".ori-v2-campaign.lock", ".ori-private"} or any(private_dir.iterdir()):
+            raise ValueError(safe_error)
+        _atomic_write(guard, expected)
+    except (OSError, UnicodeError, ValueError):
+        raise V2CampaignRunError(safe_error) from None
+
+
+def _ollama_mutation_projection(resolved: ResolvedV2CampaignConfig) -> list[dict[str, Any]]:
+    return sorted(
+        (
+            {
+                "name": model.name,
+                "model": model.model,
+                "api_surface": model.api_surface,
+                "structured_output_mode": model.structured_output_mode,
+                "configured_base_url": (
+                    model.model_base_url or resolved.config.defaults.model_base_url
+                ),
+            }
+            for model in resolved.config.models
+            if model.provider == "ollama"
+        ),
+        key=lambda entry: entry["name"],
+    )
+
+
+def _prepare_ollama_endpoints(resolved: ResolvedV2CampaignConfig) -> None:
+    # Validate the whole surface selection before preparing any provider config.
+    for model in resolved.config.models:
+        _model_api_surfaces(model)
+        if model.provider == "ollama":
+            try:
+                ollama_model_name(model.requested_model)
+            except ProviderContractError as exc:
+                raise V2CampaignRunError(str(exc)) from None
+    fingerprint = canonical_sha256(_ollama_mutation_projection(resolved))
+    if getattr(resolved, "_ollama_endpoints", None) is not None:
+        if resolved._ollama_mutation_fingerprint != fingerprint:
+            raise V2CampaignRunError("Prepared Ollama configuration changed; reload configuration")
+        return
+    pending: dict[str, OllamaEndpoint] = {}
+    for model in resolved.config.models:
+        if model.provider == "ollama":
+            try:
+                pending[model.name] = prepare_ollama_endpoint(
+                    model.model_base_url or resolved.config.defaults.model_base_url,
+                )
+            except ProviderContractError as exc:
+                raise V2CampaignRunError(str(exc)) from None
+    resolved._ollama_mutation_fingerprint = fingerprint
+    resolved._ollama_endpoints = MappingProxyType(pending)
+
+
+def _ollama_endpoint(model: V2ModelEntry, resolved: ResolvedV2CampaignConfig) -> OllamaEndpoint:
+    bindings = getattr(resolved, "_ollama_endpoints", None)
+    if bindings is None or model.name not in bindings:
+        raise V2CampaignRunError("Ollama configuration has not been prepared")
+    if resolved._ollama_mutation_fingerprint != canonical_sha256(
+        _ollama_mutation_projection(resolved)
+    ):
+        raise V2CampaignRunError("Prepared Ollama configuration changed; reload configuration")
+    return bindings[model.name]
 
 
 def _model_base_url(
@@ -1093,6 +1390,14 @@ def _model_base_url(
     resolved: ResolvedV2CampaignConfig,
 ) -> str | None:
     base_url = model.model_base_url or resolved.config.defaults.model_base_url
+    if model.provider == "anthropic":
+        return _anthropic_binding(model, resolved).base_url
+    if model.provider == "ollama":
+        return _ollama_endpoint(model, resolved).selected_base_url
+    if model.provider == "gemini":
+        return GEMINI_OPENAI_BASE_URL
+    if model.provider == "codex":
+        return codex_request_base_url(model.model, base_url)
     if not base_url and "@" in model.model:
         base_url = model.model.rsplit("@", 1)[1]
     if not base_url and model.provider == "openai-compat":
@@ -1108,28 +1413,40 @@ def _provider_endpoint_fingerprint(
 ) -> str:
     """Hash the exact effective endpoint into the resume identity."""
 
-    return canonical_sha256({"endpoint": _model_base_url(model, resolved) or ""})
+    endpoint = (
+        _ollama_endpoint(model, resolved).chat_url
+        if model.provider == "ollama"
+        else _model_base_url(model, resolved) or ""
+    )
+    return canonical_sha256({"endpoint": endpoint})
+
+
+def _model_api_surfaces(model: V2ModelEntry) -> tuple[ProviderApiSurface, ProviderApiSurface]:
+    requested = ProviderApiSurface(model.api_surface)
+    selected = resolve_api_surface(model.provider, requested)
+    try:
+        validate_release1_api_surface(model.provider, selected)
+    except ProviderContractError:
+        requirement = (
+            "Release 1 Codex requires Responses"
+            if model.provider == "codex"
+            else "Release 1 enables Responses only for Codex"
+        )
+        raise V2CampaignRunError(
+            f"model {model.name} cannot use api_surface={selected.value!r}; {requirement}"
+        ) from None
+    return requested, selected
 
 
 def _provider_identity(
     model: V2ModelEntry,
     resolved: ResolvedV2CampaignConfig,
 ) -> _ProviderIdentityV2:
-    requested = ProviderApiSurface(model.api_surface)
-    selected = resolve_api_surface(model.provider, requested)
-    if model.provider == "codex" and selected is not ProviderApiSurface.RESPONSES:
-        raise V2CampaignRunError(
-            f"model {model.name} cannot use api_surface={selected.value!r}; "
-            "Release 1 Codex requires Responses"
-        )
-    if model.provider != "codex" and selected is not ProviderApiSurface.CHAT_COMPLETIONS:
-        raise V2CampaignRunError(
-            f"model {model.name} cannot use api_surface={selected.value!r}; "
-            "Release 1 enables Responses only for Codex"
-        )
+    requested, selected = _model_api_surfaces(model)
 
     credential_source: str | None = None
     endpoint_family = model.provider
+    anthropic_fingerprint: str | None = None
     if model.provider == "openai":
         base_url = _model_base_url(model, resolved)
         if not official_openai_endpoint_is_secure(base_url):
@@ -1146,10 +1463,18 @@ def _provider_identity(
         endpoint_family = credential.endpoint_family
         credential_source = credential.credential_source
     elif model.provider == "codex":
-        endpoint_family = "codex_oauth"
-        credential_source = "codex-login-status"
+        _codex_model_slug(model)
+        try:
+            binding = codex_endpoint_binding(_model_base_url(model, resolved))
+        except ProviderContractError as exc:
+            raise V2CampaignRunError(str(exc)) from None
+        endpoint_family = binding.endpoint_family
+        credential_source = binding.credential_source
     elif model.provider == "anthropic":
-        credential_source = "ANTHROPIC_API_KEY" if os.getenv("ANTHROPIC_API_KEY") else None
+        identity = anthropic_binding_identity(_anthropic_binding(model, resolved))
+        endpoint_family = identity["endpoint_family"]
+        credential_source = identity["credential_source"]
+        anthropic_fingerprint = identity["config_fingerprint"]
     elif model.provider == "gemini":
         credential_source = "GEMINI_API_KEY" if os.getenv("GEMINI_API_KEY") else None
 
@@ -1159,12 +1484,16 @@ def _provider_identity(
         structured_output_mode=model.structured_output_mode,
         endpoint_family=endpoint_family,
         credential_source=credential_source,
+        anthropic_binding_fingerprint=anthropic_fingerprint,
     )
 
 
 def _codex_model_slug(model: V2ModelEntry) -> str:
     slug = model.model.split("/", 1)[1] if model.model.startswith("codex/") else model.model
-    return slug.split("@", 1)[0]
+    slug = slug.split("@", 1)[0]
+    if not slug.strip():
+        raise V2CampaignRunError("Codex model slug must be explicit and nonempty")
+    return slug
 
 
 def _model_readiness(
@@ -1173,11 +1502,38 @@ def _model_readiness(
     """Verify local credentials/configuration without invoking a model."""
 
     receipts: list[ModelReadinessV2] = []
+    _prepare_ollama_endpoints(resolved)
+    _prepare_anthropic_bindings(resolved)
     codex_status_checked = False
     codex_capabilities: dict[str, set[str]] | None = None
     for model in resolved.config.models:
         identity = _provider_identity(model, resolved)
         if model.provider == "codex":
+            slug = _codex_model_slug(model)
+            reasoning_effort = resolved.config.defaults.reasoning_effort
+            if identity.credential_source != "codex-auth-file":
+                if identity.credential_source is None:
+                    raise V2CampaignRunError("Custom Codex endpoint requires CODEX_COMPAT_API_KEY")
+                receipts.append(
+                    ModelReadinessV2(
+                        name=model.name,
+                        provider=model.provider,
+                        model=slug,
+                        credential_check=identity.credential_source,
+                        capability_check="configured-not-probed",
+                        requested_api_surface=identity.requested_api_surface,
+                        resolved_api_surface=identity.resolved_api_surface,
+                        structured_output_mode=identity.structured_output_mode,
+                        endpoint_family=identity.endpoint_family,
+                        credential_source=identity.credential_source,
+                        reasoning_effort=reasoning_effort,
+                    )
+                )
+                continue
+            try:
+                resolve_codex_credential(_model_base_url(model, resolved))
+            except ProviderContractError as exc:
+                raise V2CampaignRunError(str(exc)) from None
             if not codex_status_checked:
                 try:
                     status = subprocess.run(
@@ -1213,12 +1569,10 @@ def _model_readiness(
                         "Codex model cache is unavailable; run Codex once to refresh it"
                     ) from exc
                 codex_status_checked = True
-            slug = _codex_model_slug(model)
             if codex_capabilities is None or slug not in codex_capabilities:
                 raise V2CampaignRunError(
                     f"Codex model {slug!r} is absent from ~/.codex/models_cache.json"
                 )
-            reasoning_effort = resolved.config.defaults.reasoning_effort
             if reasoning_effort is not None and reasoning_effort not in codex_capabilities[slug]:
                 raise V2CampaignRunError(
                     f"Codex model {slug!r} does not advertise reasoning effort "
@@ -1229,7 +1583,7 @@ def _model_readiness(
                     name=model.name,
                     provider=model.provider,
                     model=slug,
-                    credential_check="codex-login-status",
+                    credential_check="codex-auth-file+codex-login-status",
                     capability_check=(
                         "codex-model-cache+reasoning-effort"
                         if reasoning_effort is not None
@@ -1245,8 +1599,26 @@ def _model_readiness(
             )
             continue
 
+        if model.provider == "anthropic":
+            binding = _anthropic_binding(model, resolved)
+            receipts.append(
+                ModelReadinessV2(
+                    name=model.name,
+                    provider=model.provider,
+                    model=binding.model_slug,
+                    credential_check="configuration-validated-not-probed",
+                    capability_check="configuration-validated-not-probed",
+                    requested_api_surface=identity.requested_api_surface,
+                    resolved_api_surface=identity.resolved_api_surface,
+                    structured_output_mode=identity.structured_output_mode,
+                    endpoint_family=identity.endpoint_family,
+                    credential_source=identity.credential_source,
+                    anthropic_binding_fingerprint=binding.config_fingerprint,
+                )
+            )
+            continue
+
         required_key = {
-            "anthropic": "ANTHROPIC_API_KEY",
             "gemini": "GEMINI_API_KEY",
             "openai": "OPENAI_API_KEY",
         }.get(model.provider)
@@ -1386,9 +1758,13 @@ def prepare_v2_campaign(
             or ""
         ),
     )
-    prepared = {
-        track: _prepare_track(resolved, track, snapshot) for track in resolved.config.track_modes
-    }
+    prepared_all = {track: _prepare_track(resolved, track, snapshot) for track in resolved.tracks}
+    oaic = snapshot.product == "oaic-2026-v1" or any(
+        item.pair.public.product == "oaic-2026-v1" for item in prepared_all.values()
+    )
+    if oaic or resolved.selected_release is not None:
+        prepared_all = prepare_selected_tracks(resolved, snapshot, prepared_all)
+    prepared = {track: prepared_all[track] for track in resolved.config.track_modes}
     _validate_model_bindings(resolved, prepared)
     _validate_runtime_bounds(resolved, prepared)
     model_readiness = _model_readiness(resolved)
@@ -1475,7 +1851,7 @@ def _readiness(
                 live_certification_fingerprint=item.live.artifact_fingerprint,
                 capability_profile_fingerprint=item.profile.profile_fingerprint,
                 graph_verification_fingerprint=receipts[track].verification_fingerprint,
-                task_count=len(item.release.entries),
+                task_count=len(item.task_ids),
             )
             for track, item in prepared.items()
         ),
@@ -1547,7 +1923,24 @@ def _provenance(
                 "endpoint_family": provider_identity.endpoint_family,
                 "credential_source": provider_identity.credential_source,
                 "resolved_endpoint_fingerprint": _provider_endpoint_fingerprint(model, resolved),
+                **(
+                    {
+                        "anthropic_binding_fingerprint": (
+                            provider_identity.anthropic_binding_fingerprint
+                        )
+                    }
+                    if model.provider == "anthropic"
+                    else {}
+                ),
                 "mcp_launcher_provenance": mcp_launcher_provenance,
+                **(
+                    {
+                        "selection_fingerprint": prepared.selection_fingerprint,
+                        "paired_release_fingerprint": prepared.paired_release_fingerprint,
+                    }
+                    if getattr(prepared, "selection_fingerprint", None) is not None
+                    else {}
+                ),
             }
         ),
         "provenance_fingerprint": "0" * 64,
@@ -1691,6 +2084,12 @@ def _load_state(
         prepared.profile,
         provenance.run_identity,
     )
+    if prepared.selected_task_ids is not None:
+        selected = set(prepared.task_ids)
+        if any(result.task_id not in selected for result in state.checkpoint.results) or any(
+            attempt.task_id not in selected for attempt in state.attempts
+        ):
+            raise V2CampaignRunError("private run state contains off-selection tasks")
     return state
 
 
@@ -2098,8 +2497,10 @@ async def _run_model(
             if prior_attempt is not None
             else None
         )
-        bloodhound_retry = phase != "initial" and prior_retry_policy is not None and (
-            prior_retry_policy[0] == "bloodhound"
+        bloodhound_retry = (
+            phase != "initial"
+            and prior_retry_policy is not None
+            and (prior_retry_policy[0] == "bloodhound")
         )
         model_base_url = _model_base_url(model, resolved)
         try:
@@ -2126,6 +2527,16 @@ async def _run_model(
                             detail=("BloodHound circuit remained open before provider execution"),
                         )
                 if not direct_preflight_blocked:
+                    transport_options = (
+                        {
+                            "transport": partial(
+                                call_provider_text,
+                                anthropic_binding=_anthropic_binding(model, resolved),
+                            )
+                        }
+                        if model.provider == "anthropic"
+                        else {}
+                    )
                     _outcome, sample, provider = await run_direct_model_task_v2(
                         coordinator=coordinator,
                         task=task,
@@ -2141,6 +2552,7 @@ async def _run_model(
                             "prompt_local_validation",
                         ),
                         ollama_options=provider_options,
+                        **transport_options,
                     )
             else:
                 if bundle is None or loop is None:
@@ -2564,6 +2976,7 @@ async def run_v2_campaign(
         ),
     )
     with _exclusive_output_dir_lock(resolved.output_dir):
+        _guard_anthropic_headers(resolved)
         lifecycle = _CampaignLifecycleController.start(
             output_dir=resolved.output_dir,
             source_config_fingerprint=resolved.source_config_fingerprint,

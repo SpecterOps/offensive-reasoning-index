@@ -94,6 +94,16 @@ def test_print_summary_includes_query_too_expensive(capsys) -> None:
     assert "Query too expensive: 1" in out
 
 
+def _comparison_row(out: str, model: str) -> dict[str, str]:
+    lines = [line.split() for line in out.splitlines() if line.split()]
+    headers = [fields for fields in lines if fields[0] == "Model"]
+    assert len(headers) == 1, "comparison must have exactly one Model header"
+    rows = [fields for fields in lines if fields[0] == model]
+    assert len(rows) == 1, "comparison must have exactly one matching model row"
+    assert len(rows[0]) == len(headers[0]), "comparison row must match header fields"
+    return dict(zip(headers[0], rows[0], strict=True))
+
+
 def test_print_comparison_includes_model_error_column(capsys) -> None:
     print_comparison(
         {
@@ -102,7 +112,11 @@ def test_print_comparison_includes_model_error_column(capsys) -> None:
     )
     out = capsys.readouterr().out
     assert "ModelErr" in out
-    assert "1" in out
+    row = _comparison_row(out, "test:latest")
+    assert row["ModelErr"] == "1"
+    assert row["InfraErr"] == "0"
+    assert row["QExp"] == "0"
+    assert row["Fails"] == "1"
 
 
 def test_print_comparison_includes_infra_error_column(capsys) -> None:
@@ -113,6 +127,11 @@ def test_print_comparison_includes_infra_error_column(capsys) -> None:
     )
     out = capsys.readouterr().out
     assert "InfraErr" in out
+    row = _comparison_row(out, "test:latest")
+    assert row["InfraErr"] == "1"
+    assert row["ModelErr"] == "0"
+    assert row["QExp"] == "0"
+    assert row["Fails"] == "1"
 
 
 def test_print_comparison_includes_query_too_expensive_column(capsys) -> None:
@@ -123,6 +142,11 @@ def test_print_comparison_includes_query_too_expensive_column(capsys) -> None:
     )
     out = capsys.readouterr().out
     assert "QExp" in out
+    row = _comparison_row(out, "test:latest")
+    assert row["QExp"] == "1"
+    assert row["ModelErr"] == "0"
+    assert row["InfraErr"] == "0"
+    assert row["Fails"] == "1"
 
 
 def test_write_combined_csv_writes_rows_for_all_models(tmp_path) -> None:
@@ -167,17 +191,27 @@ def test_write_summary_csv_writes_one_row_per_model(tmp_path) -> None:
     assert by_model["ollama/b:latest"]["infra_errors"] == "1"
 
 
-def test_write_summary_csv_includes_tier4_and_tier5(tmp_path) -> None:
+def test_write_summary_csv_tier_coverage(tmp_path, subtests) -> None:
     output = tmp_path / "baseline_summary.csv"
+    result = _result("CORRECT", score=1.0)
+    result.task.tier = 6
     write_summary_csv(
         {
             "ollama/a:latest": [
                 _result_for_tier(4, "CORRECT", score=1.0),
                 _result_for_tier(5, "INCORRECT", score=0.0),
+                result,
             ],
         },
         output,
     )
+    with subtests.test(msg="test_write_summary_csv_includes_tier4_and_tier5"):
+        _assert_write_summary_csv_includes_tier4_and_tier5(output)
+    with subtests.test(msg="test_write_summary_csv_reports_tier6_results"):
+        _assert_write_summary_csv_reports_tier6_results(output)
+
+
+def _assert_write_summary_csv_includes_tier4_and_tier5(output) -> None:
     with output.open() as f:
         row = next(csv.DictReader(f))
     assert row["tier4_correct"] == "1"
@@ -383,13 +417,7 @@ def test_write_summary_csv_includes_run_metadata(tmp_path) -> None:
     assert row["runs_per_model"] == "5"
 
 
-def test_write_summary_csv_reports_tier6_results(tmp_path) -> None:
-    output = tmp_path / "baseline_summary.csv"
-    result = _result("CORRECT", score=1.0)
-    result.task.tier = 6
-
-    write_summary_csv({"tier6-model": [result]}, output)
-
+def _assert_write_summary_csv_reports_tier6_results(output) -> None:
     with output.open() as f:
         row = next(csv.DictReader(f))
     assert row["tier6_correct"] == "1"
@@ -397,20 +425,17 @@ def test_write_summary_csv_reports_tier6_results(tmp_path) -> None:
     assert row["tier6_pct"] == "100"
 
 
-def test_write_combined_csv_preserves_model_thinking(tmp_path) -> None:
-    output = tmp_path / "baseline_combined.csv"
-    result = _result("CORRECT", score=1.0)
-    result.model_response.thinking = "first think then answer"
-    write_combined_csv({"ollama/a:latest": [result]}, output)
+def _assert_write_combined_csv_preserves_model_thinking(output) -> None:
     with output.open() as f:
         rows = list(csv.DictReader(f))
     assert len(rows) == 1
     assert rows[0]["model_thinking"] == "first think then answer"
 
 
-def test_write_combined_csv_includes_telemetry_columns(tmp_path) -> None:
+def test_write_combined_csv_response_details(tmp_path, subtests) -> None:
     output = tmp_path / "baseline_combined.csv"
     result = _result("CORRECT", score=1.0)
+    result.model_response.thinking = "first think then answer"
     result.task_wall_seconds = 2.5
     result.telemetry = {
         "task_wall_seconds": 2.5,
@@ -423,6 +448,13 @@ def test_write_combined_csv_includes_telemetry_columns(tmp_path) -> None:
         "sample_ref": "telemetry/samples/test.jsonl:L1",
     }
     write_combined_csv({"ollama/a:latest": [result]}, output)
+    with subtests.test(msg="test_write_combined_csv_preserves_model_thinking"):
+        _assert_write_combined_csv_preserves_model_thinking(output)
+    with subtests.test(msg="test_write_combined_csv_includes_telemetry_columns"):
+        _assert_write_combined_csv_includes_telemetry_columns(output)
+
+
+def _assert_write_combined_csv_includes_telemetry_columns(output) -> None:
     with output.open() as f:
         rows = list(csv.DictReader(f))
     assert rows[0]["task_wall_seconds"] == "2.50"

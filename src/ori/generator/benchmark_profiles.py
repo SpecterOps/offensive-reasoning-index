@@ -54,6 +54,7 @@ _SIMPLE_GENERATOR_VERSION = "seeded-benchmark-v2"
 BENCHMARK_VERSION = "v1"
 
 _SIZE_BANDS: dict[str, SizeBand] = {
+    "oaic-2026-v1": SizeBand(users=(4500, 5500), workstations=(1750, 2250), servers=(400, 600)),
     "simple": SizeBand(users=(80, 120), workstations=(30, 50), servers=(10, 20)),
     "complex": SizeBand(users=(4500, 5500), workstations=(1750, 2250), servers=(400, 600)),
 }

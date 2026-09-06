@@ -25,7 +25,7 @@ from ori.eval.v2.campaign_supervisor import (
     SupervisorAlreadyRunningError,
     SupervisorStateStore,
 )
-from tests.test_v2_campaign_status import _completed_campaign, _config
+from tests.support.v2_campaign import _completed_campaign, _config
 
 _TIMEOUT = 30
 _ISOLATION = r"""

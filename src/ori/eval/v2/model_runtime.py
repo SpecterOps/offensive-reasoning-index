@@ -33,6 +33,7 @@ from ori.eval.provider_contract import (
     ProviderAuthenticationError,
     ProviderCapabilityError,
     ProviderContractError,
+    ProviderGenerationError,
     ProviderProtocolError,
     resolve_api_surface,
     validate_release1_api_surface,
@@ -131,6 +132,32 @@ class MCPToolAuditReceipt(StrictModel):
         return self
 
 
+class SchemaRepairExecutionV1(StrictModel):
+    """Observed repair transport activity, not HTTP requests or reducer permission."""
+
+    schema_version: Literal["ori-schema-repair-execution-v1"] = "ori-schema-repair-execution-v1"
+    transport_invocations: int = Field(default=0, strict=True, ge=0, le=1)
+    responses_received: int = Field(default=0, strict=True, ge=0, le=1)
+    status: Literal[
+        "not_started", "preparation_failed", "returned", "raised", "timed_out", "interrupted"
+    ] = "not_started"
+
+    @model_validator(mode="after")
+    def execution_is_coherent(self) -> SchemaRepairExecutionV1:
+        counts = (self.transport_invocations, self.responses_received)
+        allowed = {
+            "not_started": {(0, 0)},
+            "preparation_failed": {(0, 0)},
+            "returned": {(1, 1)},
+            "raised": {(1, 0)},
+            "timed_out": {(0, 0), (1, 0)},
+            "interrupted": {(0, 0), (1, 0)},
+        }
+        if counts not in allowed[self.status]:
+            raise ValueError("schema repair execution status and counts disagree")
+        return self
+
+
 class ProviderRunRecord(StrictModel):
     """Private model-call evidence retained beside the exact v2 checkpoint."""
 
@@ -156,6 +183,15 @@ class ProviderRunRecord(StrictModel):
 
     @model_validator(mode="after")
     def fingerprint_matches(self) -> ProviderRunRecord:
+        if "schema_repair_execution" in self.provider_metrics:
+            if self.surface == "direct":
+                raise ValueError("Direct records cannot contain MCP schema repair execution")
+            repair = self.provider_metrics["schema_repair_execution"]
+            if not isinstance(repair, Mapping) or set(repair) != {
+                "schema_version", "transport_invocations", "responses_received", "status"
+            }:
+                raise ValueError("schema repair execution requires all four serialized fields")
+            SchemaRepairExecutionV1.model_validate(repair)
         expected = canonical_sha256(
             self,
             exclude_fields=("record_fingerprint",),
@@ -191,7 +227,13 @@ def _record(
     mcp_finalization: Mapping[str, Any] | None = None,
     mcp_transcript: tuple[dict[str, Any], ...] = (),
     transcript_digest: str | None = None,
+    schema_repair_execution: SchemaRepairExecutionV1 | None = None,
 ) -> ProviderRunRecord:
+    provider_metrics = dict(response.provider_metrics)
+    if schema_repair_execution is not None:
+        provider_metrics["schema_repair_execution"] = schema_repair_execution.model_dump(
+            mode="json"
+        )
     payload = {
         "task_id": task.task_id,
         "task_fingerprint": task.task_fingerprint,
@@ -203,7 +245,7 @@ def _record(
         "tokens_output": response.tokens_output,
         "elapsed_seconds": response.elapsed_seconds,
         "provider_error": response.error,
-        "provider_metrics": dict(response.provider_metrics),
+        "provider_metrics": provider_metrics,
         "direct_query_digest": (
             canonical_sha256(direct_query) if direct_query is not None else None
         ),
@@ -244,6 +286,8 @@ def _provider_infrastructure_details(
         return "PROVIDER_CAPABILITY", False
     if isinstance(exc, ProviderProtocolError):
         return "PROVIDER_PROTOCOL", False
+    if isinstance(exc, ProviderGenerationError):
+        return "PROVIDER_GENERATION_ERROR", False
     if isinstance(exc, ProviderContractError):
         return "PROVIDER_CONTRACT", False
 
@@ -382,11 +426,6 @@ def _parse_json_object(text: str) -> ParsedJsonObject:
 
 def _extract_json_object(text: str) -> Mapping[str, Any]:
     return _parse_json_object(text).payload
-
-
-def _contains_object_candidate(text: str) -> bool:
-    stripped = text.strip()
-    return bool(stripped) and ("{" in stripped or "}" in stripped)
 
 
 def _answer_scalar_values(value: Any) -> tuple[str, ...]:
@@ -1736,81 +1775,6 @@ def _ordering_matches_returned_identity(
     )
 
 
-def _object_id_order_aliases(query: str) -> frozenset[str]:
-    """Return result aliases proven to derive from an objectid projection."""
-
-    normalized = " ".join(query.split())
-    projection = re.search(
-        r"\bRETURN\b(?P<body>.*?)\bORDER\s+BY\b",
-        normalized,
-        flags=re.IGNORECASE,
-    )
-    if projection is None:
-        return frozenset()
-
-    inherited: frozenset[str] = frozenset()
-    prefix = normalized[: projection.start()]
-    for with_projection in re.finditer(
-        (
-            r"\bWITH\b(?P<body>.*?)"
-            r"(?=\b(?:OPTIONAL\s+MATCH|MATCH|WITH|RETURN|WHERE|UNWIND|CALL)\b|$)"
-        ),
-        prefix,
-        flags=re.IGNORECASE,
-    ):
-        inherited = _identity_projection_aliases(
-            with_projection.group("body"),
-            inherited,
-        )
-    return _identity_projection_aliases(projection.group("body"), inherited)
-
-
-def _identity_projection_aliases(
-    projection: str,
-    inherited: frozenset[str],
-) -> frozenset[str]:
-    """Resolve objectid aliases across one WITH or RETURN projection."""
-
-    safe: set[str] = set()
-    for raw_term in projection.split(","):
-        term = re.sub(
-            r"^\s*DISTINCT\s+",
-            "",
-            raw_term.strip(),
-            flags=re.IGNORECASE,
-        )
-        direct = re.fullmatch(
-            (
-                rf"{_CYPHER_IDENTIFIER}\s*\.\s*"
-                r"`?(?P<property>[A-Za-z_][A-Za-z0-9_]*)`?"
-                rf"(?:\s+AS\s+(?P<alias>{_CYPHER_IDENTIFIER}))?"
-            ),
-            term,
-            flags=re.IGNORECASE,
-        )
-        if direct is not None and direct.group("property") == "objectid":
-            alias = direct.group("alias")
-            if alias is not None:
-                safe.add(_strip_cypher_identifier(alias))
-            continue
-        passthrough = re.fullmatch(
-            (
-                rf"(?P<source>{_CYPHER_IDENTIFIER})"
-                rf"(?:\s+AS\s+(?P<alias>{_CYPHER_IDENTIFIER}))?"
-            ),
-            term,
-            flags=re.IGNORECASE,
-        )
-        if passthrough is None:
-            continue
-        source = _strip_cypher_identifier(passthrough.group("source"))
-        if source not in inherited:
-            continue
-        alias = passthrough.group("alias")
-        safe.add(_strip_cypher_identifier(alias or source))
-    return frozenset(safe)
-
-
 def _graph_search_cardinality(payload: Mapping[str, Any]) -> int | None:
     """Count the pinned graph-analysis search result map."""
 
@@ -2237,13 +2201,6 @@ def _query_matches_public_claim(
     return True
 
 
-def _query_covers_public_negative_scope(
-    task: TaskBundle,
-    query: str,
-) -> bool:
-    return _negative_query_scope_mode(task, query) is not None
-
-
 def _negative_query_scope_mode(
     task: TaskBundle,
     query: str,
@@ -2378,12 +2335,6 @@ def _query_selector_bindings(
             _strip_cypher_identifier(variable) if variable is not None else None
         )
     return tuple(bindings)
-
-
-def _query_projects_identity(query: str) -> bool:
-    """Recognize an identity-bearing entity projection for abstract principals."""
-
-    return bool(_query_identity_projection_variables(query))
 
 
 def _query_identity_projection_variables(query: str) -> frozenset[str]:
@@ -4261,6 +4212,9 @@ async def _schema_only_retry(
     transcript: tuple[dict[str, Any], ...] = (),
     structured_output_schema: dict[str, Any] | None = None,
 ) -> ModelResponse:
+    native_ollama = model.startswith("ollama/")
+    argument_error = "Ollama repair transcript requires object tool arguments"
+
     def provider_message(message: Mapping[str, Any]) -> dict[str, Any] | None:
         role = message.get("role")
         if role not in {"user", "assistant", "tool"}:
@@ -4277,13 +4231,25 @@ async def _schema_only_retry(
                 raw_function = raw_call.get("function")
                 if isinstance(raw_function, Mapping):
                     name = raw_function.get("name")
+                    if native_ollama and "arguments" not in raw_function:
+                        raise V2ModelRuntimeError(argument_error)
                     arguments = raw_function.get("arguments", "")
                 else:
                     name = raw_function
+                    if native_ollama and "arguments" not in raw_call:
+                        raise V2ModelRuntimeError(argument_error)
                     arguments = raw_call.get("arguments", {})
                 if not isinstance(name, str) or not name:
                     continue
-                if not isinstance(arguments, str):
+                if native_ollama:
+                    if isinstance(arguments, str):
+                        try:
+                            arguments = json.loads(arguments)
+                        except json.JSONDecodeError as exc:
+                            raise V2ModelRuntimeError(argument_error) from exc
+                    if not isinstance(arguments, dict):
+                        raise V2ModelRuntimeError(argument_error)
+                elif not isinstance(arguments, str):
                     arguments = json.dumps(arguments, sort_keys=True, separators=(",", ":"))
                 calls.append(
                     {
@@ -4361,6 +4327,30 @@ async def run_mcp_model_task_v2(
     bounded_steps = min(max_steps, task.binding.bounds.max_tool_calls)
     partial_response: ModelResponse | None = None
     partial_messages: list[Any] = []
+    schema_repair_execution = SchemaRepairExecutionV1()
+    repair_transport_started = False
+
+    async def repair_transport(**kwargs: Any) -> ModelResponse:
+        nonlocal schema_repair_execution, repair_transport_started
+        if repair_transport_started:
+            raise V2ModelRuntimeError("schema repair transport may be invoked only once")
+        repair_transport_started = True
+        try:
+            result = await transport(**kwargs)
+        except asyncio.CancelledError:
+            schema_repair_execution = SchemaRepairExecutionV1(
+                transport_invocations=1, status="interrupted"
+            )
+            raise
+        except Exception:
+            schema_repair_execution = SchemaRepairExecutionV1(
+                transport_invocations=1, status="raised"
+            )
+            raise
+        schema_repair_execution = SchemaRepairExecutionV1(
+            transport_invocations=1, responses_received=1, status="returned"
+        )
+        return result
 
     def observe_progress(response: ModelResponse, messages: list[Any]) -> None:
         nonlocal partial_response, partial_messages
@@ -4372,7 +4362,6 @@ async def run_mcp_model_task_v2(
         "public_question": task.question,
         "model_name": model,
         "base_url": model_base_url,
-        "max_tokens": max_tokens,
         "tools": bundle.tools,
         "max_steps": bounded_steps,
         # The discovered BloodHound prompt describes a different, resource-first
@@ -4411,6 +4400,7 @@ async def run_mcp_model_task_v2(
             if resolved_loop is MCPToolLoop.NATIVE_OPENAI_COMPATIBLE:
                 response, _trajectory, messages = await _run_openai_compat_mcp_loop(
                     **loop_kwargs,
+                    max_tokens=max_tokens,
                     extra_body={"options": ollama_options} if ollama_options else None,
                     telemetry_adapter=telemetry_adapter,
                     read_timeout_seconds=read_timeout_seconds,
@@ -4461,6 +4451,7 @@ async def run_mcp_model_task_v2(
             mcp_tool_receipts=tuple(projector.receipts),
             mcp_transcript=transcript,
             transcript_digest=canonical_sha256(transcript),
+            schema_repair_execution=schema_repair_execution,
         )
         raise V2ModelTaskCancelled(sample, provider) from exc
     except MCPNoProgressTimeout as exc:
@@ -4586,6 +4577,16 @@ async def run_mcp_model_task_v2(
             )
         messages = partial_messages
 
+    schema_retry_source = response.raw_text
+    truncated_source = response.provider_metrics.get("truncated_output_text")
+    if (
+        model.startswith("ollama/")
+        and response.provider_metrics.get("model_output_error") is True
+        and response.provider_metrics.get("model_output_subtype") == "TRUNCATED"
+        and isinstance(truncated_source, str)
+    ):
+        schema_retry_source = truncated_source
+
     parsed_final: ParsedJsonObject | None = None
     try:
         parsed_final = _parse_json_object(response.raw_text)
@@ -4633,10 +4634,10 @@ async def run_mcp_model_task_v2(
                 _schema_only_retry(
                     task=task,
                     model=model,
-                    malformed_output=response.raw_text,
+                    malformed_output=schema_retry_source,
                     model_base_url=model_base_url,
                     ollama_options=ollama_options,
-                    transport=transport,
+                    transport=repair_transport,
                     max_tokens=retry_max_tokens,
                     api_surface=requested_api_surface,
                     request_timeout_seconds=remaining_seconds,
@@ -4653,6 +4654,9 @@ async def run_mcp_model_task_v2(
                 timeout=remaining_seconds,
             )
         except asyncio.CancelledError as exc:
+            schema_repair_execution = SchemaRepairExecutionV1(
+                transport_invocations=int(repair_transport_started), status="interrupted"
+            )
             detail = "MCP schema-only retry interrupted before completion"
             interrupted_response = _failure_response(
                 partial=response,
@@ -4678,9 +4682,13 @@ async def run_mcp_model_task_v2(
                     mcp_tool_receipts=tuple(projector.receipts),
                     mcp_transcript=transcript,
                     transcript_digest=canonical_sha256(transcript),
+                    schema_repair_execution=schema_repair_execution,
                 ),
             ) from exc
         except TimeoutError:
+            schema_repair_execution = SchemaRepairExecutionV1(
+                transport_invocations=int(repair_transport_started), status="timed_out"
+            )
             projector.events.append(
                 classify_evidence_event(
                     task,
@@ -4690,6 +4698,8 @@ async def run_mcp_model_task_v2(
                 )
             )
         except Exception as exc:
+            if not repair_transport_started:
+                schema_repair_execution = SchemaRepairExecutionV1(status="preparation_failed")
             infrastructure = _provider_infrastructure_details(exc)
             if infrastructure is not None:
                 subtype, retryable = infrastructure
@@ -4728,7 +4738,7 @@ async def run_mcp_model_task_v2(
                 parsed_retry = _parse_json_object(retry_response.raw_text)
                 candidate_retry_answer = parsed_retry.payload
                 if _retry_adds_answer_facts(
-                    response.raw_text,
+                    schema_retry_source,
                     candidate_retry_answer,
                 ):
                     retry_contract_error = "SCHEMA_RETRY_ADDED_NEW_FACTS"
@@ -4745,7 +4755,7 @@ async def run_mcp_model_task_v2(
     if retry_response is not None:
         transcript_size += len(retry_response.raw_text.encode("utf-8"))
         transcript_size += len(retry_response.thinking.encode("utf-8"))
-    output_size = len(response.raw_text.encode("utf-8"))
+    output_size = len(schema_retry_source.encode("utf-8"))
     if retry_response is not None:
         output_size += len(retry_response.raw_text.encode("utf-8"))
     bounds_exceeded = (
@@ -4905,5 +4915,6 @@ async def run_mcp_model_task_v2(
         mcp_finalization=outcome.finalization.model_dump(mode="json"),
         mcp_transcript=tuple(transcript_payload),
         transcript_digest=canonical_sha256(transcript_payload),
+        schema_repair_execution=schema_repair_execution,
     )
     return outcome, record

@@ -21,16 +21,21 @@ def sample_graph(tmp_path):
     return graph
 
 
-def test_serialize_to_zip_creates_file(sample_graph, tmp_path):
+def test_serializer_zip_contract(sample_graph, tmp_path, subtests):
     out = tmp_path / "test.zip"
     result = serialize_to_zip(sample_graph, out)
+    with subtests.test(msg="test_serialize_to_zip_creates_file"):
+        _assert_serialize_to_zip_creates_file(result)
+    with subtests.test(msg="test_zip_contains_expected_files"):
+        _assert_zip_contains_expected_files(out)
+
+
+def _assert_serialize_to_zip_creates_file(result):
     assert result.exists()
     assert result.stat().st_size > 0
 
 
-def test_zip_contains_expected_files(sample_graph, tmp_path):
-    out = tmp_path / "test.zip"
-    serialize_to_zip(sample_graph, out)
+def _assert_zip_contains_expected_files(out):
     with zipfile.ZipFile(out) as zf:
         names = set(zf.namelist())
     assert "users.json" in names
@@ -40,10 +45,25 @@ def test_zip_contains_expected_files(sample_graph, tmp_path):
     assert "ous.json" in names
 
 
-def test_json_meta_envelope(sample_graph, tmp_path):
-    """Each JSON file must have data[] and meta{type, count, methods, version}."""
+def test_serializer_directory_contract(sample_graph, tmp_path, subtests):
     out_dir = tmp_path / "output"
     serialize_to_dir(sample_graph, out_dir)
+    with subtests.test(msg="test_json_meta_envelope"):
+        _assert_json_meta_envelope(out_dir)
+    with subtests.test(msg="test_user_objects_have_required_fields"):
+        _assert_user_objects_have_required_fields(out_dir)
+    with subtests.test(msg="test_computer_objects_have_required_fields"):
+        _assert_computer_objects_have_required_fields(out_dir)
+    with subtests.test(msg="test_group_members_reference_real_sids"):
+        _assert_group_members_reference_real_sids(sample_graph, out_dir)
+    with subtests.test(msg="test_user_names_are_uppercase_domain"):
+        _assert_user_names_are_uppercase_domain(out_dir)
+    with subtests.test(msg="test_domain_count"):
+        _assert_domain_count(sample_graph, out_dir)
+
+
+def _assert_json_meta_envelope(out_dir):
+    """Each JSON file must have data[] and meta{type, count, methods, version}."""
 
     users_file = out_dir / "users.json"
     assert users_file.exists()
@@ -57,9 +77,7 @@ def test_json_meta_envelope(sample_graph, tmp_path):
     assert data["meta"]["version"] == 6
 
 
-def test_user_objects_have_required_fields(sample_graph, tmp_path):
-    out_dir = tmp_path / "output"
-    serialize_to_dir(sample_graph, out_dir)
+def _assert_user_objects_have_required_fields(out_dir):
     data = json.loads((out_dir / "users.json").read_text())
 
     for user in data["data"]:
@@ -72,9 +90,7 @@ def test_user_objects_have_required_fields(sample_graph, tmp_path):
         assert "enabled" in props
 
 
-def test_computer_objects_have_required_fields(sample_graph, tmp_path):
-    out_dir = tmp_path / "output"
-    serialize_to_dir(sample_graph, out_dir)
+def _assert_computer_objects_have_required_fields(out_dir):
     data = json.loads((out_dir / "computers.json").read_text())
 
     for comp in data["data"]:
@@ -85,10 +101,8 @@ def test_computer_objects_have_required_fields(sample_graph, tmp_path):
         assert "isdc" in props
 
 
-def test_group_members_reference_real_sids(sample_graph, tmp_path):
+def _assert_group_members_reference_real_sids(sample_graph, out_dir):
     """All group member SIDs must exist in the graph."""
-    out_dir = tmp_path / "output"
-    serialize_to_dir(sample_graph, out_dir)
 
     all_sids = sample_graph.all_sids()
 
@@ -101,10 +115,8 @@ def test_group_members_reference_real_sids(sample_graph, tmp_path):
             )
 
 
-def test_user_names_are_uppercase_domain(sample_graph, tmp_path):
+def _assert_user_names_are_uppercase_domain(out_dir):
     """User names must be in UPPERCASE@DOMAIN format."""
-    out_dir = tmp_path / "output"
-    serialize_to_dir(sample_graph, out_dir)
     data = json.loads((out_dir / "users.json").read_text())
 
     for user in data["data"]:
@@ -115,9 +127,7 @@ def test_user_names_are_uppercase_domain(sample_graph, tmp_path):
         assert domain == domain.upper(), f"Domain not uppercase: {name}"
 
 
-def test_domain_count(sample_graph, tmp_path):
-    out_dir = tmp_path / "output"
-    serialize_to_dir(sample_graph, out_dir)
+def _assert_domain_count(sample_graph, out_dir):
     data = json.loads((out_dir / "domains.json").read_text())
     assert data["meta"]["count"] == 1
     assert data["data"][0]["ObjectIdentifier"] == sample_graph.domain_sid

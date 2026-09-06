@@ -63,6 +63,8 @@ from .inspect_runtime import (
     _task_name_for_model,
     _task_to_dict,
 )
+from .ollama_binding import ollama_model_name, prepare_ollama_endpoint
+from .ollama_stream import OllamaStreamState
 from .provider_auth import (
     openai_compat_endpoint_is_local,
     resolve_openai_compat_credential,
@@ -76,6 +78,7 @@ from .provider_contract import (
     chat_completions_payload,
     normalize_chat_completion,
 )
+from .provider_transport import openai_inference_client
 from .tasks import Task
 
 RESOURCE_MODE_OFF = "off"
@@ -696,13 +699,6 @@ def _prompt_messages_to_text(messages: list[PromptMessage]) -> str:
     return "\n\n".join(rendered).strip()
 
 
-async def _load_bloodhound_mcp_prompt(server: Any, prompt_name: str) -> str:
-    session_handle = server._task_session()
-    async with session_handle._client_session() as session:
-        prompt = await session.get_prompt(prompt_name)
-    return _prompt_messages_to_text(prompt.messages)
-
-
 def _rank_mcp_prompt_name(name: str) -> tuple[int, int, str]:
     normalized = name.lower().replace("-", "_")
     score = 0
@@ -1320,10 +1316,7 @@ def _resolve_mcp_tool_loop(model_name: str, requested: str) -> str:
 
 
 def _native_ollama_chat_url(base_url: str | None) -> str:
-    resolved = (base_url or os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")).rstrip("/")
-    if resolved.endswith("/v1"):
-        resolved = resolved[:-3].rstrip("/")
-    return f"{resolved}/api/chat"
+    return prepare_ollama_endpoint(base_url).chat_url
 
 
 def _openai_compat_model_name(model_name: str) -> str:
@@ -1530,7 +1523,7 @@ async def _ollama_chat_turn(
     no_progress_timeout_seconds: float = DEFAULT_MCP_NO_PROGRESS_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
-        "model": model_name.split("/", 1)[1],
+        "model": ollama_model_name(model_name),
         "messages": messages,
         "tools": tools,
         "stream": True,
@@ -1545,9 +1538,10 @@ async def _ollama_chat_turn(
     eval_count = 0
     final_model = model_name
     done_metrics: dict[str, int] = {}
+    stream_state = OllamaStreamState()
 
     timeout = httpx.Timeout(connect=10.0, read=read_timeout_seconds, write=30.0, pool=30.0)
-    async with httpx.AsyncClient(timeout=timeout) as client:
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
         async with client.stream("POST", url, json=payload) as resp:
             resp.raise_for_status()
             lines = resp.aiter_lines()
@@ -1571,10 +1565,10 @@ async def _ollama_chat_turn(
                         scope="turn",
                         timeout_seconds=no_progress_timeout_seconds,
                     ) from exc
-                if not line.strip():
+                data = stream_state.feed_line(line)
+                if data is None:
                     continue
                 last_activity = time.monotonic()
-                data = json.loads(line)
                 final_model = data.get("model") or final_model
                 message = data.get("message") or {}
                 thinking = message.get("thinking")
@@ -1596,14 +1590,29 @@ async def _ollama_chat_turn(
                         "eval_duration_ns": int(data.get("eval_duration") or 0),
                     }
 
+    finish_reason = stream_state.finish()
+    truncated = finish_reason == "length"
+    content = "".join(content_parts)
+    provider_metrics: dict[str, Any] = {
+        "finish_reason": finish_reason,
+        "provider_turn_status": "truncated" if truncated else "completed",
+    }
+    if truncated:
+        provider_metrics.update(
+            model_output_error=True,
+            model_output_subtype="TRUNCATED",
+            truncated_output_text=content,
+        )
     return {
         "model": final_model,
         "thinking": "".join(thinking_parts),
-        "content": "".join(content_parts),
-        "tool_calls": tool_calls,
+        "content": "" if truncated else content,
+        "tool_calls": [] if truncated else tool_calls,
         "prompt_eval_count": prompt_eval_count,
         "eval_count": eval_count,
         "metrics": done_metrics,
+        "finish_reason": finish_reason,
+        "provider_metrics": provider_metrics,
     }
 
 
@@ -1640,37 +1649,42 @@ async def _openai_compat_chat_turn(
     endpoint_family = "codex"
     credential_source = "CODEX_OAUTH"
     if model_name.startswith("codex/"):
-        import openai
-
         from .codex_oauth import (
             chat_request_to_codex_responses_params,
-            codex_headers,
             codex_model_name,
             codex_responses_events_to_chat_completion,
+            resolve_codex_credential,
         )
 
         payload["model"] = codex_model_name(model_name)
+        credential = resolve_codex_credential(url)
+        endpoint_family = credential.binding.endpoint_family
+        credential_source = credential.binding.credential_source
         params = chat_request_to_codex_responses_params(payload)
         thread_id = str(params.get("prompt_cache_key") or "")
-        headers = codex_headers(thread_id=thread_id)
-        client = openai.AsyncOpenAI(
-            api_key=headers["Authorization"].removeprefix("Bearer "),
+        headers = credential.headers(thread_id=thread_id)
+        async with openai_inference_client(
+            api_key=credential.token,
             base_url=url,
             timeout=timeout,
-        )
-        try:
-            events = await client.responses.create(**params, stream=True, extra_headers=headers)
-            buffered_events: list[Any] = []
-            partial_text: list[str] = []
-            async for event in events:
-                buffered_events.append(event)
-                if getattr(event, "type", None) == "response.output_text.delta":
-                    partial_text.append(getattr(event, "delta", "") or "")
-                if event_progress_observer is not None:
-                    event_progress_observer("".join(partial_text))
-            data = codex_responses_events_to_chat_completion(buffered_events, str(payload["model"]))
-        finally:
-            await client.close()
+        ) as client:
+            try:
+                events = await client.responses.create(**params, stream=True, extra_headers=headers)
+                buffered_events: list[Any] = []
+                partial_text: list[str] = []
+                async for event in events:
+                    buffered_events.append(event)
+                    if getattr(event, "type", None) == "response.output_text.delta":
+                        delta = getattr(event, "delta", None)
+                        if isinstance(delta, str):
+                            partial_text.append(delta)
+                    if event_progress_observer is not None:
+                        event_progress_observer("".join(partial_text))
+                data = codex_responses_events_to_chat_completion(
+                    buffered_events, str(payload["model"])
+                )
+            finally:
+                await client.close()
     else:
         credential = resolve_openai_compat_credential(url)
         endpoint_family = credential.endpoint_family
@@ -1685,7 +1699,7 @@ async def _openai_compat_chat_turn(
             if credential.api_key is not None
             else {}
         )
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
             resp = await client.post(url, json=payload, headers=headers)
             resp.raise_for_status()
             try:
@@ -1915,6 +1929,10 @@ async def _run_ollama_mcp_loop(
     finalization_guard_used = False
     t0 = time.monotonic()
 
+    turn_provider_metrics: list[dict[str, Any]] = []
+    finish_reasons: list[str] = []
+    terminal_output_metrics: dict[str, Any] = {}
+
     for step in range(max_steps):
         use_finalization_guard = (
             _env_flag("ORI_MCP_FINALIZATION_GUARD", True)
@@ -1939,6 +1957,12 @@ async def _run_ollama_mcp_loop(
         )
         total_prompt_tokens += int(turn["prompt_eval_count"])
         total_completion_tokens += int(turn["eval_count"])
+        turn_metrics = dict(turn.get("provider_metrics") or {})
+        turn_provider_metrics.append(turn_metrics)
+        if turn.get("finish_reason"):
+            finish_reasons.append(str(turn["finish_reason"]))
+        if turn_metrics.get("model_output_error") is True:
+            terminal_output_metrics = turn_metrics
         for key in total_metrics:
             total_metrics[key] += int((turn.get("metrics") or {}).get(key) or 0)
         resolved_model = str(turn["model"] or resolved_model)
@@ -1949,7 +1973,8 @@ async def _run_ollama_mcp_loop(
             thinking_parts.append(thinking)
 
         inspect_tool_calls: list[ToolCall] = []
-        payload_assistant: dict[str, Any] = {"role": "assistant", "content": content}
+        transcript_content = terminal_output_metrics.get("truncated_output_text", content)
+        payload_assistant: dict[str, Any] = {"role": "assistant", "content": transcript_content}
         if thinking:
             payload_assistant["thinking"] = thinking
         if raw_tool_calls:
@@ -1966,7 +1991,7 @@ async def _run_ollama_mcp_loop(
         messages_payload.append(payload_assistant)
         inspect_messages.append(
             ChatMessageAssistant(
-                content=content,
+                content=transcript_content,
                 tool_calls=inspect_tool_calls or None,
                 model=resolved_model,
             )
@@ -1985,6 +2010,9 @@ async def _run_ollama_mcp_loop(
                 "prompt_eval_count": total_prompt_tokens,
                 "eval_count": total_completion_tokens,
                 **total_metrics,
+                "turn_metrics": turn_provider_metrics,
+                "finish_reasons": finish_reasons,
+                **terminal_output_metrics,
             },
         )
         _emit_mcp_loop_progress(
@@ -2098,12 +2126,19 @@ async def _run_ollama_mcp_loop(
         elapsed_seconds=elapsed,
         model=resolved_model,
         thinking="".join(thinking_parts),
-        error=None if final_content else "MCP loop exhausted without final answer",
+        error=(
+            None
+            if final_content or terminal_output_metrics
+            else "MCP loop exhausted without final answer"
+        ),
         provider_metrics={
             "provider": "ollama_native_chat_mcp_loop",
             "prompt_eval_count": total_prompt_tokens,
             "eval_count": total_completion_tokens,
             **total_metrics,
+            "turn_metrics": turn_provider_metrics,
+            "finish_reasons": finish_reasons,
+            **terminal_output_metrics,
         },
     )
     trajectory = _trajectory_from_messages(inspect_messages, final_answer_raw=final_content)
@@ -2112,7 +2147,7 @@ async def _run_ollama_mcp_loop(
         trajectory.successful_tool_results, successful_tool_results
     )
     trajectory.loop_exhaustion_with_evidence = bool(
-        not final_content and successful_tool_results > 0
+        not final_content and successful_tool_results > 0 and not terminal_output_metrics
     )
     trajectory.server_prompt_used = bool(server_prompt_text.strip())
     trajectory.server_prompt_name = server_prompt_name if server_prompt_text.strip() else ""

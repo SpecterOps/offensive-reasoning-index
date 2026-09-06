@@ -27,8 +27,7 @@ from ori.eval.v2.schema import (
     HealthState,
 )
 from ori.eval.v2.scoring import SampleOutcomeCode
-
-from .test_v2_mcp_adapter import (
+from tests.support.v2_mcp import (
     ORACLE,
     PROFILE,
     RESOLVER,
@@ -153,6 +152,11 @@ def test_codex_readiness_requires_and_records_requested_effort(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    for key in ("CODEX_BASE_URL", "CODEX_API_KEY", "CODEX_COMPAT_API_KEY", "OPENAI_API_KEY"):
+        monkeypatch.delenv(key, raising=False)
+    auth_path = tmp_path / "synthetic-auth.json"
+    auth_path.write_text('{"tokens":{"access_token":"synthetic-oauth"}}')
+    monkeypatch.setenv("CODEX_AUTH_FILE", str(auth_path))
     (tmp_path / ".codex").mkdir()
     (tmp_path / ".codex" / "models_cache.json").write_text(
         json.dumps(
@@ -178,7 +182,7 @@ def test_codex_readiness_requires_and_records_requested_effort(
     resolved = SimpleNamespace(
         config=SimpleNamespace(
             models=[V2ModelEntry(name="gpt-test", provider="codex", model="gpt-test")],
-            defaults=SimpleNamespace(reasoning_effort="high"),
+            defaults=SimpleNamespace(reasoning_effort="high", model_base_url=None),
         )
     )
 
@@ -186,6 +190,8 @@ def test_codex_readiness_requires_and_records_requested_effort(
 
     assert receipts[0].reasoning_effort == "high"
     assert receipts[0].capability_check == "codex-model-cache+reasoning-effort"
+    assert receipts[0].credential_source == "codex-auth-file"
+    assert receipts[0].credential_check == "codex-auth-file+codex-login-status"
 
     resolved.config.defaults.reasoning_effort = "xhigh"
     with pytest.raises(campaign_runner.V2CampaignRunError, match="does not advertise"):
@@ -202,7 +208,7 @@ def test_v12_campaign_schemas_cannot_accept_prior_run_state() -> None:
         "ori-v2-model-campaign-v15"
     )
     assert state_schema["properties"]["schema_version"]["const"] == ("ori-v2-private-run-state-v7")
-    assert readiness_schema["properties"]["schema_version"]["const"] == ("ori-v2-run-readiness-v11")
+    assert readiness_schema["properties"]["schema_version"]["const"] == ("ori-v2-run-readiness-v12")
     assert campaign_runner.RUN_STATE_NAME == "run-state-v7.private.json"
     assert "RUN_STATE_NAME" in runner_source
     assert "run-state-v4.private.json" not in runner_source

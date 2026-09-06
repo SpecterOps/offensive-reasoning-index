@@ -11,6 +11,7 @@ import hashlib
 import json
 import math
 import re
+import unicodedata
 from collections import Counter
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -24,7 +25,9 @@ from ori.eval.v2.campaign_runner import (
     CampaignLifecycleV2,
     CampaignReadinessV2,
     ModelPublicReportV2,
+    ModelRunProvenanceV2,
     PrivateRunStateV2,
+    ReadinessTrackV2,
     TrackCompletionV2,
     _run_operational_metrics,
 )
@@ -41,6 +44,14 @@ _SENSITIVE_LABEL = re.compile(
     r"(?i)(?:api[_-]?key|password|passwd|secret|bearer|authorization|token)\s*[:=]"
 )
 _WINDOWS_ABSOLUTE = re.compile(r"^[A-Za-z]:[\\/]")
+_PUBLIC_URL = re.compile(
+    r"[A-Za-z][A-Za-z0-9+.-]*://|(?<!\w)(?ai:https?|file|ftp|sftp|ssh|wss?|mailto|data):"
+)
+_PATH_DELIMITERS = "([{'\"=:,;)]}|<>"
+_EXPLICIT_RELATIVE_PATH = re.compile(
+    r"(?:^|[\s/" + re.escape(_PATH_DELIMITERS) + r"])(?:\.{1,2}|~)/"
+)
+_SECRET_TOKEN = re.compile(r"(?<!\w)sk-", re.IGNORECASE)
 
 
 class ModelCardBuildError(ValueError):
@@ -75,17 +86,56 @@ def _load_model(path: Path, model: type[_MODEL], label: str) -> tuple[_MODEL, by
         raise ModelCardBuildError(f"invalid {label}: {exc}") from exc
 
 
+def _load_run_provenance(path: Path) -> ModelRunProvenanceV2:
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        raise ModelCardBuildError("cannot read model-run provenance") from None
+    try:
+        return ModelRunProvenanceV2.model_validate_json(raw)
+    except ValidationError:
+        raise ModelCardBuildError("invalid model-run provenance") from None
+
+
+def _assert_public_string(value: str, label: str) -> None:
+    if any(unicodedata.category(character) in {"Cc", "Cf", "Cs", "Zl", "Zp"} for character in value):
+        raise ModelCardBuildError(f"{label} contains control characters")
+    if _PUBLIC_URL.search(value):
+        raise ModelCardBuildError(f"{label} must not contain a URL")
+    if (
+        "\\" in value
+        or _WINDOWS_ABSOLUTE.match(value)
+        or _EXPLICIT_RELATIVE_PATH.search(value)
+        or any(
+            character == "/"
+            and (index == 0 or value[index - 1].isspace() or value[index - 1] in _PATH_DELIMITERS)
+            for index, character in enumerate(value)
+        )
+    ):
+        raise ModelCardBuildError(f"{label} must not contain a local path")
+    if _SENSITIVE_LABEL.search(value) or _SECRET_TOKEN.search(value):
+        raise ModelCardBuildError(f"{label} resembles secret material")
+
+
 def _public_label(value: str, label: str) -> str:
+    _assert_public_string(value, label)
     value = value.strip()
     if not value:
         raise ModelCardBuildError(f"{label} must be non-empty")
-    if any(character in value for character in ("\x00", "\r", "\n")):
-        raise ModelCardBuildError(f"{label} contains control characters")
-    if Path(value).is_absolute() or _WINDOWS_ABSOLUTE.match(value):
-        raise ModelCardBuildError(f"{label} must not contain a local path")
-    if _SENSITIVE_LABEL.search(value) or value.casefold().startswith("sk-"):
-        raise ModelCardBuildError(f"{label} resembles secret material")
     return value
+
+
+def _assert_public_strings(value: Any) -> None:
+    """Reject recognized unsafe syntax without rewriting public evidence."""
+    if isinstance(value, str):
+        _assert_public_string(value, "public card string")
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            _assert_public_strings(key)
+            _assert_public_strings(item)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            _assert_public_strings(item)
 
 
 def _run_operational_summary(state: PrivateRunStateV2) -> OperationalSummary:
@@ -202,6 +252,77 @@ def _assert_run_state_matches_report(
             )
     if report.operational_metrics != _run_operational_metrics(state):
         raise ModelCardBuildError("private state operational metrics disagree with public report")
+
+
+def _assert_run_provenance_matches_evidence(
+    provenance: ModelRunProvenanceV2,
+    report: ModelPublicReportV2,
+    state: PrivateRunStateV2,
+    readiness: CampaignReadinessV2,
+    track_readiness: ReadinessTrackV2,
+) -> None:
+    checkpoint = state.checkpoint
+    body = report.report
+    base = provenance.base
+    if state.provenance_fingerprint != provenance.provenance_fingerprint:
+        raise ModelCardBuildError("state/provenance binding mismatch")
+    if provenance.run_identity != checkpoint.run_identity or provenance.run_identity != report.run_identity:
+        raise ModelCardBuildError("run identity mismatch")
+    for field in (
+        "product", "track", "public_artifact_fingerprint", "oracle_artifact_fingerprint",
+        "catalog_fingerprint", "graph_fingerprint", "compiler_fingerprint",
+        "comparator_fingerprint", "capability_profile_fingerprint",
+    ):
+        if getattr(checkpoint, field) != getattr(base, field):
+            raise ModelCardBuildError("checkpoint/provenance metadata mismatch")
+    for field in (
+        "product", "track", "public_artifact_fingerprint", "catalog_fingerprint",
+        "graph_fingerprint", "capability_profile_fingerprint",
+    ):
+        if getattr(body, field) != getattr(checkpoint, field):
+            raise ModelCardBuildError("report/checkpoint metadata mismatch")
+    if (
+        report.candidate_release_fingerprint != provenance.candidate_release_fingerprint
+        or report.live_certification_fingerprint != provenance.live_certification_fingerprint
+    ):
+        raise ModelCardBuildError("release provenance mismatch")
+    if (
+        provenance.source_manifest_sha256 != readiness.source_manifest_sha256
+        or provenance.archive_sha256 != readiness.archive_sha256
+        or base.graph_fingerprint != readiness.graph_fingerprint
+        or provenance.run_identity.target_fingerprint != readiness.target_fingerprint
+        or base.track != track_readiness.track
+        or base.public_artifact_fingerprint != track_readiness.public_artifact_fingerprint
+        or base.oracle_artifact_fingerprint != track_readiness.oracle_artifact_fingerprint
+        or base.capability_profile_fingerprint != track_readiness.capability_profile_fingerprint
+        or provenance.candidate_release_fingerprint != track_readiness.candidate_release_fingerprint
+        or provenance.live_certification_fingerprint != track_readiness.live_certification_fingerprint
+        or body.summary.scheduled != track_readiness.task_count
+    ):
+        raise ModelCardBuildError("readiness provenance mismatch")
+    if not any(
+        item.provider == provenance.run_identity.provider
+        and item.model == provenance.run_identity.model
+        and all(
+            getattr(item, field) == getattr(provenance, field)
+            for field in (
+                "requested_api_surface", "resolved_api_surface", "structured_output_mode",
+                "endpoint_family", "credential_source",
+            )
+        )
+        for item in readiness.models
+    ):
+        raise ModelCardBuildError("provider-readiness metadata mismatch")
+    results = {result.task_id: result for result in checkpoint.results}
+    for row in body.rows:
+        if (
+            row.task_fingerprint != results[row.task_id].task_fingerprint
+            or row.product != body.product
+            or row.track != body.track
+        ):
+            raise ModelCardBuildError("row task binding mismatch")
+    if state.scheduler.phase != "complete":
+        raise ModelCardBuildError("incomplete scheduler")
 
 
 class OperationalSummary(StrictModel):
@@ -325,6 +446,7 @@ def _load_track_reports(
     expected_runs = {(run.provider, run.model, run.run_index): run for run in receipt.runs}
     paths = sorted((campaign_root / track.value).glob("*/run-*/public-report-v2.json"))
     loaded: dict[tuple[str, str, int], LoadedRun] = {}
+    provenance_paths: dict[tuple[str, str, int], Path] = {}
     for path in paths:
         report, raw = _load_model(path, ModelPublicReportV2, f"{track.value} public report")
         state, state_raw = _load_model(
@@ -345,6 +467,7 @@ def _load_track_reports(
             sha256=_sha256(raw),
             state_sha256=_sha256(state_raw),
         )
+        provenance_paths[key] = path.parent / "campaign-provenance-v2.json"
 
     if set(loaded) != set(expected_runs):
         raise ModelCardBuildError(
@@ -408,6 +531,10 @@ def _load_track_reports(
             raise ModelCardBuildError("Direct report unexpectedly declares an MCP loop")
         if track is Track.MCP and not report.run_identity.tool_loop:
             raise ModelCardBuildError("MCP report is missing its tool loop")
+        provenance = _load_run_provenance(provenance_paths[key])
+        _assert_run_provenance_matches_evidence(
+            provenance, report, loaded_run.state, readiness, track_readiness,
+        )
     return loaded
 
 
@@ -704,6 +831,7 @@ def build_model_card(
             "This card contains no prompts, responses, tool bodies, credentials, or local paths.",
         ],
     }
+    _assert_public_strings(card)
     svg = _svg_bytes(card)
     card["generated_assets"] = {SVG_NAME: _sha256(svg)}
     fingerprint_payload = dict(card)

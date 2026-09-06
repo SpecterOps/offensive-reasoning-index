@@ -820,21 +820,42 @@ def _make_manifest() -> dict:
     }
 
 
-def test_generate_tasks_count():
+def test_generated_legacy_catalog_contracts(subtests):
     tasks = generate_tasks(_make_manifest())
+    with subtests.test(msg="test_generate_tasks_count"):
+        _assert_generate_tasks_count(tasks)
+    with subtests.test(msg="test_generate_tasks_source_name_in_question"):
+        _assert_generate_tasks_source_name_in_question(tasks)
+    with subtests.test(msg="test_enumeration_task_has_own_reference_cypher"):
+        _assert_enumeration_task_has_own_reference_cypher(tasks)
+    with subtests.test(msg="test_path_finding_task_uses_verification_cypher"):
+        _assert_path_finding_task_uses_verification_cypher(tasks)
+    with subtests.test(msg="test_global_tasks_present"):
+        _assert_global_tasks_present(tasks)
+    with subtests.test(msg="test_global_admin_to_returns_computers_not_paths"):
+        _assert_global_admin_to_returns_computers_not_paths(tasks)
+    with subtests.test(msg="test_global_privileged_sessions_returns_computers_not_paths"):
+        _assert_global_privileged_sessions_returns_computers_not_paths(tasks)
+    with subtests.test(msg="test_acl_chain_02_names_source_and_target"):
+        _assert_acl_chain_02_names_source_and_target(tasks)
+    with subtests.test(msg="test_all_anchored_generated_questions_name_their_graded_endpoints"):
+        _assert_all_anchored_generated_questions_name_their_graded_endpoints(tasks)
+    with subtests.test(msg="test_phase4_composite_names_bridge_and_delegation_target"):
+        _assert_phase4_composite_names_bridge_and_delegation_target(tasks)
+
+
+def _assert_generate_tasks_count(tasks):
     assert len(tasks) == 11
 
 
-def test_generate_tasks_source_name_in_question():
-    tasks = generate_tasks(_make_manifest())
+def _assert_generate_tasks_source_name_in_question(tasks):
     admin_to = next(t for t in tasks if t.template_id == "t1_admin_to")
     assert "JDOE@TEST.LOCAL" in admin_to.question
     assert "DC01.TEST.LOCAL" in admin_to.question
 
 
-def test_enumeration_task_has_own_reference_cypher():
+def _assert_enumeration_task_has_own_reference_cypher(tasks):
     """Enumeration tasks must NOT use the planted path's verification_cypher."""
-    tasks = generate_tasks(_make_manifest())
     enum_task = next(
         t for t in tasks if t.template_id == "t1_group_membership" and t.grade_mode == "node_set"
     )
@@ -843,9 +864,8 @@ def test_enumeration_task_has_own_reference_cypher():
     assert "DOMAIN ADMINS@TEST.LOCAL" in enum_task.reference_cypher
 
 
-def test_path_finding_task_uses_verification_cypher():
+def _assert_path_finding_task_uses_verification_cypher(tasks):
     """path_finding tasks should use the manifest's verification_cypher."""
-    tasks = generate_tasks(_make_manifest())
     path_task = next(t for t in tasks if t.id == "t1_admin_to-01")
     assert "JDOE@TEST.LOCAL" in path_task.reference_cypher
 
@@ -893,39 +913,34 @@ def test_supporting_edge_reference_returns_computed_projection_alias_after_with(
     assert task.reference_cypher.endswith("RETURN nodes, ctx1s, ctx1t")
 
 
-def test_global_tasks_present():
-    tasks = generate_tasks(_make_manifest())
+def _assert_global_tasks_present(tasks):
     global_ids = {t.id for t in tasks if t.template_id == "global"}
     assert "global-kerberoastable" in global_ids
     assert "global-admin-to" in global_ids
     assert "global-da-members" in global_ids
 
 
-def test_global_admin_to_returns_computers_not_paths():
+def _assert_global_admin_to_returns_computers_not_paths(tasks):
     """global-admin-to reference Cypher must RETURN c (not p) to avoid polluting node_names."""
-    tasks = generate_tasks(_make_manifest())
     task = next(t for t in tasks if t.id == "global-admin-to")
     assert "RETURN c" in task.reference_cypher
     assert "RETURN p" not in task.reference_cypher
 
 
-def test_global_privileged_sessions_returns_computers_not_paths():
-    tasks = generate_tasks(_make_manifest())
+def _assert_global_privileged_sessions_returns_computers_not_paths(tasks):
     task = next(t for t in tasks if t.id == "global-privileged-sessions")
     assert "RETURN c" in task.reference_cypher
     assert "RETURN p" not in task.reference_cypher
 
 
-def test_acl_chain_02_names_source_and_target():
-    tasks = generate_tasks(_make_manifest())
+def _assert_acl_chain_02_names_source_and_target(tasks):
     task = next(t for t in tasks if t.id == "t2_acl_chain-02")
     assert "DWOLFE@TEST.LOCAL" in task.question
     assert "SRV-FILE-01.TEST.LOCAL" in task.question
     assert "abused group" in task.question
 
 
-def test_all_anchored_generated_questions_name_their_graded_endpoints():
-    tasks = generate_tasks(_make_manifest())
+def _assert_all_anchored_generated_questions_name_their_graded_endpoints(tasks):
 
     for task in tasks:
         if task.metadata.get("reference_scope") != "anchored":
@@ -934,8 +949,7 @@ def test_all_anchored_generated_questions_name_their_graded_endpoints():
         assert task.metadata["target_name"] in task.question
 
 
-def test_phase4_composite_names_bridge_and_delegation_target():
-    tasks = generate_tasks(_make_manifest())
+def _assert_phase4_composite_names_bridge_and_delegation_target(tasks):
     task = next(t for t in tasks if t.id == "t5_adcs_to_delegation_composite-01")
     assert "TBERGER@TEST.LOCAL" in task.question
     assert "SVC_PHASE4_BRIDGE@TEST.LOCAL" in task.question

@@ -971,7 +971,7 @@ def benchmark_describe(name: str) -> None:
     help="Optional artifact filename prefix. Defaults to <benchmark>-<version>-seed-<seed>.",
 )
 def benchmark_generate(name: str, seed: int, output_dir: str, output_prefix: str | None) -> None:
-    """Generate a seeded simple/complex benchmark dataset and manifest."""
+    """Generate a seeded benchmark dataset and manifest."""
 
     try:
         benchmark = get_benchmark(name)
@@ -1000,10 +1000,26 @@ def benchmark_generate(name: str, seed: int, output_dir: str, output_prefix: str
             servers=profile.servers,
         )
         generator_profile = benchmark.graph_profile
+    elif benchmark.name == "oaic-2026-v1":
+        from .generator.oaic import build_oaic_graph
+
+        graph = build_oaic_graph(
+            domain=profile.domain,
+            seed=seed,
+            users=profile.users,
+            workstations=profile.workstations,
+            servers=profile.servers,
+        )
+        generator_profile = benchmark.graph_profile
     else:  # defensive; get_benchmark already validates today.
         raise click.UsageError(f"Unsupported benchmark {benchmark.name!r}")
 
-    artifact_prefix = output_prefix or f"{benchmark.name}-{profile.benchmark_version}-seed-{seed}"
+    product_stem = (
+        benchmark.name
+        if benchmark.name == "oaic-2026-v1"
+        else f"{benchmark.name}-{profile.benchmark_version}"
+    )
+    artifact_prefix = output_prefix or f"{product_stem}-seed-{seed}"
     artifact_dir = Path(output_dir)
     zip_path = artifact_dir / f"{artifact_prefix}.zip"
     manifest_path = artifact_dir / f"{artifact_prefix}_manifest.json"
@@ -1137,7 +1153,7 @@ def generate(
     output: str,
     as_zip: bool,
 ) -> None:
-    """Generate a synthetic AD graph or named simple/complex benchmark."""
+    """Generate a synthetic AD graph or named benchmark product."""
     if benchmark is not None:
         ctx = click.get_current_context()
         ctx.invoke(
@@ -1208,7 +1224,7 @@ def generate(
 )
 @click.option(
     "--product",
-    type=click.Choice(["simple", "complex"]),
+    type=click.Choice(["simple", "complex", "oaic-2026-v1"]),
     required=True,
 )
 @click.option(
@@ -1248,6 +1264,51 @@ def compile_v2_command(
     for label, path in paths.items():
         visibility = "private" if "private" in path.name else "public"
         click.echo(f"  {label} ({visibility}): {path}")
+
+
+@main.command(name="select-v2")
+@click.option(
+    "--manifest", "manifest_path", required=True, type=click.Path(exists=True, dir_okay=False)
+)
+@click.option(
+    "--archive", "archive_path", required=True, type=click.Path(exists=True, dir_okay=False)
+)
+@click.option(
+    "--compiled-dir",
+    required=True,
+    type=click.Path(exists=True, file_okay=False),
+    help="Directory containing both compile-v2 tracks and recipe metadata.",
+)
+@click.option(
+    "--certification-dir",
+    required=True,
+    type=click.Path(exists=True, file_okay=False),
+    help="Directory containing both certify-v2-live catalogs.",
+)
+@click.option("--output-dir", required=True, type=click.Path(file_okay=False))
+def select_v2_command(
+    manifest_path: str,
+    archive_path: str,
+    compiled_dir: str,
+    certification_dir: str,
+    output_dir: str,
+) -> None:
+    """Select a paired OAIC release: exactly 50 Direct and 50 MCP tasks."""
+    from .eval.v2.cli_support import select_v2_files
+
+    try:
+        paths = select_v2_files(
+            source_manifest_path=Path(manifest_path),
+            archive_path=Path(archive_path),
+            compiled_dir=Path(compiled_dir),
+            certification_dir=Path(certification_dir),
+            output_dir=Path(output_dir),
+        )
+    except (ValueError, OSError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo("V2 SELECTION: PASS (50 Direct + 50 MCP; no service or model calls)")
+    for label, path in paths.items():
+        click.echo(f"  {label}: {path}")
 
 
 @main.command(name="run-v2")
@@ -1394,7 +1455,7 @@ def campaign_status_command(config_path: str, json_output: bool) -> None:
 )
 @click.option(
     "--product",
-    type=click.Choice(["simple", "complex"]),
+    type=click.Choice(["simple", "complex", "oaic-2026-v1"]),
     required=True,
 )
 @click.option(
@@ -1434,6 +1495,57 @@ def certify_v2_live_command(
     click.echo("V2 LIVE CERTIFICATION: PASS")
     for label, path in paths.items():
         click.echo(f"  {label}: {path}")
+
+
+@main.command(name="verify-native-graph")
+@click.option("--manifest", "manifest_path", required=True,
+              type=click.Path(exists=True, dir_okay=False))
+@click.option("--archive", "archive_path", required=True,
+              type=click.Path(exists=True, dir_okay=False))
+@click.option("--product", required=True,
+              type=click.Choice(["simple", "complex", "oaic-2026-v1"]))
+@click.option("--implementation", "implementation_id", required=True,
+              type=click.Choice(["mordavid", "armadin"]))
+@click.option("--database", required=True,
+              help="Explicit Neo4j database; no default or alias inference.")
+@click.option("--output", "output_path", required=True, type=click.Path(dir_okay=False),
+              help="New private verification file ending in .private.json.")
+@click.option("--page-size", type=click.IntRange(min=1, max=2000), default=500)
+@click.option("--timeout-seconds", type=click.FloatRange(min=0, min_open=True), default=120.0)
+@click.option("--transaction-timeout-seconds",
+              type=click.FloatRange(min=0, min_open=True), default=60.0)
+@click.option("--auxiliary-label", "auxiliary_labels", multiple=True,
+              help="Permitted additional node label, e.g. Base; fingerprinted, not inferred.")
+def verify_native_graph_command(
+    manifest_path: str, archive_path: str, product: str, implementation_id: str,
+    database: str, output_path: str, page_size: int, timeout_seconds: float,
+    transaction_timeout_seconds: float, auxiliary_labels: tuple[str, ...],
+) -> None:
+    """Read a controlled native Bolt graph without models, MCP launch, or writes.
+
+    Uses BLOODHOUND_URI/USERNAME/PASSWORD for mordavid, or
+    NEO4J_URI/USERNAME/PASSWORD for armadin. This is graph verification, not
+    proof of source/runtime isolation, privileges, or native campaign admission.
+    """
+    import asyncio
+
+    from .eval.v2.native_bolt_runtime import NativeBackendError, verify_native_graph_files
+
+    try:
+        asyncio.run(verify_native_graph_files(
+            source_manifest_path=Path(manifest_path), archive_path=Path(archive_path),
+            product=product, implementation_id=implementation_id, database=database,
+            output_path=Path(output_path), page_size=page_size, timeout_seconds=timeout_seconds,
+            transaction_timeout_seconds=transaction_timeout_seconds,
+            auxiliary_labels=auxiliary_labels,
+        ))
+    except NativeBackendError as exc:
+        raise click.ClickException(str(exc)) from exc
+    except Exception as exc:
+        # Driver exceptions and invalid manifests can contain private data.
+        raise click.ClickException("NATIVE_BACKEND_VERIFICATION_FAILED") from exc
+    click.echo("NATIVE GRAPH SCORING PARITY: PASS")
+    click.echo("No model or MCP server launched. Native campaign admission remains unverified.")
 
 
 @main.command(name="preflight-tasks")

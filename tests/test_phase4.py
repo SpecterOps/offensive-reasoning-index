@@ -12,36 +12,34 @@ from ori.generator.phase4 import build_phase4_v1_graph
 from ori.generator.serializer import serialize_to_zip
 
 
-def _manifest_for_seed(seed: int) -> dict:
-    graph = build_phase4_v1_graph(
+def _graph_for_seed(seed: int):
+    return build_phase4_v1_graph(
         domain="PHASE4.TEST",
         seed=seed,
         users=18,
         workstations=7,
         servers=4,
     )
-    return _build_manifest(graph, seed)
 
 
-def test_phase4_same_seed_manifest_is_identical() -> None:
-    assert _manifest_for_seed(4401) == _manifest_for_seed(4401)
+def test_phase4_seeded_artifact_contract(tmp_path: Path, subtests) -> None:
+    first = _graph_for_seed(4401)
+    second = _graph_for_seed(4401)
+    changed = _graph_for_seed(4402)
+    assert first is not second
+    with subtests.test(msg="test_phase4_same_seed_manifest_is_identical"):
+        _assert_phase4_same_seed_manifest_is_identical(first, second)
+    with subtests.test(msg="test_phase4_same_seed_zip_is_identical"):
+        _assert_phase4_same_seed_zip_is_identical(first, second, tmp_path)
+    with subtests.test(msg="test_phase4_different_seed_keeps_templates_but_varies_names"):
+        _assert_phase4_different_seed_keeps_templates_but_varies_names(first, changed)
 
 
-def test_phase4_same_seed_zip_is_identical(tmp_path: Path) -> None:
-    first = build_phase4_v1_graph(
-        domain="PHASE4.TEST",
-        seed=4401,
-        users=18,
-        workstations=7,
-        servers=4,
-    )
-    second = build_phase4_v1_graph(
-        domain="PHASE4.TEST",
-        seed=4401,
-        users=18,
-        workstations=7,
-        servers=4,
-    )
+def _assert_phase4_same_seed_manifest_is_identical(first, second) -> None:
+    assert _build_manifest(first, 4401) == _build_manifest(second, 4401)
+
+
+def _assert_phase4_same_seed_zip_is_identical(first, second, tmp_path: Path) -> None:
     first_zip = tmp_path / "first.zip"
     second_zip = tmp_path / "second.zip"
     serialize_to_zip(first, first_zip)
@@ -49,9 +47,9 @@ def test_phase4_same_seed_zip_is_identical(tmp_path: Path) -> None:
     assert first_zip.read_bytes() == second_zip.read_bytes()
 
 
-def test_phase4_different_seed_keeps_templates_but_varies_names() -> None:
-    a = _manifest_for_seed(4401)
-    b = _manifest_for_seed(4402)
+def _assert_phase4_different_seed_keeps_templates_but_varies_names(first, changed) -> None:
+    a = _build_manifest(first, 4401)
+    b = _build_manifest(changed, 4402)
     assert [p["template_id"] for p in a["planted_paths"]] == [
         p["template_id"] for p in b["planted_paths"]
     ]
@@ -60,14 +58,17 @@ def test_phase4_different_seed_keeps_templates_but_varies_names() -> None:
     ]
 
 
-def test_phase4_adcs_objects_serialize_to_sharphound_files(tmp_path: Path) -> None:
-    graph = build_phase4_v1_graph(
-        domain="PHASE4.TEST",
-        seed=4401,
-        users=18,
-        workstations=7,
-        servers=4,
-    )
+def test_phase4_generated_contract(tmp_path: Path, subtests) -> None:
+    graph = _graph_for_seed(4401)
+    with subtests.test(msg="test_phase4_adcs_objects_serialize_to_sharphound_files"):
+        _assert_phase4_adcs_objects_serialize_to_sharphound_files(graph, tmp_path)
+    with subtests.test(msg="test_phase4_tasks_include_tier4_and_tier5_metadata"):
+        _assert_phase4_tasks_include_tier4_and_tier5_metadata(graph)
+    with subtests.test(msg="test_phase4_reference_cypher_covers_privileged_targets"):
+        _assert_phase4_reference_cypher_covers_privileged_targets(graph)
+
+
+def _assert_phase4_adcs_objects_serialize_to_sharphound_files(graph, tmp_path: Path) -> None:
     zip_path = tmp_path / "phase4.zip"
     serialize_to_zip(graph, zip_path)
     with zipfile.ZipFile(zip_path) as zf:
@@ -86,8 +87,8 @@ def test_phase4_adcs_objects_serialize_to_sharphound_files(tmp_path: Path) -> No
     )
 
 
-def test_phase4_tasks_include_tier4_and_tier5_metadata() -> None:
-    manifest = _manifest_for_seed(4401)
+def _assert_phase4_tasks_include_tier4_and_tier5_metadata(graph) -> None:
+    manifest = _build_manifest(graph, 4401)
     tasks = generate_tasks(manifest)
     phase4_tasks = [task for task in tasks if task.tier in {4, 5}]
     assert {task.template_id for task in phase4_tasks} == {
@@ -99,8 +100,8 @@ def test_phase4_tasks_include_tier4_and_tier5_metadata() -> None:
     assert all(task.metadata["template_version"] == "phase4_v1.0" for task in phase4_tasks)
 
 
-def test_phase4_reference_cypher_covers_privileged_targets() -> None:
-    manifest = _manifest_for_seed(4401)
+def _assert_phase4_reference_cypher_covers_privileged_targets(graph) -> None:
+    manifest = _build_manifest(graph, 4401)
     paths = {path["template_id"]: path for path in manifest["planted_paths"]}
     assert paths["t4_adcs_esc1"]["target_name"] in paths["t4_adcs_esc1"]["verification_cypher"]
     assert (

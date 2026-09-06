@@ -138,13 +138,29 @@ BENCHMARKS: dict[str, BenchmarkDefinition] = {
         status="planned",
         tracks=_standard_tracks("phase4_complex", task_count=100, diagnostic_task_count=24),
     ),
+    "oaic-2026-v1": BenchmarkDefinition(
+        name="oaic-2026-v1",
+        title="Offensive AI Con 2026 benchmark",
+        summary="Seeded 50 Direct and 50 MCP selected contracts with reserved diagnostics.",
+        source_phase="oaic",
+        graph_profile="oaic_complex",
+        official_task_set="oaic_2026_v1_official",
+        diagnostic_task_set="oaic_2026_v1_diagnostic",
+        default_task_count=50,
+        diagnostic_task_count=10,
+        supported_modes=("direct", "mcp", "diagnostic"),
+        expected_runtime="Provider dependent",
+        scoring_profile="protocol_v2",
+        status="candidate",
+        tracks=_standard_tracks("oaic_2026_v1", task_count=50, diagnostic_task_count=10),
+    ),
 }
 
 
 def list_benchmarks() -> tuple[BenchmarkDefinition, ...]:
     """Return benchmark definitions in stable public order."""
 
-    return tuple(BENCHMARKS[name] for name in ("simple", "complex"))
+    return tuple(BENCHMARKS[name] for name in ("simple", "complex", "oaic-2026-v1"))
 
 
 def get_benchmark(name: str) -> BenchmarkDefinition:

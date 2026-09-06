@@ -14,8 +14,54 @@ def test_benchmark_list_cli_shows_simple_and_complex() -> None:
     assert result.exit_code == 0
     assert "simple" in result.output
     assert "complex" in result.output
+    assert "oaic-2026-v1" in result.output
     assert "Fast Phase 3-derived benchmark" in result.output
     assert "tracks=direct,mcp" in result.output
+
+
+def test_oaic_public_cli_generation_and_compilation(tmp_path) -> None:
+    runner = CliRunner()
+    generated = runner.invoke(
+        main, ["generate", "oaic-2026-v1", "--seed", "67", "--output", str(tmp_path)]
+    )
+    assert generated.exit_code == 0, generated.output
+    manifest_path = tmp_path / "oaic-2026-v1-seed-67_manifest.json"
+    archive_path = tmp_path / "oaic-2026-v1-seed-67.zip"
+    manifest = json.loads(manifest_path.read_text())
+    assert manifest["metadata"]["benchmark"] == "oaic-2026-v1"
+    assert len(manifest["planted_paths"]) == 38
+    assert all(
+        track["task_count"] == 50 for track in manifest["metadata"]["benchmark_tracks"].values()
+    )
+    for track in ("direct", "mcp"):
+        compiled = runner.invoke(
+            main,
+            [
+                "compile-v2",
+                "--product",
+                "oaic-2026-v1",
+                "--track",
+                track,
+                "--manifest",
+                str(manifest_path),
+                "--archive",
+                str(archive_path),
+                "--output-dir",
+                str(tmp_path / "compiled"),
+            ],
+        )
+        assert compiled.exit_code == 0, compiled.output
+        assert "V2 COMPILE: PASS" in compiled.output
+        metadata = json.loads(
+            (
+                tmp_path / "compiled" / f"oaic-2026-v1-{track}-seed-67-release-metadata-v1.json"
+            ).read_text()
+        )
+        assert len(metadata["entries"]) == 110
+        assert sum(entry["eligibility"] == "main" for entry in metadata["entries"]) == 100
+    help_result = runner.invoke(main, ["select-v2", "--help"])
+    assert help_result.exit_code == 0
+    assert "50 Direct and 50 MCP" in help_result.output
 
 
 def test_benchmark_describe_cli_shows_complex_contract() -> None:
@@ -107,17 +153,6 @@ def test_benchmark_generate_simple_writes_seeded_artifacts(tmp_path) -> None:
         for edge in [*path["path_edges"], *path["supporting_edges"]]
     }
     assert emitted_kinds.isdisjoint({"WriteDACL", "TrustedBy"})
-
-
-def test_generate_simple_alias_writes_seeded_artifacts(tmp_path) -> None:
-    result = CliRunner().invoke(
-        main,
-        ["generate", "simple", "--seed", "1234", "--output", str(tmp_path)],
-    )
-
-    assert result.exit_code == 0, result.output
-    assert (tmp_path / "simple-v1-seed-1234.zip").exists()
-    assert (tmp_path / "simple-v1-seed-1234_manifest.json").exists()
 
 
 @pytest.mark.parametrize(

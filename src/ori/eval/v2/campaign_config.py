@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, PrivateAttr, field_validator, model_validator
 
+from ..anthropic_binding import AnthropicBinding
+from ..ollama_binding import OllamaEndpoint
 from .schema import PROTOCOL_VERSION, StrictModel, Track
 
 ReasoningEffort = Literal[
@@ -31,6 +34,8 @@ class V2TrackArtifactPaths(StrictModel):
     oracles: str
     candidates: str
     live_certification: str
+    release_metadata: str | None = None
+    selection: str | None = None
 
 
 class V2SourcePaths(StrictModel):
@@ -169,12 +174,23 @@ class V2CampaignConfig(StrictModel):
     output_dir: str
     defaults: V2Defaults
     models: list[V2ModelEntry]
+    selected_release: str | None = None
 
     @model_validator(mode="after")
     def exact_modes_and_models(self) -> V2CampaignConfig:
         if not self.modes or len(self.modes) != len(set(self.modes)):
             raise ValueError("v2 modes must be non-empty and unique")
-        if set(self.tracks) != set(self.modes):
+        if self.selected_release is not None:
+            if set(self.tracks) != {"direct", "mcp"} or any(
+                paths.release_metadata is None or paths.selection is None
+                for paths in self.tracks.values()
+            ):
+                raise ValueError("selected releases require both tracks, metadata and selections")
+        elif any(
+            p.release_metadata is not None or p.selection is not None for p in self.tracks.values()
+        ):
+            raise ValueError("track selections require a paired selected_release")
+        elif set(self.tracks) != set(self.modes):
             raise ValueError("v2 tracks must exactly match configured modes")
         if not self.models:
             raise ValueError("v2 campaigns require at least one model")
@@ -220,9 +236,16 @@ class ResolvedV2TrackPaths(StrictModel):
     oracles: Path
     candidates: Path
     live_certification: Path
+    release_metadata: Path | None = None
+    selection: Path | None = None
 
 
 class ResolvedV2CampaignConfig(StrictModel):
+    _anthropic_bindings: Mapping[str, AnthropicBinding] | None = PrivateAttr(default=None)
+    _anthropic_mutation_fingerprint: str | None = PrivateAttr(default=None)
+    _ollama_endpoints: Mapping[str, OllamaEndpoint] | None = PrivateAttr(default=None)
+    _ollama_mutation_fingerprint: str | None = PrivateAttr(default=None)
+
     source_manifest: Path
     archive: Path
     tracks: dict[Track, ResolvedV2TrackPaths]
@@ -230,6 +253,7 @@ class ResolvedV2CampaignConfig(StrictModel):
     mcp_dir: Path | None
     config: V2CampaignConfig
     source_config_fingerprint: str
+    selected_release: Path | None = None
 
 
 def _resolve(base: Path, raw: str) -> Path:
@@ -256,6 +280,10 @@ def load_v2_campaign_config(path: Path) -> ResolvedV2CampaignConfig:
             oracles=_resolve(base, paths.oracles),
             candidates=_resolve(base, paths.candidates),
             live_certification=_resolve(base, paths.live_certification),
+            release_metadata=_resolve(base, paths.release_metadata)
+            if paths.release_metadata
+            else None,
+            selection=_resolve(base, paths.selection) if paths.selection else None,
         )
         for track, paths in config.tracks.items()
     }
@@ -264,6 +292,9 @@ def load_v2_campaign_config(path: Path) -> ResolvedV2CampaignConfig:
         archive=_resolve(base, config.source.archive),
         tracks=resolved_tracks,
         output_dir=_resolve(base, config.output_dir),
+        selected_release=_resolve(base, config.selected_release)
+        if config.selected_release
+        else None,
         mcp_dir=(
             _resolve(base, config.defaults.mcp.mcp_dir) if config.defaults.mcp is not None else None
         ),
@@ -281,8 +312,12 @@ def load_v2_campaign_config(path: Path) -> ResolvedV2CampaignConfig:
                 paths.oracles,
                 paths.candidates,
                 paths.live_certification,
+                paths.release_metadata,
+                paths.selection,
             )
+            if value is not None
         ),
+        *((resolved.selected_release,) if resolved.selected_release is not None else ()),
     )
     missing = [str(item) for item in required if not item.exists()]
     if missing:

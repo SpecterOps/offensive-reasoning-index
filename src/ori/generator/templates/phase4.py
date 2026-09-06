@@ -43,13 +43,6 @@ def _domain_admins(graph: ADGraph) -> ADNode:
     return graph.require_node(sid)
 
 
-def _first_dc(graph: ADGraph) -> ADNode:
-    dcs = [c for c in graph.nodes_by_type("Computer") if c.properties.get("isdc", False)]
-    if not dcs:
-        raise RuntimeError("Phase 4 templates require at least one domain controller")
-    return sorted(dcs, key=lambda n: n.properties["name"])[0]
-
-
 def _pick_user(graph: ADGraph, *, exclude: set[str] | None = None) -> ADNode:
     exclude = exclude or set()
     users = [

@@ -13,9 +13,17 @@ import platform
 import time
 import uuid
 from collections.abc import Iterable
+from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
+
+from .provider_contract import (
+    ProviderAuthenticationError,
+    ProviderCapabilityError,
+    ProviderProtocolError,
+)
 
 DEFAULT_CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex"
 DEFAULT_CODEX_ORIGINATOR = "codex_cli_rs"
@@ -24,6 +32,7 @@ DEFAULT_CODEX_MODEL = "gpt-5.5-codex"
 CODEX_REASONING_EFFORTS = frozenset(
     {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
 )
+_STREAM_PROTOCOL_ERROR = "Codex successful stream is inconsistent or malformed"
 
 
 class CodexResponseStreamError(RuntimeError):
@@ -35,26 +44,111 @@ def codex_auth_path() -> Path:
     return Path(os.environ.get("CODEX_AUTH_FILE", default_path)).expanduser()
 
 
-def codex_access_token() -> str:
-    explicit = os.environ.get("CODEX_API_KEY") or os.environ.get("OPENAI_API_KEY")
-    if explicit:
-        return explicit
+def _codex_file_token() -> str:
     path = codex_auth_path()
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError as exc:
-        raise RuntimeError(
-            "Codex OAuth token not found. Run Codex login first or set CODEX_API_KEY. "
-            f"Missing: {path}"
-        ) from exc
-    token = (data.get("tokens") or {}).get("access_token") or data.get("access_token")
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        raise ProviderAuthenticationError(
+            "Codex OAuth credential file could not be read"
+        ) from None
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        raise ProviderAuthenticationError("Codex OAuth credential file is invalid") from None
+    if not isinstance(data, dict):
+        raise ProviderAuthenticationError("Codex OAuth credential file is invalid") from None
+    tokens = data.get("tokens") or {}
+    if not isinstance(tokens, dict):
+        raise ProviderAuthenticationError("Codex OAuth credential file is invalid") from None
+    token = tokens.get("access_token") or data.get("access_token")
     if not isinstance(token, str) or not token:
-        raise RuntimeError(f"Codex OAuth access_token missing in {path}")
+        raise ProviderAuthenticationError("Codex OAuth access token is unavailable") from None
     return token
 
 
 def codex_base_url(base_url: str | None = None) -> str:
-    return (base_url or os.environ.get("CODEX_BASE_URL") or DEFAULT_CODEX_BASE_URL).rstrip("/")
+    url = (base_url or os.environ.get("CODEX_BASE_URL") or DEFAULT_CODEX_BASE_URL).rstrip("/")
+    if not url:
+        raise ProviderCapabilityError("Codex endpoint configuration is invalid")
+    return url
+
+
+@dataclass(frozen=True, slots=True)
+class CodexEndpointBinding:
+    base_url: str
+    endpoint_family: str
+    credential_source: str | None
+
+
+def codex_endpoint_binding(base_url: str | None = None) -> CodexEndpointBinding:
+    """Admit a destination and select source metadata without loading credentials."""
+    url = codex_base_url(base_url)
+    try:
+        if any(ord(char) <= 32 or ord(char) == 127 or char == "\\" for char in url):
+            raise ValueError
+        parsed = urlsplit(url)
+        port = parsed.port
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or "?" in url
+            or "#" in url
+            or parsed.netloc.endswith(":")
+        ):
+            raise ValueError
+        official = parsed.hostname.casefold() == "chatgpt.com"
+        if official and (
+            parsed.scheme != "https"
+            or port not in {None, 443}
+            or parsed.path != "/backend-api/codex"
+        ):
+            raise ValueError
+    except ValueError:
+        raise ProviderCapabilityError("Codex endpoint configuration is invalid") from None
+    if official:
+        source = "CODEX_API_KEY" if os.environ.get("CODEX_API_KEY") else "codex-auth-file"
+        return CodexEndpointBinding(url, "codex_oauth", source)
+    source = "CODEX_COMPAT_API_KEY" if os.environ.get("CODEX_COMPAT_API_KEY") else None
+    return CodexEndpointBinding(url, "codex_compat", source)
+
+
+@dataclass(frozen=True, slots=True)
+class CodexCredential:
+    binding: CodexEndpointBinding
+    token: str = field(repr=False)
+
+    def headers(self, thread_id: str | None = None) -> dict[str, str]:
+        headers = {
+            "Authorization": f"Bearer {self.token}",
+            "User-Agent": codex_user_agent(),
+            "originator": _originator(),
+            "session-id": _session_id(),
+            "x-codex-installation-id": _installation_id(),
+        }
+        if thread_id:
+            headers["thread-id"] = thread_id
+        return headers
+
+
+def resolve_codex_credential(base_url: str | None = None) -> CodexCredential:
+    binding = codex_endpoint_binding(base_url)
+    if binding.credential_source is None:
+        raise ProviderAuthenticationError(
+            "Custom Codex endpoint requires CODEX_COMPAT_API_KEY"
+        )
+    token = (
+        _codex_file_token()
+        if binding.credential_source == "codex-auth-file"
+        else os.environ[binding.credential_source]
+    )
+    return CodexCredential(binding, token)
+
+
+def codex_access_token(*, base_url: str | None = None) -> str:
+    return resolve_codex_credential(base_url).token
 
 
 def codex_model_name(model: str) -> str:
@@ -103,17 +197,10 @@ def codex_user_agent() -> str:
     return f"{_originator()}/{_codex_version()} ({os_type} {os_version}; {arch}) {runtime}"
 
 
-def codex_headers(*, thread_id: str | None = None) -> dict[str, str]:
-    headers = {
-        "Authorization": f"Bearer {codex_access_token()}",
-        "User-Agent": codex_user_agent(),
-        "originator": _originator(),
-        "session-id": _session_id(),
-        "x-codex-installation-id": _installation_id(),
-    }
-    if thread_id:
-        headers["thread-id"] = thread_id
-    return headers
+def codex_headers(
+    *, thread_id: str | None = None, base_url: str | None = None
+) -> dict[str, str]:
+    return resolve_codex_credential(base_url).headers(thread_id)
 
 
 def chat_request_to_codex_responses_params(body: dict[str, Any]) -> dict[str, Any]:
@@ -200,56 +287,78 @@ def chat_request_to_codex_responses_params(body: dict[str, Any]) -> dict[str, An
 def codex_responses_events_to_chat_completion(events: Iterable[Any], model: str) -> dict[str, Any]:
     completion_id = _new_id("chatcmpl")
     created = int(time.time())
-    text_parts: list[str] = []
-    tool_calls: list[dict[str, Any]] = []
-    finish_reason = "stop"
-    usage: dict[str, Any] | None = None
+    text_events: list[Any] = []
+    call_events: list[Any] = []
     completed_response: Any | None = None
+    completed_seen = False
+    post_terminal_event = False
 
     for event in events:
         etype = getattr(event, "type", None)
-        if etype == "response.output_text.delta":
-            text_parts.append(getattr(event, "delta", "") or "")
-        elif etype == "response.output_item.done":
-            item = getattr(event, "item", None)
-            if item is not None and getattr(item, "type", None) == "function_call":
-                tool_calls.append(
-                    {
-                        "id": getattr(item, "call_id", "") or _new_id("call"),
-                        "type": "function",
-                        "function": {
-                            "name": getattr(item, "name", "") or "",
-                            "arguments": getattr(item, "arguments", "") or "{}",
-                        },
-                    }
-                )
-                finish_reason = "tool_calls"
-        elif etype == "error":
+        if etype == "error":
             raise CodexResponseStreamError(_stream_error_detail(event))
-        elif etype in {"response.failed", "response.incomplete"}:
+        if etype in ("response.failed", "response.incomplete"):
             response = getattr(event, "response", None)
             raise CodexResponseStreamError(_terminal_response_error_detail(etype, response))
+        if completed_seen:
+            # Defer rejection so later explicit failures retain legacy precedence.
+            post_terminal_event = True
         elif etype == "response.completed":
-            response = getattr(event, "response", None)
-            completed_response = response
-            if response is not None and getattr(response, "usage", None) is not None:
-                usage = _translate_usage(response.usage)
+            completed_seen = True
+            completed_response = getattr(event, "response", None)
+        elif etype == "response.output_text.delta":
+            text_events.append(event)
+        elif etype == "response.output_item.done":
+            if getattr(getattr(event, "item", None), "type", None) == "function_call":
+                call_events.append(event)
 
     if completed_response is None:
         raise CodexResponseStreamError(
             "Codex Responses API stream ended without a response.completed event"
         )
+    if post_terminal_event:
+        raise ProviderProtocolError(_STREAM_PROTOCOL_ERROR)
 
-    if not text_parts:
-        fallback_text = _response_output_text(completed_response)
-        if fallback_text:
-            text_parts.append(fallback_text)
-    if not tool_calls:
-        tool_calls.extend(_response_function_calls(completed_response))
-        if tool_calls:
-            finish_reason = "tool_calls"
+    content, calls_by_index, text_slots = _codex_completed_output(completed_response)
+    observed_text: dict[tuple[int, int], list[str]] = {}
+    for event in text_events:
+        output_index = _codex_output_index(getattr(event, "output_index", None))
+        content_index = _codex_output_index(getattr(event, "content_index", None))
+        slot = (output_index, content_index)
+        item_id = getattr(event, "item_id", None)
+        delta = getattr(event, "delta", None)
+        if (
+            slot not in text_slots
+            or not isinstance(item_id, str)
+            or not item_id
+            or item_id != text_slots[slot][0]
+            or not isinstance(delta, str)
+        ):
+            raise ProviderProtocolError(_STREAM_PROTOCOL_ERROR)
+        observed_text.setdefault(slot, []).append(delta)
+    if any("".join(parts) != text_slots[slot][1] for slot, parts in observed_text.items()):
+        raise ProviderProtocolError(_STREAM_PROTOCOL_ERROR)
 
-    content = "".join(text_parts)
+    observed_calls: set[str] = set()
+    observed_indices: set[int] = set()
+    for event in call_events:
+        index = _codex_output_index(getattr(event, "output_index", None))
+        call = _codex_function_call(event.item)
+        item_id = _codex_item_id(event.item, required=False)
+        if (
+            index not in calls_by_index
+            or call != calls_by_index[index]
+            or call["id"] in observed_calls
+            or index in observed_indices
+        ):
+            raise ProviderProtocolError(_STREAM_PROTOCOL_ERROR)
+        final_id = getattr(completed_response.output[index], "id", None)
+        if item_id is not None and final_id is not None and item_id != final_id:
+            raise ProviderProtocolError(_STREAM_PROTOCOL_ERROR)
+        observed_calls.add(call["id"])
+        observed_indices.add(index)
+
+    tool_calls = list(calls_by_index.values())
     if not content.strip() and not tool_calls:
         raise CodexResponseStreamError(
             "Codex Responses API response completed without text or tool calls"
@@ -263,10 +372,16 @@ def codex_responses_events_to_chat_completion(events: Iterable[Any], model: str)
         "object": "chat.completion",
         "created": created,
         "model": model,
-        "choices": [{"index": 0, "message": message, "finish_reason": finish_reason}],
+        "choices": [
+            {
+                "index": 0,
+                "message": message,
+                "finish_reason": "tool_calls" if tool_calls else "stop",
+            }
+        ],
     }
-    if usage is not None:
-        completion["usage"] = usage
+    if getattr(completed_response, "usage", None) is not None:
+        completion["usage"] = _translate_usage(completed_response.usage)
     return completion
 
 
@@ -292,44 +407,94 @@ def _terminal_response_error_detail(event_type: str, response: Any) -> str:
     return f"Codex Responses API response {state}{f': {detail}' if detail else ''}"
 
 
-def _response_output_text(response: Any) -> str:
-    output_text = getattr(response, "output_text", None)
-    if isinstance(output_text, str) and output_text:
-        return output_text
+def _codex_output_index(value: Any) -> int:
+    if type(value) is not int or value < 0:
+        raise ProviderProtocolError(_STREAM_PROTOCOL_ERROR)
+    return value
 
-    parts: list[str] = []
-    for item in getattr(response, "output", None) or []:
-        if getattr(item, "type", None) != "message":
+
+def _codex_completed_status(value: Any) -> None:
+    status = getattr(value, "status", None)
+    if status is not None and status != "completed":
+        raise ProviderProtocolError(_STREAM_PROTOCOL_ERROR)
+
+
+def _codex_item_id(item: Any, *, required: bool) -> str | None:
+    value = getattr(item, "id", None)
+    if value is None and not required:
+        return None
+    if not isinstance(value, str) or not value:
+        raise ProviderProtocolError(_STREAM_PROTOCOL_ERROR)
+    return value
+
+
+def _codex_function_call(item: Any) -> dict[str, Any]:
+    _codex_completed_status(item)
+    call_id, name = getattr(item, "call_id", None), getattr(item, "name", None)
+    arguments = getattr(item, "arguments", None)
+    if (
+        not isinstance(call_id, str)
+        or not call_id.strip()
+        or not isinstance(name, str)
+        or not name.strip()
+        or not isinstance(arguments, str)
+    ):
+        raise ProviderProtocolError(_STREAM_PROTOCOL_ERROR)
+    return {"id": call_id, "type": "function", "function": {"name": name, "arguments": arguments}}
+
+
+def _codex_completed_output(
+    response: Any,
+) -> tuple[str, dict[int, dict[str, Any]], dict[tuple[int, int], tuple[str, str]]]:
+    _codex_completed_status(response)
+    output = getattr(response, "output", None)
+    if not isinstance(output, list):
+        raise ProviderProtocolError(_STREAM_PROTOCOL_ERROR)
+    text_parts: list[str] = []
+    refusals: list[str] = []
+    calls: dict[int, dict[str, Any]] = {}
+    text_slots: dict[tuple[int, int], tuple[str, str]] = {}
+    item_ids: set[str] = set()
+    call_ids: set[str] = set()
+    for index, item in enumerate(output):
+        kind = getattr(item, "type", None)
+        if not isinstance(kind, str) or not kind:
+            raise ProviderProtocolError(_STREAM_PROTOCOL_ERROR)
+        if kind not in {"message", "function_call"}:
             continue
-        for content in getattr(item, "content", None) or []:
-            content_type = getattr(content, "type", None)
+        _codex_completed_status(item)
+        item_id = _codex_item_id(item, required=kind == "message")
+        if item_id is not None:
+            if item_id in item_ids:
+                raise ProviderProtocolError(_STREAM_PROTOCOL_ERROR)
+            item_ids.add(item_id)
+        if kind == "function_call":
+            call = _codex_function_call(item)
+            if call["id"] in call_ids:
+                raise ProviderProtocolError(_STREAM_PROTOCOL_ERROR)
+            call_ids.add(call["id"])
+            calls[index] = call
+            continue
+        blocks = getattr(item, "content", None)
+        if not isinstance(blocks, list):
+            raise ProviderProtocolError(_STREAM_PROTOCOL_ERROR)
+        for content_index, block in enumerate(blocks):
+            content_type = getattr(block, "type", None)
+            if not isinstance(content_type, str) or not content_type:
+                raise ProviderProtocolError(_STREAM_PROTOCOL_ERROR)
+            if content_type not in {"output_text", "refusal"}:
+                continue
+            text = getattr(block, "text" if content_type == "output_text" else "refusal", None)
+            if not isinstance(text, str):
+                raise ProviderProtocolError(_STREAM_PROTOCOL_ERROR)
             if content_type == "output_text":
-                text = getattr(content, "text", None)
-            elif content_type == "refusal":
-                text = getattr(content, "refusal", None)
+                text_parts.append(text)
+                # The required message ID was validated above.
+                assert item_id is not None
+                text_slots[index, content_index] = (item_id, text)
             else:
-                text = None
-            if isinstance(text, str) and text:
-                parts.append(text)
-    return "".join(parts)
-
-
-def _response_function_calls(response: Any) -> list[dict[str, Any]]:
-    calls: list[dict[str, Any]] = []
-    for item in getattr(response, "output", None) or []:
-        if getattr(item, "type", None) != "function_call":
-            continue
-        calls.append(
-            {
-                "id": getattr(item, "call_id", "") or _new_id("call"),
-                "type": "function",
-                "function": {
-                    "name": getattr(item, "name", "") or "",
-                    "arguments": getattr(item, "arguments", "") or "{}",
-                },
-            }
-        )
-    return calls
+                refusals.append(text)
+    return "".join(text_parts) or "".join(refusals), calls, text_slots
 
 
 def _translate_usage(usage: Any) -> dict[str, Any]:

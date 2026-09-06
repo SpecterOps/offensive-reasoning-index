@@ -202,6 +202,38 @@ manifest/archive hashes, and a redacted operator log. Never publish private
 provider bodies, prompts, tool transcripts, oracle files, credentials, or local
 machine paths.
 
+Model-card admission also requires the original `campaign-provenance-v2.json`
+beside each run's public report and private state. The reader reconciles run,
+checkpoint, task, release, archive and provider-request metadata with readiness,
+and requires a completed private scheduler. Full compiled checkpoint bindings may
+include unused tasks; selected results must still match the public report exactly.
+Keep these provenance files in the private archived bundle, not the public card.
+
+Consistent supported historical bundles remain readable offline; the reader does
+not require current compiler/runtime fingerprints or contact live services.
+Missing provenance is a stop condition: recover the original matching file from
+the original campaign. Never fabricate it or repair fingerprints to force admission.
+The card schema, metrics and JSON/SVG formats are unchanged. These unkeyed hashes
+establish internal consistency, not authenticity against coherent rewriting, a
+signed release, or merged/currently certified conference evidence.
+
+Before rendering a model card, ORI checks every exported string for recognized
+URL schemes, explicit absolute/relative/home path patterns (including embedded
+paths after whitespace or supported punctuation), backslashes, Unicode control/
+format characters and credential-shaped assignments or `sk-` tokens. Rejected
+strings cause a category-only error before output creation; they are not silently
+redacted or rewritten. Existing namespace/model identifiers, tagged models,
+ordinary Unicode display names and supported historical revision/reference
+formats remain accepted when they contain none of those patterns.
+
+This is a bounded syntax check, not universal secret detection: `private/model`
+is indistinguishable from a legitimate namespace/model identifier, and disguised
+or unlabeled private content may not be recognizable. Operators must choose
+public names and review exports. A safe display override does not hide an unsafe
+underlying model identity. Never rewrite completed evidence to bypass admission;
+choose legitimate public identities before future campaigns. This check does not
+establish full revision pinning or change private campaign execution.
+
 ## Minimal acceptance test
 
 Before allowing an unattended paid campaign, demonstrate all of the following

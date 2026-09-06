@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
+import httpx
 import openai
 
 from ori.eval.adapter import call_model
@@ -14,6 +15,14 @@ from ori.eval.provider_auth import (
     resolve_openai_compat_credential,
 )
 from ori.eval.tasks import Task
+from tests.support.provider_origins import (
+    ALIAS_ORIGINS,
+    CLEARED_ENVIRONMENT,
+    COMPATIBILITY_ORIGINS,
+    DENIED_ORIGINS,
+    SYNTHETIC_KEYS,
+    VALID_ORIGINS,
+)
 
 
 def test_openai_compat_api_key_selects_scoped_keys_and_generic_override_only(
@@ -193,7 +202,10 @@ def test_direct_openai_compat_uses_openrouter_api_key(monkeypatch) -> None:
     assert captured["client"] == {
         "base_url": "https://openrouter.ai/api/v1",
         "api_key": "openrouter-key",
+        "http_client": captured["client"]["http_client"],
     }
+    assert captured["client"]["http_client"].follow_redirects is False
+    assert captured["client"]["http_client"].is_closed
 
 
 def test_direct_openai_compat_uses_nous_api_key(monkeypatch) -> None:
@@ -241,4 +253,77 @@ def test_direct_openai_compat_uses_nous_api_key(monkeypatch) -> None:
     assert captured["client"] == {
         "base_url": "https://inference-api.nousresearch.com/v1",
         "api_key": "nous-key",
+        "http_client": captured["client"]["http_client"],
     }
+    assert captured["client"]["http_client"].follow_redirects is False
+    assert captured["client"]["http_client"].is_closed
+
+
+def test_scoped_origin_resolver_acceptance(monkeypatch, subtests) -> None:
+    assert len(VALID_ORIGINS) == 12 and len(ALIAS_ORIGINS) == 2
+    for case, endpoint, family, source, key in VALID_ORIGINS + ALIAS_ORIGINS:
+        with subtests.test(msg=case), monkeypatch.context() as scoped:
+            for variable in CLEARED_ENVIRONMENT:
+                scoped.delenv(variable, raising=False)
+            for variable, value in SYNTHETIC_KEYS:
+                scoped.setenv(variable, value)
+            if case.endswith("-alias"):
+                scoped.delenv("NOUS_API_KEY")
+            def forbidden_client(*args, **kwargs):
+                raise AssertionError("resolver must not construct a provider client")
+            scoped.setattr(openai, "AsyncOpenAI", forbidden_client)
+            scoped.setattr(httpx, "AsyncClient", forbidden_client)
+            credential = resolve_openai_compat_credential(endpoint)
+            assert credential.endpoint_family == family
+            assert credential.credential_source == source
+            assert credential.api_key == key
+            assert openai_compat_api_key(endpoint) == key
+            for _, secret in SYNTHETIC_KEYS:
+                assert secret not in repr(credential)
+
+
+def test_scoped_origin_resolver_denial(monkeypatch, subtests) -> None:
+    assert len(DENIED_ORIGINS) == 32
+    for case, endpoint, family, _, _ in DENIED_ORIGINS:
+        with subtests.test(msg=case), monkeypatch.context() as scoped:
+            for variable in CLEARED_ENVIRONMENT:
+                scoped.delenv(variable, raising=False)
+            for variable, value in SYNTHETIC_KEYS:
+                scoped.setenv(variable, value)
+            def forbidden_client(*args, **kwargs):
+                raise AssertionError("resolver must not construct a provider client")
+            scoped.setattr(openai, "AsyncOpenAI", forbidden_client)
+            scoped.setattr(httpx, "AsyncClient", forbidden_client)
+            credential = resolve_openai_compat_credential(endpoint)
+            assert credential.endpoint_family == family
+            assert credential.api_key is None
+            assert credential.credential_source is None
+            assert openai_compat_api_key(endpoint) is None
+            for _, secret in SYNTHETIC_KEYS:
+                assert secret not in repr(credential)
+
+
+def test_scoped_origin_compatibility(monkeypatch, subtests) -> None:
+    assert len(COMPATIBILITY_ORIGINS) == 8
+    for index, (endpoint, family, key) in enumerate(COMPATIBILITY_ORIGINS):
+        with subtests.test(msg=f"C{index}"), monkeypatch.context() as scoped:
+            for variable in CLEARED_ENVIRONMENT:
+                scoped.delenv(variable, raising=False)
+            for variable, value in SYNTHETIC_KEYS:
+                scoped.setenv(variable, value)
+            def forbidden_client(*args, **kwargs):
+                raise AssertionError("resolver must not construct a provider client")
+            scoped.setattr(openai, "AsyncOpenAI", forbidden_client)
+            scoped.setattr(httpx, "AsyncClient", forbidden_client)
+            credential = resolve_openai_compat_credential(endpoint)
+            assert credential.endpoint_family == family
+            assert credential.api_key == key
+            assert credential.credential_source == (
+                "OPENAI_COMPAT_API_KEY" if family == "generic"
+                else "OPENAI_API_KEY" if key is not None else None
+            )
+            assert openai_compat_api_key(endpoint) == key
+            scoped.delenv("OPENAI_COMPAT_API_KEY")
+            assert openai_compat_api_key(endpoint) == (None if family == "generic" else key)
+            if family == "openai":
+                assert official_openai_endpoint_is_secure(endpoint) is (key is not None)

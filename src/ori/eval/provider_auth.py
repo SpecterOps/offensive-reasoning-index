@@ -76,6 +76,22 @@ def openai_compat_endpoint_is_local(base_url: str | None) -> bool:
     )
 
 
+def _scoped_compat_origin_is_secure(base_url: str | None) -> bool:
+    """Check transport/userinfo after a scoped provider family is recognized."""
+
+    parsed = urlsplit(base_url or "")
+    try:
+        port = parsed.port
+    except ValueError:
+        return False
+    return (
+        parsed.scheme.lower() == "https"
+        and port in {None, 443}
+        and parsed.username is None
+        and parsed.password is None
+    )
+
+
 def resolve_openai_compat_credential(
     base_url: str | None = None,
 ) -> OpenAICompatCredential:
@@ -88,6 +104,14 @@ def resolve_openai_compat_credential(
     """
 
     endpoint_family = _openai_endpoint_family(base_url)
+    if endpoint_family in {"openrouter", "nous"} and not _scoped_compat_origin_is_secure(
+        base_url
+    ):
+        return OpenAICompatCredential(
+            endpoint_family=endpoint_family,
+            credential_source=None,
+            api_key=None,
+        )
     if endpoint_family == "generic":
         explicit = os.getenv("OPENAI_COMPAT_API_KEY")
         if explicit:

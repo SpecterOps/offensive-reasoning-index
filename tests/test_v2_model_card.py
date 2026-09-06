@@ -1,447 +1,25 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
+import traceback
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
 
-from ori.eval.provider_contract import ProviderApiSurface
 from ori.eval.v2 import campaign_runner, model_card
-from ori.eval.v2.campaign import (
-    CheckpointTaskBinding,
-    CheckpointV2,
-    PublicReportV2,
-    PublicResultRow,
-    RunIdentity,
-)
 from ori.eval.v2.fingerprint import canonical_sha256
 from ori.eval.v2.model_card import ModelCardBuildError, build_model_card
-from ori.eval.v2.model_runtime import ProviderRunRecord
-from ori.eval.v2.schema import ExecutionClass, Track
-from ori.eval.v2.scoring import (
-    CampaignSummary,
-    SampleOutcomeCode,
-    SampleResult,
-    summarize_results,
+from ori.eval.v2.schema import Track
+from tests.support.v2_model_card import (
+    _MODEL,
+    _campaign,
+    _catalog,
+    _model_report,
+    _state,
 )
-
-_CONFIG = "a" * 64
-_GRAPH = "b" * 64
-_TARGET = "c" * 64
-_PUBLIC = "d" * 64
-_CAPABILITY = "f" * 64
-_MODEL = "poolside/laguna-s-2.1"
-_PROVIDER = "openai-compat"
-
-
-def _catalog(track: Track) -> str:
-    return ("e" if track is Track.DIRECT else "8") * 64
-
-
-def _dump(path: Path, model: object) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(model.model_dump_json(indent=2) + "\n")  # type: ignore[attr-defined]
-
-
-def _summary(track: Track, *, contradict_rows: bool = False) -> CampaignSummary:
-    samples = _samples(track)
-    summary = summarize_results(tuple(sample.task_id for sample in samples), samples)
-    if not contradict_rows:
-        return summary
-    if track is Track.DIRECT:
-        return CampaignSummary(
-            scheduled=2,
-            completed=1,
-            correct=0,
-            incorrect=1,
-            model_failures=1,
-            proof_failures=0,
-            infrastructure_failures=0,
-            harness_failures=0,
-            unexecuted=0,
-            output_compliant=0,
-            output_noncompliant=0,
-            output_normalized=0,
-            reasoning_accuracy=0.0,
-            effective_accuracy=0.0,
-            output_compliance_rate=None,
-            campaign_valid=True,
-        )
-    return CampaignSummary(
-        scheduled=2,
-        completed=0,
-        correct=0,
-        incorrect=1,
-        model_failures=1,
-        proof_failures=1,
-        infrastructure_failures=0,
-        harness_failures=0,
-        unexecuted=0,
-        output_compliant=0,
-        output_noncompliant=0,
-        output_normalized=0,
-        reasoning_accuracy=0.0,
-        effective_accuracy=0.0,
-        output_compliance_rate=None,
-        campaign_valid=True,
-    )
-
-
-def _samples(track: Track) -> tuple[SampleResult, SampleResult]:
-    if track is Track.DIRECT:
-        return (
-            SampleResult(
-                task_id=f"{track.value}-one",
-                task_fingerprint="1" * 64,
-                oracle_fingerprint="3" * 64,
-                execution_class=ExecutionClass.MODEL_FAILURE,
-                outcome=SampleOutcomeCode.OUTPUT_INVALID,
-            ),
-            SampleResult(
-                task_id=f"{track.value}-two",
-                task_fingerprint="2" * 64,
-                oracle_fingerprint="4" * 64,
-                execution_class=ExecutionClass.MODEL_FAILURE,
-                outcome=SampleOutcomeCode.OUTPUT_INVALID,
-            ),
-        )
-    return (
-        SampleResult(
-            task_id=f"{track.value}-one",
-            task_fingerprint="1" * 64,
-            oracle_fingerprint="3" * 64,
-            execution_class=ExecutionClass.MODEL_FAILURE,
-            outcome=SampleOutcomeCode.OUTPUT_INVALID,
-        ),
-        SampleResult(
-            task_id=f"{track.value}-two",
-            task_fingerprint="2" * 64,
-            oracle_fingerprint="4" * 64,
-            execution_class=ExecutionClass.PROOF_FAILURE,
-            outcome=SampleOutcomeCode.PROOF_INSUFFICIENT,
-        ),
-    )
-
-
-def _public_rows(track: Track) -> tuple[PublicResultRow, ...]:
-    return tuple(
-        PublicResultRow(
-            product="complex",
-            track=track,
-            task_id=sample.task_id,
-            task_fingerprint=sample.task_fingerprint,
-            execution_class=sample.execution_class,
-            outcome=sample.outcome,
-            reasoning_correct=sample.reasoning_correct,
-        )
-        for sample in _samples(track)
-    )
-
-
-def _provider(sample: SampleResult, track: Track) -> ProviderRunRecord:
-    payload = {
-        "task_id": sample.task_id,
-        "task_fingerprint": sample.task_fingerprint,
-        "provider_model": _MODEL,
-        "surface": track.value,
-        "raw_response": "SECRET_PROVIDER_RESPONSE",
-        "response_digest": canonical_sha256("SECRET_PROVIDER_RESPONSE"),
-        "tokens_input": 1,
-        "tokens_output": 1,
-        "elapsed_seconds": 0.1,
-        "provider_error": None,
-        "provider_metrics": {},
-        "direct_query_digest": None,
-        "direct_receipt": None,
-        "mcp_events": (),
-        "mcp_tool_receipts": (),
-        "mcp_finalization": None,
-        "mcp_transcript": (),
-        "transcript_digest": None,
-        "record_fingerprint": "0" * 64,
-    }
-    payload["record_fingerprint"] = canonical_sha256(
-        payload, exclude_fields=("record_fingerprint",)
-    )
-    return ProviderRunRecord.model_validate(payload)
-
-
-def _state(track: Track, *, model: str = _MODEL) -> campaign_runner.PrivateRunStateV2:
-    samples = _samples(track)
-    checkpoint_payload = {
-        "schema_version": "ori-eval-checkpoint-v2",
-        "protocol_version": "ori-eval-protocol-v2",
-        "product": "complex",
-        "track": track,
-        "public_artifact_fingerprint": _PUBLIC,
-        "oracle_artifact_fingerprint": "b" * 64,
-        "catalog_fingerprint": _catalog(track),
-        "graph_fingerprint": _GRAPH,
-        "compiler_fingerprint": "c" * 64,
-        "comparator_fingerprint": "d" * 64,
-        "capability_profile_id": "test-profile",
-        "capability_profile_fingerprint": _CAPABILITY,
-        "containment_policy_version": "policy" if track is Track.DIRECT else None,
-        "finalization_policy_fingerprint": "2" * 64 if track is Track.MCP else None,
-        "run_identity": RunIdentity(
-            provider=_PROVIDER,
-            model=model,
-            run_index=1,
-            target_fingerprint=_TARGET,
-            tool_loop=(None if track is Track.DIRECT else "native-openai-compatible"),
-        ),
-        "task_bindings": tuple(
-            CheckpointTaskBinding(
-                task_id=sample.task_id,
-                task_fingerprint=sample.task_fingerprint,
-                oracle_fingerprint=sample.oracle_fingerprint,
-                bounds_fingerprint="3" * 64,
-            )
-            for sample in samples
-        ),
-        "results": samples,
-        "checkpoint_fingerprint": "0" * 64,
-    }
-    checkpoint_payload["checkpoint_fingerprint"] = canonical_sha256(
-        checkpoint_payload, exclude_fields=("checkpoint_fingerprint",)
-    )
-    checkpoint = CheckpointV2.model_validate(checkpoint_payload)
-    attempts = tuple(
-        campaign_runner._attempt(sample.task_id, 1, sample, _provider(sample, track))
-        for sample in samples
-    )
-    state_payload = {
-        "schema_version": campaign_runner.RUN_STATE_SCHEMA_VERSION,
-        "protocol_version": "ori-eval-protocol-v2",
-        "provenance_fingerprint": "9" * 64,
-        "checkpoint": checkpoint,
-        "attempts": attempts,
-        "scheduler": campaign_runner.RetrySchedulerStateV2(phase="complete"),
-        "state_fingerprint": "0" * 64,
-    }
-    state_payload["state_fingerprint"] = canonical_sha256(
-        state_payload, exclude_fields=("state_fingerprint",)
-    )
-    return campaign_runner.PrivateRunStateV2.model_validate(state_payload)
-
-
-def _model_report(
-    track: Track,
-    *,
-    model: str = _MODEL,
-    graph: str = _GRAPH,
-    summary_mismatch: bool = False,
-) -> campaign_runner.ModelPublicReportV2:
-    state = _state(track, model=model)
-    report_payload = {
-        "schema_version": "ori-eval-public-report-v3",
-        "protocol_version": "ori-eval-protocol-v2",
-        "product": "complex",
-        "track": track,
-        "public_artifact_fingerprint": _PUBLIC,
-        "catalog_fingerprint": _catalog(track),
-        "graph_fingerprint": graph,
-        "capability_profile_fingerprint": _CAPABILITY,
-        "rows": _public_rows(track),
-        "summary": _summary(track),
-        "report_fingerprint": "0" * 64,
-    }
-    report_payload["report_fingerprint"] = canonical_sha256(
-        report_payload, exclude_fields=("report_fingerprint",)
-    )
-    report = PublicReportV2.model_validate(report_payload)
-    payload = {
-        "schema_version": campaign_runner.MODEL_REPORT_SCHEMA_VERSION,
-        "protocol_version": "ori-eval-protocol-v2",
-        "run_identity": RunIdentity(
-            provider=_PROVIDER,
-            model=model,
-            run_index=1,
-            target_fingerprint=_TARGET,
-            tool_loop=(None if track is Track.DIRECT else "native-openai-compatible"),
-        ),
-        "candidate_release_fingerprint": f"candidate-{track.value}",
-        "live_certification_fingerprint": f"live-{track.value}",
-        "graph_verification_before_fingerprint": f"before-{track.value}",
-        "graph_verification_after_fingerprint": f"after-{track.value}",
-        "operational_metrics": campaign_runner._run_operational_metrics(state),
-        "report": report,
-        "artifact_fingerprint": "0" * 64,
-    }
-    payload["artifact_fingerprint"] = canonical_sha256(
-        payload, exclude_fields=("artifact_fingerprint",)
-    )
-    return campaign_runner.ModelPublicReportV2.model_validate(payload)
-
-
-def _track_receipt(
-    track: Track,
-    report: campaign_runner.ModelPublicReportV2,
-    *,
-    valid: bool = True,
-) -> campaign_runner.TrackCompletionV2:
-    run = campaign_runner.TrackRunCompletionV2(
-        provider=report.run_identity.provider,
-        model=report.run_identity.model,
-        run_index=report.run_identity.run_index,
-        result_count=2,
-        public_report_fingerprint=report.artifact_fingerprint,
-        campaign_valid=valid,
-        invalid_reasons=(() if valid else ("HARNESS_FAILURE",)),
-    )
-    payload = {
-        "schema_version": campaign_runner.TRACK_COMPLETION_SCHEMA_VERSION,
-        "protocol_version": "ori-eval-protocol-v2",
-        "runner_version": campaign_runner.RUNNER_VERSION,
-        "source_config_fingerprint": _CONFIG,
-        "track": track,
-        "candidate_release_fingerprint": report.candidate_release_fingerprint,
-        "live_certification_fingerprint": report.live_certification_fingerprint,
-        "graph_verification_before_fingerprint": report.graph_verification_before_fingerprint,
-        "graph_verification_after_fingerprint": report.graph_verification_after_fingerprint,
-        "expected_task_count_per_run": 2,
-        "run_count": 1,
-        "result_count": 2,
-        "campaign_valid": valid,
-        "runs": (run,),
-        "completed_at_utc": "2026-08-30T12:00:00+00:00",
-        "receipt_fingerprint": "0" * 64,
-    }
-    payload["receipt_fingerprint"] = canonical_sha256(
-        payload, exclude_fields=("receipt_fingerprint",)
-    )
-    return campaign_runner.TrackCompletionV2.model_validate(payload)
-
-
-def _readiness(
-    reports: dict[Track, campaign_runner.ModelPublicReportV2],
-) -> campaign_runner.CampaignReadinessV2:
-    models = sorted({report.run_identity.model for report in reports.values()})
-    model_receipts = tuple(
-        campaign_runner.ModelReadinessV2(
-            name=model.replace("/", "-"),
-            provider=_PROVIDER,
-            model=model,
-            credential_check="NOUS_API_KEY",
-            capability_check="openai-compatible-chat-completions",
-            requested_api_surface=ProviderApiSurface.CHAT_COMPLETIONS,
-            resolved_api_surface=ProviderApiSurface.CHAT_COMPLETIONS,
-            structured_output_mode="prompt_local_validation",
-            endpoint_family="nous",
-            credential_source="NOUS_API_KEY",
-        )
-        for model in models
-    )
-    payload = {
-        "schema_version": campaign_runner.READINESS_SCHEMA_VERSION,
-        "protocol_version": "ori-eval-protocol-v2",
-        "runner_version": campaign_runner.RUNNER_VERSION,
-        "source_config_fingerprint": _CONFIG,
-        "source_manifest_sha256": "3" * 64,
-        "archive_sha256": "4" * 64,
-        "graph_fingerprint": _GRAPH,
-        "target_fingerprint": _TARGET,
-        "mcp_server_revision": "92a37dd",
-        "mcp_launcher_provenance": None,
-        "tracks": tuple(
-            campaign_runner.ReadinessTrackV2(
-                track=track,
-                public_artifact_fingerprint=_PUBLIC,
-                oracle_artifact_fingerprint="5" * 64,
-                candidate_release_fingerprint=report.candidate_release_fingerprint,
-                live_certification_fingerprint=report.live_certification_fingerprint,
-                capability_profile_fingerprint=_CAPABILITY,
-                graph_verification_fingerprint=f"readiness-{track.value}",
-                task_count=2,
-            )
-            for track, report in reports.items()
-        ),
-        "models": model_receipts,
-        "model_count": len(model_receipts),
-        "readiness_fingerprint": "0" * 64,
-    }
-    payload["readiness_fingerprint"] = canonical_sha256(
-        payload, exclude_fields=("readiness_fingerprint",)
-    )
-    return campaign_runner.CampaignReadinessV2.model_validate(payload)
-
-
-def _lifecycle(
-    receipts: dict[Track, campaign_runner.TrackCompletionV2],
-    *,
-    status: str = "completed",
-) -> campaign_runner.CampaignLifecycleV2:
-    return campaign_runner._campaign_lifecycle(
-        {
-            "source_config_fingerprint": _CONFIG,
-            "mode": "execution",
-            "status": status,
-            "started_at_utc": "2026-08-30T11:00:00+00:00",
-            "updated_at_utc": "2026-08-30T12:00:00+00:00",
-            "pid": 123,
-            "resume_count": 0,
-            "checkpointed_results": sum(item.result_count for item in receipts.values()),
-            "active_track": None,
-            "active_model": None,
-            "active_run_index": None,
-            "completed_tracks": tuple(
-                campaign_runner.CampaignCompletedTrackV2(
-                    track=track,
-                    receipt_fingerprint=receipt.receipt_fingerprint,
-                )
-                for track, receipt in receipts.items()
-            ),
-            "interruptions": (),
-            "failure_type": None,
-        }
-    )
-
-
-def _campaign(
-    tmp_path: Path,
-    *,
-    mcp_model: str = _MODEL,
-    mcp_graph: str = _GRAPH,
-    valid: bool = True,
-    status: str = "completed",
-    summary_mismatch: bool = False,
-) -> Path:
-    root = tmp_path / "private-campaign-root"
-    reports = {
-        Track.DIRECT: _model_report(
-            Track.DIRECT,
-            summary_mismatch=summary_mismatch,
-        ),
-        Track.MCP: _model_report(Track.MCP, model=mcp_model, graph=mcp_graph),
-    }
-    receipts = {
-        track: _track_receipt(track, report, valid=valid) for track, report in reports.items()
-    }
-    for track, report in reports.items():
-        state = _state(track, model=(mcp_model if track is Track.MCP else _MODEL))
-        _dump(
-            root / track.value / "local-config-name" / "run-001" / "public-report-v2.json",
-            report,
-        )
-        _dump(
-            root / track.value / "local-config-name" / "run-001" / "run-state-v7.private.json",
-            state,
-        )
-        if track is Track.DIRECT and summary_mismatch:
-            report_path = (
-                root / track.value / "local-config-name" / "run-001" / "public-report-v2.json"
-            )
-            report_data = json.loads(report_path.read_text())
-            report_data["report"]["summary"]["model_failures"] = 1
-            report_data["report"]["summary"]["correct"] = 1
-            report_data["report"]["summary"]["incorrect"] = 0
-            report_data["report"]["summary"]["reasoning_accuracy"] = 1.0
-            report_data["report"]["summary"]["effective_accuracy"] = 0.5
-            report_path.write_text(json.dumps(report_data, indent=2) + "\n")
-        _dump(root / track.value / "track-completion-v2.private.json", receipts[track])
-    _dump(root / "v2-run-readiness.private.json", _readiness(reports))
-    _dump(root / "campaign-lifecycle-v2.private.json", _lifecycle(receipts, status=status))
-    return root
 
 
 def test_build_model_card_is_deterministic_separate_and_public_safe(
@@ -601,3 +179,617 @@ def test_build_model_card_json_contains_no_rows_or_private_payloads(
         "local-config-name",
     ):
         assert forbidden not in serialized
+
+
+def _frozen_campaign_bytes(tmp_path: Path) -> tuple[Path, dict[Path, bytes]]:
+    root = _campaign(tmp_path / "immutable-baseline")
+    files = {path.relative_to(root): path.read_bytes() for path in root.rglob("*.json")}
+    assert len(files) == 10
+    return root, files
+
+
+def _copy_campaign_bytes(files: dict[Path, bytes], root: Path) -> Path:
+    for relative, content in files.items():
+        destination = root / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(content)
+    return root
+
+
+def _assert_frozen_campaign_bytes(root: Path, files: dict[Path, bytes]) -> None:
+    assert {path.relative_to(root): path.read_bytes() for path in root.rglob("*.json")} == files
+
+
+def _run_file(root: Path, track: Track, filename: str) -> Path:
+    return root / track.value / "local-config-name" / "run-001" / filename
+
+
+def _rehash(payload: dict, field: str) -> None:
+    payload[field] = canonical_sha256(payload, exclude_fields=(field,))
+
+
+def _write_json(path: Path, payload: dict) -> None:
+    path.write_text(json.dumps(payload, indent=2) + "\n")
+
+
+def _validate_campaign_files(root: Path) -> None:
+    schemas = {
+        "campaign-provenance-v2.json": campaign_runner.ModelRunProvenanceV2,
+        "run-state-v7.private.json": campaign_runner.PrivateRunStateV2,
+        "public-report-v2.json": campaign_runner.ModelPublicReportV2,
+        "track-completion-v2.private.json": campaign_runner.TrackCompletionV2,
+        "v2-run-readiness.private.json": campaign_runner.CampaignReadinessV2,
+        "campaign-lifecycle-v2.private.json": campaign_runner.CampaignLifecycleV2,
+    }
+    paths = tuple(root.rglob("*.json"))
+    assert len(paths) == 10
+    for path in paths:
+        schemas[path.name].model_validate_json(path.read_bytes())
+
+
+_BASE_FIELDS = (
+    "product",
+    "track",
+    "public_artifact_fingerprint",
+    "oracle_artifact_fingerprint",
+    "catalog_fingerprint",
+    "graph_fingerprint",
+    "compiler_fingerprint",
+    "comparator_fingerprint",
+    "capability_profile_fingerprint",
+)
+_IDENTITY_FIELDS = ("provider", "model", "run_index", "target_fingerprint", "tool_loop")
+_PROVIDER_FIELDS = (
+    "requested_api_surface",
+    "resolved_api_surface",
+    "structured_output_mode",
+    "endpoint_family",
+    "credential_source",
+)
+
+
+def _mixed_evidence_cases() -> tuple[tuple[str, str], ...]:
+    return (
+        *((f"checkpoint.{field}", "checkpoint/provenance metadata") for field in _BASE_FIELDS),
+        *((f"provenance.base.{field}", "checkpoint/provenance metadata") for field in _BASE_FIELDS),
+        ("state.provenance_fingerprint", "state/provenance binding"),
+        *((f"provenance.run_identity.{field}", "run identity") for field in _IDENTITY_FIELDS),
+        ("provenance.release.candidate_release_fingerprint", "release provenance"),
+        ("provenance.release.live_certification_fingerprint", "release provenance"),
+        ("provenance.archive.source_manifest_sha256", "readiness provenance"),
+        ("provenance.archive.archive_sha256", "readiness provenance"),
+        *(
+            (f"provenance.provider.{field}", "provider-readiness metadata")
+            for field in _PROVIDER_FIELDS
+        ),
+        ("public_row.task_fingerprint", "row task binding"),
+        ("public_row.product", "row task binding"),
+        ("public_row.track", "row task binding"),
+        ("readiness.task_count", "readiness provenance"),
+        ("state.scheduler_phase", "incomplete scheduler"),
+        ("provenance.unmatched_file", "state/provenance binding"),
+        ("readiness.split_metadata", "provider-readiness metadata"),
+        ("report_body.catalog", "report/checkpoint metadata"),
+        ("report_body.product", "report/checkpoint metadata"),
+        ("coherent_private.oracle", "readiness provenance"),
+    )
+
+
+def _mutate_run_evidence(root: Path, track: Track, case: str) -> None:
+    state_path = _run_file(root, track, "run-state-v7.private.json")
+    provenance_path = _run_file(root, track, "campaign-provenance-v2.json")
+    report_path = _run_file(root, track, "public-report-v2.json")
+    readiness_path = root / "v2-run-readiness.private.json"
+    state = json.loads(state_path.read_bytes())
+    provenance = json.loads(provenance_path.read_bytes())
+    report = json.loads(report_path.read_bytes())
+    readiness = json.loads(readiness_path.read_bytes())
+    different_fp = "7" * 64
+    other_track = Track.MCP.value if track is Track.DIRECT else Track.DIRECT.value
+
+    def replace_field(payload: dict, field: str, value: object) -> None:
+        assert payload[field] != value
+        payload[field] = value
+
+    def base_value(field: str) -> str:
+        return (
+            "other-product"
+            if field == "product"
+            else other_track
+            if field == "track"
+            else different_fp
+        )
+
+    if case.startswith("checkpoint."):
+        field = case.removeprefix("checkpoint.")
+        replace_field(state["checkpoint"], field, base_value(field))
+    elif case.startswith("provenance.base."):
+        field = case.removeprefix("provenance.base.")
+        replace_field(provenance["base"], field, base_value(field))
+    elif case == "state.provenance_fingerprint":
+        replace_field(state, "provenance_fingerprint", different_fp)
+    elif case.startswith("provenance.run_identity."):
+        field = case.removeprefix("provenance.run_identity.")
+        values = {
+            "provider": "other-provider",
+            "model": "other-model",
+            "run_index": 2,
+            "target_fingerprint": different_fp,
+            "tool_loop": "native-openai-compatible" if track is Track.DIRECT else None,
+        }
+        replace_field(provenance["run_identity"], field, values[field])
+    elif case.startswith("provenance.release."):
+        field = case.removeprefix("provenance.release.")
+        replace_field(
+            provenance, field, "other-candidate" if field.startswith("candidate") else "other-live"
+        )
+    elif case.startswith("provenance.archive."):
+        replace_field(provenance, case.removeprefix("provenance.archive."), different_fp)
+    elif case.startswith("provenance.provider."):
+        field = case.removeprefix("provenance.provider.")
+        values = {
+            "requested_api_surface": "responses",
+            "resolved_api_surface": "responses",
+            "structured_output_mode": "json_schema",
+            "endpoint_family": "generic",
+            "credential_source": None,
+        }
+        replace_field(provenance, field, values[field])
+    elif case.startswith("public_row."):
+        field = case.removeprefix("public_row.")
+        replace_field(report["report"]["rows"][0], field, base_value(field))
+    elif case == "readiness.task_count":
+        selected = next(item for item in readiness["tracks"] if item["track"] == track.value)
+        replace_field(selected, "task_count", 3)
+    elif case == "state.scheduler_phase":
+        replace_field(state["scheduler"], "phase", "primary")
+    elif case == "provenance.unmatched_file":
+        replace_field(provenance, "source_manifest_sha256", different_fp)
+    elif case == "readiness.split_metadata":
+        assert len(readiness["models"]) == 1
+        first = deepcopy(readiness["models"][0])
+        second = deepcopy(first)
+        first.update(name="split-one", requested_api_surface="responses")
+        second.update(name="split-two", endpoint_family="generic")
+        readiness["models"] = [first, second]
+        readiness["model_count"] = 2
+    elif case == "report_body.catalog":
+        replace_field(report["report"], "catalog_fingerprint", different_fp)
+    elif case == "report_body.product":
+        replace_field(report["report"], "product", "other-product")
+        for row in report["report"]["rows"]:
+            replace_field(row, "product", "other-product")
+    elif case == "coherent_private.oracle":
+        replace_field(state["checkpoint"], "oracle_artifact_fingerprint", different_fp)
+        replace_field(provenance["base"], "oracle_artifact_fingerprint", different_fp)
+    else:
+        raise AssertionError(f"unknown mutation case: {case}")
+
+    _rehash(provenance["base"], "provenance_fingerprint")
+    _rehash(provenance, "provenance_fingerprint")
+    if (
+        case.startswith("provenance.") and case != "provenance.unmatched_file"
+    ) or case == "coherent_private.oracle":
+        state["provenance_fingerprint"] = provenance["provenance_fingerprint"]
+    _rehash(state["checkpoint"], "checkpoint_fingerprint")
+    _rehash(state, "state_fingerprint")
+    _rehash(readiness, "readiness_fingerprint")
+    if case.startswith(("public_row.", "report_body.")):
+        _rehash(report["report"], "report_fingerprint")
+        _rehash(report, "artifact_fingerprint")
+        receipt_path = root / track.value / "track-completion-v2.private.json"
+        receipt = json.loads(receipt_path.read_bytes())
+        assert len(receipt["runs"]) == 1
+        receipt["runs"][0]["public_report_fingerprint"] = report["artifact_fingerprint"]
+        _rehash(receipt, "receipt_fingerprint")
+        lifecycle_path = root / "campaign-lifecycle-v2.private.json"
+        lifecycle = json.loads(lifecycle_path.read_bytes())
+        completed = next(
+            item for item in lifecycle["completed_tracks"] if item["track"] == track.value
+        )
+        completed["receipt_fingerprint"] = receipt["receipt_fingerprint"]
+        _rehash(lifecycle, "lifecycle_fingerprint")
+        _write_json(receipt_path, receipt)
+        _write_json(lifecycle_path, lifecycle)
+    for path, payload in (
+        (state_path, state),
+        (provenance_path, provenance),
+        (report_path, report),
+        (readiness_path, readiness),
+    ):
+        _write_json(path, payload)
+
+
+@pytest.mark.parametrize("track", (Track.DIRECT, Track.MCP))
+def test_model_card_rejects_missing_or_invalid_provenance(
+    tmp_path: Path, subtests, track: Track
+) -> None:
+    baseline, files = _frozen_campaign_bytes(tmp_path)
+    cases = (
+        "missing",
+        "malformed_json",
+        "invalid_root",
+        "unsupported_schema",
+        "incorrect_self_hash",
+    )
+    for case in cases:
+        with subtests.test(msg=case, track=track.value):
+            path_sentinel = f"SYNTHETIC_INPUT_PATH_{track.value}_{case}"
+            payload_sentinel = f"SYNTHETIC_PAYLOAD_{track.value}_{case}"
+            root = _copy_campaign_bytes(files, tmp_path / path_sentinel)
+            path = _run_file(root, track, "campaign-provenance-v2.json")
+            if case == "missing":
+                path.unlink()
+            elif case == "malformed_json":
+                path.write_text('{"sentinel":"' + payload_sentinel + '"')
+            elif case == "invalid_root":
+                path.write_text(json.dumps(payload_sentinel))
+            else:
+                payload = json.loads(path.read_bytes())
+                if case == "unsupported_schema":
+                    payload["schema_version"] = "unsupported"
+                else:
+                    assert payload["provenance_fingerprint"] != "7" * 64
+                    payload["provenance_fingerprint"] = "7" * 64
+                _write_json(path, payload)
+            output = tmp_path / f"output-{case}"
+            category = (
+                "cannot read model-run provenance"
+                if case == "missing"
+                else "invalid model-run provenance"
+            )
+            with pytest.raises(ModelCardBuildError, match=category) as error:
+                build_model_card(root, output, model=_MODEL)
+            for rendered in (str(error.value), "".join(traceback.format_exception(error.value))):
+                assert path_sentinel not in rendered
+                assert payload_sentinel not in rendered
+            assert not output.exists()
+            if case in {"malformed_json", "invalid_root"}:
+                cli_output = tmp_path / f"cli-output-{case}"
+                completed = subprocess.run(
+                    [
+                        sys.executable,
+                        "-m",
+                        "ori.eval.v2.model_card",
+                        "--campaign-root",
+                        str(root),
+                        "--output-dir",
+                        str(cli_output),
+                        "--model",
+                        _MODEL,
+                    ],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=30,
+                )
+                assert completed.returncode != 0
+                assert category in completed.stderr
+                assert path_sentinel not in completed.stderr
+                assert payload_sentinel not in completed.stderr
+                assert path_sentinel not in completed.stdout
+                assert payload_sentinel not in completed.stdout
+                assert not cli_output.exists()
+    _assert_frozen_campaign_bytes(baseline, files)
+
+
+def _public_string_pattern_cases() -> tuple[tuple[str, str, str | None, str | None], ...]:
+    groups = (
+        ("empty", "must be non-empty", ("", "   ")),
+        (
+            "control",
+            "contains control characters",
+            (
+                "safe\x00name",
+                "safe\rname",
+                "safe\nname",
+                "\tsafe",
+                "safe\x7f",
+                "safe\u202ename",
+                "safe\u2028name",
+                "safe\ud800name",
+            ),
+        ),
+        (
+            "url",
+            "must not contain a URL",
+            (
+                "https://private.example.invalid/service",
+                "Model custom+scheme://host",
+                "FILE:/private/model",
+                "mailto:synthetic@example.invalid",
+                "Model data:text/plain,synthetic",
+            ),
+        ),
+        (
+            "path",
+            "must not contain a local path",
+            (
+                "/private/model",
+                "../private/model",
+                "./private/model",
+                "~/private/model",
+                "Model /private/model",
+                "Model (/private/model)",
+                "org/../private",
+                "C:/private/model",
+                "C:\\private\\model",
+                "\\\\server\\share",
+                "org\\model",
+                "Model,/private/model",
+                "Model;/private/model",
+                "Model)/private/model",
+                "Model]/private/model",
+                "Model}/private/model",
+                "Model|/private/model",
+                "Model</private/model",
+                "Model>/private/model",
+            ),
+        ),
+        (
+            "secret",
+            "resembles secret material",
+            (
+                "api_key=synthetic",
+                "Model password:synthetic",
+                "sk-synthetic",
+                "Model sk-synthetic",
+            ),
+        ),
+    )
+    accepted = (
+        "poolside/laguna-s-2.1",
+        "Qwen/Qwen3.8-27B",
+        "org/model:latest",
+        "org/team/model",
+        "Poolside: Laguna S 2.1",
+        "Modèle local",
+        "ORI (local)",
+        "  Model Name  ",
+        "édata:model",
+    )
+    return (
+        *(
+            (f"{group}-{index}", value, category, None)
+            for group, category, values in groups
+            for index, value in enumerate(values)
+        ),
+        *(
+            (f"accepted-{index}", value, None, value.strip())
+            for index, value in enumerate(accepted)
+        ),
+    )
+
+
+def _unsafe_public_build_cases() -> tuple[tuple[str, str, str], ...]:
+    return (
+        ("display-url", "https://private.example.invalid/service", "must not contain a URL"),
+        ("display-relative", "../synthetic-private/run", "must not contain a local path"),
+        (
+            "display-embedded",
+            "Model /private/synthetic-private/run",
+            "must not contain a local path",
+        ),
+        ("raw-revision", "https://private.example.invalid/revision", "must not contain a URL"),
+        ("nested-release", "../synthetic-private/release", "must not contain a local path"),
+    )
+
+
+def _replace_public_release(root: Path, value: str) -> None:
+    readiness_path = root / "v2-run-readiness.private.json"
+    lifecycle_path = root / "campaign-lifecycle-v2.private.json"
+    readiness = json.loads(readiness_path.read_bytes())
+    lifecycle = json.loads(lifecycle_path.read_bytes())
+    for track in (Track.DIRECT, Track.MCP):
+        provenance_path = _run_file(root, track, "campaign-provenance-v2.json")
+        state_path = _run_file(root, track, "run-state-v7.private.json")
+        report_path = _run_file(root, track, "public-report-v2.json")
+        receipt_path = root / track.value / "track-completion-v2.private.json"
+        provenance = json.loads(provenance_path.read_bytes())
+        state = json.loads(state_path.read_bytes())
+        report = json.loads(report_path.read_bytes())
+        receipt = json.loads(receipt_path.read_bytes())
+        provenance["candidate_release_fingerprint"] = value
+        _rehash(provenance, "provenance_fingerprint")
+        state["provenance_fingerprint"] = provenance["provenance_fingerprint"]
+        _rehash(state, "state_fingerprint")
+        report["candidate_release_fingerprint"] = value
+        _rehash(report, "artifact_fingerprint")
+        receipt["candidate_release_fingerprint"] = value
+        assert len(receipt["runs"]) == 1
+        receipt["runs"][0]["public_report_fingerprint"] = report["artifact_fingerprint"]
+        _rehash(receipt, "receipt_fingerprint")
+        track_readiness = next(item for item in readiness["tracks"] if item["track"] == track.value)
+        track_readiness["candidate_release_fingerprint"] = value
+        completed = next(
+            item for item in lifecycle["completed_tracks"] if item["track"] == track.value
+        )
+        completed["receipt_fingerprint"] = receipt["receipt_fingerprint"]
+        for path, payload in (
+            (provenance_path, provenance),
+            (state_path, state),
+            (report_path, report),
+            (receipt_path, receipt),
+        ):
+            _write_json(path, payload)
+    _rehash(readiness, "readiness_fingerprint")
+    _rehash(lifecycle, "lifecycle_fingerprint")
+    _write_json(readiness_path, readiness)
+    _write_json(lifecycle_path, lifecycle)
+
+
+def test_public_string_admission_patterns(subtests) -> None:
+    cases = _public_string_pattern_cases()
+    assert len(cases) == 47
+    for case, value, category, expected in cases:
+        with subtests.test(msg=case):
+            if category is None:
+                actual = model_card._public_label(value, "synthetic label")
+                assert actual == expected
+                assert actual.encode("utf-8") == expected.encode("utf-8")
+            else:
+                with pytest.raises(ModelCardBuildError) as error:
+                    model_card._public_label(value, "synthetic label")
+                assert str(error.value) == f"synthetic label {category}"
+                if value:
+                    assert value not in str(error.value)
+
+
+def test_model_card_rejects_unsafe_public_strings(tmp_path: Path, subtests) -> None:
+    baseline, files = _frozen_campaign_bytes(tmp_path)
+    cases = _unsafe_public_build_cases()
+    assert len(cases) == 5
+    for case, value, category in cases:
+        with subtests.test(msg=case):
+            root = _copy_campaign_bytes(files, tmp_path / case)
+            display_name = value if case.startswith("display-") else "Safe display"
+            if case == "raw-revision":
+                path = root / "v2-run-readiness.private.json"
+                readiness = json.loads(path.read_bytes())
+                readiness["mcp_server_revision"] = value
+                _rehash(readiness, "readiness_fingerprint")
+                _write_json(path, readiness)
+            elif case == "nested-release":
+                _replace_public_release(root, value)
+            _validate_campaign_files(root)
+            input_bytes = {
+                path.relative_to(root): path.read_bytes() for path in root.rglob("*.json")
+            }
+            output = tmp_path / f"output-{case}"
+            with pytest.raises(ModelCardBuildError, match=category) as error:
+                build_model_card(root, output, model=_MODEL, display_name=display_name)
+            label = "display name" if case.startswith("display-") else "public card string"
+            assert str(error.value) == f"{label} {category}"
+            assert value not in str(error.value)
+            assert value not in "".join(traceback.format_exception(error.value))
+            assert not output.exists()
+            if case == "display-url":
+                cli_output = tmp_path / "cli-output"
+                completed = subprocess.run(
+                    [
+                        sys.executable,
+                        "-m",
+                        "ori.eval.v2.model_card",
+                        "--campaign-root",
+                        str(root),
+                        "--output-dir",
+                        str(cli_output),
+                        "--model",
+                        _MODEL,
+                        "--display-name",
+                        value,
+                    ],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=30,
+                )
+                assert completed.returncode != 0
+                assert category in completed.stderr
+                assert value not in completed.stdout
+                assert value not in completed.stderr
+                assert not cli_output.exists()
+            _assert_frozen_campaign_bytes(root, input_bytes)
+    _assert_frozen_campaign_bytes(baseline, files)
+
+
+def test_public_string_recursive_boundary(subtests) -> None:
+    cases = (
+        ("dict-value", {"value": "../private/model"}),
+        ("list-item", {"values": ["safe", "../private/model"]}),
+        ("tuple-item", {"values": ("safe", "../private/model")}),
+        ("mapping-key", {"../private/model": "safe"}),
+    )
+    for case, payload in cases:
+        with subtests.test(msg=case):
+            before = deepcopy(payload)
+            with pytest.raises(ModelCardBuildError) as error:
+                model_card._assert_public_strings(payload)
+            assert str(error.value) == "public card string must not contain a local path"
+            assert "../private/model" not in str(error.value)
+            assert payload == before
+    with subtests.test(msg="accepted-unchanged"):
+        payload = {
+            "org/model:latest": ["Qwen/Qwen3.8-27B", ("Modèle local", "  Model Name  ")],
+            "scalars": [True, None, 3, 0.5],
+        }
+        before = deepcopy(payload)
+        serialized = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        model_card._assert_public_strings(payload)
+        assert payload == before
+        assert type(payload["org/model:latest"]) is list
+        assert type(payload["org/model:latest"][1]) is tuple
+        assert json.dumps(payload, ensure_ascii=False).encode("utf-8") == serialized
+
+
+@pytest.mark.parametrize("track", (Track.DIRECT, Track.MCP))
+def test_model_card_rejects_mixed_run_evidence(tmp_path: Path, subtests, track: Track) -> None:
+    baseline, files = _frozen_campaign_bytes(tmp_path)
+    cases = _mixed_evidence_cases()
+    assert len(cases) == 43
+    assert len({case for case, _ in cases}) == 43
+    for case, category in cases:
+        with subtests.test(msg=case, track=track.value):
+            root = _copy_campaign_bytes(files, tmp_path / case)
+            _mutate_run_evidence(root, track, case)
+            _validate_campaign_files(root)
+            output = tmp_path / f"output-{case}"
+            with pytest.raises(ModelCardBuildError, match=category):
+                build_model_card(root, output, model=_MODEL)
+            assert not output.exists()
+    _assert_frozen_campaign_bytes(baseline, files)
+
+
+@pytest.mark.parametrize("track", (Track.DIRECT, Track.MCP))
+def test_model_card_accepts_full_compiled_bindings_for_selected_subset(
+    tmp_path: Path, subtests, track: Track
+) -> None:
+    baseline, files = _frozen_campaign_bytes(tmp_path)
+    for add_result in (False, True):
+        case = "foreign_result" if add_result else "unused_compiled_binding"
+        with subtests.test(msg=case, track=track.value):
+            root = _copy_campaign_bytes(files, tmp_path / case)
+            path = _run_file(root, track, "run-state-v7.private.json")
+            state = json.loads(path.read_bytes())
+            binding = {
+                "task_id": "unused-compiled-task",
+                "task_fingerprint": "6" * 64,
+                "oracle_fingerprint": "6" * 64,
+                "bounds_fingerprint": "6" * 64,
+            }
+            state["checkpoint"]["task_bindings"].append(binding)
+            if add_result:
+                sample = deepcopy(state["checkpoint"]["results"][0])
+                sample.update(
+                    task_id=binding["task_id"],
+                    task_fingerprint=binding["task_fingerprint"],
+                    oracle_fingerprint=binding["oracle_fingerprint"],
+                )
+                state["checkpoint"]["results"].append(sample)
+                attempt = deepcopy(state["attempts"][0])
+                attempt.update(task_id=binding["task_id"], sample=sample, attempt=1)
+                attempt["provider"].update(
+                    task_id=binding["task_id"], task_fingerprint=binding["task_fingerprint"]
+                )
+                _rehash(attempt["provider"], "record_fingerprint")
+                _rehash(attempt, "attempt_fingerprint")
+                state["attempts"].append(attempt)
+            _rehash(state["checkpoint"], "checkpoint_fingerprint")
+            _rehash(state, "state_fingerprint")
+            _write_json(path, state)
+            _validate_campaign_files(root)
+            output = tmp_path / f"output-{case}"
+            if add_result:
+                with pytest.raises(
+                    ModelCardBuildError, match="private state result count disagrees"
+                ):
+                    build_model_card(root, output, model=_MODEL)
+                assert not output.exists()
+            else:
+                card = build_model_card(root, output, model=_MODEL)
+                assert card["tracks"][track.value]["scheduled"] == 2
+                assert {item.name for item in output.iterdir()} == {
+                    "v30-model-card.json",
+                    "v30-model-card.svg",
+                }
+    _assert_frozen_campaign_bytes(baseline, files)

@@ -1464,6 +1464,10 @@ profiles:
     kind: smoke-eval
     manifest: {manifest}
     output_dir: out-smoke
+  after:
+    kind: preflight
+    manifest: {manifest}
+    output_dir: out-after
 """
     )
     calls: list[str] = []
@@ -1488,7 +1492,8 @@ profiles:
     result = runner.invoke(
         main, ["run", "--config", str(config), "--run-all-profiles", "--keep-going"]
     )
-    assert calls == ["preflight", "smoke_eval"]
+    assert calls == ["preflight", "smoke_eval", "preflight"]
+    assert "[3/3] after (preflight)" in result.output
     assert result.exit_code != 0
     assert "Profile failed: smoke (boom)" in result.output
     assert "Run-all profile failures:" in result.output

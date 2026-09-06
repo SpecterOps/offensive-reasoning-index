@@ -1,0 +1,57 @@
+# Copy to results/oaic-67/models.local.yaml after following docs/oaic-selected-release.md.
+# Paths below resolve from that destination, not from this template directory.
+# Replace the MCP checkout, model ID and local inference endpoint before readiness.
+# This uses the historical qualified MCP lane, not unfinished native integration.
+version: 2
+protocol: ori-eval-protocol-v2
+source:
+  manifest: ../../datasets/benchmarks/oaic-2026-v1-seed-67_manifest.json
+  archive: ../../datasets/benchmarks/oaic-2026-v1-seed-67.zip
+selected_release: selected/oaic-2026-v1-seed-67-selected-release-v1.json
+tracks:
+  direct:
+    public: compiled/oaic-2026-v1-direct-seed-67-public-v2.json
+    oracles: compiled/oaic-2026-v1-direct-seed-67-oracles-v2.private.json
+    candidates: certified/oaic-2026-v1-seed-67-direct-candidates-v2.json
+    live_certification: certified/oaic-2026-v1-seed-67-direct-live-certification-v4.private.json
+    release_metadata: compiled/oaic-2026-v1-direct-seed-67-release-metadata-v1.json
+    selection: selected/oaic-2026-v1-seed-67-direct-selection-v1.json
+  mcp:
+    public: compiled/oaic-2026-v1-mcp-seed-67-public-v2.json
+    oracles: compiled/oaic-2026-v1-mcp-seed-67-oracles-v2.private.json
+    candidates: certified/oaic-2026-v1-seed-67-mcp-candidates-v2.json
+    live_certification: certified/oaic-2026-v1-seed-67-mcp-live-certification-v4.private.json
+    release_metadata: compiled/oaic-2026-v1-mcp-seed-67-release-metadata-v1.json
+    selection: selected/oaic-2026-v1-seed-67-mcp-selection-v1.json
+modes: [direct, mcp]
+output_dir: campaigns/local-stage3-001
+defaults:
+  concurrency: 1
+  runs_per_model: 1
+  bhce_url: null
+  max_infra_retries: 1
+  infra_retry:
+    immediate_retries: 1
+    deferred_cooldown_seconds: 300.0
+  graph_page_size: 500
+  health:
+    timeout_seconds: 60.0
+    poll_interval: 5.0
+  mcp:
+    mcp_dir: /path/to/pinned-bloodhound-mcp
+    max_steps: 16
+    resource_mode: "off"
+    tool_loop: native-openai-compatible
+    telemetry_adapter: auto
+    read_timeout_seconds: 240.0
+    tool_timeout_seconds: 60.0
+models:
+  - name: local-baseline
+    provider: openai-compat
+    model: REPLACE_WITH_LOCAL_MODEL_ID
+    model_base_url: http://127.0.0.1:8080/v1
+    api_surface: chat_completions
+    mcp_tool_loop: native-openai-compatible
+    structured_output_mode: prompt_local_validation
+    max_output_tokens: 8192
+    options: {}

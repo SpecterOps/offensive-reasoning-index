@@ -2,11 +2,18 @@
 
 from __future__ import annotations
 
-import json
 import re
 import time
 from dataclasses import dataclass, field
 
+from .anthropic_binding import (
+    AnthropicBinding,
+    anthropic_binding_identity,
+    materialize_anthropic_client,
+    prepare_anthropic_binding,
+)
+from .ollama_binding import ollama_model_name, prepare_ollama_endpoint
+from .ollama_stream import OllamaStreamState
 from .provider_auth import (
     official_openai_endpoint_is_secure,
     openai_compat_endpoint_is_local,
@@ -14,6 +21,7 @@ from .provider_auth import (
     sanitized_provider_endpoint,
 )
 from .provider_contract import (
+    GEMINI_OPENAI_BASE_URL,
     ProviderApiSurface,
     ProviderAuthenticationError,
     ProviderCapabilityError,
@@ -26,6 +34,7 @@ from .provider_contract import (
     resolve_api_surface,
     validate_release1_api_surface,
 )
+from .provider_transport import openai_inference_client
 from .tasks import Task
 
 # BH CE Cypher constraints injected into system prompt
@@ -57,6 +66,10 @@ class ModelResponse:
     thinking: str = ""
     error: str | None = None
     provider_metrics: dict[str, object] = field(default_factory=dict)
+
+
+class ProviderAdapterInternalError(RuntimeError):
+    """Unexpected adapter/SDK defect, not a retryable provider failure."""
 
 
 def extract_cypher_details(text: str) -> tuple[str | None, str]:
@@ -243,12 +256,16 @@ async def call_provider_text(
     api_surface: ProviderApiSurface | str = ProviderApiSurface.AUTO,
     request_timeout_seconds: float | None = None,
     structured_output_schema: dict[str, object] | None = None,
+    anthropic_binding: AnthropicBinding | None = None,
 ) -> ModelResponse:
     """Call a provider without imposing a legacy task or Cypher parse contract.
 
     Protocol-v2 runtimes use this transport boundary so solver requests contain
     only their public prompt envelope. Provider failures remain explicit in the
     returned response and are classified by the owning runtime.
+    Unexpected defects raise ProviderAdapterInternalError with their original
+    cause; cancellation propagates unchanged. Legacy call_model retains its
+    existing error-response contract.
     """
 
     started = time.monotonic()
@@ -267,6 +284,7 @@ async def call_provider_text(
             api_surface=resolved_surface,
             request_timeout_seconds=request_timeout_seconds,
             structured_output_schema=structured_output_schema,
+            **({"anthropic_binding": anthropic_binding} if provider == "anthropic" else {}),
         )
         provider_metrics = {
             **provider_metrics,
@@ -304,6 +322,8 @@ async def call_provider_text(
         )
     except Exception as exc:
         provider_error_metrics = _provider_exception_metrics(exc)
+        if provider_error_metrics is None:
+            raise ProviderAdapterInternalError(str(exc)) from exc
         return ModelResponse(
             raw_text="",
             cypher=None,
@@ -331,6 +351,7 @@ async def _call_provider(
     api_surface: ProviderApiSurface = ProviderApiSurface.CHAT_COMPLETIONS,
     request_timeout_seconds: float | None = None,
     structured_output_schema: dict[str, object] | None = None,
+    anthropic_binding: AnthropicBinding | None = None,
 ) -> tuple[str, int, int, str, dict[str, object]]:
     """Dispatch to the correct provider SDK.
 
@@ -339,33 +360,53 @@ async def _call_provider(
     provider, name = model.split("/", 1)
 
     if provider == "anthropic":
+        binding = anthropic_binding or prepare_anthropic_binding(model, base_url)
         import anthropic
 
-        client = anthropic.AsyncAnthropic()
-        resp = await client.messages.create(
-            model=name,
-            max_tokens=max_tokens,
-            system=system,
-            messages=messages,
-        )
-        return resp.content[0].text, resp.usage.input_tokens, resp.usage.output_tokens, "", {}
+        if name.split("@", 1)[0] != binding.model_slug:
+            raise ProviderCapabilityError("Anthropic request does not match its prepared model")
+        attempted_url = base_url or (name.rsplit("@", 1)[1] if "@" in name else None)
+        if attempted_url and attempted_url.rstrip("/") != binding.base_url:
+            raise ProviderCapabilityError("Anthropic request does not match its prepared endpoint")
+        attempt = await materialize_anthropic_client(binding)
+        client = attempt.client
+        try:
+            # Keep the independent post-allocation F03 admission boundary.
+            headers = {
+                key: value for key, value in client.default_headers.items()
+                if not isinstance(value, anthropic.Omit)
+            }
+            try:
+                client._validate_headers(headers, {})
+            except TypeError:
+                raise ProviderAuthenticationError(
+                    "Anthropic authentication configuration is unavailable"
+                ) from None
+            resp = await client.messages.create(
+                model=binding.model_slug,
+                max_tokens=max_tokens,
+                system=system,
+                messages=messages,
+            )
+            identity = anthropic_binding_identity(binding)
+            return (
+                resp.content[0].text, resp.usage.input_tokens, resp.usage.output_tokens, "",
+                {"endpoint_family": identity["endpoint_family"],
+                 "credential_source": identity["credential_source"]},
+            )
+        finally:
+            await attempt.aclose()
 
     elif provider == "ollama":
-        import os
-
         import httpx
 
-        resolved_base = (base_url or os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")).rstrip(
-            "/"
-        )
-        if resolved_base.endswith("/v1"):
-            resolved_base = resolved_base[:-3].rstrip("/")
-        url = f"{resolved_base}/api/chat"
+        endpoint = prepare_ollama_endpoint(base_url)
+        url = endpoint.chat_url
 
         full_messages = [{"role": "system", "content": system}] + messages
         options = dict(ollama_options or {})
         payload: dict[str, object] = {
-            "model": name,
+            "model": ollama_model_name(model),
             "messages": full_messages,
             "stream": True,
         }
@@ -377,15 +418,16 @@ async def _call_provider(
         prompt_eval_count = 0
         eval_count = 0
         done_metrics: dict[str, object] = {}
+        stream_state = OllamaStreamState()
 
         timeout = httpx.Timeout(connect=10.0, read=180.0, write=30.0, pool=30.0)
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
             async with client.stream("POST", url, json=payload) as resp:
                 resp.raise_for_status()
                 async for line in resp.aiter_lines():
-                    if not line.strip():
+                    data = stream_state.feed_line(line)
+                    if data is None:
                         continue
-                    data = json.loads(line)
                     message = data.get("message") or {}
                     thinking = message.get("thinking")
                     if isinstance(thinking, str) and thinking:
@@ -408,8 +450,16 @@ async def _call_provider(
                             "eval_duration_ns": int(data.get("eval_duration") or 0),
                         }
 
+        finish_reason = stream_state.finish()
+        truncated = finish_reason == "length"
+        done_metrics.update(
+            finish_reason=finish_reason,
+            provider_turn_status="truncated" if truncated else "completed",
+        )
+        if truncated:
+            done_metrics.update(model_output_error=True, model_output_subtype="TRUNCATED")
         return (
-            "".join(content_parts),
+            "" if truncated else "".join(content_parts),
             prompt_eval_count,
             eval_count,
             "".join(thinking_parts),
@@ -419,14 +469,13 @@ async def _call_provider(
     elif provider in ("openai", "openai-compat", "gemini"):
         import os
 
-        import openai
-
         resolved_base = {
-            "gemini": "https://generativelanguage.googleapis.com/v1beta/openai/",
+            "gemini": GEMINI_OPENAI_BASE_URL,
         }.get(provider, base_url)
-        # handle "modelname@http://custom-url" for openai-compat
+        # An explicit caller destination takes precedence over the inline fallback.
         if "@" in name and provider == "openai-compat":
-            name, resolved_base = name.split("@", 1)
+            name, inline_base = name.split("@", 1)
+            resolved_base = resolved_base or inline_base
 
         client_kwargs = {"base_url": resolved_base}
         credential = None
@@ -472,7 +521,6 @@ async def _call_provider(
             client_kwargs["api_key"] = api_key
         if request_timeout_seconds is not None:
             client_kwargs["timeout"] = request_timeout_seconds
-        client = openai.AsyncOpenAI(**client_kwargs)
         # Inject system prompt as first message for OpenAI-compat providers
         full_messages = [{"role": "system", "content": system}] + messages
         request = ProviderRequest(
@@ -481,9 +529,10 @@ async def _call_provider(
             output_limit=max_tokens,
             structured_output_schema=structured_output_schema,
         )
-        resp = await client.chat.completions.create(
-            **chat_completions_payload(request, model=name)
-        )
+        async with openai_inference_client(**client_kwargs) as client:
+            resp = await client.chat.completions.create(
+                **chat_completions_payload(request, model=name)
+            )
         turn = normalize_chat_completion(
             resp,
             provider=provider,
@@ -521,17 +570,16 @@ async def _call_provider(
         )
 
     elif provider == "codex":
-        import openai
-
         from .codex_oauth import (
             chat_request_to_codex_responses_params,
-            codex_headers,
             codex_model_name,
             codex_request_base_url,
             codex_responses_events_to_chat_completion,
+            resolve_codex_credential,
         )
 
         resolved_base = codex_request_base_url(model, base_url)
+        credential = resolve_codex_credential(resolved_base)
         resolved_model = codex_model_name(model)
         reasoning_effort = (ollama_options or {}).get("reasoning_effort")
         full_messages = [{"role": "system", "content": system}] + messages
@@ -544,21 +592,21 @@ async def _call_provider(
             body["reasoning_effort"] = reasoning_effort
         params = chat_request_to_codex_responses_params(body)
         thread_id = str(params.get("prompt_cache_key") or "")
-        headers = codex_headers(thread_id=thread_id)
+        headers = credential.headers(thread_id=thread_id)
         client_kwargs = {
-            "api_key": headers["Authorization"].removeprefix("Bearer "),
+            "api_key": credential.token,
             "base_url": resolved_base,
         }
         if request_timeout_seconds is not None:
             client_kwargs["timeout"] = request_timeout_seconds
-        client = openai.AsyncOpenAI(**client_kwargs)
-        try:
-            events = await client.responses.create(**params, stream=True, extra_headers=headers)
-            data = codex_responses_events_to_chat_completion(
-                [event async for event in events], resolved_model
-            )
-        finally:
-            await client.close()
+        async with openai_inference_client(**client_kwargs) as client:
+            try:
+                events = await client.responses.create(**params, stream=True, extra_headers=headers)
+                data = codex_responses_events_to_chat_completion(
+                    [event async for event in events], resolved_model
+                )
+            finally:
+                await client.close()
         choice = (data.get("choices") or [{}])[0]
         message = choice.get("message") or {}
         usage = data.get("usage") or {}
@@ -568,7 +616,9 @@ async def _call_provider(
             int(usage.get("completion_tokens") or 0),
             "",
             {
-                "provider": "codex_oauth",
+                "provider": credential.binding.endpoint_family,
+                "endpoint_family": credential.binding.endpoint_family,
+                "credential_source": credential.binding.credential_source,
                 "response_id": data.get("id", ""),
                 "reasoning_effort": reasoning_effort or "native_default",
                 "provider_turn_status": "completed",
@@ -577,7 +627,7 @@ async def _call_provider(
         )
 
     else:
-        raise ValueError(
+        raise ProviderCapabilityError(
             f"Unknown provider: {provider!r}. "
             "Supported: anthropic, openai, ollama, openai-compat, gemini, codex"
         )
@@ -610,35 +660,50 @@ def _provider_turn_metrics(turn: ProviderTurn) -> dict[str, object]:
     }
 
 
-def _provider_exception_metrics(exc: Exception) -> dict[str, object]:
+def _provider_exception_metrics(exc: Exception) -> dict[str, object] | None:
     """Classify SDK/HTTP failures without parsing provider error strings."""
 
+    import anthropic
     import httpx
+    import openai
+
+    from .codex_oauth import CodexResponseStreamError
 
     subtype = "PROVIDER_ERROR"
     retryable = True
-    status = getattr(exc, "status_code", None)
-    if isinstance(exc, httpx.TimeoutException) or type(exc).__name__ == "APITimeoutError":
+    if isinstance(exc, (httpx.TimeoutException, openai.APITimeoutError, anthropic.APITimeoutError)):
         subtype = "PROVIDER_TIMEOUT"
-    elif isinstance(exc, httpx.RequestError) or type(exc).__name__ == "APIConnectionError":
-        subtype = "PROVIDER_TRANSPORT"
-    elif type(exc).__name__ in {"AuthenticationError", "PermissionDeniedError"} or status in {
-        401,
-        403,
-    }:
-        subtype = "PROVIDER_AUTH"
-        retryable = False
-    elif type(exc).__name__ == "RateLimitError" or status == 429:
-        subtype = "PROVIDER_RATE_LIMIT"
-    elif status == 408:
-        subtype = "PROVIDER_TIMEOUT"
-    elif type(exc).__name__ == "InternalServerError" or (
-        isinstance(status, int) and status >= 500
+    elif isinstance(
+        exc, (httpx.RequestError, openai.APIConnectionError, anthropic.APIConnectionError)
     ):
-        subtype = "PROVIDER_SERVER"
-    elif isinstance(status, int) and 400 <= status < 500:
-        subtype = "PROVIDER_REQUEST"
+        subtype = "PROVIDER_TRANSPORT"
+    elif isinstance(exc, (openai.APIResponseValidationError, anthropic.APIResponseValidationError)):
+        subtype = "PROVIDER_PROTOCOL"
         retryable = False
+    elif isinstance(exc, (httpx.HTTPStatusError, openai.APIStatusError, anthropic.APIStatusError)):
+        status = (
+            exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else exc.status_code
+        )
+        if status in {401, 403}:
+            subtype, retryable = "PROVIDER_AUTH", False
+        elif status == 408:
+            subtype = "PROVIDER_TIMEOUT"
+        elif status == 429:
+            subtype = "PROVIDER_RATE_LIMIT"
+        elif status >= 500:
+            subtype = "PROVIDER_SERVER"
+        elif 400 <= status < 500:
+            subtype, retryable = "PROVIDER_REQUEST", False
+        else:
+            subtype, retryable = "PROVIDER_PROTOCOL", False
+    elif isinstance(exc, CodexResponseStreamError):
+        # Retain stream-failure compatibility until terminal-state attribution
+        # can distinguish provider failures from incomplete/empty responses.
+        pass
+    elif isinstance(exc, (openai.APIError, anthropic.AnthropicError)):
+        retryable = False
+    else:
+        return None
     return {
         "infra_scope": "provider",
         "infra_error_subtype": subtype,

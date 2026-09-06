@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
+import httpx
+import openai
 import pytest
 from pydantic import ValidationError
 
+from ori.eval.adapter import call_provider_text
 from ori.eval.provider_contract import ProviderApiSurface
 from ori.eval.v2.campaign_config import (
     ResolvedV2CampaignConfig,
@@ -17,9 +22,16 @@ from ori.eval.v2.campaign_config import (
 from ori.eval.v2.campaign_runner import (
     _RUNNER_IMPLEMENTATION_SOURCES,
     V2CampaignRunError,
+    _model_base_url,
     _model_readiness,
     _provider_endpoint_fingerprint,
     _provider_identity,
+)
+from tests.support.provider_origins import (
+    CLEARED_ENVIRONMENT,
+    DENIED_ORIGINS,
+    SYNTHETIC_KEYS,
+    VALID_ORIGINS,
 )
 
 
@@ -282,6 +294,7 @@ def test_provider_behavior_sources_are_runtime_fingerprinted() -> None:
         "mcp_launcher",
         "provider_auth",
         "provider_contract",
+        "adapter",
     } <= _RUNNER_IMPLEMENTATION_SOURCES.keys()
 
 
@@ -299,3 +312,110 @@ def test_environment_compat_endpoint_is_resolved_for_runtime_fingerprinting(
     assert len(first) == 64
     assert len(second) == 64
     assert first != second
+
+
+@pytest.mark.parametrize("source", ["model", "defaults", "inline"])
+def test_compatible_config_destination_matches_actual_adapter(monkeypatch, source) -> None:
+    for variable in (
+        "OPENAI_API_KEY", "OPENAI_COMPAT_API_KEY", "OPENROUTER_API_KEY",
+        "NOUS_API_KEY", "NOUS_PORTAL_API_KEY", "OPENAI_COMPAT_BASE_URL", "OPENAI_BASE_URL",
+    ):
+        monkeypatch.delenv(variable, raising=False)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-router")
+    monkeypatch.setenv("NOUS_API_KEY", "test-nous")
+    router = "https://openrouter.ai/api/v1"
+    nous = "https://inference-api.nousresearch.com/v1"
+    payload = _config(provider="openai-compat").model_dump(mode="json")
+    payload["models"][0]["model"] = f"provider/model@{nous}"
+    if source == "model":
+        payload["models"][0]["model_base_url"] = router
+        payload["defaults"]["model_base_url"] = nous
+    elif source == "defaults":
+        payload["defaults"]["model_base_url"] = router
+    config = V2CampaignConfig.model_validate(payload)
+    model = config.models[0]
+    resolved = _resolved(config)
+    endpoint = _model_base_url(model, resolved)
+    identity = _provider_identity(model, resolved)
+    before = _provider_endpoint_fingerprint(model, resolved)
+    expected = nous if source == "inline" else router
+    expected_source = "NOUS_API_KEY" if source == "inline" else "OPENROUTER_API_KEY"
+    captured = {}
+
+    class FakeCompletions:
+        async def create(self, **kwargs):
+            captured["request"] = kwargs
+            return SimpleNamespace(
+                id="synthetic", model="provider/model", usage=None,
+                choices=[SimpleNamespace(
+                    finish_reason="stop", message=SimpleNamespace(content="answer"),
+                )],
+            )
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            captured["client"] = kwargs
+            self.chat = SimpleNamespace(completions=FakeCompletions())
+
+    monkeypatch.setattr(openai, "AsyncOpenAI", FakeClient)
+    response = asyncio.run(call_provider_text(
+        model=f"openai-compat/{model.model}", base_url=endpoint,
+        system="system", messages=[{"role": "user", "content": "question"}],
+    ))
+    assert response.error is None
+    assert endpoint == expected == captured["client"]["base_url"]
+    assert captured["client"]["api_key"] == (
+        "test-nous" if source == "inline" else "test-router"
+    )
+    assert captured["request"]["model"] == "provider/model"
+    assert response.provider_metrics["endpoint_family"] == identity.endpoint_family
+    assert response.provider_metrics["credential_source"] == identity.credential_source
+    assert identity.credential_source == expected_source
+    payload["models"][0]["model_base_url"] = router if source == "inline" else nous
+    changed = V2CampaignConfig.model_validate(payload)
+    assert before != _provider_endpoint_fingerprint(changed.models[0], _resolved(changed))
+
+
+def test_readiness_scoped_origin_admission(monkeypatch, subtests) -> None:
+    for case, endpoint, family, source, key in DENIED_ORIGINS + VALID_ORIGINS:
+        with subtests.test(msg=case), monkeypatch.context() as scoped:
+            for variable in CLEARED_ENVIRONMENT:
+                scoped.delenv(variable, raising=False)
+            for variable, value in SYNTHETIC_KEYS:
+                scoped.setenv(variable, value)
+            counts = {"constructors": 0, "requests": 0}
+
+            class FakeRequest:
+                async def create(self, *args, **kwargs):
+                    counts["requests"] += 1
+                    raise AssertionError("Readiness must not issue an SDK request")
+
+            class ForbiddenClient:
+                def __init__(self, *args, **kwargs):
+                    counts["constructors"] += 1
+                    self.chat = SimpleNamespace(completions=FakeRequest())
+                async def __aenter__(self):
+                    return self
+                async def __aexit__(self, *args):
+                    return None
+                async def post(self, *args, **kwargs):
+                    counts["requests"] += 1
+                    raise AssertionError("Readiness must not issue an HTTP request")
+
+            scoped.setattr(openai, "AsyncOpenAI", ForbiddenClient)
+            scoped.setattr(httpx, "AsyncClient", ForbiddenClient)
+            config = _config(provider="openai-compat", model_base_url=endpoint)
+            if "-D" in case:
+                with pytest.raises(V2CampaignRunError):
+                    _model_readiness(_resolved(config))
+            else:
+                receipts = _model_readiness(_resolved(config))
+                assert len(receipts) == 1
+                receipt = receipts[0]
+                assert receipt.endpoint_family == family
+                assert receipt.credential_source == source
+                assert receipt.resolved_api_surface is ProviderApiSurface.CHAT_COMPLETIONS
+                for _, secret in SYNTHETIC_KEYS:
+                    assert secret not in receipt.model_dump_json()
+            assert counts["constructors"] == 0
+            assert counts["requests"] == 0

@@ -51,6 +51,8 @@ from .schema import (
     MCPBindingMode,
     MCPClaimEvidenceContract,
     MechanismValidRoutePolicy,
+    NativeClaimEvidenceContract,
+    NativeProofAlternative,
     NegativeReasonCode,
     NegativeWitness,
     OracleBundle,
@@ -261,6 +263,7 @@ def compiler_fingerprint() -> str:
         Path(__file__).with_name("schema.py"),
         Path(__file__).with_name("selection.py"),
         Path(__file__).with_name("task_recipes.py"),
+        Path(__file__).with_name("oaic_recipes.py"),
         Path(__file__).parents[1] / "task_recipes.py",
         Path(__file__).parents[1] / "tasks.py",
     )
@@ -363,11 +366,13 @@ def _assert_edges_exist(
     *,
     purpose: str,
 ) -> None:
-    missing = [
-        edge
-        for edge in edges
-        if (edge.source_id, edge.relationship, edge.target_id) not in snapshot.edge_keys
-    ]
+    edge_keys = None
+    missing = []
+    for edge in edges:
+        if edge_keys is None:
+            edge_keys = snapshot.edge_keys
+        if (edge.source_id, edge.relationship, edge.target_id) not in edge_keys:
+            missing.append(edge)
     if missing:
         rendered = [f"{edge.source_id}-[{edge.relationship}]->{edge.target_id}" for edge in missing]
         raise V2CompileError(f"{purpose} contains graph-absent edges: {rendered}")
@@ -2141,12 +2146,79 @@ def _mcp_claim_evidence_contract(
     )
 
 
+def _native_claim_evidence_contract(
+    claim: ClaimSpec, implementation_id: str,
+) -> NativeClaimEvidenceContract:
+    legacy_shape = _mcp_claim_evidence_contract(claim)
+    requirements = (
+        "Bind the exact public input selectors and claim population.",
+        "Respect the public direction, hop limits, filters, and projection.",
+        "Provide complete, unambiguous native evidence within the public result window.",
+        "A successful tool call or literal-only assertion is not proof of the claim.",
+    )
+    if implementation_id == "mwnickerson":
+        tool_name, operation = "cypher_query", "run"
+    elif implementation_id == "mordavid":
+        tool_name, operation = "query_bloodhound", None
+    elif implementation_id == "armadin":
+        if isinstance(claim, SetClaim) and (
+            claim.selection.projection_type == "Domain"
+            and not claim.selection.anchors and not claim.selection.relationships
+            and not claim.selection.predicates and claim.selection.offset == 0
+            and claim.selection.limit is None and claim.selection.require_complete
+        ):
+            tool_name = "find_domains"
+        elif isinstance(claim, RouteClaim) and not any((
+            claim.required_mechanisms, claim.required_context, claim.required_properties,
+            claim.excluded_relationships, claim.excluded_mechanisms,
+        )):
+            tool_name = "find_shortest_path"
+            requirements += (
+                "Return a positive directed path with ordered node identities and edge types.",
+                "An empty shortest-path response does not establish bounded absence.",
+            )
+        else:
+            raise V2CompileError("unsupported Armadin native claim evidence contract")
+        operation = None
+    else:
+        raise V2CompileError("unknown native implementation")
+    if isinstance(claim, CountClaim) and implementation_id in {"mwnickerson", "mordavid"}:
+        requirements += (
+            "Count the declared population directly, without WITH, UNWIND, CALL, UNION, "
+            "OPTIONAL MATCH, EXISTS subqueries, ORDER BY, SKIP or LIMIT stages.",
+            "Return one COUNT(node) or COUNT(*) scalar, optionally aliased; do not count "
+            "properties or apply arithmetic. Count each selected node identity once. "
+            "For populations reached through relationships, use COUNT(DISTINCT node).",
+        )
+    return NativeClaimEvidenceContract(
+        contract_version="ori-native-claim-evidence-v1",
+        implementation_id=implementation_id,
+        alternatives=(NativeProofAlternative(
+            tool_name=tool_name, operation=operation,
+            result_kind=legacy_shape.result_kind,
+            required_input_roles=legacy_shape.required_input_roles,
+            projection_types=legacy_shape.projection_types,
+            requirements=requirements,
+        ),),
+    )
+
+
 def _binding(
     track: Track,
     *,
     claim: ClaimSpec,
     expected_cardinality: int,
+    native_profile: Any | None = None,
 ) -> TrackBinding:
+    if native_profile is not None:
+        from .native_capability import validate_native_capability_profile
+
+        if track is not Track.MCP:
+            raise V2CompileError("native capability profiles apply only to MCP")
+        try:
+            native_profile = validate_native_capability_profile(native_profile)
+        except (TypeError, ValueError) as exc:
+            raise V2CompileError("invalid native capability profile") from exc
     selection = claim.selection if isinstance(claim, (SetClaim, CountClaim)) else None
     result_offset = selection.offset if selection is not None else 0
     result_limit = selection.limit if selection is not None else None
@@ -2267,13 +2339,20 @@ def _binding(
     )
     return TrackBinding(
         track=track,
-        capability_profile_id=MCP_CAPABILITY_PROFILE,
+        capability_profile_id=(
+            native_profile.profile_id if native_profile is not None else MCP_CAPABILITY_PROFILE
+        ),
         semantics=claim.semantics,
         bounds=bounds,
         mcp_tool_loop="native-openai-compatible",
-        mcp_resource_mode="off",
-        mcp_binding_mode=MCPBindingMode.CYPHER_ENABLED,
-        mcp_evidence_contract=_mcp_claim_evidence_contract(claim),
+        mcp_resource_mode="native" if native_profile is not None else "off",
+        mcp_binding_mode=(
+            MCPBindingMode.NATIVE if native_profile is not None else MCPBindingMode.CYPHER_ENABLED
+        ),
+        mcp_evidence_contract=(
+            _native_claim_evidence_contract(claim, native_profile.implementation_id)
+            if native_profile is not None else _mcp_claim_evidence_contract(claim)
+        ),
     )
 
 
@@ -2297,6 +2376,11 @@ def _fingerprinted_task_bundle(
         "Use stable object IDs when available; aliases must resolve unambiguously.",
         "Do not claim completeness when any result is truncated or pagination is incomplete.",
     )
+    if isinstance(binding.mcp_evidence_contract, NativeClaimEvidenceContract):
+        generic_instructions += (
+            "Use the native proof alternatives declared in mcp_evidence_contract; "
+            "do not invent tools or replace missing native evidence with assertions.",
+        )
     claim_fingerprint = canonical_sha256(claim)
     prompt_fingerprint = canonical_sha256(
         {
@@ -2458,8 +2542,14 @@ def compile_legacy_product(
     *,
     product: str,
     track: Track,
+    native_profile: Any | None = None,
 ) -> CompiledCorpus:
     """Compile a v1 generated product into explicit v2 public/private artifacts."""
+
+    if product == "oaic-2026-v1":
+        from .oaic_recipes import compile_oaic_product
+
+        return compile_oaic_product(manifest, snapshot, track=track, native_profile=native_profile)
 
     if manifest.get("schema_version") != "ori-generated-manifest-v2":
         raise V2CompileError(
@@ -2517,6 +2607,7 @@ def compile_legacy_product(
                 track,
                 claim=draft.claim,
                 expected_cardinality=expected_cardinality,
+                native_profile=native_profile,
             )
             input_entities = _public_input_entities(draft)
             public = _fingerprinted_task_bundle(

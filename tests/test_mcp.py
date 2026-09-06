@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import csv
 import json
 from pathlib import Path
 
+import httpx
+import openai
 import pytest
 from click.testing import CliRunner
 from inspect_ai.model import ChatMessageAssistant, ChatMessageTool
@@ -44,6 +47,12 @@ from ori.eval.provider_contract import ProviderAuthenticationError, ProviderProt
 from ori.eval.report import write_combined_csv, write_summary_csv
 from ori.eval.runner import EvalResult
 from ori.eval.tasks import Task, generate_mcp_tasks
+from tests.support.provider_origins import (
+    CLEARED_ENVIRONMENT,
+    DENIED_ORIGINS,
+    SYNTHETIC_KEYS,
+    VALID_ORIGINS,
+)
 
 
 def _manifest() -> dict:
@@ -1476,3 +1485,68 @@ def test_cli_smoke_mcp(tmp_path: Path, monkeypatch) -> None:
     )
     assert result.exit_code == 0
     assert "SMOKE TEST: PASS" in result.output
+
+
+def test_native_scoped_origin_admission(monkeypatch, subtests) -> None:
+    for case, endpoint, family, source, key in DENIED_ORIGINS + VALID_ORIGINS:
+        with subtests.test(msg=case), monkeypatch.context() as scoped:
+            for variable in CLEARED_ENVIRONMENT:
+                scoped.delenv(variable, raising=False)
+            for variable, value in SYNTHETIC_KEYS:
+                scoped.setenv(variable, value)
+            counts = {"constructors": 0, "requests": 0}
+            captured = {}
+
+            class FakeResponse:
+                def raise_for_status(self):
+                    return None
+                def json(self):
+                    return {
+                        "id": "synthetic", "model": "provider/model",
+                        "choices": [{"finish_reason": "stop", "message": {"content": "answer"}}],
+                        "usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5},
+                    }
+
+            class FakeClient:
+                def __init__(self, *args, **kwargs):
+                    counts["constructors"] += 1
+                async def __aenter__(self):
+                    return self
+                async def __aexit__(self, *args):
+                    return None
+                async def post(self, url, **kwargs):
+                    counts["requests"] += 1
+                    captured.update(url=url, **kwargs)
+                    return FakeResponse()
+
+            class ForbiddenSDK:
+                def __init__(self, *args, **kwargs):
+                    counts["constructors"] += 1
+                    raise AssertionError("Native must use only the fake HTTP client")
+                async def create(self, *args, **kwargs):
+                    counts["requests"] += 1
+                    raise AssertionError("Native must not issue an SDK request")
+
+            scoped.setattr(httpx, "AsyncClient", FakeClient)
+            scoped.setattr(openai, "AsyncOpenAI", ForbiddenSDK)
+            arguments = {
+                "url": endpoint + "/chat/completions", "model_name": "openai-compat/provider/model",
+                "messages": [{"role": "user", "content": "synthetic question"}], "tools": [],
+            }
+            if "-D" in case:
+                with pytest.raises(ProviderAuthenticationError):
+                    asyncio.run(_openai_compat_chat_turn(**arguments))
+                assert counts["constructors"] == 0
+                assert counts["requests"] == 0
+            else:
+                turn = asyncio.run(_openai_compat_chat_turn(**arguments))
+                assert counts["constructors"] == 1
+                assert counts["requests"] == 1
+                assert captured["url"] == endpoint + "/chat/completions"
+                assert captured["headers"]["Authorization"] == f"Bearer {key}"
+                assert captured["json"]["model"] == "provider/model"
+                assert turn["content"] == "answer"
+                assert turn["prompt_tokens"] == 3
+                assert turn["completion_tokens"] == 2
+                assert turn["provider_metrics"]["endpoint_family"] == family
+                assert turn["provider_metrics"]["credential_source"] == source

@@ -23,8 +23,42 @@ def _complex_paths():
     return graph, {path.template_id: path for path in graph.planted_paths}
 
 
-def test_complex_path_registry_starts_with_non_adcs_families() -> None:
+def test_complex_registry_contract(subtests) -> None:
     templates = complex_path_templates()
+    with subtests.test(msg="complex_path_registry_starts_with_non_adcs_families"):
+        _assert_complex_path_registry_starts_with_non_adcs_families(templates)
+    with subtests.test(msg="phase2_pack_has_multiple_variants_per_initial_family"):
+        _assert_phase2_pack_has_multiple_variants_per_initial_family(templates)
+
+
+def test_complex_generated_graph_contract(subtests) -> None:
+    graph, paths = _complex_paths()
+    with subtests.test(msg="phase4_complex_plants_initial_tier6_paths"):
+        _assert_phase4_complex_plants_initial_tier6_paths(paths)
+    with subtests.test(msg="complex_paths_have_tool_effort_and_mechanism_contracts"):
+        _assert_complex_paths_have_tool_effort_and_mechanism_contracts(paths)
+    with subtests.test(msg="host_session_pivot_requires_multiple_sessions_and_terminal_escalation"):
+        _assert_host_session_pivot_requires_multiple_sessions_and_terminal_escalation(paths)
+    with subtests.test(msg="initial_complex_pack_is_non_adcs_heavy"):
+        _assert_initial_complex_pack_is_non_adcs_heavy(paths)
+    with subtests.test(msg="host_session_phase2_variants_cover_long_chain_and_terminal_rbcd"):
+        _assert_host_session_phase2_variants_cover_long_chain_and_terminal_rbcd(paths)
+    with subtests.test(msg="trust_hop_uses_foreign_domain_principal_and_domain_trust"):
+        _assert_trust_hop_uses_foreign_domain_principal_and_domain_trust(graph, paths)
+    with subtests.test(msg="contextual_edges_are_separate_from_continuous_attack_paths"):
+        _assert_contextual_edges_are_separate_from_continuous_attack_paths(paths)
+
+
+def test_complex_paired_track_contract(subtests) -> None:
+    graph, _paths = _complex_paths()
+    manifest = _build_manifest(graph, seed=4401)
+    with subtests.test(msg="tier6_tasks_are_generated_with_operator_questions"):
+        _assert_tier6_tasks_are_generated_with_operator_questions(manifest)
+    with subtests.test(msg="tier6_mcp_tasks_include_complex_direct_tasks"):
+        _assert_tier6_mcp_tasks_include_complex_direct_tasks(manifest)
+
+
+def _assert_complex_path_registry_starts_with_non_adcs_families(templates) -> None:
 
     assert len(templates) == 19
     assert {template.family for template in templates} == {
@@ -46,8 +80,7 @@ def test_complex_path_registry_starts_with_non_adcs_families() -> None:
     assert any(not template.positive for template in templates)
 
 
-def test_phase4_complex_plants_initial_tier6_paths() -> None:
-    _graph, paths = _complex_paths()
+def _assert_phase4_complex_plants_initial_tier6_paths(paths) -> None:
 
     assert {
         "t6_host_session_pivot_tier0",
@@ -65,8 +98,7 @@ def test_phase4_complex_plants_initial_tier6_paths() -> None:
     assert all(path.tier == 6 for tid, path in paths.items() if tid.startswith("t6_"))
 
 
-def test_complex_paths_have_tool_effort_and_mechanism_contracts() -> None:
-    _graph, paths = _complex_paths()
+def _assert_complex_paths_have_tool_effort_and_mechanism_contracts(paths) -> None:
     tier6_paths = [path for path in paths.values() if path.template_id.startswith("t6_")]
 
     assert tier6_paths
@@ -82,8 +114,7 @@ def test_complex_paths_have_tool_effort_and_mechanism_contracts() -> None:
         assert path.metadata["tool_effort"]["minimum_expected_tool_calls"] >= 4
 
 
-def test_host_session_pivot_requires_multiple_sessions_and_terminal_escalation() -> None:
-    _graph, paths = _complex_paths()
+def _assert_host_session_pivot_requires_multiple_sessions_and_terminal_escalation(paths) -> None:
     path = paths["t6_host_session_pivot_tier0"]
     edge_kinds = [edge[1] for edge in path.path_edges]
 
@@ -98,8 +129,7 @@ def test_host_session_pivot_requires_multiple_sessions_and_terminal_escalation()
     }
 
 
-def test_initial_complex_pack_is_non_adcs_heavy() -> None:
-    _graph, paths = _complex_paths()
+def _assert_initial_complex_pack_is_non_adcs_heavy(paths) -> None:
     tier6 = [path for path in paths.values() if path.template_id.startswith("t6_")]
 
     assert len(tier6) == 19
@@ -110,8 +140,7 @@ def test_initial_complex_pack_is_non_adcs_heavy() -> None:
     assert "shortestPath((t)" in negative.verification_cypher
 
 
-def test_phase2_pack_has_multiple_variants_per_initial_family() -> None:
-    templates = complex_path_templates()
+def _assert_phase2_pack_has_multiple_variants_per_initial_family(templates) -> None:
 
     for family in {
         "host_session_pivot",
@@ -123,8 +152,7 @@ def test_phase2_pack_has_multiple_variants_per_initial_family() -> None:
         assert sum(1 for template in templates if template.family == family) >= 2
 
 
-def test_host_session_phase2_variants_cover_long_chain_and_terminal_rbcd() -> None:
-    _graph, paths = _complex_paths()
+def _assert_host_session_phase2_variants_cover_long_chain_and_terminal_rbcd(paths) -> None:
     rbcd = paths["t6_host_session_pivot_rbcd_tier0"]
     three_host = paths["t6_host_session_pivot_three_host_tier0"]
 
@@ -133,8 +161,7 @@ def test_host_session_phase2_variants_cover_long_chain_and_terminal_rbcd() -> No
     assert [edge[1] for edge in three_host.path_edges].count("HasSession") >= 3
 
 
-def test_trust_hop_uses_foreign_domain_principal_and_domain_trust() -> None:
-    graph, paths = _complex_paths()
+def _assert_trust_hop_uses_foreign_domain_principal_and_domain_trust(graph, paths) -> None:
     trust_path = paths["t6_trust_hopping_tier0"]
     foreign_group = graph.require_node(trust_path.path_edges[0][2])
     domains = graph.nodes_by_type("Domain")
@@ -152,8 +179,7 @@ def test_trust_hop_uses_foreign_domain_principal_and_domain_trust() -> None:
     ) in trust_path.metadata["supporting_edges"]
 
 
-def test_contextual_edges_are_separate_from_continuous_attack_paths() -> None:
-    _graph, paths = _complex_paths()
+def _assert_contextual_edges_are_separate_from_continuous_attack_paths(paths) -> None:
 
     for template_id in {
         "t6_trust_hopping_tier0",
@@ -176,9 +202,7 @@ def test_contextual_edges_are_separate_from_continuous_attack_paths() -> None:
     assert "SameForestTrust" in [edge[1] for edge in trust.metadata["supporting_edges"]]
 
 
-def test_tier6_tasks_are_generated_with_operator_questions() -> None:
-    graph, _paths = _complex_paths()
-    manifest = _build_manifest(graph, seed=4401)
+def _assert_tier6_tasks_are_generated_with_operator_questions(manifest) -> None:
     tasks = [task for task in generate_tasks(manifest) if task.tier == 6]
 
     assert len(tasks) == 19
@@ -216,9 +240,7 @@ def test_tier6_tasks_are_generated_with_operator_questions() -> None:
         )
 
 
-def test_tier6_mcp_tasks_include_complex_direct_tasks() -> None:
-    graph, _paths = _complex_paths()
-    manifest = _build_manifest(graph, seed=4401)
+def _assert_tier6_mcp_tasks_include_complex_direct_tasks(manifest) -> None:
     mcp_tasks = [task for task in generate_mcp_tasks(manifest) if task.tier == 6]
 
     assert len(mcp_tasks) >= 19

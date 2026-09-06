@@ -110,6 +110,7 @@ class MCPBindingMode(StrEnum):
     TOOL_ONLY = "tool_only"
     CYPHER_ENABLED = "cypher_enabled"
     BLOCKED = "blocked"
+    NATIVE = "native"
 
 
 class NegativeReasonCode(StrEnum):
@@ -688,6 +689,74 @@ class MCPClaimEvidenceContract(StrictModel):
         return self
 
 
+class NativeProofAlternative(StrictModel):
+    """One native, solver-visible evidence route; not proof certification."""
+
+    tool_name: NonEmptyStr
+    operation: NonEmptyStr | None = None
+    result_kind: Literal["entities", "scalar_count", "path"]
+    required_input_roles: tuple[NonEmptyStr, ...] = ()
+    projection_types: tuple[NonEmptyStr, ...] = ()
+    requirements: tuple[NonEmptyStr, ...]
+
+    @model_validator(mode="after")
+    def unique_requirements(self) -> NativeProofAlternative:
+        for field in ("required_input_roles", "projection_types", "requirements"):
+            values = getattr(self, field)
+            if len(values) != len(set(values)):
+                raise ValueError(f"native {field} must be unique")
+        if not self.requirements:
+            raise ValueError("native evidence alternatives require public proof requirements")
+        return self
+
+
+class NativeClaimEvidenceContract(StrictModel):
+    """Explicit native protocol; legacy serialized contracts remain unchanged."""
+
+    contract_version: Literal["ori-native-claim-evidence-v1"]
+    implementation_id: Literal["mwnickerson", "mordavid", "armadin"]
+    alternatives: tuple[NativeProofAlternative, ...]
+
+    @property
+    def result_kind(self) -> str:
+        return self.alternatives[0].result_kind
+
+    @property
+    def projection_types(self) -> tuple[str, ...]:
+        return self.alternatives[0].projection_types
+
+    @property
+    def required_input_roles(self) -> tuple[str, ...]:
+        return tuple(dict.fromkeys(
+            role for alternative in self.alternatives for role in alternative.required_input_roles
+        ))
+
+    @model_validator(mode="after")
+    def exact_native_alternatives(self) -> NativeClaimEvidenceContract:
+        allowed = {
+            "mwnickerson": {("cypher_query", "run")},
+            "mordavid": {("query_bloodhound", None)},
+            "armadin": {("find_domains", None), ("find_shortest_path", None)},
+        }
+        keys = [(alternative.tool_name, alternative.operation) for alternative in self.alternatives]
+        if (
+            not keys or len(keys) != len(set(keys))
+            or not set(keys) <= allowed[self.implementation_id]
+        ):
+            raise ValueError("unknown or duplicate native proof alternative")
+        for alternative in self.alternatives:
+            if (
+                alternative.result_kind != self.alternatives[0].result_kind
+                or alternative.projection_types != self.alternatives[0].projection_types
+            ):
+                raise ValueError("native alternatives must share result kind and projection types")
+            if alternative.tool_name == "find_shortest_path" and alternative.result_kind != "path":
+                raise ValueError("native shortest path requires a positive path witness")
+            if alternative.tool_name == "find_domains" and alternative.result_kind == "path":
+                raise ValueError("native domain inventory cannot prove a path")
+        return self
+
+
 class TrackBinding(StrictModel):
     track: Track
     capability_profile_id: NonEmptyStr
@@ -697,7 +766,7 @@ class TrackBinding(StrictModel):
     mcp_tool_loop: NonEmptyStr | None = None
     mcp_resource_mode: NonEmptyStr | None = None
     mcp_binding_mode: MCPBindingMode | None = None
-    mcp_evidence_contract: MCPClaimEvidenceContract | None = None
+    mcp_evidence_contract: MCPClaimEvidenceContract | NativeClaimEvidenceContract | None = None
 
     @model_validator(mode="after")
     def track_fields_match(self) -> TrackBinding:
@@ -721,6 +790,18 @@ class TrackBinding(StrictModel):
                 raise ValueError("MCP bindings require an explicit binding mode")
             if self.mcp_evidence_contract is None:
                 raise ValueError("MCP bindings require a public claim evidence contract")
+            native_contract = isinstance(self.mcp_evidence_contract, NativeClaimEvidenceContract)
+            if (self.mcp_binding_mode is MCPBindingMode.NATIVE) != native_contract:
+                raise ValueError("native binding mode and evidence contract must match")
+            if native_contract:
+                prefix = f"ori-native-{self.mcp_evidence_contract.implementation_id}-v1-"
+                suffix = self.capability_profile_id.removeprefix(prefix)
+                if (
+                    not self.capability_profile_id.startswith(prefix)
+                    or len(suffix) != 64
+                    or any(character not in "0123456789abcdef" for character in suffix)
+                ):
+                    raise ValueError("native profile identifier and implementation must match")
             if self.mcp_binding_mode is MCPBindingMode.BLOCKED:
                 raise ValueError("blocked MCP bindings cannot produce TaskBundles")
             if self.bounds.max_tool_calls == 0:

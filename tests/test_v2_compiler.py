@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import json
 from collections import Counter
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
 from jsonschema import validate as validate_json_schema
+from pydantic import BaseModel
 
-from ori.cli import _build_manifest, main
+from ori.cli import main
 from ori.eval.v2.campaign import (
     CampaignArtifactError,
     RunIdentity,
@@ -48,11 +50,19 @@ from ori.eval.v2.fixtures import (
     POLICY_COVERAGE_REGISTRY_FINGERPRINT,
     REQUIRED_FIXTURES,
     TaskFixtureManifest,
+    _entity_token,
     offline_certify,
     policy_coverage_artifacts,
     validate_fixture_coverage_artifacts,
 )
-from ori.eval.v2.graph import LiveGraphVerification, build_archive_snapshot
+from ori.eval.v2.graph import (
+    GraphObject,
+    GraphSnapshot,
+    LiveGraphVerification,
+    graph_identity_resolver,
+    graph_snapshot_fingerprint,
+)
+from ori.eval.v2.identity import AmbiguousIdentityError
 from ori.eval.v2.mcp import build_mcp_capability_profile, classify_mcp_binding
 from ori.eval.v2.profiles import capability_profile_for_track
 from ori.eval.v2.protocol import (
@@ -78,10 +88,12 @@ from ori.eval.v2.schema import (
     CertificationState,
     DecisionClaim,
     DecisionPolicy,
+    EntityRef,
     ExecutionClass,
     ExtraEvidenceRule,
     MCPBindingMode,
     NegativeReasonCode,
+    OracleBundle,
     RouteAcceptanceKind,
     RouteClaim,
     SetClaim,
@@ -96,61 +108,51 @@ from ori.eval.v2.scoring import (
     score_answers_v2,
     summarize_results,
 )
-from ori.generator.attack_paths import plant_all_paths
-from ori.generator.benchmark_profiles import build_benchmark_generation_profile
-from ori.generator.graph import ADGraph
-from ori.generator.org import build_org
-from ori.generator.phase4 import build_phase4_complex_graph
-from ori.generator.security import apply_baseline_security
-from ori.generator.serializer import _build_zip
+from tests.support.v2_compiler import _generated_product
+from tests.support.v2_compiler import simple_compiled as _simple_compiled
+
+simple_compiled = _simple_compiled
 
 
-def _generated_product(product: str, seed: int):
-    profile = build_benchmark_generation_profile(product, seed=seed)
-    if product == "simple":
-        graph = ADGraph(domain=profile.domain, seed=seed)
-        build_org(
-            graph,
-            num_users=profile.users,
-            num_workstations=profile.workstations,
-            num_servers=profile.servers,
-        )
-        apply_baseline_security(graph)
-        plant_all_paths(graph)
-    else:
-        graph = build_phase4_complex_graph(
-            domain=profile.domain,
-            seed=seed,
-            users=profile.users,
-            workstations=profile.workstations,
-            servers=profile.servers,
-        )
-    archive = _build_zip(graph)
-    manifest = _build_manifest(graph, seed, archive=archive)
-    manifest["metadata"]["benchmark_name"] = product
-    snapshot = build_archive_snapshot(archive, manifest, product=product)
-    return manifest, snapshot
-
-
-@pytest.fixture(scope="module")
-def simple_compiled():
-    manifest, snapshot = _generated_product("simple", 1234)
-    return (
-        manifest,
-        snapshot,
-        compile_legacy_product(
-            manifest,
-            snapshot,
-            product="simple",
-            track=Track.DIRECT,
+def test_positive_fixture_aliases_preserve_ambiguous_identity_rejection():
+    entities = (
+        EntityRef(object_id="group-id", object_type="Group", role="group", canonical_name="shared"),
+        EntityRef(object_id="ou-id", object_type="OU", role="ou", canonical_name="shared"),
+        EntityRef(
+            object_id="user-id", object_type="User", role="user", canonical_name="unique-user"
         ),
-        compile_legacy_product(
-            manifest,
-            snapshot,
-            product="simple",
-            track=Track.MCP,
+        EntityRef(
+            object_id="alias-id",
+            role="alias",
+            object_type="User",
+            canonical_name="alias-owner",
+            aliases=("alias-collision",),
+        ),
+        EntityRef(
+            object_id="other-id", object_type="User", role="other", canonical_name="alias-collision"
         ),
     )
+    raw = GraphSnapshot.model_construct(
+        manifest_schema_version="ori-generated-manifest-v2",
+        product="fixture",
+        seed=1,
+        domain="EXAMPLE.TEST",
+        domain_sid="S-1-5-21-1-2-3",
+        objects=tuple(GraphObject(entity=entity) for entity in entities),
+        relationships=(),
+        relationship_counts=(),
+        graph_fingerprint="0" * 64,
+    ).model_dump()
+    raw["graph_fingerprint"] = graph_snapshot_fingerprint(raw)
+    snapshot = GraphSnapshot.model_validate(raw)
+    assert _entity_token(snapshot, "group-id") == "group-id"
+    assert _entity_token(snapshot, "ou-id") == "ou-id"
+    assert _entity_token(snapshot, "user-id") == "unique-user"
+    assert _entity_token(snapshot, "other-id") == "other-id"
+    assert _entity_token(snapshot, "alias-id") == "alias-owner"
+    for ambiguous in ("shared", "alias-collision"):
+        with pytest.raises(AmbiguousIdentityError):
+            graph_identity_resolver(snapshot).resolve(ambiguous)
 
 
 @pytest.fixture(scope="module")
@@ -215,24 +217,22 @@ def test_seed_4401_set_and_count_oracles_retain_phase1_identity_digest(
 
 def test_fixture_exemption_registry_binds_executable_micrograph_artifacts(
     complex_compiled,
+    complex_certified,
 ) -> None:
-    _, snapshot, direct, _ = complex_compiled
-    certifications = tuple(offline_certify(task, snapshot) for task in direct.tasks)
+    _, _, direct, _ = complex_compiled
+    certifications = _certifications_for_corpus(direct, complex_certified)
     validate_fixture_coverage_artifacts(certifications)
     assert {artifact["fixture_name"] for artifact in policy_coverage_artifacts()} == {
         "alias",
         "decoy",
         "alternate_route",
     }
-    fixture_manifest = offline_certify(direct.tasks[0], snapshot).fixtures
+    fixture_manifest = certifications[0].fixtures
     payload = fixture_manifest.model_dump(mode="python")
     payload["coverage_registry_fingerprint"] = "0" * 64
     with pytest.raises(ValueError, match="coverage registry is stale"):
         TaskFixtureManifest.model_validate(payload)
-    assert (
-        fixture_manifest.coverage_registry_fingerprint
-        == POLICY_COVERAGE_REGISTRY_FINGERPRINT
-    )
+    assert fixture_manifest.coverage_registry_fingerprint == POLICY_COVERAGE_REGISTRY_FINGERPRINT
 
 
 @pytest.mark.parametrize(
@@ -257,11 +257,7 @@ def test_equivalent_candidates_must_agree_on_selector_metadata(
     equivalent = next(tasks for tasks in by_semantics.values() if len(tasks) > 1)
     changed_id = equivalent[-1].public.task_id
     changed_tasks = tuple(
-        task.model_copy(
-            update={
-                "migration": task.migration.model_copy(update=migration_update)
-            }
-        )
+        task.model_copy(update={"migration": task.migration.model_copy(update=migration_update)})
         if task.public.task_id == changed_id
         else task
         for task in mcp.tasks
@@ -308,13 +304,8 @@ def test_simple_corpus_is_completely_migrated(simple_compiled) -> None:
     assert len({task.migration.legacy_task_id for task in mcp.tasks}) == 40
     assert all(task.public.binding.track is Track.DIRECT for task in direct.tasks)
     assert all(task.public.binding.track is Track.MCP for task in mcp.tasks)
-    assert all(
-        task.public.binding.bounds.timeout_seconds == 180.0 for task in direct.tasks
-    )
-    assert all(
-        600.0 <= task.public.binding.bounds.timeout_seconds <= 1200.0
-        for task in mcp.tasks
-    )
+    assert all(task.public.binding.bounds.timeout_seconds == 180.0 for task in direct.tasks)
+    assert all(600.0 <= task.public.binding.bounds.timeout_seconds <= 1200.0 for task in mcp.tasks)
 
 
 def test_complex_corpus_replaces_oversized_enumerations(complex_compiled) -> None:
@@ -350,10 +341,7 @@ def test_complex_corpus_replaces_oversized_enumerations(complex_compiled) -> Non
             for task in pages
         )
     assert all(not task.public.binding.bounds.require_total_count for task in native_mcp_pages)
-    assert all(
-        task.public.binding.bounds.timeout_seconds == 1200.0
-        for task in native_mcp_pages
-    )
+    assert all(task.public.binding.bounds.timeout_seconds == 1200.0 for task in native_mcp_pages)
 
     page = native_mcp_pages[1]
     mismatched_binding = page.public.binding.model_copy(
@@ -415,15 +403,11 @@ def test_complex_candidate_release_groups_exact_public_semantic_duplicates(
     assert sorted(released_ids) == sorted(tasks_by_id)
     assert len(released_ids) == len(set(released_ids))
 
-    duplicate_entry = next(
-        entry for entry in release.entries if len(entry.equivalent_task_ids) > 1
-    )
+    duplicate_entry = next(entry for entry in release.entries if len(entry.equivalent_task_ids) > 1)
     alias_id = duplicate_entry.equivalent_task_ids[1]
     stale_candidates = {
         **candidates,
-        alias_id: candidates[alias_id].model_copy(
-            update={"task_fingerprint": "f" * 64}
-        ),
+        alias_id: candidates[alias_id].model_copy(update={"task_fingerprint": "f" * 64}),
     }
     with pytest.raises(CertificationError, match=f"task {alias_id} certification is stale"):
         build_catalog_release(corpus, stale_candidates, profile)
@@ -510,10 +494,7 @@ def test_vertical_slice_claims_are_typed_and_correct(complex_compiled) -> None:
         "transitive",
     ]
     session_membership = sessions.oracle.claim.selection.relationships[1]
-    assert (
-        f"within {session_membership.max_hops} MemberOf hops"
-        in sessions.public.question
-    )
+    assert f"within {session_membership.max_hops} MemberOf hops" in sessions.public.question
 
     da_members = _by_legacy(direct, "global-da-members")[0]
     assert len(da_members.oracle.expected_entities) == 561
@@ -616,19 +597,41 @@ def test_public_bundles_are_sealed_and_fingerprints_bind_claims(
 
 def test_oracle_sentinel_never_reaches_any_solver_visible_surface(
     complex_compiled,
+    tmp_path,
 ) -> None:
-    _, _, direct, _ = complex_compiled
+    _, snapshot, direct, _ = complex_compiled
+    original = direct.model_dump(mode="python")
     compiled = direct.tasks[0]
     sentinel = "ORI_ORACLE_SENTINEL_4d624ea1"
-    sealed = compiled.oracle.model_copy(
-        update={
-            "oracle_id": sentinel,
-            "oracle_fingerprint": canonical_sha256({"sentinel": sentinel}),
-        }
+    payload = compiled.oracle.model_dump(mode="python")
+    payload["oracle_id"] = sentinel
+    payload["oracle_fingerprint"] = canonical_sha256(
+        payload, exclude_fields=("oracle_fingerprint",)
+    )
+    sealed = OracleBundle.model_validate(payload)
+    marked = direct.model_copy(
+        update={"tasks": (compiled.model_copy(update={"oracle": sealed}), *direct.tasks[1:])}
+    )
+    public_path = tmp_path / "public.json"
+    oracle_path = tmp_path / "private" / "oracles.json"
+    public, private = write_artifacts(
+        marked,
+        public_path=public_path,
+        oracle_path=oracle_path,
+        identity_catalog=snapshot.entities,
+    )
+    assert sentinel in private.model_dump_json()
+    assert sentinel in oracle_path.read_text()
+    assert sentinel not in public.model_dump_json()
+    assert sentinel not in public_path.read_text()
+    pair = load_v2_pair(public_path, oracle_path)
+    assert pair.private.oracles[0].oracle_id == sentinel
+    loaded_task = next(
+        task for task in pair.public.tasks if task.task_id == compiled.public.task_id
     )
 
     assert sentinel in sealed.model_dump_json()
-    envelopes = build_all_solver_visible_envelopes(compiled.public)
+    envelopes = build_all_solver_visible_envelopes(loaded_task)
     assert {envelope.surface for envelope in envelopes} == set(PublicSurface)
     assert {envelope.surface.value for envelope in envelopes} == {
         "provider_request",
@@ -642,6 +645,7 @@ def test_oracle_sentinel_never_reaches_any_solver_visible_surface(
         payload = envelope.model_dump(mode="json")
         assert_solver_visible(payload, sentinels=(sentinel,))
         assert sentinel not in json.dumps(payload, sort_keys=True)
+    assert direct.model_dump(mode="python") == original
 
 
 def test_solver_visible_redaction_recursively_rejects_keys_and_sentinels() -> None:
@@ -727,18 +731,10 @@ def test_decision_entity_closure_policy_is_solver_visible() -> None:
         require_evidence_entities=False,
         forbid_unrelated_entities=True,
     )
-    open_policy = closed.model_copy(
-        update={"forbid_unrelated_entities": False}
-    )
+    open_policy = closed.model_copy(update={"forbid_unrelated_entities": False})
 
-    assert (
-        _extra_evidence_policy(closed).entities
-        is ExtraEvidenceRule.REQUIRE_EVIDENCE_CLOSURE
-    )
-    assert (
-        _extra_evidence_policy(open_policy).entities
-        is ExtraEvidenceRule.ALLOW_TRUTHFUL
-    )
+    assert _extra_evidence_policy(closed).entities is ExtraEvidenceRule.REQUIRE_EVIDENCE_CLOSURE
+    assert _extra_evidence_policy(open_policy).entities is ExtraEvidenceRule.ALLOW_TRUTHFUL
 
 
 def test_scorer_constraints_cannot_diverge_from_public_acceptance(
@@ -825,10 +821,11 @@ def test_claim_kinds_cover_full_complex_catalog(complex_compiled) -> None:
     }
 
 
-def test_legacy_compiler_rejects_v2_or_unknown_manifests(simple_compiled) -> None:
+@pytest.mark.parametrize("version", ("ori-generated-manifest-v3", "ori-generated-manifest-unknown"))
+def test_legacy_compiler_rejects_unsupported_manifest_versions(simple_compiled, version) -> None:
     manifest, snapshot, _, _ = simple_compiled
     incompatible = dict(manifest)
-    incompatible["schema_version"] = "ori-generated-manifest-v3"
+    incompatible["schema_version"] = version
 
     with pytest.raises(V2CompileError, match="requires ori-generated-manifest-v2"):
         compile_legacy_product(
@@ -932,10 +929,13 @@ def test_every_mcp_candidate_is_supported_by_the_pinned_capability_profile(
     simple_mcp = simple_compiled[3]
     complex_mcp = complex_compiled[3]
 
-    classifications = {
-        task.public.task_id: classify_mcp_binding(task.public, profile)
-        for task in (*simple_mcp.tasks, *complex_mcp.tasks)
-    }
+    classifications = {}
+    for corpus in (simple_mcp, complex_mcp):
+        for task in corpus.tasks:
+            key = (corpus.product, corpus.track, task.public.task_id)
+            assert key not in classifications
+            classifications[key] = classify_mcp_binding(task.public, profile)
+    assert len(classifications) == len(simple_mcp.tasks) + len(complex_mcp.tasks)
 
     assert set(classifications.values()) == {MCPBindingMode.CYPHER_ENABLED}
 
@@ -1011,21 +1011,32 @@ def test_public_semantic_fingerprint_excludes_provenance_but_binds_contract(
     )
 
     assert public_semantic_fingerprint(provenance_changed) == baseline
-    assert public_semantic_fingerprint(
-        task.model_copy(update={"question": f"{task.question} changed"})
-    ) != baseline
-    assert public_semantic_fingerprint(
-        task.model_copy(update={"generic_instructions": (*task.generic_instructions, "changed")})
-    ) != baseline
-    assert public_semantic_fingerprint(
-        task.model_copy(
-            update={
-                "binding": task.binding.model_copy(
-                    update={"capability_profile_id": "changed-profile"}
-                )
-            }
+    assert (
+        public_semantic_fingerprint(
+            task.model_copy(update={"question": f"{task.question} changed"})
         )
-    ) != baseline
+        != baseline
+    )
+    assert (
+        public_semantic_fingerprint(
+            task.model_copy(
+                update={"generic_instructions": (*task.generic_instructions, "changed")}
+            )
+        )
+        != baseline
+    )
+    assert (
+        public_semantic_fingerprint(
+            task.model_copy(
+                update={
+                    "binding": task.binding.model_copy(
+                        update={"capability_profile_id": "changed-profile"}
+                    )
+                }
+            )
+        )
+        != baseline
+    )
 
 
 def test_v2_pair_rejects_wrong_track_and_incomplete_identity_catalog(
@@ -1068,10 +1079,72 @@ def test_v2_pair_rejects_wrong_track_and_incomplete_identity_catalog(
         )
 
 
-def _perfect_answers(corpus, snapshot):
-    answers = {}
+def _certifications_for_corpus(corpus, certifications):
+    indexed = {}
+    for result in certifications:
+        certificate = result.certification
+        key = (certificate.task_id, certificate.task_fingerprint, certificate.oracle_fingerprint)
+        assert key not in indexed, "duplicate certificate key"
+        indexed[key] = result
+    selected = []
     for task in corpus.tasks:
-        certification = offline_certify(task, snapshot)
+        key = (task.public.task_id, task.public.task_fingerprint, task.oracle.oracle_fingerprint)
+        assert key in indexed, "missing task/oracle certificate binding"
+        result = indexed[key]
+        certificate, fixture = result.certification, result.fixtures
+        assert certificate.certification_fingerprint == canonical_sha256(
+            certificate, exclude_fields=("certification_fingerprint",)
+        ), "certificate self-hash"
+        assert fixture.fixture_fingerprint == canonical_sha256(
+            fixture, exclude_fields=("fixture_fingerprint",)
+        ), "fixture self-hash"
+        assert fixture.task_id == certificate.task_id == task.public.task_id, "fixture task binding"
+        assert (
+            fixture.task_fingerprint == certificate.task_fingerprint == task.public.task_fingerprint
+        ), "fixture task fingerprint"
+        assert (
+            fixture.oracle_fingerprint
+            == certificate.oracle_fingerprint
+            == task.oracle.oracle_fingerprint
+        ), "fixture oracle fingerprint"
+        assert certificate.graph_fingerprint == corpus.graph_fingerprint, "graph fingerprint"
+        assert certificate.compiler_fingerprint == corpus.compiler_fingerprint, (
+            "compiler fingerprint"
+        )
+        assert certificate.comparator_fingerprint == COMPARATOR_FINGERPRINT, (
+            "comparator fingerprint"
+        )
+        assert certificate.certifier_fingerprint == certifier_fingerprint(), "certifier fingerprint"
+        assert fixture.comparator_fingerprint == COMPARATOR_FINGERPRINT, (
+            "fixture comparator fingerprint"
+        )
+        profile = capability_profile_for_track(task.public.binding.track)
+        assert certificate.capability_profile_fingerprint == profile.profile_fingerprint, (
+            "profile fingerprint"
+        )
+        assert certificate.bounds_fingerprint == canonical_sha256(task.public.binding.bounds), (
+            "bounds fingerprint"
+        )
+        assert certificate.state is CertificationState.OFFLINE_CERTIFIED, "certification state"
+        assert certificate.failures == (), "certification failures"
+        assert fixture.coverage_registry_fingerprint == POLICY_COVERAGE_REGISTRY_FINGERPRINT, (
+            "fixture coverage registry"
+        )
+        perfect = [case for case in fixture.cases if case.name == "perfect"]
+        assert len(perfect) == 1, "exactly one perfect case"
+        assert perfect[0].applicable is True, "perfect applicability"
+        assert perfect[0].evidence is not None, "perfect evidence"
+        assert perfect[0].expected_status is VerdictStatus.CORRECT, "perfect expected status"
+        assert perfect[0].actual_status is VerdictStatus.CORRECT, "perfect actual status"
+        selected.append(result)
+    return tuple(selected)
+
+
+def _perfect_answers(corpus, certifications):
+    answers = {}
+    for task, certification in zip(
+        corpus.tasks, _certifications_for_corpus(corpus, certifications), strict=True
+    ):
         perfect = next(case for case in certification.fixtures.cases if case.name == "perfect")
         assert perfect.evidence is not None
         evidence = perfect.evidence
@@ -1115,16 +1188,267 @@ def _perfect_answers(corpus, snapshot):
             for key in task.public.answer_schema["properties"]
             if evidence_payload.get(key) is not None
         }
-    return answers
+    return deepcopy(answers)
+
+
+def _mutable_container_ids(value):
+    found = set()
+    if isinstance(value, BaseModel):
+        children = (getattr(value, name) for name in type(value).model_fields)
+    elif isinstance(value, dict):
+        found.add(id(value))
+        children = value.values()
+    elif isinstance(value, (list, tuple)):
+        if isinstance(value, list):
+            found.add(id(value))
+        children = value
+    else:
+        return found
+    for child in children:
+        found.update(_mutable_container_ids(child))
+    return found
+
+
+def _assert_answer_reuse_is_detached(direct, mcp, certifications):
+    before = tuple(item.model_dump(mode="python") for item in certifications)
+    first = _perfect_answers(direct, certifications)
+    second = _perfect_answers(direct, certifications)
+    assert first == second
+    assert _mutable_container_ids(first).isdisjoint(_mutable_container_ids(second))
+    assert _mutable_container_ids(first).isdisjoint(_mutable_container_ids(certifications))
+    entities = next(answer["entities"] for answer in first.values() if answer.get("entities"))
+    entities.clear()
+    properties = next(
+        edge["properties"]
+        for answer in first.values()
+        for edge in (*answer.get("edges", []), *answer.get("supporting_edges", []))
+    )
+    properties["reuse_probe"] = True
+    assert first != second
+    assert _perfect_answers(direct, certifications) == second
+    assert tuple(item.model_dump(mode="python") for item in certifications) == before
+    first_mcp = _perfect_answers(mcp, certifications)
+    second_mcp = _perfect_answers(mcp, certifications)
+    assert first_mcp == second_mcp
+    assert _mutable_container_ids(first_mcp).isdisjoint(_mutable_container_ids(second_mcp))
+    assert _mutable_container_ids(first_mcp).isdisjoint(_mutable_container_ids(certifications))
+
+
+def _rehash_reuse_model(model, field):
+    return model.model_copy(update={field: canonical_sha256(model, exclude_fields=(field,))})
+
+
+def _assert_reuse_rejects(
+    corpus, certifications, *, certificate=None, fixture=None, perfect=None, stale=False, message
+):
+    original = _certifications_for_corpus(corpus, certifications)[0]
+    changed = original
+    if certificate is not None:
+        value = original.certification.model_copy(update=certificate)
+        if not stale:
+            value = _rehash_reuse_model(value, "certification_fingerprint")
+        changed = changed.model_copy(update={"certification": value})
+    if fixture is not None or perfect is not None:
+        value = original.fixtures.model_copy(update=fixture or {})
+        if perfect is not None:
+            value = value.model_copy(
+                update={
+                    "cases": tuple(
+                        case.model_copy(update=perfect) if case.name == "perfect" else case
+                        for case in value.cases
+                    )
+                }
+            )
+        if not stale:
+            value = _rehash_reuse_model(value, "fixture_fingerprint")
+        changed = changed.model_copy(update={"fixtures": value})
+    variants = tuple(changed if item is original else item for item in certifications)
+    with pytest.raises(AssertionError, match=message):
+        _perfect_answers(corpus, variants)
+
+
+def test_certified_answer_reuse_is_bound_and_isolated(
+    simple_compiled,
+    simple_certified,
+    subtests,
+) -> None:
+    _, _, direct, mcp = simple_compiled
+    baseline = _perfect_answers(direct, simple_certified)
+    before = tuple(item.model_dump(mode="python") for item in simple_certified)
+    selected = _certifications_for_corpus(direct, simple_certified)[0]
+    with subtests.test(msg="fresh Direct and MCP answers are deeply detached"):
+        _assert_answer_reuse_is_detached(direct, mcp, simple_certified)
+    with subtests.test(msg="missing selected certificate"):
+        with pytest.raises(AssertionError, match="missing task/oracle certificate binding"):
+            _perfect_answers(
+                direct, tuple(item for item in simple_certified if item is not selected)
+            )
+    with subtests.test(msg="duplicate full certificate key"):
+        with pytest.raises(AssertionError, match="duplicate certificate key"):
+            _perfect_answers(direct, (*simple_certified, selected))
+    with subtests.test(msg="changed task fingerprint"):
+        _assert_reuse_rejects(
+            direct,
+            simple_certified,
+            certificate={"task_fingerprint": "f" * 64},
+            message="missing task/oracle certificate binding",
+        )
+    with subtests.test(msg="changed oracle fingerprint"):
+        _assert_reuse_rejects(
+            direct,
+            simple_certified,
+            certificate={"oracle_fingerprint": "f" * 64},
+            message="missing task/oracle certificate binding",
+        )
+    with subtests.test(msg="changed graph fingerprint"):
+        _assert_reuse_rejects(
+            direct,
+            simple_certified,
+            certificate={"graph_fingerprint": "f" * 64},
+            message="graph fingerprint",
+        )
+    with subtests.test(msg="changed compiler fingerprint"):
+        _assert_reuse_rejects(
+            direct,
+            simple_certified,
+            certificate={"compiler_fingerprint": "f" * 64},
+            message="compiler fingerprint",
+        )
+    with subtests.test(msg="changed comparator fingerprint"):
+        _assert_reuse_rejects(
+            direct,
+            simple_certified,
+            certificate={"comparator_fingerprint": "f" * 64},
+            message="comparator fingerprint",
+        )
+    with subtests.test(msg="changed certifier fingerprint"):
+        _assert_reuse_rejects(
+            direct,
+            simple_certified,
+            certificate={"certifier_fingerprint": "f" * 64},
+            message="certifier fingerprint",
+        )
+    with subtests.test(msg="changed capability profile"):
+        _assert_reuse_rejects(
+            direct,
+            simple_certified,
+            certificate={"capability_profile_fingerprint": "f" * 64},
+            message="profile fingerprint",
+        )
+    with subtests.test(msg="changed bounds"):
+        _assert_reuse_rejects(
+            direct,
+            simple_certified,
+            certificate={"bounds_fingerprint": "f" * 64},
+            message="bounds fingerprint",
+        )
+    with subtests.test(msg="changed fixture task binding"):
+        _assert_reuse_rejects(
+            direct, simple_certified, fixture={"task_id": "wrong"}, message="fixture task binding"
+        )
+    with subtests.test(msg="changed fixture task fingerprint"):
+        _assert_reuse_rejects(
+            direct,
+            simple_certified,
+            fixture={"task_fingerprint": "f" * 64},
+            message="fixture task fingerprint",
+        )
+    with subtests.test(msg="changed fixture oracle fingerprint"):
+        _assert_reuse_rejects(
+            direct,
+            simple_certified,
+            fixture={"oracle_fingerprint": "f" * 64},
+            message="fixture oracle fingerprint",
+        )
+    with subtests.test(msg="changed fixture coverage registry"):
+        _assert_reuse_rejects(
+            direct,
+            simple_certified,
+            fixture={"coverage_registry_fingerprint": "f" * 64},
+            message="fixture coverage registry",
+        )
+    with subtests.test(msg="failed certification state"):
+        _assert_reuse_rejects(
+            direct,
+            simple_certified,
+            certificate={"state": CertificationState.CANDIDATE},
+            message="certification state",
+        )
+    with subtests.test(msg="certification failures"):
+        _assert_reuse_rejects(
+            direct,
+            simple_certified,
+            certificate={"failures": ("failure",)},
+            message="certification failures",
+        )
+    with subtests.test(msg="absent perfect case"):
+        _assert_reuse_rejects(
+            direct,
+            simple_certified,
+            fixture={
+                "cases": tuple(case for case in selected.fixtures.cases if case.name != "perfect")
+            },
+            message="exactly one perfect case",
+        )
+    with subtests.test(msg="non-correct perfect expected status"):
+        _assert_reuse_rejects(
+            direct,
+            simple_certified,
+            perfect={"expected_status": VerdictStatus.INCORRECT},
+            message="perfect expected status",
+        )
+    with subtests.test(msg="non-correct perfect actual status"):
+        _assert_reuse_rejects(
+            direct,
+            simple_certified,
+            perfect={"actual_status": VerdictStatus.INCORRECT},
+            message="perfect actual status",
+        )
+    with subtests.test(msg="stale certification self-hash"):
+        _assert_reuse_rejects(
+            direct,
+            simple_certified,
+            certificate={"certification_fingerprint": "f" * 64},
+            stale=True,
+            message="certificate self-hash",
+        )
+    with subtests.test(msg="stale fixture self-hash"):
+        _assert_reuse_rejects(
+            direct,
+            simple_certified,
+            fixture={"fixture_fingerprint": "f" * 64},
+            stale=True,
+            message="fixture self-hash",
+        )
+    with subtests.test(msg="altered perfect evidence with stale hash"):
+        evidence = next(case.evidence for case in selected.fixtures.cases if case.name == "perfect")
+        _assert_reuse_rejects(
+            direct,
+            simple_certified,
+            perfect={"evidence": evidence.model_copy(update={"count": 987})},
+            stale=True,
+            message="fixture self-hash",
+        )
+    with subtests.test(msg="changed fixture comparator fingerprint"):
+        _assert_reuse_rejects(
+            direct,
+            simple_certified,
+            fixture={"comparator_fingerprint": "f" * 64},
+            message="fixture comparator fingerprint",
+        )
+    with subtests.test(msg="fresh call after all invalid variants"):
+        assert _perfect_answers(direct, simple_certified) == baseline
+        assert tuple(item.model_dump(mode="python") for item in simple_certified) == before
 
 
 def test_every_compiled_perfect_answer_matches_its_public_schema(
     complex_compiled,
+    complex_certified,
 ) -> None:
     _, snapshot, direct, mcp = complex_compiled
 
     for corpus in (direct, mcp):
-        answers = _perfect_answers(corpus, snapshot)
+        answers = _perfect_answers(corpus, complex_certified)
         for task in corpus.tasks:
             validate_json_schema(
                 answers[task.public.task_id],
@@ -1138,11 +1462,7 @@ def test_absence_prompt_does_not_offer_fields_forbidden_by_its_schema(
     _, _, direct, mcp = complex_compiled
 
     for corpus in (direct, mcp):
-        task = next(
-            item.public
-            for item in corpus.tasks
-            if item.public.claim_kind == "absence"
-        )
+        task = next(item.public for item in corpus.tasks if item.public.claim_kind == "absence")
         assert "supporting_edges" not in task.answer_schema["properties"]
         assert "observed_properties" not in task.answer_schema["properties"]
         assert "additional supporting edges" not in task.question
@@ -1158,21 +1478,7 @@ def test_every_public_answer_field_has_a_shared_evidence_ir_consumer(
         assert set(task.public.answer_schema["properties"]).issubset(_KNOWN_TOP_LEVEL_FIELDS)
 
 
-def test_offline_scoring_uses_sealed_identity_catalog_and_shared_comparator(
-    simple_compiled,
-) -> None:
-    _, snapshot, direct, _ = simple_compiled
-    public, private = build_artifacts(
-        direct,
-        identity_catalog=snapshot.entities,
-    )
-    answers = build_answers_artifact(
-        public,
-        _perfect_answers(direct, snapshot),
-    )
-
-    scoring = score_answers_v2(public, private, answers)
-
+def _assert_offline_scoring_compliance(public, private, snapshot, scoring):
     assert len(private.identity_catalog) == len(snapshot.entities)
     assert scoring.summary.scheduled == len(public.tasks)
     assert scoring.summary.correct == len(public.tasks)
@@ -1190,15 +1496,121 @@ def test_offline_scoring_uses_sealed_identity_catalog_and_shared_comparator(
     )
 
 
+def _assert_scoring_checkpoint(pair, profile, identity, scoring):
+    checkpoint = build_checkpoint(
+        pair,
+        profile,
+        identity,
+        results=scoring.results,
+    )
+    assert validate_checkpoint(checkpoint, pair, profile, identity) == checkpoint
+    with pytest.raises(CampaignArtifactError, match="run_identity"):
+        validate_checkpoint(
+            checkpoint,
+            pair,
+            profile,
+            identity.model_copy(update={"run_index": 2}),
+        )
+
+
+def _assert_scoring_public_report(pair, profile, public, scoring):
+    report = build_public_report(
+        pair,
+        profile,
+        scoring.results,
+        scoring.summary,
+    )
+    serialized = json.dumps(report.model_dump(mode="json"), sort_keys=True)
+    assert "oracle_fingerprint" not in serialized
+    assert "oracle_artifact_fingerprint" not in serialized
+    assert "evidence" not in serialized
+    assert len(report.rows) == len(public.tasks)
+
+
+def _assert_scoring_subset_report(pair, profile, scoring):
+    subset_ids = tuple(result.task_id for result in scoring.results[:2])
+    subset_results = scoring.results[:2]
+    subset_report = build_public_report(
+        pair,
+        profile,
+        subset_results,
+        summarize_results(subset_ids, subset_results),
+        scheduled_task_ids=subset_ids,
+    )
+    assert tuple(row.task_id for row in subset_report.rows) == tuple(sorted(subset_ids))
+
+
+def _assert_scoring_output_guard(pair, profile, snapshot, mcp, tmp_path):
+    provenance = build_run_provenance(pair, profile)
+    output_dir = tmp_path / "campaign"
+    guard = guard_v2_output_directory(output_dir, provenance)
+    assert guard_v2_output_directory(output_dir, provenance) == guard
+
+    public_mcp, private_mcp = build_artifacts(
+        mcp,
+        identity_catalog=snapshot.entities,
+    )
+    other = build_run_provenance(
+        V2ArtifactPair(public=public_mcp, private=private_mcp),
+        capability_profile_for_track(Track.MCP),
+    )
+    with pytest.raises(CampaignArtifactError, match="different"):
+        guard_v2_output_directory(output_dir, other)
+
+
+def test_offline_scoring_publication_lifecycle(
+    simple_compiled,
+    simple_certified,
+    tmp_path,
+    subtests,
+) -> None:
+    _, snapshot, direct, mcp = simple_compiled
+    public, private = build_artifacts(direct, identity_catalog=snapshot.entities)
+    pair = V2ArtifactPair(public=public, private=private)
+    profile = capability_profile_for_track(Track.DIRECT)
+    answers = build_answers_artifact(public, _perfect_answers(direct, simple_certified))
+    scoring = score_answers_v2(public, private, answers)
+    identity = RunIdentity(
+        provider="fixture",
+        model="deterministic",
+        run_index=1,
+        target_fingerprint="a" * 64,
+    )
+    with subtests.test(
+        msg="test_offline_scoring_uses_sealed_identity_catalog_and_shared_comparator"
+    ):
+        _assert_offline_scoring_compliance(public, private, snapshot, scoring)
+    with subtests.test(
+        msg="test_v2_checkpoint_output_guard_and_public_report_are_exact_and_redacted: checkpoint"
+    ):
+        _assert_scoring_checkpoint(pair, profile, identity, scoring)
+    with subtests.test(
+        msg="test_v2_checkpoint_output_guard_and_public_report_are_exact_and_redacted: full report"
+    ):
+        _assert_scoring_public_report(pair, profile, public, scoring)
+    with subtests.test(
+        msg=(
+            "test_v2_checkpoint_output_guard_and_public_report_are_exact_and_redacted: "
+            "subset report"
+        )
+    ):
+        _assert_scoring_subset_report(pair, profile, scoring)
+    with subtests.test(
+        msg="test_v2_checkpoint_output_guard_and_public_report_are_exact_and_redacted: output guard"
+    ):
+        _assert_scoring_output_guard(pair, profile, snapshot, mcp, tmp_path)
+
+
 def test_forged_answer_reference_data_cannot_affect_a_v2_verdict(
     simple_compiled,
+    simple_certified,
 ) -> None:
     _, snapshot, direct, _ = simple_compiled
     public, private = build_artifacts(
         direct,
         identity_catalog=snapshot.entities,
     )
-    raw_answers = _perfect_answers(direct, snapshot)
+    raw_answers = _perfect_answers(direct, simple_certified)
     first_task_id = public.tasks[0].task_id
     raw_answers[first_task_id]["correct"] = True
     answers = build_answers_artifact(public, raw_answers)
@@ -1214,20 +1626,19 @@ def test_forged_answer_reference_data_cannot_affect_a_v2_verdict(
     assert scoring.summary.model_failures == 1
     assert scoring.summary.output_noncompliant == 1
     assert scoring.summary.reasoning_accuracy == 1.0
-    assert scoring.summary.effective_accuracy == (len(public.tasks) - 1) / len(
-        public.tasks
-    )
+    assert scoring.summary.effective_accuracy == (len(public.tasks) - 1) / len(public.tasks)
 
 
 def test_offline_scoring_treats_strict_schema_failure_as_output_invalid(
     simple_compiled,
+    simple_certified,
 ) -> None:
     _, snapshot, _, mcp = simple_compiled
     public, private = build_artifacts(
         mcp,
         identity_catalog=snapshot.entities,
     )
-    raw_answers = _perfect_answers(mcp, snapshot)
+    raw_answers = _perfect_answers(mcp, simple_certified)
     count_task = next(task for task in public.tasks if task.claim_kind == "count")
     raw_answers[count_task.task_id]["count"] = "not-an-integer"
     answers = build_answers_artifact(public, raw_answers)
@@ -1248,6 +1659,7 @@ def test_offline_scoring_treats_strict_schema_failure_as_output_invalid(
 @pytest.mark.parametrize("nonfinite", (float("nan"), float("inf"), float("-inf")))
 def test_offline_scoring_rejects_nonfinite_output_at_shared_boundary(
     simple_compiled,
+    simple_certified,
     nonfinite: float,
 ) -> None:
     _, snapshot, _, mcp = simple_compiled
@@ -1255,7 +1667,7 @@ def test_offline_scoring_rejects_nonfinite_output_at_shared_boundary(
         mcp,
         identity_catalog=snapshot.entities,
     )
-    raw_answers = _perfect_answers(mcp, snapshot)
+    raw_answers = _perfect_answers(mcp, simple_certified)
     count_task = next(task for task in public.tasks if task.claim_kind == "count")
     raw_answers[count_task.task_id]["count"] = nonfinite
     answers = build_answers_artifact(public, raw_answers)
@@ -1271,6 +1683,7 @@ def test_offline_scoring_rejects_nonfinite_output_at_shared_boundary(
 
 def test_offline_scoring_contains_unexpected_comparator_failure(
     simple_compiled,
+    simple_certified,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _, snapshot, direct, _ = simple_compiled
@@ -1280,7 +1693,7 @@ def test_offline_scoring_contains_unexpected_comparator_failure(
     )
     answers = build_answers_artifact(
         public,
-        _perfect_answers(direct, snapshot),
+        _perfect_answers(direct, simple_certified),
     )
 
     def raise_internal_error(*args: object, **kwargs: object):
@@ -1303,13 +1716,14 @@ def test_offline_scoring_contains_unexpected_comparator_failure(
 
 def test_v2_scoring_rejects_missing_duplicate_unknown_and_stale_tasks(
     simple_compiled,
+    simple_certified,
 ) -> None:
     _, snapshot, direct, _ = simple_compiled
     public, private = build_artifacts(
         direct,
         identity_catalog=snapshot.entities,
     )
-    raw_answers = _perfect_answers(direct, snapshot)
+    raw_answers = _perfect_answers(direct, simple_certified)
     valid = build_answers_artifact(public, raw_answers)
     submissions = list(valid.answers)
 
@@ -1514,86 +1928,9 @@ def test_live_catalog_promotion_requires_exact_receipts_and_task_accounting(
     )
 
 
-def test_v2_checkpoint_output_guard_and_public_report_are_exact_and_redacted(
-    simple_compiled,
-    tmp_path,
-) -> None:
-    _, snapshot, direct, mcp = simple_compiled
-    public, private = build_artifacts(
-        direct,
-        identity_catalog=snapshot.entities,
-    )
-    pair = V2ArtifactPair(public=public, private=private)
-    profile = capability_profile_for_track(Track.DIRECT)
-    answers = build_answers_artifact(
-        public,
-        _perfect_answers(direct, snapshot),
-    )
-    scoring = score_answers_v2(public, private, answers)
-    identity = RunIdentity(
-        provider="fixture",
-        model="deterministic",
-        run_index=1,
-        target_fingerprint="a" * 64,
-    )
-
-    checkpoint = build_checkpoint(
-        pair,
-        profile,
-        identity,
-        results=scoring.results,
-    )
-    assert validate_checkpoint(checkpoint, pair, profile, identity) == checkpoint
-    with pytest.raises(CampaignArtifactError, match="run_identity"):
-        validate_checkpoint(
-            checkpoint,
-            pair,
-            profile,
-            identity.model_copy(update={"run_index": 2}),
-        )
-
-    report = build_public_report(
-        pair,
-        profile,
-        scoring.results,
-        scoring.summary,
-    )
-    serialized = json.dumps(report.model_dump(mode="json"), sort_keys=True)
-    assert "oracle_fingerprint" not in serialized
-    assert "oracle_artifact_fingerprint" not in serialized
-    assert "evidence" not in serialized
-    assert len(report.rows) == len(public.tasks)
-
-    subset_ids = tuple(result.task_id for result in scoring.results[:2])
-    subset_results = scoring.results[:2]
-    subset_report = build_public_report(
-        pair,
-        profile,
-        subset_results,
-        summarize_results(subset_ids, subset_results),
-        scheduled_task_ids=subset_ids,
-    )
-    assert tuple(row.task_id for row in subset_report.rows) == tuple(sorted(subset_ids))
-
-    provenance = build_run_provenance(pair, profile)
-    output_dir = tmp_path / "campaign"
-    guard = guard_v2_output_directory(output_dir, provenance)
-    assert guard_v2_output_directory(output_dir, provenance) == guard
-
-    public_mcp, private_mcp = build_artifacts(
-        mcp,
-        identity_catalog=snapshot.entities,
-    )
-    other = build_run_provenance(
-        V2ArtifactPair(public=public_mcp, private=private_mcp),
-        capability_profile_for_track(Track.MCP),
-    )
-    with pytest.raises(CampaignArtifactError, match="different"):
-        guard_v2_output_directory(output_dir, other)
-
-
 def test_score_answers_cli_requires_explicit_v2_and_separate_oracles(
     simple_compiled,
+    simple_certified,
     tmp_path,
 ) -> None:
     _, snapshot, direct, _ = simple_compiled
@@ -1608,7 +1945,7 @@ def test_score_answers_cli_requires_explicit_v2_and_separate_oracles(
     answers_path = tmp_path / "answers.json"
     answers_path.write_text(
         json.dumps(
-            {"answers": _perfect_answers(direct, snapshot)},
+            {"answers": _perfect_answers(direct, simple_certified)},
             indent=2,
             sort_keys=True,
         )

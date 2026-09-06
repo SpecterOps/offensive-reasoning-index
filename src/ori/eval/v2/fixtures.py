@@ -18,7 +18,7 @@ from .evidence import (
 )
 from .fingerprint import canonical_sha256, certifier_fingerprint
 from .graph import GraphSnapshot, graph_identity_resolver
-from .identity import IdentityResolver
+from .identity import AmbiguousIdentityError, IdentityResolver
 from .profiles import capability_profile_for_track
 from .schema import (
     BoundedNegativePolicy,
@@ -363,7 +363,12 @@ def validate_fixture_coverage_artifacts(
 
 def _entity_token(snapshot: GraphSnapshot, object_id: str) -> str:
     entity = snapshot.entity(object_id)
-    return entity.canonical_name or next(iter(entity.aliases), entity.object_id)
+    candidate = entity.canonical_name or next(iter(entity.aliases), entity.object_id)
+    try:
+        resolved = graph_identity_resolver(snapshot).resolve(candidate)
+    except AmbiguousIdentityError:
+        return object_id
+    return candidate if resolved == object_id else object_id
 
 
 def _edge_payload(edge: EdgeWitness, snapshot: GraphSnapshot, *, aliases: bool) -> dict[str, Any]:
@@ -974,6 +979,8 @@ def offline_certify(
 ) -> OfflineCertification:
     """Execute fixtures and bind one task to an offline-certified state."""
 
+    if task.public.binding.mcp_binding_mode == "native":
+        raise ValueError("NATIVE_CERTIFICATION_UNAVAILABLE: native adapter replay is required")
     fixtures = build_fixture_manifest(task, snapshot)
     binding = task.public.binding
     capability_profile = capability_profile_for_track(binding.track)

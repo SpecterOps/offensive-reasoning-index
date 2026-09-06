@@ -8,9 +8,11 @@ from ori.benchmarks import describe_benchmark, get_benchmark, list_benchmarks
 def test_list_benchmarks_exposes_simple_and_complex_in_public_order() -> None:
     benchmarks = list_benchmarks()
 
-    assert [benchmark.name for benchmark in benchmarks] == ["simple", "complex"]
+    assert [benchmark.name for benchmark in benchmarks] == ["simple", "complex", "oaic-2026-v1"]
     assert benchmarks[0].source_phase == "phase3"
     assert benchmarks[1].source_phase == "phase4"
+    assert benchmarks[2].name == "oaic-2026-v1"
+    assert all(track.task_count == 50 for track in benchmarks[2].tracks)
 
 
 def test_simple_benchmark_is_phase3_fast_profile() -> None:

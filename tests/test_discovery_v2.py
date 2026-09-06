@@ -9,6 +9,7 @@ from click.testing import CliRunner
 from pydantic import ValidationError
 
 from ori.cli import main
+from ori.discovery import compiler, grader
 from ori.discovery.compiler import _normalize_variant
 from ori.discovery.grader import (
     DiscoverySubmissionError,
@@ -31,7 +32,14 @@ from ori.eval.v2.graph import (
     build_graph_fact_registry,
 )
 from ori.eval.v2.profiles import PINNED_DIRECT_CAPABILITY_PROFILE
-from ori.eval.v2.schema import EdgeWitness, EntityRef, ExecutionBounds, Track
+from ori.eval.v2.schema import (
+    EdgeDirection,
+    EdgeWitness,
+    EntityRef,
+    ExecutionBounds,
+    PropertyFact,
+    Track,
+)
 
 ZERO = "0" * 64
 
@@ -337,3 +345,63 @@ def test_discovery_cli_exposes_offline_commands_only() -> None:
     assert "preflight" in result.output
     assert "grade" in result.output
     assert "run" not in result.output
+
+
+def test_discovery_edge_key_preserves_comparison_contract() -> None:
+    assert compiler._edge_key is grader._edge_key
+    edge = EdgeWitness(source_id="Straße", relationship="MemberOf", target_id="TARGET")
+    key = grader._edge_key(edge)
+    assert key == ("strasse", "memberof", "target", "outbound")
+    assert grader._edge_key(
+        edge.model_copy(update={"source_id": "STRASSE", "relationship": "memberof"})
+    ) == key
+    assert grader._edge_key(edge.model_copy(update={"source_id": " Straße"})) != key
+    assert grader._edge_key(
+        edge.model_copy(update={"source_id": "TARGET", "target_id": "Straße"})
+    ) != key
+    inbound = edge.model_copy(update={"direction": EdgeDirection.INBOUND})
+    assert grader._edge_key(inbound) != key
+    assert grader._edge_key(
+        edge.model_copy(update={"properties": (PropertyFact(key="enabled", value=True),)})
+    ) == key
+
+
+def test_discovery_edge_key_preserves_invalid_input_errors() -> None:
+    for key in (compiler._edge_key, grader._edge_key):
+        with pytest.raises(AttributeError):
+            key(None)
+
+        sentinel = RuntimeError("source access failed")
+        accessed: list[str] = []
+
+        class BrokenEdge:
+            @property
+            def source_id(self):
+                accessed.append("source")
+                raise sentinel
+
+            def __getattr__(self, name):
+                accessed.append(name)
+                raise AssertionError("later field must not be evaluated")
+
+        with pytest.raises(RuntimeError) as caught:
+            key(BrokenEdge())
+        assert caught.value is sentinel
+        assert accessed == ["source"]
+
+
+def test_discovery_strict_subpath_preserves_order() -> None:
+    route = tuple(
+        EdgeWitness(source_id=source, relationship="MemberOf", target_id=target)
+        for source, target in (("A", "B"), ("B", "C"), ("C", "D"))
+    )
+    for strict_subpath in (
+        compiler._strict_contiguous_subpath,
+        grader._is_strict_subpath,
+    ):
+        assert strict_subpath(route[:2], route)
+        assert strict_subpath(route[1:2], route)
+        assert not strict_subpath(route, route)
+        assert not strict_subpath(tuple(reversed(route[:2])), route)
+        assert not strict_subpath((route[0], route[2]), route)
+        assert strict_subpath((), route)

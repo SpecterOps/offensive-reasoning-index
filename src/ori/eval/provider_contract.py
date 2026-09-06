@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Literal, TypeAlias
 
+GEMINI_OPENAI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
+
 
 class ProviderApiSurface(StrEnum):
     """Provider API surface requested by campaign configuration."""
@@ -54,6 +56,12 @@ class ProviderProtocolError(ProviderContractError):
     """The provider returned a successful but incompatible response envelope."""
 
     code = "PROVIDER_PROTOCOL"
+
+
+class ProviderGenerationError(ProviderContractError):
+    """A provider explicitly failed generation without a structured retry cause."""
+
+    code = "PROVIDER_GENERATION_ERROR"
 
 
 class ProviderCapabilityError(ProviderContractError):

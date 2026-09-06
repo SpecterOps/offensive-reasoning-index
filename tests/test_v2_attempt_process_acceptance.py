@@ -34,8 +34,8 @@ import httpx
 from ori.eval.v2 import campaign_runner as runner, model_runtime
 from ori.eval.v2.profiles import build_direct_capability_profile
 from ori.eval.v2.schema import Track
-from tests.test_v2_direct_adapter import TASK, ORACLE
-from tests.test_v2_campaign_status import _provenance
+from tests.support.v2_direct import TASK, ORACLE
+from tests.support.v2_campaign import _provenance
 
 root, mode = Path(sys.argv[1]), sys.argv[2]
 profile = build_direct_capability_profile()

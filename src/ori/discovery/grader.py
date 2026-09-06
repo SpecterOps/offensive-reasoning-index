@@ -20,7 +20,7 @@ from ori.relationships import (
     canonical_relationship_kind,
 )
 
-from .compiler import iter_truth_variants
+from .compiler import _edge_key, iter_truth_variants
 from .schema import (
     DiscoveryFinding,
     DiscoveryFindingResult,
@@ -101,15 +101,6 @@ def _normalize_finding(
                 _normalize_edge(edge, resolver) for edge in finding.evidence_edges
             ),
         }
-    )
-
-
-def _edge_key(edge: EdgeWitness) -> tuple[str, str, str, str]:
-    return (
-        edge.source_id.casefold(),
-        edge.relationship.casefold(),
-        edge.target_id.casefold(),
-        edge.direction.value,
     )
 
 

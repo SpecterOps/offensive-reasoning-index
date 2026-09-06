@@ -33,6 +33,10 @@ Thumbs.db
 .env.local
 .env.*.local
 
+# Campaign header guards can contain private values in any output directory.
+.ori-private/
+*.private.json
+
 results/
 
 results/

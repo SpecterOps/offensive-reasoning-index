@@ -53,6 +53,7 @@ from ori.eval.v2.schema import (
     EvidenceIR,
     ExactCountPolicy,
     ExactSetPolicy,
+    ExecutionBounds,
     ExecutionClass,
     MCPClaimEvidenceContract,
     NegativeReasonCode,
@@ -70,32 +71,31 @@ from ori.eval.v2.schema import (
     VerdictStatus,
 )
 from ori.eval.v2.scoring import SampleOutcomeCode, SampleResult
-
-from .test_v2_direct_adapter import (
+from tests.support.v2_direct import (
     ORACLE as DIRECT_ORACLE,
 )
-from .test_v2_direct_adapter import (
+from tests.support.v2_direct import (
     RESOLVER as DIRECT_RESOLVER,
 )
-from .test_v2_direct_adapter import SET_TASK as DIRECT_SET_TASK
-from .test_v2_direct_adapter import (
+from tests.support.v2_direct import SET_TASK as DIRECT_SET_TASK
+from tests.support.v2_direct import (
     TASK as DIRECT_TASK,
 )
-from .test_v2_direct_adapter import (
+from tests.support.v2_direct import (
     FakeCoordinator,
     _raw_route,
 )
-from .test_v2_mcp_adapter import (
+from tests.support.v2_mcp import (
     ORACLE as MCP_ORACLE,
 )
-from .test_v2_mcp_adapter import (
+from tests.support.v2_mcp import (
     PROFILE,
     _answer,
 )
-from .test_v2_mcp_adapter import (
+from tests.support.v2_mcp import (
     RESOLVER as MCP_RESOLVER,
 )
-from .test_v2_mcp_adapter import (
+from tests.support.v2_mcp import (
     TASK as MCP_TASK,
 )
 
@@ -158,6 +158,55 @@ def _public_selection_task(selection: SelectionExpression):
             "acceptance_spec": compile_acceptance_spec(claim, policy, binding),
             "binding": binding,
         }
+    )
+
+
+def _unbound_user_count_task() -> TaskBundle:
+    return MCP_TASK.model_copy(
+        update={
+            "claim_kind": "count",
+            "answer_policy": ExactCountPolicy(kind="exact_count"),
+            "binding": MCP_TASK.binding.model_copy(
+                update={
+                    "mcp_evidence_contract": MCPClaimEvidenceContract(
+                        result_kind="scalar_count",
+                        projection_types=("User",),
+                    )
+                }
+            ),
+        }
+    )
+
+
+def _user_set_task(bounds: ExecutionBounds) -> TaskBundle:
+    return MCP_TASK.model_copy(
+        update={
+            "claim_kind": "set",
+            "answer_policy": ExactSetPolicy(kind="exact_set"),
+            "binding": _cypher_set_binding(
+                bounds=bounds,
+                projection_type="User",
+            ),
+        }
+    )
+
+
+def _group_membership_selection_task() -> TaskBundle:
+    return _public_selection_task(
+        SelectionExpression(
+            anchors=(EntitySelector(role="target", object_type="Group"),),
+            relationships=(
+                RelationshipPattern(
+                    source_role="result",
+                    relationship="MemberOf",
+                    target_role="target",
+                    source_type="User",
+                    target_type="Group",
+                ),
+            ),
+            projection_role="result",
+            projection_type="User",
+        )
     )
 
 
@@ -810,22 +859,7 @@ def test_mcp_negative_proof_query_must_cover_public_route_scope() -> None:
 
 
 def test_public_selection_requires_the_declared_relationship() -> None:
-    task = _public_selection_task(
-        SelectionExpression(
-            anchors=(EntitySelector(role="target", object_type="Group"),),
-            relationships=(
-                RelationshipPattern(
-                    source_role="result",
-                    relationship="MemberOf",
-                    target_role="target",
-                    source_type="User",
-                    target_type="Group",
-                ),
-            ),
-            projection_role="result",
-            projection_type="User",
-        )
-    )
+    task = _group_membership_selection_task()
     connected = (
         "MATCH (g:Group {objectid:'GROUP-B'}) "
         "MATCH (u:User)-[:MemberOf]->(g) "
@@ -987,22 +1021,7 @@ def test_query_selectors_use_live_identity_properties_not_answer_aliases() -> No
 
 
 def test_public_selection_requires_unproven_concrete_projection_label() -> None:
-    task = _public_selection_task(
-        SelectionExpression(
-            anchors=(EntitySelector(role="target", object_type="Group"),),
-            relationships=(
-                RelationshipPattern(
-                    source_role="result",
-                    relationship="MemberOf",
-                    target_role="target",
-                    source_type="User",
-                    target_type="Group",
-                ),
-            ),
-            projection_role="result",
-            projection_type="User",
-        )
-    )
+    task = _group_membership_selection_task()
     explicit_user = (
         "MATCH (g:Group {objectid:'GROUP-B'}) "
         "MATCH (result:User)-[:MemberOf]->(g) "
@@ -1151,22 +1170,7 @@ def test_public_not_true_boolean_accepts_equivalent_coalesce_false() -> None:
 
 
 def test_selection_fixture_query_realizes_the_public_contract() -> None:
-    task = _public_selection_task(
-        SelectionExpression(
-            anchors=(EntitySelector(role="target", object_type="Group"),),
-            relationships=(
-                RelationshipPattern(
-                    source_role="result",
-                    relationship="MemberOf",
-                    target_role="target",
-                    source_type="User",
-                    target_type="Group",
-                ),
-            ),
-            projection_role="result",
-            projection_type="User",
-        )
-    )
+    task = _group_membership_selection_task()
 
     page_query = _mcp_fixture_query(task, count=False, limit=100)
     count_query = _mcp_fixture_query(task, count=True)
@@ -2391,16 +2395,7 @@ def test_certification_companion_count_matches_distinct_set_window() -> None:
 
 def test_count_projection_accepts_one_unambiguous_scalar_alias() -> None:
     bounds = MCP_TASK.binding.bounds.model_copy(update={"require_total_count": True})
-    task = MCP_TASK.model_copy(
-        update={
-            "claim_kind": "set",
-            "answer_policy": ExactSetPolicy(kind="exact_set"),
-            "binding": _cypher_set_binding(
-                bounds=bounds,
-                projection_type="User",
-            ),
-        }
-    )
+    task = _user_set_task(bounds)
     projector = MCPTranscriptProjector(task, PROFILE)
 
     projector.observe(
@@ -2426,20 +2421,7 @@ def test_count_projection_accepts_one_unambiguous_scalar_alias() -> None:
 
 
 def test_count_star_accepts_one_unambiguous_typed_population() -> None:
-    task = MCP_TASK.model_copy(
-        update={
-            "claim_kind": "count",
-            "answer_policy": ExactCountPolicy(kind="exact_count"),
-            "binding": MCP_TASK.binding.model_copy(
-                update={
-                    "mcp_evidence_contract": MCPClaimEvidenceContract(
-                        result_kind="scalar_count",
-                        projection_types=("User",),
-                    )
-                }
-            ),
-        }
-    )
+    task = _unbound_user_count_task()
     projector = MCPTranscriptProjector(task, PROFILE)
 
     ready = projector.observe(
@@ -2504,20 +2486,7 @@ def test_count_star_accepts_one_selector_bound_typed_population() -> None:
 
 
 def test_count_star_accepts_one_anonymous_typed_population() -> None:
-    task = MCP_TASK.model_copy(
-        update={
-            "claim_kind": "count",
-            "answer_policy": ExactCountPolicy(kind="exact_count"),
-            "binding": MCP_TASK.binding.model_copy(
-                update={
-                    "mcp_evidence_contract": MCPClaimEvidenceContract(
-                        result_kind="scalar_count",
-                        projection_types=("User",),
-                    )
-                }
-            ),
-        }
-    )
+    task = _unbound_user_count_task()
     projector = MCPTranscriptProjector(task, PROFILE)
 
     ready = projector.observe(
@@ -2541,20 +2510,7 @@ def test_count_star_accepts_one_anonymous_typed_population() -> None:
 
 
 def test_count_star_rejects_ambiguous_typed_populations() -> None:
-    task = MCP_TASK.model_copy(
-        update={
-            "claim_kind": "count",
-            "answer_policy": ExactCountPolicy(kind="exact_count"),
-            "binding": MCP_TASK.binding.model_copy(
-                update={
-                    "mcp_evidence_contract": MCPClaimEvidenceContract(
-                        result_kind="scalar_count",
-                        projection_types=("User",),
-                    )
-                }
-            ),
-        }
-    )
+    task = _unbound_user_count_task()
     projector = MCPTranscriptProjector(task, PROFILE)
 
     ready = projector.observe(
@@ -2578,20 +2534,7 @@ def test_count_star_rejects_ambiguous_typed_populations() -> None:
 
 
 def test_count_star_rejects_fanout_row_populations() -> None:
-    task = MCP_TASK.model_copy(
-        update={
-            "claim_kind": "count",
-            "answer_policy": ExactCountPolicy(kind="exact_count"),
-            "binding": MCP_TASK.binding.model_copy(
-                update={
-                    "mcp_evidence_contract": MCPClaimEvidenceContract(
-                        result_kind="scalar_count",
-                        projection_types=("User",),
-                    )
-                }
-            ),
-        }
-    )
+    task = _unbound_user_count_task()
     projector = MCPTranscriptProjector(task, PROFILE)
 
     ready = projector.observe(
@@ -2622,20 +2565,7 @@ def test_count_star_rejects_fanout_row_populations() -> None:
     ),
 )
 def test_count_star_rejects_anonymous_fanout_row_populations(query: str) -> None:
-    task = MCP_TASK.model_copy(
-        update={
-            "claim_kind": "count",
-            "answer_policy": ExactCountPolicy(kind="exact_count"),
-            "binding": MCP_TASK.binding.model_copy(
-                update={
-                    "mcp_evidence_contract": MCPClaimEvidenceContract(
-                        result_kind="scalar_count",
-                        projection_types=("User",),
-                    )
-                }
-            ),
-        }
-    )
+    task = _unbound_user_count_task()
     projector = MCPTranscriptProjector(task, PROFILE)
 
     ready = projector.observe(
@@ -2664,16 +2594,7 @@ def test_count_projection_accepts_limit_one_and_collected_entity_page() -> None:
             "require_total_count": True,
         }
     )
-    task = MCP_TASK.model_copy(
-        update={
-            "claim_kind": "set",
-            "answer_policy": ExactSetPolicy(kind="exact_set"),
-            "binding": _cypher_set_binding(
-                bounds=bounds,
-                projection_type="User",
-            ),
-        }
-    )
+    task = _user_set_task(bounds)
     projector = MCPTranscriptProjector(task, PROFILE)
     projector.observe(
         "cypher_query",
@@ -3109,16 +3030,7 @@ def test_page_bound_violation_revokes_an_earlier_unlock() -> None:
             "require_total_count": False,
         }
     )
-    task = MCP_TASK.model_copy(
-        update={
-            "claim_kind": "set",
-            "answer_policy": ExactSetPolicy(kind="exact_set"),
-            "binding": _cypher_set_binding(
-                bounds=bounds,
-                projection_type="User",
-            ),
-        }
-    )
+    task = _user_set_task(bounds)
     projector = MCPTranscriptProjector(task, PROFILE)
     first = projector.observe(
         "cypher_query",
@@ -3154,16 +3066,7 @@ def test_later_independently_complete_proof_supersedes_earlier_truncation() -> N
             "require_total_count": False,
         }
     )
-    task = MCP_TASK.model_copy(
-        update={
-            "claim_kind": "set",
-            "answer_policy": ExactSetPolicy(kind="exact_set"),
-            "binding": _cypher_set_binding(
-                bounds=bounds,
-                projection_type="User",
-            ),
-        }
-    )
+    task = _user_set_task(bounds)
     projector = MCPTranscriptProjector(task, PROFILE)
     assert (
         projector.observe(
@@ -6329,3 +6232,143 @@ def test_complete_500_identity_receipt_materializes_set_after_empty_schema_retry
     assert len(outcome.sample.evidence.entities) == 500
     assert record.mcp_finalization is not None
     assert record.mcp_finalization["schema_retry_count"] == 1
+
+
+def test_schema_retry_adapter_internal_fault_is_harness_failure(monkeypatch, subtests):
+    import copy
+    import os
+    import socket
+    import subprocess
+
+    from ori.eval import adapter
+    from ori.eval.v2.fingerprint import canonical_sha256
+
+    visited = []
+    for case, error_type in (("S0", ValueError), ("S1", TimeoutError)):
+        visited.append(case)
+        with subtests.test(case=case), monkeypatch.context() as context:
+
+            def deny(*args, **kwargs):
+                raise AssertionError("schema acceptance attempted external access")
+
+            for key in tuple(os.environ):
+                context.delenv(key)
+            context.setenv("OPENAI_COMPAT_API_KEY", "synthetic")
+            context.setattr(socket.socket, "connect", deny)
+            context.setattr(socket.socket, "connect_ex", deny)
+            context.setattr(socket, "getaddrinfo", deny)
+            context.setattr(subprocess, "Popen", deny)
+            initial_calls = []
+            requests = []
+            clients = []
+            original_transcript = []
+            original_observations = []
+            frozen = {}
+
+            async def initial(**kwargs):
+                initial_calls.append(kwargs)
+
+                def observe(*args):
+                    original_observations.append(copy.deepcopy(args))
+                    kwargs["tool_result_observer"](*args)
+
+                _observe_route_evidence(observe)
+                malformed = "commentary " + json.dumps(_answer())
+                original_transcript.extend(
+                    [
+                        {"role": "system", "content": "authoritative"},
+                        {"role": "user", "content": MCP_TASK.question},
+                        {
+                            "role": "assistant",
+                            "content": "",
+                            "metadata": {"private": True},
+                            "tool_calls": [
+                                {
+                                    "id": "call-1",
+                                    "type": "function",
+                                    "function": "cypher_query",
+                                    "arguments": {"info_type": "run"},
+                                }
+                            ],
+                        },
+                        {"role": "tool", "tool_call_id": "call-1", "content": "claim-bound-result"},
+                        {"role": "assistant", "content": malformed},
+                    ]
+                )
+                frozen["transcript"] = copy.deepcopy(original_transcript)
+                return _response(malformed), object(), original_transcript
+
+            async def create(**kwargs):
+                requests.append(kwargs)
+                raise error_type(f"S1-05F-{case}")
+
+            def client(**kwargs):
+                clients.append(kwargs)
+                return SimpleNamespace(
+                    chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+                )
+
+            context.setattr(model_runtime, "_run_openai_compat_mcp_loop", initial)
+            context.setattr(openai, "AsyncOpenAI", client)
+            outcome, record = asyncio.run(
+                run_mcp_model_task_v2(
+                    task=MCP_TASK,
+                    oracle=MCP_ORACLE,
+                    resolver=MCP_RESOLVER,
+                    profile=PROFILE,
+                    bundle=MCPServerBundle(tools=[]),
+                    model="openai-compat/test-model",
+                    model_base_url="https://provider.invalid/v1",
+                    tool_loop=MCPToolLoop.NATIVE_OPENAI_COMPATIBLE,
+                    max_steps=4,
+                    structured_output_mode="json_schema",
+                    transport=adapter.call_provider_text,
+                )
+            )
+            assert len(initial_calls) == len(requests) == len(clients) == 1
+            payload = requests[0]
+            assert "tools" not in payload
+            assert payload["response_format"]["json_schema"]["name"] == "ori_mcp_submission"
+            assert payload["response_format"]["json_schema"]["schema"] == MCP_TASK.answer_schema
+            assert any(
+                message.get("tool_call_id") == "call-1"
+                and message["content"] == "claim-bound-result"
+                for message in payload["messages"]
+            )
+            assert all("metadata" not in message for message in payload["messages"])
+            assert payload["messages"][-1]["role"] == "user"
+            assert "schema" in payload["messages"][-1]["content"].lower()
+            assert 0 < clients[0]["timeout"] <= MCP_TASK.binding.bounds.timeout_seconds
+            assert outcome.sample.execution_class is ExecutionClass.HARNESS_FAILURE
+            assert outcome.sample.outcome is SampleOutcomeCode.HARNESS_ERROR
+            assert outcome.sample.reasoning_correct is None
+            assert campaign_runner._infrastructure_retry_policy(outcome.sample, record) is None
+            assert (record.tokens_input, record.tokens_output) == (10, 5)
+            assert record.mcp_finalization is not None
+            assert outcome.finalization.phase is FinalizationPhase.HARNESS_FAILURE
+            assert any(
+                event.kind is EvidenceEventKind.USEFUL_POSITIVE for event in record.mcp_events
+            )
+            assert not any(
+                event.kind
+                in {EvidenceEventKind.INFRASTRUCTURE_FAILURE, EvidenceEventKind.TASK_TIMEOUT}
+                for event in record.mcp_events
+            )
+            assert len(record.mcp_tool_receipts) == len(original_observations) == 1
+            receipt = record.mcp_tool_receipts[0]
+            name, arguments, text, error = original_observations[0]
+            assert (
+                receipt.tool_name,
+                receipt.arguments,
+                receipt.result_text,
+                receipt.tool_error,
+            ) == (name, arguments, text, error)
+            assert receipt.event.kind is EvidenceEventKind.USEFUL_POSITIVE
+            assert receipt.receipt_fingerprint == canonical_sha256(
+                receipt, exclude_fields=("receipt_fingerprint",)
+            )
+            assert record.mcp_transcript == tuple(frozen["transcript"])
+            assert record.transcript_digest == canonical_sha256(tuple(frozen["transcript"]))
+            assert record.raw_response == frozen["transcript"][-1]["content"]
+            assert record.response_digest == canonical_sha256(frozen["transcript"][-1]["content"])
+    assert visited == ["S0", "S1"]

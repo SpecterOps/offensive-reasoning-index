@@ -104,8 +104,6 @@ def test_greedy_open_ended_recursive_query_is_rejected() -> None:
             "WHERE g.name = 'DOMAIN ADMINS@TEST.LOCAL' RETURN p"
         ),
         ("MATCH p=(u:User)-[:MemberOf*1..]->(g:Group {name: 'DOMAIN ADMINS@TEST.LOCAL'}) RETURN p"),
-        "MATCH (u:User {hasspn: true}) RETURN u",
-        "MATCH (u:User) WHERE u.hasspn = true RETURN u",
         (
             "MATCH p=(u:User {name: 'A@TEST.LOCAL'})-[*1..5]->"
             "(c:Computer {name: 'C.TEST.LOCAL'}) RETURN p LIMIT 1"

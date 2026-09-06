@@ -28,7 +28,7 @@ V2_REGRESSION_TESTS = {
     ),
     "CV1-005": (
         "tests/test_v2_compiler.py",
-        "test_offline_scoring_uses_sealed_identity_catalog_and_shared_comparator",
+        "test_offline_scoring_publication_lifecycle",
     ),
     "CV1-006": (
         "tests/test_v2_compiler.py",

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -34,10 +35,7 @@ from .scoring import (
 
 def _write_model(path: Path, model: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(model.model_dump(mode="json"), indent=2, sort_keys=True)
-        + "\n"
-    )
+    path.write_text(json.dumps(model.model_dump(mode="json"), indent=2, sort_keys=True) + "\n")
 
 
 def compile_v2_files(
@@ -71,9 +69,7 @@ def compile_v2_files(
     public_path = output_dir / f"{stem}-public-v2.json"
     oracle_path = output_dir / f"{stem}-oracles-v2.private.json"
     inventory_path = output_dir / f"{stem}-inventory-v2.json"
-    certification_path = (
-        output_dir / f"{stem}-offline-certification-v4.private.json"
-    )
+    certification_path = output_dir / f"{stem}-offline-certification-v4.private.json"
     write_artifacts(
         corpus,
         public_path=public_path,
@@ -82,12 +78,87 @@ def compile_v2_files(
     )
     _write_model(inventory_path, inventory)
     _write_model(certification_path, offline)
-    return {
+    paths = {
         "public": public_path,
         "oracles": oracle_path,
         "inventory": inventory_path,
         "offline_certification": certification_path,
     }
+    if product == "oaic-2026-v1":
+        from .oaic_recipes import build_oaic_recipe_metadata
+
+        paths["release_metadata"] = output_dir / f"{stem}-release-metadata-v1.json"
+        _write_model(paths["release_metadata"], build_oaic_recipe_metadata(corpus))
+    return paths
+
+
+def select_v2_files(
+    *,
+    source_manifest_path: Path,
+    archive_path: Path,
+    compiled_dir: Path,
+    certification_dir: Path,
+    output_dir: Path,
+) -> dict[str, Path]:
+    """Admit both complete certified pools and publish one deterministic release.
+
+    This is a file-only operation: existing live certification is required, but
+    no provider, MCP server, or graph endpoint is contacted.
+    """
+    from .campaign_config import ResolvedV2TrackPaths
+    from .campaign_runner import _atomic_write, prepare_track_artifacts
+    from .fingerprint import canonical_sha256
+    from .oaic_recipes import OAICRecipeMetadata
+    from .release_selection import PRODUCT, pair_selected_tracks, select_candidate_track
+
+    manifest = json.loads(source_manifest_path.read_text())
+    archive = archive_path.read_bytes()
+    snapshot = build_archive_snapshot(archive, manifest, product=PRODUCT)
+    if manifest.get("metadata", {}).get("benchmark") != PRODUCT:
+        raise ValueError("selection requires an explicit OAIC source manifest")
+    source_fingerprint = canonical_sha256(manifest)
+    archive_sha256 = hashlib.sha256(archive).hexdigest()
+    selections = {}
+    for track in (Track.DIRECT, Track.MCP):
+        stem = f"{PRODUCT}-{track.value}-seed-{snapshot.seed}"
+        live_stem = f"{PRODUCT}-seed-{snapshot.seed}-{track.value}"
+        paths = ResolvedV2TrackPaths(
+            public=compiled_dir / f"{stem}-public-v2.json",
+            oracles=compiled_dir / f"{stem}-oracles-v2.private.json",
+            candidates=certification_dir / f"{live_stem}-candidates-v2.json",
+            live_certification=(
+                certification_dir / f"{live_stem}-live-certification-v4.private.json"
+            ),
+        )
+        prepared = prepare_track_artifacts(paths, track, snapshot)
+        public = prepared.pair.public
+        if public.seed != snapshot.seed or public.source_manifest_fingerprint != source_fingerprint:
+            raise ValueError("selection source manifest or seed mismatch")
+        metadata = OAICRecipeMetadata.model_validate_json(
+            (compiled_dir / f"{stem}-release-metadata-v1.json").read_text()
+        )
+        selections[track] = select_candidate_track(
+            public=public,
+            candidates=prepared.release,
+            metadata=metadata,
+            source_archive_sha256=archive_sha256,
+        )
+    paired = pair_selected_tracks(selections[Track.DIRECT], selections[Track.MCP])
+    stem = f"{PRODUCT}-seed-{snapshot.seed}"
+    models = {
+        "direct_selection": selections[Track.DIRECT],
+        "mcp_selection": selections[Track.MCP],
+        "selected_release": paired,
+    }
+    paths = {name: output_dir / f"{stem}-{name.replace('_', '-')}-v1.json" for name in models}
+    # Check every output before replacing any file. A release directory cannot
+    # silently change identity; exact reruns are safe and reproducible.
+    for name, path in paths.items():
+        if path.exists() and json.loads(path.read_text()) != models[name].model_dump(mode="json"):
+            raise ValueError("selection output already contains a different release")
+    for name, model in models.items():
+        _atomic_write(paths[name], model.model_dump(mode="json"))
+    return paths
 
 
 async def certify_v2_live_files(
@@ -116,10 +187,7 @@ async def certify_v2_live_files(
         )
         for track in (Track.DIRECT, Track.MCP)
     }
-    profiles = {
-        track: capability_profile_for_track(track)
-        for track in (Track.DIRECT, Track.MCP)
-    }
+    profiles = {track: capability_profile_for_track(track) for track in (Track.DIRECT, Track.MCP)}
     offline = {
         track: build_offline_certification_catalog(
             corpora[track],
@@ -133,8 +201,7 @@ async def certify_v2_live_files(
         health = await bhce.check_health()
         if not health.ok:
             raise ValueError(
-                f"BloodHound health check failed before v2 certification: "
-                f"{health.detail}"
+                f"BloodHound health check failed before v2 certification: {health.detail}"
             )
         live_pre, receipt_pre = await collect_live_snapshot(
             bhce,
@@ -180,12 +247,8 @@ async def certify_v2_live_files(
         "verification_pre": output_dir / f"{stem}-live-pre.private.json",
         "verification_middle": output_dir / f"{stem}-live-middle.private.json",
         "verification_post": output_dir / f"{stem}-live-post.private.json",
-        "direct_certification": (
-            output_dir / f"{stem}-direct-live-certification-v4.private.json"
-        ),
-        "mcp_certification": (
-            output_dir / f"{stem}-mcp-live-certification-v4.private.json"
-        ),
+        "direct_certification": (output_dir / f"{stem}-direct-live-certification-v4.private.json"),
+        "mcp_certification": (output_dir / f"{stem}-mcp-live-certification-v4.private.json"),
         "direct_candidates": output_dir / f"{stem}-direct-candidates-v2.json",
         "mcp_candidates": output_dir / f"{stem}-mcp-candidates-v2.json",
     }
@@ -209,10 +272,7 @@ def _raw_answers_artifact(
 ) -> AnswersV2Artifact:
     text = path.read_text()
     payload = json.loads(text)
-    if (
-        isinstance(payload, dict)
-        and payload.get("schema_version") == "ori-eval-answers-v2"
-    ):
+    if isinstance(payload, dict) and payload.get("schema_version") == "ori-eval-answers-v2":
         return AnswersV2Artifact.model_validate_json(text)
     if not isinstance(payload, dict):
         raise ValueError("v2 answers must be a JSON object")
@@ -227,9 +287,7 @@ def _raw_answers_artifact(
             task_id = item.get("task_id")
             answer = item.get("answer")
             if not isinstance(task_id, str) or not isinstance(answer, dict):
-                raise ValueError(
-                    "v2 answer rows require task_id and structured answer"
-                )
+                raise ValueError("v2 answer rows require task_id and structured answer")
             if task_id in converted:
                 raise ValueError(f"duplicate v2 answer task ID: {task_id}")
             converted[task_id] = answer

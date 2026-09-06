@@ -24,9 +24,8 @@ from ori.eval.v2.profiles import capability_profile_for_track
 from ori.eval.v2.protocol import V2ArtifactPair, build_artifacts
 from ori.eval.v2.schema import ExecutionClass, Track
 from ori.eval.v2.scoring import SampleOutcomeCode, SampleResult
-
-from .test_v2_campaign_status import _config, _provider
-from .test_v2_compiler import simple_compiled  # noqa: F401 -- shared compiled fixture
+from tests.support.v2_campaign import _config, _provider
+from tests.support.v2_compiler import simple_compiled  # noqa: F401 -- shared compiled fixture
 
 
 @pytest.mark.parametrize("drift_gate", [None, 1, 2, 3, 4])

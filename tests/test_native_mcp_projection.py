@@ -1,0 +1,323 @@
+"""Source-shaped fixtures; observed evidence is not a certified proof."""
+
+import json
+from copy import deepcopy
+
+import pytest
+
+from ori.eval.v2.fingerprint import canonical_sha256
+from ori.eval.v2.native_mcp_projection import project_native_result
+from ori.eval.v2.schema import EdgeDirection, PathStatus
+from tests.support.v2_compiler import simple_compiled as _simple_compiled
+
+simple_compiled = _simple_compiled
+
+
+@pytest.fixture(scope="module")
+def task(simple_compiled):
+    return simple_compiled[3].tasks[0].public
+
+
+def _call(payload):
+    return {"content": [{"type": "text", "text": json.dumps(payload)}], "isError": False}
+
+
+def _path():
+    return {
+        "success": True,
+        "path_found": True,
+        "source": "ALICE",
+        "target": "ADMINS",
+        "path_length": 1,
+        "nodes": [
+            {"name": "alice", "type": "User", "objectid": "user-1", "enabled": True},
+            {"name": "admins", "type": "Group", "objectid": "group-1", "enabled": None},
+        ],
+        "edges": [{"type": "MemberOf", "isacl": False}],
+        "analysis": {},
+        "risk_level": "CRITICAL",
+    }
+
+
+@pytest.mark.parametrize("surface", ("text", "structured", "both", "string-wrapper"))
+def test_armadin_directed_path_preserves_native_identity_and_raw_digest(task, surface):
+    payload = _path()
+    result = _call(payload)
+    if surface in {"structured", "both"}:
+        result["structuredContent"] = deepcopy(payload)
+    if surface == "structured":
+        result["content"] = []
+    if surface == "string-wrapper":
+        result["structuredContent"] = {"result": json.dumps(payload)}
+    original = deepcopy(result)
+    arguments = {"source": "ALICE", "target": "ADMINS"}
+    projection = project_native_result("armadin", "find_shortest_path", arguments, result, task)
+    assert projection.status == "observed"
+    assert projection.reason == "mechanical_observation_only"
+    assert projection.raw_result_fingerprint == canonical_sha256(original)
+    evidence = projection.evidence
+    assert evidence.raw_digest == projection.raw_result_fingerprint
+    assert evidence.task_id == task.task_id
+    assert [(e.object_id, e.object_type) for e in evidence.entities] == [
+        ("user-1", "User"),
+        ("group-1", "Group"),
+    ]
+    assert len(evidence.edges) == 1
+    edge = evidence.edges[0]
+    assert (edge.source_id, edge.relationship, edge.target_id, edge.direction) == (
+        "user-1",
+        "MemberOf",
+        "group-1",
+        EdgeDirection.OUTBOUND,
+    )
+    assert edge.properties == ()
+    assert evidence.path_status is PathStatus.FOUND
+    assert evidence.graph_fact_attestation is None
+    assert evidence.negative_reason_codes == ()
+    assert result == original
+    assert arguments == {"source": "ALICE", "target": "ADMINS"}
+
+
+@pytest.mark.parametrize("empty", (False, True))
+def test_armadin_domain_rows_are_observations_not_absence_proofs(task, empty):
+    domains = (
+        []
+        if empty
+        else [
+            {
+                "objectid": "domain-1",
+                "name": "EXAMPLE.TEST",
+                "domain": "EXAMPLE.TEST",
+                "sid": "domain-1",
+                "functional_level": 7,
+            }
+        ]
+    )
+    result = _call({"success": True, "domains": domains, "count": len(domains)})
+    original = deepcopy(result)
+    projection = project_native_result("armadin", "find_domains", {}, result, task)
+    assert projection.status == "observed"
+    assert projection.evidence.count == len(domains)
+    assert [e.object_type for e in projection.evidence.entities] == ([] if empty else ["Domain"])
+    assert projection.evidence.path_status is PathStatus.UNKNOWN
+    assert projection.evidence.negative_reason_codes == ()
+    assert projection.evidence.graph_fact_attestation is None
+    assert result == original
+
+
+@pytest.mark.parametrize(
+    "change",
+    (
+        "negative-path",
+        "truncated",
+        "missing-id",
+        "missing-type",
+        "wrong-length",
+        "boolean-length",
+        "missing-edge-type",
+        "wrong-endpoint",
+        "duplicate-node",
+        "conflicting-surfaces",
+        "multiple-text",
+        "malformed-json",
+        "duplicate-json-key",
+        "nonfinite-json",
+        "non-text",
+        "false-success-shape",
+    ),
+)
+def test_native_path_malformed_or_lossy_data_is_inconclusive(task, change):
+    payload = _path()
+    result = _call(payload)
+    if change == "negative-path":
+        payload = {"success": True, "path_found": False, "message": "No path found"}
+    elif change == "truncated":
+        payload["truncated"] = True
+    elif change == "missing-id":
+        del payload["nodes"][0]["objectid"]
+    elif change == "missing-type":
+        del payload["nodes"][0]["type"]
+    elif change == "wrong-length":
+        payload["path_length"] = 2
+    elif change == "boolean-length":
+        payload["path_length"] = True
+    elif change == "missing-edge-type":
+        del payload["edges"][0]["type"]
+    elif change == "wrong-endpoint":
+        payload["nodes"][0]["name"] = "other-user"
+    elif change == "duplicate-node":
+        payload["nodes"][1]["objectid"] = "user-1"
+    elif change == "false-success-shape":
+        payload["success"] = 1
+    result = _call(payload)
+    if change == "conflicting-surfaces":
+        result["structuredContent"] = {"success": True, "count": 3}
+    elif change == "multiple-text":
+        result["content"] *= 2
+    elif change == "malformed-json":
+        result["content"][0]["text"] = "not json"
+    elif change == "duplicate-json-key":
+        result["content"][0]["text"] = '{"success":true,"success":false}'
+    elif change == "nonfinite-json":
+        result["content"][0]["text"] = '{"success":true,"count":NaN}'
+    elif change == "non-text":
+        result["content"] = [{"type": "image", "data": "ignored", "mimeType": "image/png"}]
+    original = deepcopy(result)
+    projection = project_native_result(
+        "armadin", "find_shortest_path", {"source": "ALICE", "target": "ADMINS"}, result, task
+    )
+    assert projection.status == "inconclusive"
+    assert projection.evidence is None
+    assert projection.raw_result_fingerprint == canonical_sha256(original)
+    assert result == original
+
+
+@pytest.mark.parametrize(
+    "data,expected",
+    (
+        ([{"count": 3}], "observed"),
+        ([{"count": 0}], "observed"),
+        ([{"count": True}], "inconclusive"),
+        ([{"count": -1}], "inconclusive"),
+        ([{"count": 2.0}], "inconclusive"),
+        ([], "inconclusive"),
+        ([{"count": 1}, {"count": 2}], "inconclusive"),
+        ([{"count": 1, "other": 1}], "inconclusive"),
+        ([{"n": {"objectid": "user-1", "name": "ALICE"}}], "inconclusive"),
+        ([{"p": [{"objectid": "user-1"}, "MemberOf", {"objectid": "group-1"}]}], "inconclusive"),
+    ),
+)
+def test_mordavid_scalar_only_and_lossy_paths(task, data, expected):
+    result = _call({"success": True, "data": data})
+    original = deepcopy(result)
+    projection = project_native_result(
+        "mordavid",
+        "query_bloodhound",
+        {"query": "MATCH (n) RETURN count(n) AS count"},
+        result,
+        task,
+    )
+    assert projection.status == expected
+    if expected == "observed":
+        assert projection.evidence.count == data[0]["count"]
+        assert projection.evidence.entities == ()
+        assert projection.evidence.edges == ()
+        assert projection.evidence.path_status is PathStatus.UNKNOWN
+        assert projection.evidence.negative_reason_codes == ()
+    else:
+        assert projection.evidence is None
+    assert result == original
+    assert projection.raw_result_fingerprint == canonical_sha256(original)
+
+
+@pytest.mark.parametrize("native", (False, True))
+def test_native_and_mcp_errors_are_not_graph_evidence(task, native):
+    result = _call({"success": False, "error": "private backend detail"})
+    if not native:
+        result["isError"] = True
+    projection = project_native_result("armadin", "find_domains", {}, result, task)
+    assert projection.status == "tool_error"
+    assert projection.evidence is None
+    assert "private backend detail" not in projection.reason
+
+
+@pytest.mark.parametrize(
+    "implementation,tool",
+    (
+        ("unknown", "find_domains"),
+        ("armadin", "unknown"),
+        ("mordavid", "find_all_domain_admins"),
+        ("mwnickerson", "unknown"),
+    ),
+)
+def test_unknown_native_shapes_are_explicitly_unsupported(task, implementation, tool):
+    result = _call({"success": True, "data": []})
+    projection = project_native_result(implementation, tool, {}, result, task)
+    assert projection.status == "unsupported"
+    assert projection.evidence is None
+    assert projection.raw_result_fingerprint == canonical_sha256(result)
+
+
+@pytest.mark.parametrize(
+    "implementation,tool",
+    (
+        ("armadin", "find_domain_admins"),
+        ("mordavid", "find_all_domain_admins"),
+        ("mwnickerson", "domain_info"),
+    ),
+)
+@pytest.mark.parametrize("mcp_error", (False, True))
+def test_registered_tools_without_projectors_still_report_errors(
+    task, implementation, tool, mcp_error
+):
+    result = _call({"success": False, "error": "private backend failure"})
+    if mcp_error:
+        result["isError"] = True
+    projection = project_native_result(implementation, tool, {}, result, task)
+    assert projection.status == "tool_error"
+    assert projection.evidence is None
+    assert "private" not in projection.reason
+
+
+@pytest.mark.parametrize(
+    "case",
+    (
+        "positive",
+        "zero",
+        "boolean",
+        "float",
+        "multiple",
+        "empty",
+        "string",
+        "counter-not-answer",
+        "wrong-operation",
+        "wrong-response-operation",
+        "has-no-results",
+    ),
+)
+def test_main_native_run_projects_only_explicit_scalar_literals(task, case):
+    # Source envelope: pinned main.py:_cypher_run, NOT ORI's execution wrapper.
+    payload = {
+        "info_type": "run",
+        "success": True,
+        "has_results": True,
+        "query_compatibility": {},
+        "node_count": 0,
+        "edge_count": 0,
+        "data": {"nodes": {}, "edges": [], "literals": [{"key": "total", "value": 7}]},
+    }
+    arguments = {"info_type": "run", "query": "MATCH (u:User) RETURN count(u) AS total"}
+    if case in {"zero", "boolean", "float", "string"}:
+        payload["data"]["literals"][0]["value"] = {
+            "zero": 0,
+            "boolean": True,
+            "float": 7.0,
+            "string": "7",
+        }[case]
+    elif case == "multiple":
+        payload["data"]["literals"] *= 2
+    elif case == "empty":
+        payload["data"]["literals"] = []
+    elif case == "counter-not-answer":
+        del payload["data"]["literals"]
+        payload["node_count"] = 7
+    elif case == "wrong-operation":
+        arguments["info_type"] = "list_saved"
+    elif case == "wrong-response-operation":
+        payload["info_type"] = "list_saved"
+    elif case == "has-no-results":
+        payload["has_results"] = False
+    result = _call(payload)
+    original = deepcopy(result)
+    projection = project_native_result("mwnickerson", "cypher_query", arguments, result, task)
+    if case in {"positive", "zero"}:
+        assert projection.status == "observed"
+        assert projection.evidence.count == (7 if case == "positive" else 0)
+        assert projection.evidence.path_status is PathStatus.UNKNOWN
+        assert projection.evidence.negative_reason_codes == ()
+        assert projection.evidence.graph_fact_attestation is None
+    else:
+        assert projection.status == ("unsupported" if case == "wrong-operation" else "inconclusive")
+        assert projection.evidence is None
+    assert result == original
+    assert projection.raw_result_fingerprint == canonical_sha256(original)

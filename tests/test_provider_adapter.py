@@ -3,14 +3,29 @@
 from __future__ import annotations
 
 import asyncio
+import socket
+import subprocess
 from types import SimpleNamespace
 from typing import Any
 
+import anthropic
 import httpx
 import openai
 import pytest
 
+from ori.eval import adapter, codex_oauth
 from ori.eval.adapter import _provider_exception_metrics, call_provider_text
+from ori.eval.provider_contract import (
+    ProviderAuthenticationError,
+    ProviderCapabilityError,
+    ProviderProtocolError,
+)
+from tests.support.provider_origins import (
+    CLEARED_ENVIRONMENT,
+    DENIED_ORIGINS,
+    SYNTHETIC_KEYS,
+    VALID_ORIGINS,
+)
 
 
 def _sdk_response(
@@ -51,6 +66,7 @@ def _call_with_response(
     base_url: str | None = "https://compatible.example/v1",
     set_compat_key: bool = True,
     request_timeout_seconds: float | None = None,
+    model: str = "openai-compat/provider/model",
 ):
     captured: dict[str, Any] = {}
 
@@ -71,7 +87,7 @@ def _call_with_response(
         monkeypatch.delenv("OPENAI_COMPAT_API_KEY", raising=False)
     result = asyncio.run(
         call_provider_text(
-            model="openai-compat/provider/model",
+            model=model,
             messages=[{"role": "user", "content": "test"}],
             system="system",
             base_url=base_url,
@@ -474,3 +490,302 @@ def test_provider_endpoint_telemetry_strips_userinfo_path_and_query(monkeypatch)
 
     assert response.error is None
     assert response.provider_metrics["provider_endpoint"] == "https://generic.example"
+
+
+@pytest.mark.parametrize(
+    ("explicit", "inline", "expected", "family", "source", "key"),
+    [
+        ("https://openrouter.ai/api/v1", "https://inference-api.nousresearch.com/v1",
+         "https://openrouter.ai/api/v1", "openrouter", "OPENROUTER_API_KEY", "test-router"),
+        ("https://inference-api.nousresearch.com/v1", "https://openrouter.ai/api/v1",
+         "https://inference-api.nousresearch.com/v1", "nous", "NOUS_API_KEY", "test-nous"),
+        ("http://127.0.0.1:8000/v1", "https://openrouter.ai/api/v1",
+         "http://127.0.0.1:8000/v1", "generic", None, "not-needed"),
+        (None, "https://inference-api.nousresearch.com/v1",
+         "https://inference-api.nousresearch.com/v1", "nous", "NOUS_API_KEY", "test-nous"),
+        ("", "https://inference-api.nousresearch.com/v1",
+         "https://inference-api.nousresearch.com/v1", "nous", "NOUS_API_KEY", "test-nous"),
+        ("https://openrouter.ai/api/v1", "https://openrouter.ai/api/v1",
+         "https://openrouter.ai/api/v1", "openrouter", "OPENROUTER_API_KEY", "test-router"),
+    ],
+    ids=["explicit-router", "explicit-nous", "explicit-local", "inline", "empty", "equal"],
+)
+def test_compatible_explicit_destination_precedes_inline(
+    monkeypatch, explicit, inline, expected, family, source, key,
+) -> None:
+    for variable in (
+        "OPENAI_API_KEY", "OPENAI_COMPAT_API_KEY", "OPENROUTER_API_KEY",
+        "NOUS_API_KEY", "NOUS_PORTAL_API_KEY", "OPENAI_COMPAT_BASE_URL", "OPENAI_BASE_URL",
+    ):
+        monkeypatch.delenv(variable, raising=False)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-router")
+    monkeypatch.setenv("NOUS_API_KEY", "test-nous")
+    response, captured = _call_with_response(
+        monkeypatch, _sdk_response(), base_url=explicit, set_compat_key=False,
+        model=f"openai-compat/provider/model@{inline}",
+    )
+    assert response.error is None
+    assert captured["client"]["base_url"] == expected
+    assert captured["client"]["api_key"] == key
+    assert captured["request"]["model"] == "provider/model"
+    assert captured["request"]["messages"] == [
+        {"role": "system", "content": "system"}, {"role": "user", "content": "test"},
+    ]
+    assert response.raw_text == '{"query":"MATCH (n) RETURN n LIMIT 1"}'
+    assert response.provider_metrics["endpoint_family"] == family
+    assert response.provider_metrics["credential_source"] == source
+
+
+def test_direct_scoped_origin_admission(monkeypatch, subtests) -> None:
+    for case, endpoint, family, source, key in DENIED_ORIGINS + VALID_ORIGINS:
+        with subtests.test(msg=case), monkeypatch.context() as scoped:
+            for variable in CLEARED_ENVIRONMENT:
+                scoped.delenv(variable, raising=False)
+            for variable, value in SYNTHETIC_KEYS:
+                scoped.setenv(variable, value)
+            counts = {"constructors": 0, "requests": 0}
+            captured = {}
+
+            class FakeCompletions:
+                async def create(self, **kwargs):
+                    counts["requests"] += 1
+                    captured["request"] = kwargs
+                    return _sdk_response()
+
+            class FakeClient:
+                def __init__(self, **kwargs):
+                    counts["constructors"] += 1
+                    captured["client"] = kwargs
+                    self.chat = SimpleNamespace(completions=FakeCompletions())
+
+            class ForbiddenHTTPClient:
+                def __init__(self, *args, **kwargs):
+                    counts["constructors"] += 1
+                    raise AssertionError("Direct must use only the fake SDK")
+                async def post(self, *args, **kwargs):
+                    counts["requests"] += 1
+                    raise AssertionError("Direct must not issue an HTTP request")
+
+            scoped.setattr(openai, "AsyncOpenAI", FakeClient)
+            scoped.setattr(httpx, "AsyncClient", ForbiddenHTTPClient)
+            response = asyncio.run(call_provider_text(
+                model="openai-compat/provider/model", base_url=endpoint,
+                system="system", messages=[{"role": "user", "content": "synthetic question"}],
+            ))
+            if "-D" in case:
+                assert counts["constructors"] == 0
+                assert counts["requests"] == 0
+                assert response.raw_text == ""
+                assert response.error is not None
+                assert response.provider_metrics["infra_error_subtype"] == "PROVIDER_AUTH"
+                assert response.provider_metrics["infra_retryable"] is False
+            else:
+                assert counts["constructors"] == 1
+                assert counts["requests"] == 1
+                assert captured["client"]["base_url"] == endpoint
+                assert captured["client"]["api_key"] == key
+                assert captured["request"]["model"] == "provider/model"
+                assert response.error is None
+                assert response.raw_text == '{"query":"MATCH (n) RETURN n LIMIT 1"}'
+                assert response.provider_metrics["endpoint_family"] == family
+                assert response.provider_metrics["credential_source"] == source
+
+
+def _adapter_fault_fixture(scoped, fault: BaseException):
+    counts = {"constructors": 0, "requests": 0}
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("S1-05F external activity forbidden")
+
+    for variable in CLEARED_ENVIRONMENT + (
+        "CODEX_API_KEY",
+        "CODEX_AUTH_FILE",
+        "CODEX_BASE_URL",
+        "CODEX_COMPAT_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+    ):
+        scoped.delenv(variable, raising=False)
+    scoped.setenv("OPENAI_COMPAT_API_KEY", "test-internal-boundary")
+    scoped.setattr(socket, "getaddrinfo", forbidden)
+    scoped.setattr(socket, "create_connection", forbidden)
+    scoped.setattr(socket.socket, "connect", forbidden)
+    scoped.setattr(subprocess, "Popen", forbidden)
+    scoped.setattr(httpx, "AsyncClient", forbidden)
+    scoped.setattr(anthropic, "AsyncAnthropic", forbidden)
+    scoped.setattr(codex_oauth, "codex_auth_path", forbidden)
+
+    class Completions:
+        async def create(self, **kwargs):
+            counts["requests"] += 1
+            raise fault
+
+    class Client:
+        def __init__(self, **kwargs):
+            counts["constructors"] += 1
+            self.chat = SimpleNamespace(completions=Completions())
+
+    scoped.setattr(openai, "AsyncOpenAI", Client)
+    return counts
+
+
+def _call_fault_adapter(*, model="openai-compat/provider/model", base_url="https://provider.invalid/v1"):
+    return asyncio.run(
+        call_provider_text(
+            model=model,
+            base_url=base_url,
+            system="system",
+            messages=[{"role": "user", "content": "synthetic boundary"}],
+        )
+    )
+
+
+def _internal_fault(index):
+    classes = (
+        ValueError,
+        AttributeError,
+        TypeError,
+        TimeoutError,
+        RuntimeError,
+        type("APIConnectionError", (Exception,), {}),
+        Exception,
+    )
+    fault = classes[index](f"S1-05F-U{index}")
+    if index == 6:
+        fault.status_code = 503
+    return fault
+
+
+def test_adapter_internal_fault_boundary(monkeypatch, subtests) -> None:
+    visited = []
+    for index in range(7):
+        case = f"U{index}"
+        visited.append(case)
+        with subtests.test(msg=case), monkeypatch.context() as scoped:
+            fault = _internal_fault(index)
+            counts = _adapter_fault_fixture(scoped, fault)
+            with pytest.raises(RuntimeError) as error:
+                _call_fault_adapter()
+            assert type(error.value) is adapter.ProviderAdapterInternalError
+            assert error.value.__cause__ is fault
+            assert str(error.value) == str(fault)
+            assert counts == {"constructors": 1, "requests": 1}
+    assert visited == [f"U{index}" for index in range(7)]
+
+
+def _known_failure(index):
+    message = f"S1-05F-K{index:02d}"
+    request = httpx.Request("POST", "https://provider.invalid/v1")
+    if index < 33:
+        library, position = divmod(index, 11)
+        sdk = (None, openai, anthropic)[library]
+        if position == 0:
+            fault = (
+                httpx.ReadTimeout(message, request=request)
+                if sdk is None
+                else sdk.APITimeoutError(request)
+            )
+            return fault, "PROVIDER_TIMEOUT", True
+        if position == 1:
+            fault = (
+                httpx.ConnectError(message, request=request)
+                if sdk is None
+                else sdk.APIConnectionError(message=message, request=request)
+            )
+            return fault, "PROVIDER_TRANSPORT", True
+        status = (401, 403, 408, 429, 400, 404, 500, 503, 302)[position - 2]
+        response = httpx.Response(status, request=request)
+        fault = (
+            httpx.HTTPStatusError(message, request=request, response=response)
+            if sdk is None
+            else sdk.APIStatusError(message, response=response, body={"synthetic": message})
+        )
+        expected = {
+            401: ("PROVIDER_AUTH", False),
+            403: ("PROVIDER_AUTH", False),
+            408: ("PROVIDER_TIMEOUT", True),
+            429: ("PROVIDER_RATE_LIMIT", True),
+            400: ("PROVIDER_REQUEST", False),
+            404: ("PROVIDER_REQUEST", False),
+            500: ("PROVIDER_SERVER", True),
+            503: ("PROVIDER_SERVER", True),
+            302: ("PROVIDER_PROTOCOL", False),
+        }[status]
+        return fault, *expected
+    if index in (33, 34):
+        sdk = openai if index == 33 else anthropic
+        return (
+            sdk.APIResponseValidationError(
+                httpx.Response(200, request=request), {"synthetic": message}, message=message
+            ),
+            "PROVIDER_PROTOCOL",
+            False,
+        )
+    if index in (35, 36):
+        sdk = openai if index == 35 else anthropic
+        return sdk.APIError(message, request, body={"synthetic": message}), "PROVIDER_ERROR", False
+    if index == 37:
+        return codex_oauth.CodexResponseStreamError(message), "PROVIDER_ERROR", True
+    cls = (ProviderAuthenticationError, ProviderCapabilityError, ProviderProtocolError)[index - 38]
+    return cls(message), cls.code, False
+
+
+def test_adapter_known_failure_boundary(monkeypatch, subtests) -> None:
+    visited = []
+    for index in range(41):
+        case = f"K{index:02d}"
+        visited.append(case)
+        with subtests.test(msg=case), monkeypatch.context() as scoped:
+            fault, subtype, retryable = _known_failure(index)
+            counts = _adapter_fault_fixture(scoped, fault)
+            response = _call_fault_adapter()
+            assert counts == {"constructors": 1, "requests": 1}
+            expected_error = (
+                "Provider redirects are not supported; configure the final endpoint"
+                if index == 21
+                else str(fault)
+            )
+            assert response.error == expected_error
+            assert response.raw_text == ""
+            assert response.provider_metrics["infra_error_subtype"] == subtype
+            assert response.provider_metrics["infra_retryable"] is retryable
+    assert visited == [f"K{index:02d}" for index in range(41)]
+
+
+def test_adapter_cancellation_is_not_wrapped(monkeypatch) -> None:
+    with monkeypatch.context() as scoped:
+        fault = asyncio.CancelledError("S1-05F-cancellation")
+        counts = _adapter_fault_fixture(scoped, fault)
+        with pytest.raises(asyncio.CancelledError) as error:
+            _call_fault_adapter()
+        assert error.value is fault
+        assert counts == {"constructors": 1, "requests": 1}
+
+
+def test_codex_auth_failure_stops_before_sdk(monkeypatch, tmp_path) -> None:
+    with monkeypatch.context() as scoped:
+        counts = _adapter_fault_fixture(scoped, AssertionError("SDK should not run"))
+        scoped.setattr(codex_oauth, "_installation_id", lambda: "S1-05F-installation")
+        scoped.setattr(codex_oauth, "_session_id", lambda: "S1-05F-session")
+        path = tmp_path / "missing-synthetic-codex.json"
+        scoped.setattr(codex_oauth, "codex_auth_path", lambda: path)
+        response = _call_fault_adapter(
+            model="codex/synthetic-model", base_url="https://chatgpt.com/backend-api/codex"
+        )
+        assert counts == {"constructors": 0, "requests": 0}
+        assert response.raw_text == ""
+        assert response.provider_metrics["infra_error_subtype"] == "PROVIDER_AUTH"
+        assert response.provider_metrics["infra_retryable"] is False
+        assert response.error == "Codex OAuth credential file could not be read"
+        assert str(path) not in response.error
+
+
+def test_unknown_provider_is_typed_capability_failure(monkeypatch) -> None:
+    with monkeypatch.context() as scoped:
+        counts = _adapter_fault_fixture(scoped, AssertionError("SDK should not run"))
+        response = _call_fault_adapter(model="unsupported-synthetic/provider-model")
+        assert counts == {"constructors": 0, "requests": 0}
+        assert response.raw_text == ""
+        assert response.error is not None
+        assert response.provider_metrics["infra_error_subtype"] == "PROVIDER_CAPABILITY"
+        assert response.provider_metrics["infra_retryable"] is False
