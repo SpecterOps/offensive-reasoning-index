@@ -199,7 +199,7 @@ def test_native_count_compilation_replays_shared_finalizer_before_offline_certif
     with pytest.raises(ValueError, match="forbidden"):
         initial_finalization_state(task.public, profile, tool_loop="auto", certified=False)
     with pytest.raises(ValueError, match="NATIVE_PROOF_UNSUPPORTED"):
-        unsupported = next(task for task in corpus.tasks if task.public.claim_kind == "route")
+        unsupported = next(task for task in corpus.tasks if task.public.claim_kind == "set")
         offline_certify(unsupported, snapshot, native_profile=profile)
     from ori.eval.v2.certification import build_offline_certification_catalog
 
@@ -270,3 +270,62 @@ def test_armadin_domain_offline_replay_is_not_live_admission(simple_compiled):
     assert certification.certification.state is CertificationState.OFFLINE_CERTIFIED
     assert certification.certification.capability_profile_fingerprint == profile.profile_fingerprint
     assert certification.certification.live_proof_fingerprint is None
+
+
+def test_main_native_routes_cross_offline_fixture_replay(simple_compiled):
+    from ori.eval.v2.fixtures import offline_certify
+    from ori.eval.v2.schema import CertificationState
+
+    manifest, snapshot, _, _ = simple_compiled
+    profile = _profile("mwnickerson")
+    corpus = compile_legacy_product(
+        manifest, snapshot, product="simple", track=Track.MCP, native_profile=profile,
+    )
+    routes = [task for task in corpus.tasks if task.public.claim_kind == "route"]
+    assert routes
+    for task in routes:
+        certified = offline_certify(task, snapshot, native_profile=profile)
+        assert certified.certification.state is CertificationState.OFFLINE_CERTIFIED
+        assert certified.certification.live_proof_fingerprint is None
+        names = {case.name for case in certified.fixtures.cases if case.applicable}
+        assert {"perfect", "wrong", "empty", "reversed_edge", "disconnected_path"} <= names
+
+
+def test_armadin_native_route_replay_preserves_directed_witness(simple_compiled):
+    from ori.eval.v2.compiler import CompiledTask, _fingerprinted_task_bundle
+    from ori.eval.v2.fingerprint import canonical_sha256
+    from ori.eval.v2.fixtures import offline_certify
+    from ori.eval.v2.schema import CertificationState, MechanismValidRoutePolicy, OracleBundle
+
+    _, snapshot, _, corpus = simple_compiled
+    original = next(task for task in corpus.tasks if task.public.claim_kind == "route"
+                    and not task.oracle.claim.required_context
+                    and not task.oracle.claim.required_properties
+                    and not task.oracle.claim.excluded_relationships
+                    and not task.oracle.claim.excluded_mechanisms)
+    # This is a dedicated unconstrained route fixture, not an easier replacement
+    # for any selected benchmark task. Armadin's compiler rejects constrained
+    # route contracts and that whole-cell admission boundary remains unchanged.
+    claim = original.oracle.claim.model_copy(update={"required_mechanisms": ()})
+    profile = _profile("armadin")
+    public = _fingerprinted_task_bundle(
+        task_id="native-armadin-route", product="simple", claim=claim,
+        policy=MechanismValidRoutePolicy(kind="mechanism_valid_route", forbid_extra_edges=False),
+        binding=_binding(Track.MCP, claim=claim, expected_cardinality=1,
+                         native_profile=profile), input_entities=original.public.input_entities,
+        question="Return a directed path with edges between the public source and target.",
+    )
+    oracle_data = original.oracle.model_dump(mode="python")
+    oracle_data.update(oracle_id="oracle:native-armadin-route", task_id=public.task_id,
+                       claim=claim, required_mechanisms=(),
+                       task_fingerprint=public.task_fingerprint,
+                       claim_fingerprint=public.claim_fingerprint)
+    oracle_data["oracle_fingerprint"] = canonical_sha256(
+        oracle_data, exclude_fields=("oracle_fingerprint",),
+    )
+    task = CompiledTask(public=public, oracle=OracleBundle.model_validate(oracle_data),
+                        migration=original.migration.model_copy(
+                            update={"candidate_task_ids": (public.task_id,)}))
+    certified = offline_certify(task, snapshot, native_profile=profile)
+    assert certified.certification.state is CertificationState.OFFLINE_CERTIFIED
+    assert certified.certification.live_proof_fingerprint is None

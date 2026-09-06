@@ -32,6 +32,7 @@ from .mcp_adapter import score_mcp_transcript_v2
 from .model_runtime import MCPTranscriptProjector
 from .schema import (
     CapabilityProfile,
+    EdgeDirection,
     EdgeWitness,
     EvidenceIR,
     ExecutionClass,
@@ -777,6 +778,52 @@ def project_native_fixture(
                     {"key": "certified_count", "value": perfect_evidence.count},
                 ]},
             }
+    elif task.claim_kind == "route" and profile.implementation_id == "mwnickerson":
+        arguments = {"info_type": "run", "query": _mcp_fixture_query(task, count=False)}
+        nodes = _mcp_node_payload(snapshot, perfect_evidence)
+        key_by_id = {node["objectId"]: key for key, node in nodes.items()}
+        edges = []
+        for edge in (*perfect_evidence.edges, *perfect_evidence.supporting_edges):
+            start, end = edge.source_id, edge.target_id
+            if edge.direction is EdgeDirection.INBOUND:
+                start, end = end, start
+            elif edge.direction is not EdgeDirection.OUTBOUND:
+                raise ValueError("NATIVE_PROOF_UNSUPPORTED: fixture edge lacks direction")
+            edges.append({"source": key_by_id[start], "target": key_by_id[end],
+                          "kind": edge.relationship,
+                          "properties": {fact.key: fact.value for fact in edge.properties}})
+        payload = {"success": True, "info_type": "run", "has_results": True,
+                   "node_count": len(nodes), "edge_count": len(edges),
+                   "data": {"nodes": nodes, "edges": edges, "literals": []}}
+    elif task.claim_kind == "route" and profile.implementation_id == "armadin":
+        public = {entity.role: entity for entity in task.input_entities}
+        source = public[task.acceptance_spec.source_role]
+        target = public[task.acceptance_spec.target_role]
+        if not source.canonical_name or not target.canonical_name:
+            raise ValueError("NATIVE_PROOF_UNSUPPORTED: Armadin path requires native names")
+        arguments = {"source": source.canonical_name, "target": target.canonical_name}
+        # Armadin's directed shortest-path query serializes ordered nodes and
+        # relationship types, not arbitrary supporting edges or property maps.
+        ordered_ids = [source.object_id]
+        edges = []
+        for edge in perfect_evidence.edges:
+            start, end = edge.source_id, edge.target_id
+            if edge.direction is EdgeDirection.INBOUND:
+                start, end = end, start
+            elif edge.direction is not EdgeDirection.OUTBOUND:
+                raise ValueError("NATIVE_PROOF_UNSUPPORTED: fixture edge lacks direction")
+            if start != ordered_ids[-1] or end in ordered_ids:
+                raise ValueError("NATIVE_PROOF_UNSUPPORTED: fixture is not a simple directed path")
+            ordered_ids.append(end)
+            edges.append({"type": edge.relationship})
+        if ordered_ids[-1] != target.object_id or not edges:
+            raise ValueError("NATIVE_PROOF_UNSUPPORTED: fixture path misses public target")
+        payload = {"success": True, "path_found": True, **arguments,
+                   "path_length": len(edges), "nodes": [
+                       {"objectid": object_id, "name": snapshot.entity(object_id).canonical_name,
+                        "type": snapshot.entity(object_id).object_type}
+                       for object_id in ordered_ids
+                   ], "edges": edges}
     elif profile.implementation_id == "armadin" and alternative.tool_name == "find_domains":
         arguments = {}
         payload = {"success": True, "domains": [
@@ -796,11 +843,26 @@ def project_native_fixture(
     if case.name == "perfect":
         # Exercise native proof rejection independently of incorrect final
         # answers. A correct comparator must not mask an over-permissive adapter.
-        for negative in (
+        negative_payloads = [
             {"success": True, "unrecognized": payload},
             {**payload, "truncated": True},
             {"success": False, "error": "synthetic fixture failure"},
-        ):
+        ]
+        if task.claim_kind == "route":
+            node_only = deepcopy(payload)
+            missing_identity = deepcopy(payload)
+            if profile.implementation_id == "mwnickerson":
+                node_only["data"]["edges"] = []
+                node_only["edge_count"] = 0
+                for node in missing_identity["data"]["nodes"].values():
+                    node.pop("objectId", None)
+            else:
+                node_only["edges"] = []
+                for node in missing_identity["nodes"]:
+                    node.pop("objectid", None)
+                negative_payloads.append({"success": True, "path_found": False})
+            negative_payloads.extend((node_only, missing_identity))
+        for negative in negative_payloads:
             negative_result = {"isError": False, "content": [
                 {"type": "text", "text": json.dumps(negative)},
             ]}

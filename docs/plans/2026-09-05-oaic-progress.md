@@ -258,6 +258,22 @@ The final dedicated main/MorDavid/Armadin offline replay checks passed three
 tests in 2.78 seconds, including proof rejection and whole-catalog refusal.
 Ruff and whitespace checks passed; no live model, graph or remote Git calls.
 
+Native route replay is now integrated into offline certification for main and
+Armadin's supported unconstrained positive route surface. Main fixture envelopes
+use stable object IDs plus actual CE map-key edge endpoints; Armadin fixtures
+serialize only an ordered simple directed path, not unavailable edge properties
+or supporting edges. Certification independently rejects node-only responses,
+missing stable identities and native no-path results. The existing adversarial
+answer fixtures still cross the shared finalizer/scorer. The dedicated Armadin
+fixture authors an unconstrained route with the corresponding public policy;
+it does not weaken or replace the selected benchmark roster. MorDavid's lossy
+native paths remain unsupported rather than reconstructed from sealed data.
+Independent route review found no blocker and passed two route certification
+tests. Focused native/compiler/projector/finalizer validation passed **83 tests
+and 70 subtests in 29.12 seconds**. Ruff and whitespace checks passed. This is
+offline Stage 4 progress, not native live admission. General set/absence proof,
+complete selected-cell feasibility and shared runner admission/dispatch remain.
+
 One deferred backlog: unrelated dead-code/cosmetic cleanup, additional test-count
 consolidation without demonstrated payoff, broader partial-usage knownness and
 nonblocking provider edge cases. Accounting required by the scorecard remains in

@@ -14,13 +14,18 @@ Compilation preserves claim and recipe identities while creating new public
 task, oracle and catalog fingerprints. Native contracts name the actual server
 tools, not a normalized Cypher facade. Unsupported Armadin contracts fail closed.
 Offline certification accepts an explicit native profile for currently implemented
-replay shapes: main/MorDavid counts and Armadin complete Domain sets. Use
+replay shapes: main/MorDavid counts, main positive routes, Armadin complete
+Domain sets and Armadin unconstrained positive routes. Use
 `offline_certify(task, snapshot, native_profile=profile)` or pass the native profile
 to `build_offline_certification_catalog`. Replay crosses the actual native
 projector/adjudicator and shared MCP finalizer/scorer, including incorrect final
 answers and independent malformed, truncated, failed and unrelated-scope native
 responses. A perfect response that cannot establish proof blocks certification;
 one unsupported task aborts the complete catalog rather than shrinking it.
+Route replay also rejects node-only results, missing stable identities and
+Armadin no-path responses. Main fixtures use native CE map-key endpoint
+references. Armadin fixtures preserve the native ordered directed path surface;
+they do not invent relationship properties or supporting edges.
 The historical call without an explicit native profile still rejects native tasks.
 Other native replay shapes and complete selected-task admission remain unfinished.
 There is not yet a native campaign CLI path; do not substitute these contracts
