@@ -238,6 +238,26 @@ Focused session/projection validation passed **68 tests and 94 subtests in 3.27
 seconds**; Ruff and whitespace checks passed. No model or live graph calls were
 made. Public pinned source was read without a Git fetch, push, PR or merge.
 
+Native offline certification now uses the existing fixture/catalog interfaces,
+with an explicit native profile dispatch. Main/MorDavid count fixtures and
+Armadin complete Domain-set fixtures cross source-shaped envelopes, production
+native projection/adjudication, and the same MCP schema finalizer/comparator as
+historical runs. Every applicable scorer fixture is replayed, and independent
+unknown/truncated/failed/unrelated-scope responses must remain non-unlocking.
+Unsupported native shapes abort the whole catalog; no smaller replacement
+selection is created. Native finalizer state is explicitly uncertified for
+offline replay, and the default certified path remains closed. The existing
+offline certificate structure is reused without a parallel receipt system.
+Independent review found no blocking regression; its historical adapter check
+passed 13 tests. Focused native/compiler/finalizer validation passed 131 tests
+and 100 subtests in 82.06 seconds, before the separate Armadin replay assertion
+was added. This is further implementation of the open Stage 4 batch, not live
+qualification or whole-campaign completion. Native route/set/absence replay,
+whole-selected-cell feasibility and shared campaign admission/dispatch remain.
+The final dedicated main/MorDavid/Armadin offline replay checks passed three
+tests in 2.78 seconds, including proof rejection and whole-catalog refusal.
+Ruff and whitespace checks passed; no live model, graph or remote Git calls.
+
 One deferred backlog: unrelated dead-code/cosmetic cleanup, additional test-count
 consolidation without demonstrated payoff, broader partial-usage knownness and
 nonblocking provider edge cases. Accounting required by the scorecard remains in

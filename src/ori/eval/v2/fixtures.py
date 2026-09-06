@@ -19,6 +19,7 @@ from .evidence import (
 from .fingerprint import canonical_sha256, certifier_fingerprint
 from .graph import GraphSnapshot, graph_identity_resolver
 from .identity import AmbiguousIdentityError, IdentityResolver
+from .native_capability import NativeCapabilityProfile
 from .profiles import capability_profile_for_track
 from .schema import (
     BoundedNegativePolicy,
@@ -976,18 +977,41 @@ def build_fixture_manifest(
 def offline_certify(
     task: CompiledTask,
     snapshot: GraphSnapshot,
+    *, native_profile: NativeCapabilityProfile | None = None,
 ) -> OfflineCertification:
     """Execute fixtures and bind one task to an offline-certified state."""
 
-    if task.public.binding.mcp_binding_mode == "native":
+    native = task.public.binding.mcp_binding_mode == "native"
+    if native and native_profile is None:
         raise ValueError("NATIVE_CERTIFICATION_UNAVAILABLE: native adapter replay is required")
+    if not native and native_profile is not None:
+        raise ValueError("historical certification cannot use a native profile")
     fixtures = build_fixture_manifest(task, snapshot)
     binding = task.public.binding
-    capability_profile = capability_profile_for_track(binding.track)
+    capability_profile = native_profile if native else capability_profile_for_track(binding.track)
     if capability_profile.profile_id != binding.capability_profile_id:
         raise ValueError(
             f"task {task.public.task_id} does not bind the pinned capability profile"
         )
+    if native:
+        from .live_projection import project_native_fixture
+        from .scoring import SampleOutcomeCode
+
+        perfect = next(case.evidence for case in fixtures.cases if case.name == "perfect")
+        for case in fixtures.cases:
+            if not case.applicable:
+                continue
+            replay = project_native_fixture(
+                task=task.public, oracle=task.oracle, case=case, perfect_evidence=perfect,
+                profile=capability_profile, snapshot=snapshot,
+            )
+            if case.normalization_error is not None:
+                matched = replay.outcome is SampleOutcomeCode.OUTPUT_INVALID
+            else:
+                matched = (replay.verdict is not None
+                           and replay.verdict.status is case.expected_status)
+            if not matched:
+                raise ValueError(f"native fixture replay disagrees with scorer case {case.name}")
     capability_fingerprint = capability_profile.profile_fingerprint
     bounds_fingerprint = canonical_sha256(binding.bounds)
     payload = {

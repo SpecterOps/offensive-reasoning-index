@@ -13,8 +13,16 @@ including shared proof helpers, without requiring a Git checkout.
 Compilation preserves claim and recipe identities while creating new public
 task, oracle and catalog fingerprints. Native contracts name the actual server
 tools, not a normalized Cypher facade. Unsupported Armadin contracts fail closed.
-The historical fixture certifier explicitly rejects native tasks: native adapter
-replay and complete selected-task admission are still under implementation.
+Offline certification accepts an explicit native profile for currently implemented
+replay shapes: main/MorDavid counts and Armadin complete Domain sets. Use
+`offline_certify(task, snapshot, native_profile=profile)` or pass the native profile
+to `build_offline_certification_catalog`. Replay crosses the actual native
+projector/adjudicator and shared MCP finalizer/scorer, including incorrect final
+answers and independent malformed, truncated, failed and unrelated-scope native
+responses. A perfect response that cannot establish proof blocks certification;
+one unsupported task aborts the complete catalog rather than shrinking it.
+The historical call without an explicit native profile still rejects native tasks.
+Other native replay shapes and complete selected-task admission remain unfinished.
 There is not yet a native campaign CLI path; do not substitute these contracts
 into a historical certified campaign or reuse its certification.
 
@@ -35,8 +43,10 @@ that proof. This follows the pinned server's
 [unbounded Domain query](https://github.com/armadin-public/bloodhound-mcp-server/blob/6ad4a4703d1117c3019400539911ca689a537197/tools/active_directory/domain_tools.py)
 and [complete record iteration](https://github.com/armadin-public/bloodhound-mcp-server/blob/6ad4a4703d1117c3019400539911ca689a537197/lib/bloodhound_client.py).
 Other proof shapes remain non-unlocking until their native adjudicators are
-implemented. Native fixture certification remains pending. A proof event alone
-does not admit a campaign or establish answer correctness.
+implemented. Native offline replay explicitly uses `certified=False` in the
+shared finalizer; the default certified native path still raises until live
+admission exists. Offline certificates have no live proof or certified execution
+profile. A proof event alone does not admit a campaign or establish answer correctness.
 
 The native MorDavid and Armadin implementations use Neo4j Bolt, not the
 BloodHound CE API. `ori verify-native-graph` independently checks one explicitly

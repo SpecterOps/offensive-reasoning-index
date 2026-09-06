@@ -28,6 +28,7 @@ from .live_projection import (
     project_mcp_fixture,
     semantic_evidence_fingerprint,
 )
+from .native_capability import NativeCapabilityProfile, validate_native_capability_profile
 from .profiles import validate_capability_profile
 from .public_surfaces import public_semantic_fingerprint
 from .schema import (
@@ -139,18 +140,23 @@ class OfflineCertificationCatalog(StrictModel):
 def build_offline_certification_catalog(
     corpus: CompiledCorpus,
     snapshot: GraphSnapshot,
-    profile: CapabilityProfile,
+    profile: CapabilityProfile | NativeCapabilityProfile,
 ) -> OfflineCertificationCatalog:
     """Run and bind every deterministic adversarial fixture in one track."""
 
-    validate_capability_profile(profile)
+    native = isinstance(profile, NativeCapabilityProfile)
+    if native:
+        validate_native_capability_profile(profile)
+    else:
+        validate_capability_profile(profile)
     if snapshot.graph_fingerprint != corpus.graph_fingerprint:
         raise CertificationError("offline certification graph fingerprint mismatch")
     if profile.track is not corpus.track:
         raise CertificationError("offline certification profile track mismatch")
     validate_semantic_equivalence_classes(corpus)
     certifications = tuple(
-        offline_certify(task, snapshot) for task in corpus.tasks
+        offline_certify(task, snapshot, native_profile=profile if native else None)
+        for task in corpus.tasks
     )
     validate_fixture_coverage_artifacts(certifications)
     payload = {

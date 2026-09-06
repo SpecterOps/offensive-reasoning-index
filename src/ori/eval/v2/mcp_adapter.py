@@ -27,6 +27,7 @@ from .mcp import (
     initial_finalization_state,
     reduce_finalization,
 )
+from .native_capability import NativeCapabilityProfile
 from .output_compliance import is_schema_compliant_json
 from .schema import (
     CapabilityProfile,
@@ -117,7 +118,7 @@ def score_mcp_transcript_v2(
     task: TaskBundle,
     oracle: OracleBundle,
     resolver: IdentityResolver,
-    profile: CapabilityProfile,
+    profile: CapabilityProfile | NativeCapabilityProfile,
     tool_loop: MCPToolLoop | str,
     events: Sequence[EvidenceEvent],
     final_answer: Mapping[str, Any] | None,
@@ -131,6 +132,7 @@ def score_mcp_transcript_v2(
     final_receipt_attested: bool = True,
     retry_receipt_attested: bool = True,
     retry_contract_error: str | None = None,
+    certified: bool = True,
 ) -> MCPV2Outcome:
     """Reduce one typed transcript and call the shared comparator exactly once."""
 
@@ -138,6 +140,7 @@ def score_mcp_transcript_v2(
         task,
         profile,
         tool_loop=tool_loop,
+        certified=certified,
     )
     for event in events:
         state = reduce_finalization(state, event)

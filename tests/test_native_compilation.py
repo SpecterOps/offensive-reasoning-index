@@ -171,3 +171,102 @@ def test_oaic_native_compiler_threads_profile_without_changing_recipe_roster():
                for task in native.tasks)
     assert {t.public.task_id for t in native.tasks} == {t.public.task_id for t in legacy.tasks}
     assert native.catalog_fingerprint != legacy.catalog_fingerprint
+
+
+@pytest.mark.parametrize("implementation", ["mwnickerson", "mordavid"])
+def test_native_count_compilation_replays_shared_finalizer_before_offline_certification(
+    simple_compiled, implementation, monkeypatch,
+):
+    from ori.eval.v2.fixtures import offline_certify
+    from ori.eval.v2.mcp import initial_finalization_state
+    from ori.eval.v2.schema import CertificationState
+
+    manifest, snapshot, _, _ = simple_compiled
+    profile = _profile(implementation)
+    corpus = compile_legacy_product(
+        manifest, snapshot, product="simple", track=Track.MCP, native_profile=profile,
+    )
+    task = next(task for task in corpus.tasks if task.public.claim_kind == "count")
+    certified = offline_certify(task, snapshot, native_profile=profile)
+    assert certified.certification.state is CertificationState.OFFLINE_CERTIFIED
+    assert certified.certification.capability_profile_fingerprint == profile.profile_fingerprint
+    assert certified.certification.live_proof_fingerprint is None
+    assert certified.certification.certified_profile_id is None
+    assert all(case.actual_status == case.expected_status
+               for case in certified.fixtures.cases if case.applicable)
+    with pytest.raises(ValueError, match="NATIVE_CERTIFICATION_UNAVAILABLE"):
+        initial_finalization_state(task.public, profile, tool_loop="native-openai-compatible")
+    with pytest.raises(ValueError, match="forbidden"):
+        initial_finalization_state(task.public, profile, tool_loop="auto", certified=False)
+    with pytest.raises(ValueError, match="NATIVE_PROOF_UNSUPPORTED"):
+        unsupported = next(task for task in corpus.tasks if task.public.claim_kind == "route")
+        offline_certify(unsupported, snapshot, native_profile=profile)
+    from ori.eval.v2.certification import build_offline_certification_catalog
+
+    with pytest.raises(ValueError, match="NATIVE_PROOF_UNSUPPORTED"):
+        build_offline_certification_catalog(corpus, snapshot, profile)
+
+    # A broken projector or an unproven perfect response must block certification,
+    # even though all deterministic scorer-only fixture expectations still pass.
+    import ori.eval.v2.native_proof as proof
+    original = proof.classify_native_result
+
+    def irrelevant(*args, **kwargs):
+        from ori.eval.v2.mcp import EvidenceEventKind
+        return original(*args, **kwargs).model_copy(update={"kind": EvidenceEventKind.IRRELEVANT})
+
+    monkeypatch.setattr(proof, "classify_native_result", irrelevant)
+    with pytest.raises(ValueError, match="perfect native fixture cannot establish proof"):
+        offline_certify(task, snapshot, native_profile=profile)
+    def always_positive(*args, **kwargs):
+        from ori.eval.v2.mcp import EvidenceEventKind
+        return original(*args, **kwargs).model_copy(
+            update={"kind": EvidenceEventKind.USEFUL_POSITIVE},
+        )
+
+    monkeypatch.setattr(proof, "classify_native_result", always_positive)
+    with pytest.raises(ValueError, match="adversarial fixture incorrectly establishes proof"):
+        offline_certify(task, snapshot, native_profile=profile)
+
+
+def test_armadin_domain_offline_replay_is_not_live_admission(simple_compiled):
+    from ori.eval.v2.compiler import CompiledTask, _fingerprinted_task_bundle
+    from ori.eval.v2.fingerprint import canonical_sha256
+    from ori.eval.v2.fixtures import offline_certify
+    from ori.eval.v2.schema import CertificationState, ExactSetPolicy, OracleBundle
+
+    _, snapshot, _, corpus = simple_compiled
+    original = next(task for task in corpus.tasks if task.public.claim_kind == "set")
+    profile = _profile("armadin")
+    claim = SetClaim(
+        kind="set", claim_id="native-all-domains",
+        selection=SelectionExpression(projection_role="item", projection_type="Domain"),
+        semantics=original.oracle.claim.semantics,
+        population_scope=original.oracle.claim.population_scope,
+    )
+    entities = tuple(obj.entity for obj in snapshot.objects if obj.entity.object_type == "Domain")
+    assert entities
+    public = _fingerprinted_task_bundle(
+        task_id="native-all-domains", product="simple", claim=claim,
+        policy=ExactSetPolicy(kind="exact_set"),
+        binding=_binding(Track.MCP, claim=claim, expected_cardinality=len(entities),
+                         native_profile=profile), input_entities=(),
+        question="Return the complete set of Domain objects.",
+    )
+    oracle_data = original.oracle.model_dump(mode="python")
+    oracle_data.update(
+        oracle_id="oracle:native-all-domains", task_id=public.task_id, claim=claim,
+        task_fingerprint=public.task_fingerprint, claim_fingerprint=public.claim_fingerprint,
+        expected_entities=entities, resolved_roles=(), expected_count=None,
+    )
+    oracle_data["oracle_fingerprint"] = canonical_sha256(
+        oracle_data, exclude_fields=("oracle_fingerprint",),
+    )
+    task = CompiledTask(
+        public=public, oracle=OracleBundle.model_validate(oracle_data),
+        migration=original.migration.model_copy(update={"candidate_task_ids": (public.task_id,)}),
+    )
+    certification = offline_certify(task, snapshot, native_profile=profile)
+    assert certification.certification.state is CertificationState.OFFLINE_CERTIFIED
+    assert certification.certification.capability_profile_fingerprint == profile.profile_fingerprint
+    assert certification.certification.live_proof_fingerprint is None

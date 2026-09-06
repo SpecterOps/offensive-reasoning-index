@@ -16,6 +16,7 @@ from typing import Literal
 from pydantic import Field, model_validator
 
 from .fingerprint import canonical_sha256
+from .native_capability import NativeCapabilityProfile
 from .schema import (
     CapabilityProfile,
     Fingerprint,
@@ -1043,7 +1044,7 @@ def validate_certified_mcp_loop(tool_loop: MCPToolLoop | str) -> MCPToolLoop:
 
 def initial_finalization_state(
     task: TaskBundle,
-    profile: CapabilityProfile,
+    profile: CapabilityProfile | NativeCapabilityProfile,
     *,
     tool_loop: MCPToolLoop | str,
     certified: bool = True,
@@ -1051,8 +1052,18 @@ def initial_finalization_state(
     """Create the immutable initial state for one MCP sample."""
 
     _require_public_task(task)
-    validate_mcp_capability_profile(profile)
-    validate_mcp_binding(task, profile)
+    if isinstance(profile, NativeCapabilityProfile):
+        from .native_proof import validate_native_task_binding
+
+        validate_native_task_binding(profile, task)
+        if certified:
+            raise ValueError("NATIVE_CERTIFICATION_UNAVAILABLE: native live admission is required")
+        # Reuse the same reducer for offline native replay without asserting
+        # that a configured native profile is a certified execution boundary.
+        validate_certified_mcp_loop(tool_loop)
+    else:
+        validate_mcp_capability_profile(profile)
+        validate_mcp_binding(task, profile)
     resolved_loop = validate_certified_mcp_loop(tool_loop) if certified else MCPToolLoop(tool_loop)
     return FinalizationState(
         task_fingerprint=task.task_fingerprint,

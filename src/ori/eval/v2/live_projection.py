@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -741,4 +742,92 @@ def project_mcp_fixture(
             if outcome.sample.evidence is None
             else None
         ),
+    )
+
+
+def project_native_fixture(
+    *, task: TaskBundle, oracle: OracleBundle, case: FixtureCase,
+    perfect_evidence: EvidenceIR, profile, snapshot: GraphSnapshot,
+) -> SurfaceProjection:
+    """Offline native-envelope replay through the production proof and scorer.
+
+    The perfect fixture supplies synthetic backend data, never a live receipt.
+    Production native projectors still receive only that envelope and the public
+    task. Unsupported shapes cannot borrow the historical CE execution wrapper.
+    """
+    from .native_mcp_projection import project_native_result
+    from .native_proof import classify_native_result, validate_native_task_binding
+
+    validate_native_task_binding(profile, task)
+    if case.answer_payload is None:
+        raise ValueError("applicable native fixture has no answer payload")
+    alternative = task.binding.mcp_evidence_contract.alternatives[0]
+    if task.claim_kind == "count" and profile.implementation_id in {"mwnickerson", "mordavid"}:
+        if perfect_evidence.count is None:
+            raise ValueError("native count fixture lacks a mechanical count")
+        arguments = {"query": _mcp_fixture_query(task, count=True)}
+        if profile.implementation_id == "mordavid":
+            payload = {"success": True, "data": [{"certified_count": perfect_evidence.count}]}
+        else:
+            arguments["info_type"] = "run"
+            payload = {
+                "success": True, "info_type": "run", "has_results": True,
+                "node_count": 0, "edge_count": 0,
+                "data": {"nodes": {}, "edges": [], "literals": [
+                    {"key": "certified_count", "value": perfect_evidence.count},
+                ]},
+            }
+    elif profile.implementation_id == "armadin" and alternative.tool_name == "find_domains":
+        arguments = {}
+        payload = {"success": True, "domains": [
+            {"objectid": entity.object_id, "name": entity.canonical_name,
+             "domain": entity.domain}
+            for entity in perfect_evidence.entities
+        ], "count": len(perfect_evidence.entities)}
+    else:
+        raise ValueError("NATIVE_PROOF_UNSUPPORTED: native fixture shape is not implemented")
+    result = {"isError": False, "content": [{"type": "text", "text": json.dumps(payload)}]}
+    observation = project_native_result(
+        profile.implementation_id, alternative.tool_name, arguments, result, task,
+    )
+    event = classify_native_result(profile, task, alternative.tool_name, arguments, result)
+    if observation.evidence is None or not event.unlocks_finalization:
+        raise ValueError("NATIVE_PROOF_UNSUPPORTED: perfect native fixture cannot establish proof")
+    if case.name == "perfect":
+        # Exercise native proof rejection independently of incorrect final
+        # answers. A correct comparator must not mask an over-permissive adapter.
+        for negative in (
+            {"success": True, "unrecognized": payload},
+            {**payload, "truncated": True},
+            {"success": False, "error": "synthetic fixture failure"},
+        ):
+            negative_result = {"isError": False, "content": [
+                {"type": "text", "text": json.dumps(negative)},
+            ]}
+            rejected = classify_native_result(
+                profile, task, alternative.tool_name, arguments, negative_result,
+            )
+            if rejected.unlocks_finalization:
+                raise ValueError("native adversarial fixture incorrectly establishes proof")
+        wrong_arguments = deepcopy(arguments)
+        if "query" in wrong_arguments:
+            wrong_arguments["query"] = "RETURN 1 AS certified_count"
+        else:
+            wrong_arguments["unsupported_filter"] = "fixture"
+        if classify_native_result(
+            profile, task, alternative.tool_name, wrong_arguments, result,
+        ).unlocks_finalization:
+            raise ValueError("native unrelated-scope fixture incorrectly establishes proof")
+    outcome = score_mcp_transcript_v2(
+        task=task, oracle=oracle, resolver=graph_identity_resolver(snapshot), profile=profile,
+        tool_loop=task.binding.mcp_tool_loop, events=(event,), final_answer=case.answer_payload,
+        observed_identity_ids=tuple(entity.object_id for entity in observation.evidence.entities),
+        graph_fact_registry=build_graph_fact_registry(snapshot), certified=False,
+    )
+    return SurfaceProjection(
+        projection_source=_projection_source(case, snapshot),
+        execution_class=outcome.sample.execution_class, outcome=outcome.sample.outcome,
+        evidence=outcome.sample.evidence, verdict=outcome.sample.verdict,
+        raw_source_digest=canonical_sha256({"arguments": arguments, "result": result}),
+        rejection_reason=outcome.sample.detail if outcome.sample.evidence is None else None,
     )
