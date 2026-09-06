@@ -199,7 +199,8 @@ def test_native_count_compilation_replays_shared_finalizer_before_offline_certif
     with pytest.raises(ValueError, match="forbidden"):
         initial_finalization_state(task.public, profile, tool_loop="auto", certified=False)
     with pytest.raises(ValueError, match="NATIVE_PROOF_UNSUPPORTED"):
-        unsupported = next(task for task in corpus.tasks if task.public.claim_kind == "set")
+        kind = "decision" if implementation == "mwnickerson" else "set"
+        unsupported = next(task for task in corpus.tasks if task.public.claim_kind == kind)
         offline_certify(unsupported, snapshot, native_profile=profile)
     from ori.eval.v2.certification import build_offline_certification_catalog
 
@@ -352,3 +353,20 @@ def test_native_absence_offline_certification_replays_generated_contracts(subtes
                 assert certified.certification.capability_profile_fingerprint == (
                     profile.profile_fingerprint
                 )
+
+
+def test_main_native_sets_cross_offline_fixture_replay(simple_compiled):
+    from ori.eval.v2.fixtures import offline_certify
+    from ori.eval.v2.schema import CertificationState
+
+    manifest, snapshot, _, _ = simple_compiled
+    profile = _profile("mwnickerson")
+    corpus = compile_legacy_product(
+        manifest, snapshot, product="simple", track=Track.MCP, native_profile=profile,
+    )
+    tasks = [task for task in corpus.tasks if task.public.claim_kind == "set"]
+    assert tasks
+    for task in tasks:
+        certified = offline_certify(task, snapshot, native_profile=profile)
+        assert certified.certification.state is CertificationState.OFFLINE_CERTIFIED
+        assert certified.certification.live_proof_fingerprint is None

@@ -758,13 +758,60 @@ def project_native_fixture(
     task. Unsupported shapes cannot borrow the historical CE execution wrapper.
     """
     from .native_mcp_projection import project_native_result
-    from .native_proof import classify_native_result, validate_native_task_binding
+    from .native_proof import (
+        NativeSetProofState,
+        classify_native_result,
+        validate_native_task_binding,
+    )
 
     validate_native_task_binding(profile, task)
     if case.answer_payload is None:
         raise ValueError("applicable native fixture has no answer payload")
     alternative = task.binding.mcp_evidence_contract.alternatives[0]
-    if (task.claim_kind in {"count", "absence"}
+    set_state = None
+    prefix_events = []
+    observed_ids = set()
+    if task.claim_kind == "set" and profile.implementation_id == "mwnickerson":
+        set_state = NativeSetProofState()
+        native_calls = []
+        if task.binding.bounds.require_total_count:
+            native_calls.append((
+                {"info_type": "run", "query": _mcp_fixture_query(task, count=True)},
+                {"success": True, "info_type": "run", "has_results": True,
+                 "node_count": 0, "edge_count": 0,
+                 "data": {"nodes": {}, "edges": [], "literals": [
+                     {"key": "total", "value": len(perfect_evidence.entities)},
+                 ]}},
+            ))
+        clauses, variable = _selection_fixture_population(task)
+        page_size = task.binding.bounds.page_size
+        entities = sorted(perfect_evidence.entities, key=lambda entity: entity.object_id)
+        for start in range(0, max(1, len(entities)), page_size):
+            query = " ".join((*clauses,
+                f"RETURN DISTINCT {variable} ORDER BY {variable}.objectid "
+                f"SKIP {task.binding.bounds.result_offset + start} LIMIT {page_size}"))
+            nodes = {str(index): _raw_node(snapshot, entity.object_id, {})
+                     for index, entity in enumerate(entities[start:start + page_size])}
+            native_calls.append((
+                {"info_type": "run", "query": query},
+                {"success": True, "info_type": "run", "has_results": bool(nodes),
+                 "node_count": len(nodes), "edge_count": 0,
+                 "data": {"nodes": nodes, "edges": [], "literals": []}},
+            ))
+        for arguments, payload in native_calls[:-1]:
+            result = {"isError": False, "content": [
+                {"type": "text", "text": json.dumps(payload)},
+            ]}
+            observation = project_native_result(
+                profile.implementation_id, alternative.tool_name, arguments, result, task,
+            )
+            if observation.evidence is not None:
+                observed_ids.update(entity.object_id for entity in observation.evidence.entities)
+            prefix_events.append(classify_native_result(
+                profile, task, alternative.tool_name, arguments, result, set_state=set_state,
+            ))
+        arguments, payload = native_calls[-1]
+    elif (task.claim_kind in {"count", "absence"}
             and profile.implementation_id in {"mwnickerson", "mordavid"}):
         if task.claim_kind == "absence" and perfect_evidence.path_status is not PathStatus.NO_PATH:
             raise ValueError("native absence fixture lacks a bounded no-path verdict")
@@ -842,7 +889,9 @@ def project_native_fixture(
     observation = project_native_result(
         profile.implementation_id, alternative.tool_name, arguments, result, task,
     )
-    event = classify_native_result(profile, task, alternative.tool_name, arguments, result)
+    event = classify_native_result(
+        profile, task, alternative.tool_name, arguments, result, set_state=set_state,
+    )
     if observation.evidence is None or not event.unlocks_finalization:
         raise ValueError("NATIVE_PROOF_UNSUPPORTED: perfect native fixture cannot establish proof")
     if case.name == "perfect":
@@ -887,14 +936,19 @@ def project_native_fixture(
             raise ValueError("native unrelated-scope fixture incorrectly establishes proof")
     outcome = score_mcp_transcript_v2(
         task=task, oracle=oracle, resolver=graph_identity_resolver(snapshot), profile=profile,
-        tool_loop=task.binding.mcp_tool_loop, events=(event,), final_answer=case.answer_payload,
-        observed_identity_ids=tuple(entity.object_id for entity in observation.evidence.entities),
+        tool_loop=task.binding.mcp_tool_loop, events=(*prefix_events, event),
+        final_answer=case.answer_payload,
+        observed_identity_ids=tuple(sorted(observed_ids | {
+            entity.object_id for entity in observation.evidence.entities
+        })),
         graph_fact_registry=build_graph_fact_registry(snapshot), certified=False,
     )
     return SurfaceProjection(
         projection_source=_projection_source(case, snapshot),
         execution_class=outcome.sample.execution_class, outcome=outcome.sample.outcome,
         evidence=outcome.sample.evidence, verdict=outcome.sample.verdict,
-        raw_source_digest=canonical_sha256({"arguments": arguments, "result": result}),
+        raw_source_digest=canonical_sha256(
+            native_calls if set_state is not None else {"arguments": arguments, "result": result},
+        ),
         rejection_reason=outcome.sample.detail if outcome.sample.evidence is None else None,
     )

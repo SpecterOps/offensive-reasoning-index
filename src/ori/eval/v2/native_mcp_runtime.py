@@ -169,6 +169,7 @@ class NativeMCPSession:
         self._max_calls = max_calls
         self._max_result_bytes = max_result_bytes
         self._calls = 0
+        self._set_states = {}
         # Never let an external consumer mutate the descriptors bound above.
         self._tools = {item["name"]: deepcopy(item) for item in tools}
         self._prompts = {item["name"]: deepcopy(item) for item in prompts}
@@ -254,6 +255,7 @@ class NativeMCPSession:
 
     async def call_tool(
         self, name: str, arguments: dict[str, Any], task: TaskBundle,
+        *, attempt_id: str | None = None,
     ) -> NativeCallOutcome:
         started = time.monotonic()
         executed = False
@@ -272,6 +274,11 @@ class NativeMCPSession:
                 validate_native_task_binding(self._capability_profile, task)
             except (TypeError, ValueError):
                 return rejected("HARNESS_ERROR")
+            if task.claim_kind == "set" and self.implementation_id == "mwnickerson":
+                # The runner must supply a fresh private identifier for each
+                # model/repetition/retry attempt. Never reuse prior page proof.
+                if not isinstance(attempt_id, str) or not attempt_id.strip():
+                    return rejected("HARNESS_ERROR")
         try:
             if not isinstance(arguments, dict):
                 return rejected("ARGUMENT_INVALID")
@@ -322,10 +329,13 @@ class NativeMCPSession:
                 )
                 proof_event = None
                 if failure is None and self._capability_profile is not None:
-                    from .native_proof import classify_native_result
+                    from .native_proof import NativeSetProofState, classify_native_result
 
                     proof_event = classify_native_result(
                         self._capability_profile, task, name, arguments, payload,
+                        set_state=self._set_states.setdefault(
+                            (task.task_fingerprint, attempt_id), NativeSetProofState(),
+                        ) if task.claim_kind == "set" else None,
                     )
                 return NativeCallOutcome(
                     True, time.monotonic() - started, payload, projection, failure, proof_event,

@@ -2190,6 +2190,15 @@ def _native_claim_evidence_contract(
             "properties or apply arithmetic. Count each selected node identity once. "
             "For populations reached through relationships, use COUNT(DISTINCT node).",
         )
+    if isinstance(claim, SetClaim) and implementation_id == "mwnickerson":
+        requirements += (
+            "Return DISTINCT graph nodes for the selected population, ordered by their objectid, "
+            "using the declared SKIP and LIMIT page window; do not return scalar identity columns.",
+            "For a full set, also return COUNT(DISTINCT node) over that same complete population, "
+            "without intermediate limiting/filtering/rebinding stages or arithmetic. "
+            "All contiguous pages must cover each counted identity exactly once, including an "
+            "empty page for a zero count. A declared single page needs no global count.",
+        )
     return NativeClaimEvidenceContract(
         contract_version="ori-native-claim-evidence-v1",
         implementation_id=implementation_id,

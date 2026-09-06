@@ -313,6 +313,14 @@ def project_native_result(
             if payload.get("info_type") != "run" or not isinstance(arguments.get("query"), str):
                 raise _ShapeError("malformed_run_envelope")
             data = payload.get("data")
+            if (task.claim_kind == "set" and isinstance(data, dict)
+                    and data.get("nodes") == {} and data.get("edges") == []
+                    and data.get("literals", []) == []
+                    and type(payload.get("has_results")) is bool
+                    and type(payload.get("node_count")) is int and payload["node_count"] == 0
+                    and type(payload.get("edge_count")) is int and payload["edge_count"] == 0):
+                evidence = EvidenceIR(task_id=task.task_id, raw_digest=digest)
+                return NativeProjection(evidence, "observed", "mechanical_observation_only", digest)
             if not isinstance(data, dict) or payload.get("has_results") is not True:
                 raise _ShapeError("missing_native_scalar")
             if data.get("nodes"):

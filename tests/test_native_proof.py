@@ -16,6 +16,7 @@ from ori.eval.v2.schema import (
     BoundedNegativePolicy,
     CountClaim,
     EntityRef,
+    EvidenceIR,
     ExactCountPolicy,
     ExactRoutePolicy,
     ExactSetPolicy,
@@ -124,6 +125,137 @@ def _native_session(implementation, payload):
         Session(), implementation, **discovery, surface_availability=availability,
         capability_profile=profile, guard=lambda *_: NativeCallDecision(True, "test-only guard"),
     ), calls
+
+
+def test_main_native_sets_require_matching_count_and_distinct_pages(subtests):
+    for case in ("count-first", "page-first", "missing-count", "wrong-count",
+                 "wrong-population", "nondistinct", "wrong-offset", "wrong-type", "empty"):
+        with subtests.test(case=case):
+            payload = {}
+            profile, session, calls = _native_session("mwnickerson", payload)
+            claim = SetClaim(
+                kind="set", claim_id="all-users", semantics="direct",
+                population_scope=PopulationScope.BENCHMARK_NAMESPACE,
+                selection=SelectionExpression(projection_role="item", projection_type="User"),
+            )
+            task = _fingerprinted_task_bundle(
+                task_id="native-users", product="simple", claim=claim,
+                policy=ExactSetPolicy(kind="exact_set"),
+                binding=_binding(Track.MCP, claim=claim, expected_cardinality=3,
+                                 native_profile=profile), input_entities=(),
+                question="Return the complete set of User objects.",
+            )
+            count = 0 if case == "empty" else 4 if case == "wrong-count" else 3
+            nodes = {} if case == "empty" else {
+                str(i): {"objectId": f"user-{i}", "kind": "User", "label": f"USER{i}"}
+                for i in range(3)
+            }
+            if case == "wrong-type":
+                nodes["0"]["kind"] = "Group"
+            count_query = "MATCH (u:User) RETURN count(DISTINCT u) AS total"
+            if case == "wrong-population":
+                count_query = count_query.replace(":User", ":Group")
+            page_query = ("MATCH (u:User) RETURN DISTINCT u ORDER BY u.objectid "
+                          f"SKIP {500 if case == 'wrong-offset' else 0} LIMIT 500")
+            if case == "nondistinct":
+                page_query = page_query.replace("DISTINCT ", "")
+            count_payload = {
+                "success": True, "info_type": "run", "has_results": True,
+                "node_count": 0, "edge_count": 0,
+                "data": {"nodes": {}, "edges": [], "literals": [{"key": "total", "value": count}]},
+            }
+            page_payload = {
+                "success": True, "info_type": "run", "has_results": bool(nodes),
+                "node_count": len(nodes), "edge_count": 0,
+                "data": {"nodes": nodes, "edges": [], "literals": []},
+            }
+            sequence = [(count_query, count_payload), (page_query, page_payload)]
+            if case == "page-first":
+                sequence.reverse()
+            elif case == "missing-count":
+                sequence = sequence[1:]
+            outcomes = []
+            for query, response in sequence:
+                payload.clear()
+                payload.update(response)
+                outcomes.append(asyncio.run(session.call_tool(
+                    "cypher_query", {"info_type": "run", "query": query}, task,
+                    attempt_id="model-a/run-1/attempt-1",
+                )))
+            assert len(calls) == len(sequence)
+            assert all(outcome.executed and outcome.failure is None for outcome in outcomes)
+            assert outcomes[-1].proof_event.unlocks_finalization is (
+                case in {"count-first", "page-first", "empty"}
+            )
+            if len(outcomes) == 2:
+                assert not outcomes[0].proof_event.unlocks_finalization
+            if case == "count-first":
+                # Reusing the transport for another repetition/retry must not
+                # reuse the prior count. The new attempt sees only a page.
+                retry = asyncio.run(session.call_tool(
+                    "cypher_query", {"info_type": "run", "query": page_query}, task,
+                    attempt_id="model-a/run-1/attempt-2",
+                ))
+                assert retry.executed and retry.failure is None
+                assert not retry.proof_event.unlocks_finalization
+                prior_calls = len(calls)
+                missing_attempt = asyncio.run(session.call_tool(
+                    "cypher_query", {"info_type": "run", "query": page_query}, task,
+                ))
+                assert not missing_attempt.executed and missing_attempt.failure == "HARNESS_ERROR"
+                assert len(calls) == prior_calls
+
+
+def test_native_set_coverage_handles_multiple_pages_and_fixed_windows(subtests):
+    from ori.eval.v2.native_proof import NativeSetProofState
+
+    profile, _, _ = _native_session("mwnickerson", {})
+    for case in ("complete", "gap", "overlap", "short-prefix", "changed-page", "window"):
+        with subtests.test(case=case):
+            windowed = case == "window"
+            claim = SetClaim(
+                kind="set", claim_id="users", semantics="direct",
+                population_scope=PopulationScope.BENCHMARK_NAMESPACE,
+                selection=SelectionExpression(
+                    projection_role="item", projection_type="User",
+                    offset=500 if windowed else 0, limit=500 if windowed else None,
+                ),
+            )
+            task = _fingerprinted_task_bundle(
+                task_id="page-test", product="simple", claim=claim,
+                policy=ExactSetPolicy(kind="exact_set"), input_entities=(),
+                binding=_binding(Track.MCP, claim=claim,
+                                 expected_cardinality=500 if windowed else 501,
+                                 native_profile=profile),
+                question="Return the set of User objects in the declared window.",
+            )
+            state = NativeSetProofState()
+
+            def page(offset, ids):
+                return state.observe(
+                    profile, task, "MATCH (u:User) RETURN DISTINCT u ORDER BY u.objectid "
+                    f"SKIP {offset} LIMIT 500",
+                    EvidenceIR(task_id=task.task_id, raw_digest="a" * 64, entities=tuple(
+                        EntityRef(object_id=f"user-{i}", object_type="User", role="item")
+                        for i in ids
+                    )),
+                )
+
+            if windowed:
+                assert not page(0, range(2))
+                assert page(500, range(2))
+                continue
+            assert not state.observe(
+                profile, task, "MATCH (u:User) RETURN count(DISTINCT u) AS total",
+                EvidenceIR(task_id=task.task_id, raw_digest="b" * 64, count=501),
+            )
+            assert not page(0, range(499 if case == "short-prefix" else 500))
+            if case == "changed-page":
+                with pytest.raises(ValueError, match="page changed"):
+                    page(0, range(1, 501))
+                continue
+            last_ids = [0] if case == "overlap" else [499, 500] if case == "short-prefix" else [500]
+            assert page(1000 if case == "gap" else 500, last_ids) is (case == "complete")
 
 
 def test_armadin_domain_set_proof_uses_complete_native_rows(subtests):

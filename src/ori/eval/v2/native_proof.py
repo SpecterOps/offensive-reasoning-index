@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 from collections import deque
+from dataclasses import dataclass, field
 
 from ori.eval.direct_query_safety import (
     _mask_literals_and_comments,
@@ -18,6 +19,89 @@ from .mcp import EvidenceEvent, EvidenceEventKind
 from .native_capability import NativeCapabilityProfile, validate_native_capability_profile
 from .native_mcp_projection import project_native_result
 from .schema import EdgeDirection, EvidenceIR, NativeClaimEvidenceContract, TaskBundle
+
+
+@dataclass
+class NativeSetProofState:
+    """Task-local native page coverage; uses the existing public query keys."""
+
+    binding: tuple[str, str] | None = None
+    total: tuple[str, int] | None = None
+    pages: dict[str, dict[int, frozenset[str]]] = field(default_factory=dict)
+
+    def observe(self, profile, task, query: str, evidence: EvidenceIR) -> bool:
+        from .model_runtime import (
+            _count_population_matches_page,
+            _is_count_query,
+            _page_window,
+            _query_matches_public_claim,
+            _query_population_key,
+        )
+
+        binding = (profile.profile_fingerprint, task.task_fingerprint)
+        if self.binding not in (None, binding):
+            raise ValueError("native set state cannot cross task/profile bindings")
+        self.binding = binding
+        bounds = task.binding.bounds
+        if _is_count_query(query):
+            if (not bounds.require_total_count or evidence.count is None
+                    or not _complete_count_shape(task, query)
+                    or not _query_matches_public_claim(
+                        task, query, is_count=True, allow_set_companion_count=True,
+                    )):
+                return False
+            total = (_query_population_key(query), evidence.count)
+            if self.total is not None and self.total != total:
+                raise ValueError("native set population/count changed during proof")
+            self.total = total
+        else:
+            if (evidence.count is not None or evidence.edges
+                    or not _query_matches_public_claim(task, query, is_count=False)):
+                return False
+            expected = task.acceptance_spec.selection.projection_type
+            # Match the declarative selector's abstract Principal vocabulary;
+            # concrete native labels still have to be mechanically present.
+            accepted = {"User", "Group", "Computer"} if expected == "Principal" else {expected}
+            if expected not in {"Any", "Object"} and any(
+                entity.object_type not in accepted for entity in evidence.entities
+            ):
+                return False
+            window = _page_window(query)
+            key = _query_population_key(query)
+            # CE graph nodes are deduplicated, so only a DISTINCT identity
+            # projection can make graph cardinality authoritative as page rows.
+            if (window is None or not key.endswith("|identity_distinct=true")
+                    or window[1] != bounds.page_size or window[0] < bounds.result_offset
+                    or (window[0] - bounds.result_offset) % bounds.page_size):
+                return False
+            ids = frozenset(entity.object_id for entity in evidence.entities)
+            if len(ids) != len(evidence.entities) or len(ids) > bounds.page_size:
+                return False
+            pages = self.pages.setdefault(key, {})
+            if window[0] in pages and pages[window[0]] != ids:
+                raise ValueError("native set page changed during proof")
+            pages[window[0]] = ids
+            if not bounds.require_total_count:
+                return (window[0] == bounds.result_offset
+                        and len(ids) <= bounds.max_result_cardinality)
+        if self.total is None:
+            return False
+        count_key, total_count = self.total
+        if total_count > bounds.max_result_cardinality:
+            return False
+        for key, pages in self.pages.items():
+            if not _count_population_matches_page(count_key, key):
+                continue
+            offsets = sorted(pages)
+            if offsets != [bounds.result_offset + index * bounds.page_size
+                           for index in range(len(offsets))]:
+                continue
+            if any(len(pages[offset]) != bounds.page_size for offset in offsets[:-1]):
+                continue
+            identities = set().union(*pages.values())
+            if sum(map(len, pages.values())) == len(identities) == total_count:
+                return True
+        return False
 
 
 def validate_native_task_binding(profile: NativeCapabilityProfile, task: TaskBundle) -> None:
@@ -114,6 +198,7 @@ def classify_native_result(
     tool_name: str,
     arguments: dict,
     result: dict,
+    *, set_state: NativeSetProofState | None = None,
 ) -> EvidenceEvent:
     """Classify actual native call data against its explicitly bound public task.
 
@@ -144,6 +229,12 @@ qualified backend guard. A fabricated dictionary is not an execution receipt.
         return event(EvidenceEventKind.QUERY_ERROR, "native_tool_failed")
     if projection.status != "observed" or projection.evidence is None:
         return event(EvidenceEventKind.IRRELEVANT, "native_evidence_inconclusive")
+    if task.claim_kind == "set" and profile.implementation_id == "mwnickerson":
+        query = arguments.get("query")
+        if (set_state is not None and isinstance(query, str)
+                and set_state.observe(profile, task, query, projection.evidence)):
+            return event(EvidenceEventKind.USEFUL_POSITIVE, "native_complete_identity_pages")
+        return event(EvidenceEventKind.IRRELEVANT, "native_set_coverage_incomplete")
     if (
         task.claim_kind == "absence"
         and profile.implementation_id in {"mwnickerson", "mordavid"}

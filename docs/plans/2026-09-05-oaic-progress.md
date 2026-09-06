@@ -293,6 +293,21 @@ the final run used unchanged source and passed. No live graph/model operations
 or remote Git operations occurred. General native sets, selected-cell feasibility
 and campaign admission/dispatch remain in the open Stage 4 batch.
 
+Main native set enumeration now crosses the shared offline fixture/scorer path.
+The public contract declares DISTINCT identity pages, stable ordering, the exact
+window and companion count for full sets. Proof checks enforce contiguous,
+non-overlapping coverage and concrete types. Session state is isolated by task
+and an explicit per-attempt ID; missing IDs fail before dispatch. Empty full
+sets require a zero count plus an empty page. Focused native proof/compilation
+validation passed **20 tests and 107 subtests in 59.14 seconds**; Ruff passed.
+Independent review verified retry isolation and type validation, with **2 tests
+and 15 subtests passed**, and found no remaining blocker in this bounded delta.
+This is a local WIP checkpoint, not whole-Stage-4 acceptance or a current full-suite
+result. General MorDavid sets, decision proof, selected-cell feasibility and
+native certification/readiness/runner integration remain. Local signed checkpoint
+commits are authorized; remote Git operations remain paused. No live model,
+provider spend, graph mutation or host operation occurred in this batch.
+
 One deferred backlog: unrelated dead-code/cosmetic cleanup, additional test-count
 consolidation without demonstrated payoff, broader partial-usage knownness and
 nonblocking provider edge cases. Accounting required by the scorecard remains in
