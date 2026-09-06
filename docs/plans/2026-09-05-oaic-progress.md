@@ -214,6 +214,30 @@ subsequent source changes; the next full run is reserved for completion of this
 coherent native compilation-to-runner batch. No model, live backend, graph
 mutation, host operation or Git publication occurred.
 
+Local recovery checkpoint `cefe2dd` preserves the accumulated Stage 3 and Stage 4
+work on `codex/oaic-codebase-consolidation`. It is signed and explicitly WIP, not
+release acceptance. The full regression started before that checkpoint completed
+with **1,305 tests and 1,541 subtests passing in 701.66 seconds**. Subsequent native
+proof changes below are covered separately by focused tests, not by that full run.
+No remote Git operation occurred.
+
+Native path/domain continuation: main CE graph envelopes now retain actual stable
+IDs, directed endpoint references and observed properties without turning scalar
+columns into completeness counts. Main and Armadin positive route observations
+must connect the exact public endpoint identities within the declared hop bound.
+Armadin `find_domains` now proves only the complete unfiltered Domain population;
+its pinned source has no hidden query limit and its client iterates all records.
+Malformed counts, missing/duplicate identities, truncation, filtered populations
+and selected windows cannot unlock this proof. No oracle supplements native data.
+Independent review found no implementation blocker and requested independent
+Domain scope-negative tests; those are included with the actual-session route
+and malformed-main-graph regressions. The compilation-to-runner batch remains
+open: native certification, whole-selected-cell feasibility, readiness and shared
+campaign dispatch remain required before Stage 4 is ready for operator testing.
+Focused session/projection validation passed **68 tests and 94 subtests in 3.27
+seconds**; Ruff and whitespace checks passed. No model or live graph calls were
+made. Public pinned source was read without a Git fetch, push, PR or merge.
+
 One deferred backlog: unrelated dead-code/cosmetic cleanup, additional test-count
 consolidation without demonstrated payoff, broader partial-usage knownness and
 nonblocking provider edge cases. Accounting required by the scorecard remains in

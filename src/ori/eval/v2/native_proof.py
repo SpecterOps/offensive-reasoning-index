@@ -144,6 +144,30 @@ qualified backend guard. A fabricated dictionary is not an execution receipt.
         return event(EvidenceEventKind.QUERY_ERROR, "native_tool_failed")
     if projection.status != "observed" or projection.evidence is None:
         return event(EvidenceEventKind.IRRELEVANT, "native_evidence_inconclusive")
+    if (
+        profile.implementation_id == "armadin" and tool_name == "find_domains"
+        and task.claim_kind == "set"
+        and any(alt.result_kind == "entities" for alt in alternatives)
+    ):
+        # This pinned tool enumerates all Domain nodes without a limit. Its
+        # explicit count is checked against unique returned identities by the
+        # projector. It cannot prove a filtered population or a selected page.
+        selection = task.acceptance_spec.selection
+        evidence = projection.evidence
+        if (
+            selection is None or selection.projection_type != "Domain"
+            or selection.anchors or selection.relationships or selection.predicates
+            or selection.offset != 0 or selection.limit is not None
+            or not selection.require_complete or arguments
+            or evidence.count != len(evidence.entities)
+            or any(entity.object_type != "Domain" for entity in evidence.entities)
+        ):
+            return event(EvidenceEventKind.IRRELEVANT, "native_domain_scope_unproven")
+        return event(
+            EvidenceEventKind.CONCLUSIVE_EMPTY if evidence.count == 0
+            else EvidenceEventKind.USEFUL_POSITIVE,
+            "native_complete_domain_set",
+        )
     # Reuse the existing *public* query analysis, not the historical execution
     # adapter or its receipts. Both admitted query tools return actual Cypher
     # data; a scalar is relevant only when it counts the declared population.

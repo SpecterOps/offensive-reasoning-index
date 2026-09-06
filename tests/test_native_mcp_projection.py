@@ -321,3 +321,68 @@ def test_main_native_run_projects_only_explicit_scalar_literals(task, case):
         assert projection.evidence is None
     assert result == original
     assert projection.raw_result_fingerprint == canonical_sha256(original)
+
+
+def test_main_graph_uses_observed_stable_ids_and_explicit_edge_endpoints(task, subtests):
+    for case in ("positive", "missing-id", "duplicate-id", "contradictory-id",
+                 "unknown-type", "wrong-count", "boolean-count", "missing-endpoint",
+                 "wrong-direction", "duplicate-edge", "unknown-edge", "bad-properties"):
+        with subtests.test(case=case):
+            # Deliberately reversed map order and nonidentity CE map keys.
+            nodes = {
+                "9": {"objectId": "group-1", "kind": "Group", "label": "ADMINS"},
+                "2": {"objectId": "user-1", "kind": "User", "label": "ALICE",
+                      "properties": {"name": "ALICE", "enabled": True}},
+            }
+            edges = [{"source": "2", "target": "9", "kind": "MemberOf"}]
+            payload = {"success": True, "info_type": "run", "has_results": True,
+                       "node_count": 2, "edge_count": 1,
+                       "data": {"nodes": nodes, "edges": edges,
+                                "literals": [{"key": "endpoint", "value": "ALICE"}]}}
+            if case == "missing-id":
+                del nodes["2"]["objectId"]
+            elif case == "duplicate-id":
+                nodes["2"]["objectId"] = "group-1"
+            elif case == "contradictory-id":
+                nodes["2"]["properties"]["objectid"] = "other-user"
+            elif case == "unknown-type":
+                nodes["2"]["kind"] = "Invented"
+            elif case == "wrong-count":
+                payload["node_count"] = 3
+            elif case == "boolean-count":
+                payload["edge_count"] = True
+            elif case == "missing-endpoint":
+                edges[0]["target"] = "group-1"
+            elif case == "wrong-direction":
+                edges[0]["direction"] = "inbound"
+            elif case == "duplicate-edge":
+                edges.append(deepcopy(edges[0]))
+                payload["edge_count"] = 2
+            elif case == "unknown-edge":
+                edges[0]["kind"] = "Invented"
+            elif case == "bad-properties":
+                nodes["2"]["properties"] = []
+            result = _call(payload)
+            original = deepcopy(result)
+            projection = project_native_result(
+                "mwnickerson", "cypher_query",
+                {"info_type": "run", "query": "MATCH p=(s)-[:MemberOf]->(t) RETURN p"},
+                result, task,
+            )
+            assert result == original
+            assert projection.raw_result_fingerprint == canonical_sha256(original)
+            if case != "positive":
+                assert projection.status == "inconclusive"
+                assert projection.evidence is None
+                continue
+            evidence = projection.evidence
+            assert projection.status == "observed"
+            assert [entity.object_id for entity in evidence.entities] == ["group-1", "user-1"]
+            assert [(e.source_id, e.target_id, e.direction) for e in evidence.edges] == [
+                ("user-1", "group-1", EdgeDirection.OUTBOUND),
+            ]
+            assert any(fact.entity_id == "user-1" and fact.key == "enabled" and fact.value is True
+                       for fact in evidence.observed_properties)
+            assert evidence.count is None
+            assert evidence.path_status is PathStatus.UNKNOWN
+            assert evidence.graph_fact_attestation is None

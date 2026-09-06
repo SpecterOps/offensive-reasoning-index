@@ -24,9 +24,19 @@ uses actual native results plus public query scope, without oracle data. Counts
 after intermediate limiting/filtering/rebinding, property counts, arithmetic and
 unproven population changes cannot unlock proof. Relationship-derived counts
 must count distinct node identities. Those restrictions are solver-visible in
-the compiled native contract. Other proof shapes remain non-unlocking until
-their native adjudicators and fixture certification are implemented. A proof
-event alone does not admit a campaign.
+the compiled native contract. Positive paths from main and Armadin now require
+observed stable endpoint identities, actual directed connectivity within the
+public hop bound, and public query/argument scope. Main graph map keys are only
+edge locators, never stable identities; auxiliary scalar columns cannot become
+count proof. Armadin's complete Domain listing can establish an unfiltered full
+Domain set, including an empty set, only with unique identities and a matching
+explicit native count. Filtered/windowed tasks and truncated results cannot use
+that proof. This follows the pinned server's
+[unbounded Domain query](https://github.com/armadin-public/bloodhound-mcp-server/blob/6ad4a4703d1117c3019400539911ca689a537197/tools/active_directory/domain_tools.py)
+and [complete record iteration](https://github.com/armadin-public/bloodhound-mcp-server/blob/6ad4a4703d1117c3019400539911ca689a537197/lib/bloodhound_client.py).
+Other proof shapes remain non-unlocking until their native adjudicators are
+implemented. Native fixture certification remains pending. A proof event alone
+does not admit a campaign or establish answer correctness.
 
 The native MorDavid and Armadin implementations use Neo4j Bolt, not the
 BloodHound CE API. `ori verify-native-graph` independently checks one explicitly
