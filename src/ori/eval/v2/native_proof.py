@@ -160,6 +160,11 @@ def _positive_route_is_observed(task: TaskBundle, evidence: EvidenceIR) -> bool:
     public = {entity.role: entity for entity in task.input_entities}
     source = public.get(task.acceptance_spec.source_role)
     target = public.get(task.acceptance_spec.target_role)
+    if task.claim_kind == "decision":
+        roles = task.binding.mcp_evidence_contract.required_input_roles
+        if len(roles) != 2:
+            return False
+        source, target = (public.get(role) for role in roles)
     observed = {entity.object_id: entity for entity in evidence.entities}
     if source is None or target is None or source.object_id == target.object_id:
         return False
@@ -177,18 +182,24 @@ def _positive_route_is_observed(task: TaskBundle, evidence: EvidenceIR) -> bool:
         elif edge.direction is not EdgeDirection.OUTBOUND:
             return False
         adjacency.setdefault(start, set()).add(end)
-    queue = deque([(source.object_id, 0)])
-    visited = {source.object_id}
-    while queue:
-        start, hops = queue.popleft()
-        if hops >= task.binding.bounds.max_hops:
-            continue
-        for end in adjacency.get(start, ()):
-            if end == target.object_id:
-                return True
-            if end not in visited:
-                visited.add(end)
-                queue.append((end, hops + 1))
+    pairs = [(source.object_id, target.object_id)]
+    if task.claim_kind == "decision":
+        # Decision subjects may occur inside the returned witness in either
+        # order. They must still lie on one directed path, not sibling branches.
+        pairs.append((target.object_id, source.object_id))
+    for origin, destination in pairs:
+        queue = deque([(origin, 0)])
+        visited = {origin}
+        while queue:
+            start, hops = queue.popleft()
+            if hops >= task.binding.bounds.max_hops:
+                continue
+            for end in adjacency.get(start, ()):
+                if end == destination:
+                    return True
+                if end not in visited:
+                    visited.add(end)
+                    queue.append((end, hops + 1))
     return False
 
 
@@ -300,7 +311,9 @@ qualified backend guard. A fabricated dictionary is not an execution receipt.
             else EvidenceEventKind.USEFUL_POSITIVE,
             "native_complete_public_count",
         )
-    if task.claim_kind == "route" and any(alt.result_kind == "path" for alt in alternatives):
+    if task.claim_kind in {"route", "decision"} and any(
+        alt.result_kind == "path" for alt in alternatives
+    ):
         relevant = False
         if profile.implementation_id == "mwnickerson":
             from .model_runtime import _query_matches_public_claim

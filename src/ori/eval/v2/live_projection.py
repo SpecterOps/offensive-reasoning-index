@@ -830,7 +830,7 @@ def project_native_fixture(
                     {"key": "certified_count", "value": count},
                 ]},
             }
-    elif task.claim_kind == "route" and profile.implementation_id == "mwnickerson":
+    elif task.claim_kind in {"route", "decision"} and profile.implementation_id == "mwnickerson":
         arguments = {"info_type": "run", "query": _mcp_fixture_query(task, count=False)}
         nodes = _mcp_node_payload(snapshot, perfect_evidence)
         key_by_id = {node["objectId"]: key for key, node in nodes.items()}
@@ -902,7 +902,7 @@ def project_native_fixture(
             {**payload, "truncated": True},
             {"success": False, "error": "synthetic fixture failure"},
         ]
-        if task.claim_kind == "route":
+        if task.claim_kind in {"route", "decision"}:
             node_only = deepcopy(payload)
             missing_identity = deepcopy(payload)
             if profile.implementation_id == "mwnickerson":

@@ -14,7 +14,7 @@ Compilation preserves claim and recipe identities while creating new public
 task, oracle and catalog fingerprints. Native contracts name the actual server
 tools, not a normalized Cypher facade. Unsupported Armadin contracts fail closed.
 Offline certification accepts an explicit native profile for currently implemented
-replay shapes: main/MorDavid counts and bounded absence, main sets and positive routes, Armadin complete
+replay shapes: main/MorDavid counts and bounded absence, main sets, decisions and positive routes, Armadin complete
 Domain sets and Armadin unconstrained positive routes. Use
 `offline_certify(task, snapshot, native_profile=profile)` or pass the native profile
 to `build_offline_certification_catalog`. Replay crosses the actual native
@@ -69,6 +69,15 @@ Profile-bound main set calls require a private `attempt_id` before dispatch.
 Runner integration must assign a fresh ID per model, repetition and retry so
 coverage cannot carry over between attempts. These are offline-tested integration
 interfaces, not native live-campaign admission.
+
+Main decision evidence now reuses the public returned-path selector check and
+observed directed connectivity. Its two declared subjects may occur in either
+order within that witness; route tasks retain ordered endpoint semantics.
+Sibling branches, detached query selectors, missing identities and wrong types
+cannot establish decision proof. This admits finalization only: the shared scorer
+still checks the submitted decision, required properties and supporting edges.
+The generated simple main-MCP corpus can now cross the complete offline catalog
+builder. This does not establish OAIC selected-cell feasibility or live admission.
 
 The native MorDavid and Armadin implementations use Neo4j Bolt, not the
 BloodHound CE API. `ori verify-native-graph` independently checks one explicitly

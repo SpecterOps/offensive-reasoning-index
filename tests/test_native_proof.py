@@ -15,6 +15,9 @@ from ori.eval.v2.schema import (
     AbsenceClaim,
     BoundedNegativePolicy,
     CountClaim,
+    DecisionClaim,
+    DecisionPolicy,
+    EdgeDirection,
     EntityRef,
     EvidenceIR,
     ExactCountPolicy,
@@ -320,6 +323,63 @@ def test_armadin_domain_set_proof_uses_complete_native_rows(subtests):
                         assert denied.executed and denied.failure is None
                         assert not denied.proof_event.unlocks_finalization
                         assert denied.proof_event.reason == "native_domain_scope_unproven"
+
+
+def test_native_decision_subjects_require_one_directed_witness(subtests):
+    for case in ("forward", "reverse", "fork", "wrong-type", "node-only", "detached"):
+        with subtests.test(case=case):
+            nodes = {
+                "0": {"objectId": "user-1", "kind": "User", "label": "ALICE"},
+                "1": {"objectId": "group-1", "kind": "Group", "label": "ADMINS"},
+                "2": {"objectId": "group-2", "kind": "Group", "label": "MID"},
+            }
+            pairs = [("0", "1")]
+            if case == "reverse":
+                pairs = [("1", "0")]
+            elif case == "fork":
+                pairs = [("2", "0"), ("2", "1")]
+            elif case == "node-only":
+                pairs = []
+            elif case == "wrong-type":
+                nodes["0"]["kind"] = "Computer"
+            edges = [{"source": a, "target": b, "kind": "MemberOf"} for a, b in pairs]
+            payload = {"success": True, "info_type": "run", "has_results": True,
+                       "node_count": len(nodes), "edge_count": len(edges),
+                       "data": {"nodes": nodes, "edges": edges, "literals": []}}
+            profile, session, _ = _native_session("mwnickerson", payload)
+            claim = DecisionClaim(
+                kind="decision", claim_id="subjects", semantics="direct",
+                subjects=({"role": "source", "object_type": "User"},
+                          {"role": "target", "object_type": "Group"}),
+                required_relationships=(RelationshipPattern(
+                    source_role="source", source_type="User",
+                    target_role="target", target_type="Group",
+                    relationship="MemberOf", direction=EdgeDirection.OUTBOUND,
+                ),),
+                population_scope=PopulationScope.BENCHMARK_NAMESPACE,
+            )
+            task = _fingerprinted_task_bundle(
+                task_id="native-decision", product="simple", claim=claim,
+                policy=DecisionPolicy(kind="decision", require_supporting_evidence=True),
+                binding=_binding(Track.MCP, claim=claim, expected_cardinality=3,
+                                 native_profile=profile),
+                input_entities=(
+                    EntityRef(object_id="user-1", object_type="User", role="source"),
+                    EntityRef(object_id="group-1", object_type="Group", role="target"),
+                ), question="Decide the claim using relationship evidence for both subjects.",
+            )
+            selectors = ["(s {objectid:'user-1'})", "(t {objectid:'group-1'})"]
+            if case == "reverse":
+                selectors.reverse()
+            query = f"MATCH p={selectors[0]}-[:MemberOf]->{selectors[1]} RETURN p"
+            if case == "detached":
+                query = ("MATCH (s {objectid:'user-1'}), (t {objectid:'group-1'}) "
+                         "MATCH p=(a)-[:MemberOf]->(b) RETURN p")
+            outcome = asyncio.run(session.call_tool(
+                "cypher_query", {"info_type": "run", "query": query}, task,
+            ))
+            assert outcome.executed and outcome.failure is None
+            assert outcome.proof_event.unlocks_finalization is (case in {"forward", "reverse"})
 
 
 @pytest.mark.parametrize("implementation", ["mwnickerson", "armadin"])

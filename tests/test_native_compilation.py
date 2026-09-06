@@ -198,13 +198,16 @@ def test_native_count_compilation_replays_shared_finalizer_before_offline_certif
         initial_finalization_state(task.public, profile, tool_loop="native-openai-compatible")
     with pytest.raises(ValueError, match="forbidden"):
         initial_finalization_state(task.public, profile, tool_loop="auto", certified=False)
-    with pytest.raises(ValueError, match="NATIVE_PROOF_UNSUPPORTED"):
-        kind = "decision" if implementation == "mwnickerson" else "set"
-        unsupported = next(task for task in corpus.tasks if task.public.claim_kind == kind)
-        offline_certify(unsupported, snapshot, native_profile=profile)
+    if implementation == "mordavid":
+        with pytest.raises(ValueError, match="NATIVE_PROOF_UNSUPPORTED"):
+            unsupported = next(task for task in corpus.tasks if task.public.claim_kind == "set")
+            offline_certify(unsupported, snapshot, native_profile=profile)
     from ori.eval.v2.certification import build_offline_certification_catalog
 
-    with pytest.raises(ValueError, match="NATIVE_PROOF_UNSUPPORTED"):
+    if implementation == "mordavid":
+        with pytest.raises(ValueError, match="NATIVE_PROOF_UNSUPPORTED"):
+            build_offline_certification_catalog(corpus, snapshot, profile)
+    else:
         build_offline_certification_catalog(corpus, snapshot, profile)
 
     # A broken projector or an unproven perfect response must block certification,
@@ -273,7 +276,8 @@ def test_armadin_domain_offline_replay_is_not_live_admission(simple_compiled):
     assert certification.certification.live_proof_fingerprint is None
 
 
-def test_main_native_routes_cross_offline_fixture_replay(simple_compiled):
+@pytest.mark.parametrize("claim_kind", ["route", "decision"])
+def test_main_native_routes_cross_offline_fixture_replay(simple_compiled, claim_kind):
     from ori.eval.v2.fixtures import offline_certify
     from ori.eval.v2.schema import CertificationState
 
@@ -282,14 +286,16 @@ def test_main_native_routes_cross_offline_fixture_replay(simple_compiled):
     corpus = compile_legacy_product(
         manifest, snapshot, product="simple", track=Track.MCP, native_profile=profile,
     )
-    routes = [task for task in corpus.tasks if task.public.claim_kind == "route"]
+    routes = [task for task in corpus.tasks if task.public.claim_kind == claim_kind]
     assert routes
     for task in routes:
         certified = offline_certify(task, snapshot, native_profile=profile)
         assert certified.certification.state is CertificationState.OFFLINE_CERTIFIED
         assert certified.certification.live_proof_fingerprint is None
         names = {case.name for case in certified.fixtures.cases if case.applicable}
-        assert {"perfect", "wrong", "empty", "reversed_edge", "disconnected_path"} <= names
+        assert {"perfect", "wrong", "empty"} <= names
+        if claim_kind == "route":
+            assert {"reversed_edge", "disconnected_path"} <= names
 
 
 def test_armadin_native_route_replay_preserves_directed_witness(simple_compiled):

@@ -308,6 +308,20 @@ native certification/readiness/runner integration remain. Local signed checkpoin
 commits are authorized; remote Git operations remain paused. No live model,
 provider spend, graph mutation or host operation occurred in this batch.
 
+Main native decision proof and fixture replay now use public subject bindings
+and observed bounded directed connectivity in either subject order. Route
+endpoint direction remains unchanged. Decision replay includes malformed,
+truncated, node-only and missing-identity negatives; session tests independently
+reject sibling forks, wrong types and detached selectors. The complete generated
+simple main-native corpus now passes the existing offline catalog builder without
+dropping tasks. Focused native proof/compilation validation passed **22 tests and
+113 subtests in 65.13 seconds**; Ruff and whitespace checks passed. Independent
+decision/route verification passed **3 tests and 22 subtests**, with no remaining
+blocking finding in this delta. Native selected-release feasibility and live
+admission are not established; broader native integration remains in progress.
+No live or remote operations occurred. This local WIP checkpoint preserves the
+next delivery boundary: MorDavid/Armadin proof coverage and shared runner admission.
+
 One deferred backlog: unrelated dead-code/cosmetic cleanup, additional test-count
 consolidation without demonstrated payoff, broader partial-usage knownness and
 nonblocking provider edge cases. Accounting required by the scorecard remains in
