@@ -63,8 +63,10 @@ def _observed(tmp_path: Path, info: dict) -> dict:
 
 def _status() -> dict:
     payload = {
-        "schema_version": "ori-v2-campaign-status-v2",
+        "schema_version": "ori-v2-campaign-status-v3",
         "protocol_version": "ori-eval-protocol-v2",
+        "purpose": "official",
+        "ranking_eligible": True,
         "lifecycle_state": "not_started",
         "observed_state": "not_started",
         "mode": None,

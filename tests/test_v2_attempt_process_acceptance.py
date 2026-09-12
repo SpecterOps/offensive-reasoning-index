@@ -80,7 +80,8 @@ def progress(message):
             os._exit(23)
 asyncio.run(runner._run_model(
     resolved=resolved, prepared=prepared, model=model, run_index=1,
-    bhce=NS(), coordinator=NS(circuit_open=False), loop=None, runs_total=1,
+    bhce=NS(), coordinator=NS(circuit_open=False,
+        require_confirmed_native_completion=lambda: None), loop=None, runs_total=1,
     progress=progress,
 ))
 print(json.dumps({"calls": calls}), flush=True)

@@ -13,12 +13,15 @@ from pydantic import Field, model_validator
 from .comparator import COMPARATOR_FINGERPRINT
 from .fingerprint import canonical_sha256
 from .mcp import MCP_FINALIZATION_POLICY_FINGERPRINT
+from .native_capability import NativeCapabilityProfile, validate_native_capability_profile
+from .native_proof import validate_native_task_binding
 from .profiles import validate_capability_profile
 from .protocol import V2ArtifactPair
 from .schema import (
     PROTOCOL_VERSION,
     CapabilityProfile,
     ExecutionClass,
+    NativeClaimEvidenceContract,
     StrictModel,
     TaskCertification,
     Track,
@@ -296,14 +299,14 @@ def _task_bindings(pair: V2ArtifactPair) -> tuple[CheckpointTaskBinding, ...]:
 
 def build_checkpoint(
     pair: V2ArtifactPair,
-    profile: CapabilityProfile,
+    profile: CapabilityProfile | NativeCapabilityProfile,
     run_identity: RunIdentity,
     *,
     results: Sequence[SampleResult] = (),
 ) -> CheckpointV2:
     """Build one private, fully fingerprint-bound resume checkpoint."""
 
-    validate_capability_profile(profile)
+    _validate_pair_profile(pair, profile)
     if pair.public.track is not profile.track:
         raise CampaignArtifactError("checkpoint capability profile track mismatch")
     if any(
@@ -351,7 +354,7 @@ def build_checkpoint(
 def validate_checkpoint(
     checkpoint: CheckpointV2,
     pair: V2ArtifactPair,
-    profile: CapabilityProfile,
+    profile: CapabilityProfile | NativeCapabilityProfile,
     run_identity: RunIdentity,
 ) -> CheckpointV2:
     """Reject stale checkpoints before any task is scheduled."""
@@ -392,7 +395,7 @@ def validate_checkpoint(
 
 def build_public_report(
     pair: V2ArtifactPair,
-    profile: CapabilityProfile,
+    profile: CapabilityProfile | NativeCapabilityProfile,
     results: Sequence[SampleResult],
     summary: CampaignSummary,
     *,
@@ -401,7 +404,7 @@ def build_public_report(
 ) -> PublicReportV2:
     """Redact scorer-only state while preserving exact public accounting."""
 
-    validate_capability_profile(profile)
+    _validate_pair_profile(pair, profile)
     task_by_id = {task.task_id: task for task in pair.public.tasks}
     scheduled = (
         tuple(task_by_id)
@@ -471,11 +474,28 @@ def build_public_report(
     return PublicReportV2.model_validate(payload)
 
 
+def _validate_pair_profile(
+    pair: V2ArtifactPair,
+    profile: CapabilityProfile | NativeCapabilityProfile,
+) -> None:
+    if isinstance(profile, NativeCapabilityProfile):
+        validate_native_capability_profile(profile)
+        if pair.public.track is not Track.MCP:
+            raise CampaignArtifactError("native provenance requires an MCP task catalog")
+        for task in pair.public.tasks:
+            validate_native_task_binding(profile, task)
+    else:
+        validate_capability_profile(profile)
+        if any(isinstance(task.binding.mcp_evidence_contract, NativeClaimEvidenceContract)
+               for task in pair.public.tasks):
+            raise CampaignArtifactError("native task provenance requires its native profile")
+
+
 def build_run_provenance(
     pair: V2ArtifactPair,
-    profile: CapabilityProfile,
+    profile: CapabilityProfile | NativeCapabilityProfile,
 ) -> RunProvenanceV2:
-    validate_capability_profile(profile)
+    _validate_pair_profile(pair, profile)
     payload = {
         "product": pair.public.product,
         "track": pair.public.track,

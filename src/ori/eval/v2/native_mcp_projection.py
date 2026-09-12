@@ -10,6 +10,7 @@ No scorer oracle, graph snapshot, identity resolver, or finalizer is consulted.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from typing import Literal
 
@@ -34,6 +35,16 @@ class NativeProjection:
 
 class _ShapeError(ValueError):
     pass
+
+
+def native_response_completed(result: dict) -> bool:
+    """Recognize an explicit native success, independently of evidence completeness."""
+    try:
+        payload = _payload(result)
+        return (result.get("isError", False) is False
+                and payload.get("success") is True and "error" not in payload)
+    except (ValueError, TypeError, KeyError, AttributeError):
+        return False
 
 
 def _object(pairs):
@@ -89,6 +100,47 @@ def _payload(result):
 
 def _nonnegative_int(value):
     return type(value) is int and value >= 0
+
+
+def _mordavid_set(rows, query, task_id, digest):
+    """Project explicit native node/label columns, never infer lost labels."""
+    from ori.eval.direct_query_safety import _mask_literals_and_comments
+
+    normalized = _mask_literals_and_comments(query)
+    match = re.search(
+        r"\bRETURN\s+DISTINCT\s+(?P<node>[A-Za-z_][A-Za-z_0-9]*)\s+AS\s+entity"
+        r"\s*,\s*labels\s*\(\s*(?-i:(?P=node))\s*\)\s+AS\s+labels\s+ORDER\s+BY\s+"
+        r"(?-i:(?P=node))\s*\.\s*(?-i:objectid)\s+SKIP\s+\d+\s+LIMIT\s+\d+\s*$",
+        normalized, flags=re.IGNORECASE,
+    )
+    if match is None or not isinstance(rows, list):
+        raise _ShapeError("unbound_native_identity_columns")
+    entities, properties, ids = [], [], set()
+    for row in rows:
+        if not isinstance(row, dict) or set(row) != {"entity", "labels"}:
+            raise _ShapeError("malformed_native_identity_row")
+        props, labels = row["entity"], row["labels"]
+        if (not isinstance(props, dict) or not isinstance(labels, list)
+                or not labels or any(not isinstance(label, str) for label in labels)
+                or len(labels) != len(set(labels))):
+            raise _ShapeError("malformed_native_identity_row")
+        concrete = set(labels) & _LIVE_OBJECT_TYPES
+        if len(concrete) != 1 or set(labels) - _LIVE_OBJECT_TYPES - {"Base"}:
+            raise _ShapeError("ambiguous_native_identity_type")
+        kind = next(iter(concrete))
+        object_id = props.get("objectid")
+        if not isinstance(object_id, str) or not object_id.strip() or object_id in ids:
+            raise _ShapeError("missing_or_duplicate_native_identity")
+        _json_value(props)
+        entities.append(EntityRef(
+            object_id=object_id, object_type=kind, canonical_name=props.get("name"),
+            domain=props.get("domain"), role=f"observed_{len(entities)}",
+        ))
+        properties.extend(EntityPropertyFact(entity_id=object_id, key=fact.key, value=fact.value)
+                          for fact in _object_properties(props, object_type=kind))
+        ids.add(object_id)
+    return EvidenceIR(task_id=task_id, entities=tuple(entities),
+                      observed_properties=tuple(properties), raw_digest=digest)
 
 
 def _main_graph(data, payload, task_id, digest):
@@ -297,6 +349,11 @@ def project_native_result(
             if set(arguments) != {"query"} or not isinstance(arguments["query"], str):
                 raise _ShapeError("malformed_query_arguments")
             rows = payload.get("data")
+            if task.claim_kind == "set" and not re.search(
+                r"\bcount\s*\(", arguments["query"], flags=re.IGNORECASE,
+            ):
+                evidence = _mordavid_set(rows, arguments["query"], task.task_id, digest)
+                return NativeProjection(evidence, "observed", "mechanical_observation_only", digest)
             if not isinstance(rows, list) or len(rows) != 1:
                 raise _ShapeError("missing_unambiguous_scalar")
             row = rows[0]

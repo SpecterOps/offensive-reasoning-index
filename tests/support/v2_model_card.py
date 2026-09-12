@@ -148,6 +148,22 @@ def _public_rows(track: Track) -> tuple[PublicResultRow, ...]:
     )
 
 
+def _schedule(track: Track) -> campaign_runner.ScheduledTaskRosterV2:
+    payload = {
+        "track": track,
+        "purpose": "official",
+        "ranking_eligible": True,
+        "suite": "candidate-catalog-v1",
+        "selection_fingerprint": f"selection-{track.value}",
+        "task_ids": tuple(sample.task_id for sample in _samples(track)),
+        "schedule_fingerprint": "0" * 64,
+    }
+    payload["schedule_fingerprint"] = canonical_sha256(
+        payload, exclude_fields=("schedule_fingerprint",)
+    )
+    return campaign_runner.ScheduledTaskRosterV2.model_validate(payload)
+
+
 def _provider(sample: SampleResult, track: Track) -> ProviderRunRecord:
     payload = {
         "task_id": sample.task_id,
@@ -203,6 +219,7 @@ def _provenance(checkpoint: CheckpointV2) -> campaign_runner.ModelRunProvenanceV
         "archive_sha256": "4" * 64,
         "candidate_release_fingerprint": f"candidate-{checkpoint.track.value}",
         "live_certification_fingerprint": f"live-{checkpoint.track.value}",
+        "schedule": _schedule(checkpoint.track),
         "containment_config_fingerprint": "1" * 64,
         "runtime_implementation_fingerprint": "2" * 64,
         "runtime_config_fingerprint": "3" * 64,
@@ -316,6 +333,7 @@ def _model_report(
         ),
         "candidate_release_fingerprint": f"candidate-{track.value}",
         "live_certification_fingerprint": f"live-{track.value}",
+        "schedule_fingerprint": _schedule(track).schedule_fingerprint,
         "graph_verification_before_fingerprint": f"before-{track.value}",
         "graph_verification_after_fingerprint": f"after-{track.value}",
         "operational_metrics": campaign_runner._run_operational_metrics(state),
@@ -354,6 +372,7 @@ def _track_receipt(
         "graph_verification_before_fingerprint": report.graph_verification_before_fingerprint,
         "graph_verification_after_fingerprint": report.graph_verification_after_fingerprint,
         "expected_task_count_per_run": 2,
+        "schedule": _schedule(track),
         "run_count": 1,
         "result_count": 2,
         "campaign_valid": valid,
@@ -390,16 +409,19 @@ def _readiness(
         "schema_version": campaign_runner.READINESS_SCHEMA_VERSION,
         "protocol_version": "ori-eval-protocol-v2",
         "runner_version": campaign_runner.RUNNER_VERSION,
+        "purpose": "official",
+        "ranking_eligible": True,
         "source_config_fingerprint": _CONFIG,
         "source_manifest_sha256": "3" * 64,
         "archive_sha256": "4" * 64,
         "graph_fingerprint": _GRAPH,
-        "target_fingerprint": _TARGET,
+        "target_fingerprint": canonical_sha256({track.value: _TARGET for track in reports}),
         "mcp_server_revision": "92a37dd",
         "mcp_launcher_provenance": None,
         "tracks": tuple(
             campaign_runner.ReadinessTrackV2(
                 track=track,
+                target_fingerprint=_TARGET,
                 public_artifact_fingerprint=_PUBLIC,
                 oracle_artifact_fingerprint="b" * 64,
                 candidate_release_fingerprint=report.candidate_release_fingerprint,
@@ -407,6 +429,7 @@ def _readiness(
                 capability_profile_fingerprint=_CAPABILITY,
                 graph_verification_fingerprint=f"readiness-{track.value}",
                 task_count=2,
+                schedule=_schedule(track),
             )
             for track, report in reports.items()
         ),
@@ -428,6 +451,9 @@ def _lifecycle(
     return campaign_runner._campaign_lifecycle(
         {
             "source_config_fingerprint": _CONFIG,
+            "purpose": "official",
+            "ranking_eligible": True,
+            "schedules": tuple(_schedule(track) for track in receipts),
             "mode": "execution",
             "status": status,
             "started_at_utc": "2026-08-30T11:00:00+00:00",

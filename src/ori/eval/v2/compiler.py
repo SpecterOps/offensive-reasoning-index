@@ -126,6 +126,10 @@ class V2CompileError(ValueError):
     """Raised when a legacy capability cannot be represented or certified."""
 
 
+class NativeContractUnsupported(V2CompileError):
+    """The pinned native surface cannot represent this public contract."""
+
+
 class MigrationRecord(StrictModel):
     product: str
     track: Track
@@ -2178,7 +2182,7 @@ def _native_claim_evidence_contract(
                 "An empty shortest-path response does not establish bounded absence.",
             )
         else:
-            raise V2CompileError("unsupported Armadin native claim evidence contract")
+            raise NativeContractUnsupported("unsupported Armadin native claim evidence contract")
         operation = None
     else:
         raise V2CompileError("unknown native implementation")
@@ -2193,11 +2197,26 @@ def _native_claim_evidence_contract(
     if isinstance(claim, SetClaim) and implementation_id == "mwnickerson":
         requirements += (
             "Return DISTINCT graph nodes for the selected population, ordered by their objectid, "
-            "using the declared SKIP and LIMIT page window; do not return scalar identity columns.",
+            "using the declared SKIP and LIMIT page window; do not return scalar identity columns "
+            "or use intermediate WITH, UNWIND, CALL or UNION stages.",
             "For a full set, also return COUNT(DISTINCT node) over that same complete population, "
             "without intermediate limiting/filtering/rebinding stages or arithmetic. "
             "All contiguous pages must cover each counted identity exactly once, including an "
             "empty page for a zero count. A declared single page needs no global count.",
+        )
+    if isinstance(claim, SetClaim) and implementation_id == "mordavid":
+        requirements += (
+            "Preserve native identity and type with RETURN DISTINCT n AS entity, "
+            "labels(n) AS labels "
+            "ORDER BY n.objectid SKIP <offset> LIMIT <page_size>, using the same bound node "
+            "variable throughout and the declared page window. Do not construct entity maps or "
+            "literal labels, or use intermediate WITH, UNWIND, CALL or UNION stages; "
+            "plain node serialization loses labels. Only one concrete object "
+            "label, optionally accompanied by Base, is supported.",
+            "For a full set, also return COUNT(DISTINCT n) over the same complete population "
+            "without intermediate limiting/filtering/rebinding or arithmetic. Contiguous pages "
+            "must cover every counted identity once; zero requires an empty page. A declared "
+            "single page needs no global count.",
         )
     return NativeClaimEvidenceContract(
         contract_version="ori-native-claim-evidence-v1",
@@ -2218,7 +2237,12 @@ def _binding(
     claim: ClaimSpec,
     expected_cardinality: int,
     native_profile: Any | None = None,
+    native_tool_loop: str = "native-openai-compatible",
 ) -> TrackBinding:
+    if native_tool_loop not in {"native-openai-compatible", "native-anthropic"} or (
+        native_tool_loop != "native-openai-compatible" and native_profile is None
+    ):
+        raise V2CompileError("native loop requires an explicit compatible native profile")
     if native_profile is not None:
         from .native_capability import validate_native_capability_profile
 
@@ -2353,7 +2377,8 @@ def _binding(
         ),
         semantics=claim.semantics,
         bounds=bounds,
-        mcp_tool_loop="native-openai-compatible",
+        mcp_tool_loop=(native_tool_loop if native_profile is not None
+                       else "native-openai-compatible"),
         mcp_resource_mode="native" if native_profile is not None else "off",
         mcp_binding_mode=(
             MCPBindingMode.NATIVE if native_profile is not None else MCPBindingMode.CYPHER_ENABLED
@@ -2552,13 +2577,19 @@ def compile_legacy_product(
     product: str,
     track: Track,
     native_profile: Any | None = None,
+    native_tool_loop: str = "native-openai-compatible",
 ) -> CompiledCorpus:
     """Compile a v1 generated product into explicit v2 public/private artifacts."""
 
+    if native_tool_loop not in {"native-openai-compatible", "native-anthropic"} or (
+        native_tool_loop != "native-openai-compatible" and native_profile is None
+    ):
+        raise V2CompileError("native loop requires an explicit compatible native profile")
     if product == "oaic-2026-v1":
         from .oaic_recipes import compile_oaic_product
 
-        return compile_oaic_product(manifest, snapshot, track=track, native_profile=native_profile)
+        return compile_oaic_product(manifest, snapshot, track=track, native_profile=native_profile,
+                                    native_tool_loop=native_tool_loop)
 
     if manifest.get("schema_version") != "ori-generated-manifest-v2":
         raise V2CompileError(
@@ -2617,6 +2648,7 @@ def compile_legacy_product(
                 claim=draft.claim,
                 expected_cardinality=expected_cardinality,
                 native_profile=native_profile,
+                native_tool_loop=native_tool_loop,
             )
             input_entities = _public_input_entities(draft)
             public = _fingerprinted_task_bundle(

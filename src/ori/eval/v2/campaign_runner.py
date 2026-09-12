@@ -14,7 +14,7 @@ import subprocess
 import tempfile
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from functools import partial
@@ -117,15 +117,16 @@ from .schema import (
 )
 from .scoring import SampleOutcomeCode, SampleResult, summarize_results
 
-RUNNER_VERSION = "ori-v2-model-campaign-v15"
+RUNNER_VERSION = "ori-v2-model-campaign-v16"
 RUN_STATE_SCHEMA_VERSION = "ori-v2-private-run-state-v7"
 RUN_STATE_NAME = "run-state-v7.private.json"
-MODEL_REPORT_SCHEMA_VERSION = "ori-v2-model-report-v4"
-READINESS_SCHEMA_VERSION = "ori-v2-run-readiness-v12"
-CAMPAIGN_LIFECYCLE_SCHEMA_VERSION = "ori-v2-campaign-lifecycle-v2"
-TRACK_COMPLETION_SCHEMA_VERSION = "ori-v2-track-completion-v1"
+MODEL_REPORT_SCHEMA_VERSION = "ori-v2-model-report-v5"
+READINESS_SCHEMA_VERSION = "ori-v2-run-readiness-v13"
+CAMPAIGN_LIFECYCLE_SCHEMA_VERSION = "ori-v2-campaign-lifecycle-v3"
+TRACK_COMPLETION_SCHEMA_VERSION = "ori-v2-track-completion-v2"
 _RUNNER_IMPLEMENTATION_SOURCES = {
     "release_selection": Path(__file__).with_name("release_selection.py"),
+    "diagnostic_selection": Path(__file__).with_name("diagnostic_selection.py"),
     "oaic_recipes": Path(__file__).with_name("oaic_recipes.py"),
     "adapter": Path(__file__).parent.parent / "adapter.py",
     "anthropic_binding": Path(__file__).parent.parent / "anthropic_binding.py",
@@ -256,8 +257,74 @@ def _infrastructure_attempt_progress(
     return f"           {arrow} {sample.outcome.value} on attempt {attempt_number}; {state}"
 
 
+class ScheduledTaskRosterV2(StrictModel):
+    """The exact public task schedule admitted for one V2 track.
+
+    Candidate catalogs can contain certified but intentionally unscheduled
+    semantic equivalents.  A count alone cannot prove which subset ran, so the
+    immutable roster is carried by every durable campaign boundary.
+    """
+
+    track: Track
+    purpose: Literal["official", "diagnostic_canary"]
+    ranking_eligible: bool
+    suite: str = Field(min_length=1)
+    selection_fingerprint: str
+    task_ids: tuple[str, ...]
+    schedule_fingerprint: str
+
+    @model_validator(mode="after")
+    def roster_is_exact(self) -> ScheduledTaskRosterV2:
+        if not self.task_ids or any(not task_id for task_id in self.task_ids):
+            raise ValueError("scheduled task roster must contain non-empty task IDs")
+        if len(self.task_ids) != len(set(self.task_ids)):
+            raise ValueError("scheduled task roster contains duplicate task IDs")
+        if self.ranking_eligible != (self.purpose == "official"):
+            raise ValueError("scheduled task roster ranking eligibility conflicts with purpose")
+        if self.purpose == "diagnostic_canary":
+            if self.track is not Track.MCP or self.suite != "native-five-kind-v1":
+                raise ValueError("diagnostic canary roster must be the native MCP suite")
+            if len(self.task_ids) != 5:
+                raise ValueError("diagnostic canary roster must contain exactly five tasks")
+        expected = canonical_sha256(self, exclude_fields=("schedule_fingerprint",))
+        if self.schedule_fingerprint != expected:
+            raise ValueError("scheduled task roster fingerprint mismatch")
+        return self
+
+
+def _scheduled_task_roster(
+    resolved: ResolvedV2CampaignConfig,
+    prepared: PreparedTrack,
+) -> ScheduledTaskRosterV2:
+    """Bind purpose, selector, and exact task IDs before any campaign write."""
+
+    purpose = getattr(getattr(resolved, "config", None), "purpose", "official")
+    selection_fingerprint = (
+        getattr(prepared, "selection_fingerprint", None) or prepared.release.release_fingerprint
+    )
+    if purpose == "diagnostic_canary":
+        suite = "native-five-kind-v1"
+    elif getattr(prepared, "selection_fingerprint", None) is not None:
+        suite = "official-selected-release-v1"
+    else:
+        suite = "candidate-catalog-v1"
+    payload = {
+        "track": prepared.track,
+        "purpose": purpose,
+        "ranking_eligible": purpose == "official",
+        "suite": suite,
+        "selection_fingerprint": selection_fingerprint,
+        "task_ids": prepared.task_ids,
+        "schedule_fingerprint": "0" * 64,
+    }
+    payload["schedule_fingerprint"] = canonical_sha256(
+        payload, exclude_fields=("schedule_fingerprint",)
+    )
+    return ScheduledTaskRosterV2.model_validate(payload)
+
+
 class ModelRunProvenanceV2(StrictModel):
-    schema_version: Literal["ori-v2-model-campaign-v15"] = RUNNER_VERSION
+    schema_version: Literal["ori-v2-model-campaign-v16"] = RUNNER_VERSION
     protocol_version: Literal["ori-eval-protocol-v2"] = PROTOCOL_VERSION
     base: RunProvenanceV2
     run_identity: RunIdentity
@@ -265,6 +332,7 @@ class ModelRunProvenanceV2(StrictModel):
     archive_sha256: str
     candidate_release_fingerprint: str
     live_certification_fingerprint: str
+    schedule: ScheduledTaskRosterV2
     containment_config_fingerprint: str
     runtime_implementation_fingerprint: str
     runtime_config_fingerprint: str
@@ -386,7 +454,7 @@ class PrivateRunStateV2(StrictModel):
 
 
 class RunOperationalMetricsV2(StrictModel):
-    resource_mode: Literal["off", "not_applicable"]
+    resource_mode: Literal["off", "native", "not_applicable"]
     attempts_total: int = Field(strict=True, ge=0)
     retries_total: int = Field(strict=True, ge=0)
     immediate_retries_total: int = Field(strict=True, ge=0)
@@ -416,17 +484,18 @@ class RunOperationalMetricsV2(StrictModel):
             raise ValueError("operational MCP tool accounting mismatch")
         if not math.isfinite(self.elapsed_seconds_total):
             raise ValueError("operational elapsed time must be finite")
-        if self.resource_read_calls_total != 0:
+        if self.resource_mode != "native" and self.resource_read_calls_total != 0:
             raise ValueError("certified resource_mode=off cannot report resource reads")
         return self
 
 
 class ModelPublicReportV2(StrictModel):
-    schema_version: Literal["ori-v2-model-report-v4"] = MODEL_REPORT_SCHEMA_VERSION
+    schema_version: Literal["ori-v2-model-report-v5"] = MODEL_REPORT_SCHEMA_VERSION
     protocol_version: Literal["ori-eval-protocol-v2"] = PROTOCOL_VERSION
     run_identity: RunIdentity
     candidate_release_fingerprint: str
     live_certification_fingerprint: str
+    schedule_fingerprint: str
     graph_verification_before_fingerprint: str
     graph_verification_after_fingerprint: str
     operational_metrics: RunOperationalMetricsV2
@@ -447,8 +516,8 @@ class ModelPublicReportV2(StrictModel):
                 raise ValueError("Direct operational metrics require not_applicable resources")
             if self.operational_metrics.mcp_tool_calls_total != 0:
                 raise ValueError("Direct operational metrics cannot contain MCP tool calls")
-        elif self.operational_metrics.resource_mode != "off":
-            raise ValueError("certified MCP operational metrics require resource_mode=off")
+        elif self.operational_metrics.resource_mode not in {"off", "native"}:
+            raise ValueError("certified MCP operational metrics require off or native resources")
         expected = canonical_sha256(
             self,
             exclude_fields=("artifact_fingerprint",),
@@ -458,8 +527,22 @@ class ModelPublicReportV2(StrictModel):
         return self
 
 
-def _run_operational_metrics(state: PrivateRunStateV2) -> RunOperationalMetricsV2:
+def _run_operational_metrics(
+    state: PrivateRunStateV2,
+    *,
+    native: bool = False,
+) -> RunOperationalMetricsV2:
+    from .model_runtime import NativeExecutionTrace
+
     attempts = tuple(state.attempts)
+    native_traces = []
+    for attempt in attempts:
+        raw = attempt.provider.provider_metrics.get("native_execution")
+        if raw is not None:
+            trace = NativeExecutionTrace.model_validate_json(json.dumps(raw, allow_nan=False))
+            if not native or not trace.certified:
+                raise ValueError("native metrics require a certified native campaign")
+            native_traces.append(trace)
     mcp_tool_calls = sum(len(attempt.provider.mcp_tool_receipts) for attempt in attempts)
     cypher_query_calls = sum(
         sum(receipt.tool_name == "cypher_query" for receipt in attempt.provider.mcp_tool_receipts)
@@ -475,6 +558,29 @@ def _run_operational_metrics(state: PrivateRunStateV2) -> RunOperationalMetricsV
     resource_read_calls = sum(
         sum(event.kind == EvidenceEventKind.RESOURCE_READ for event in attempt.provider.mcp_events)
         for attempt in attempts
+        if "native_execution" not in attempt.provider.provider_metrics
+    )
+    native_calls = [call for trace in native_traces for call in trace.tool_calls]
+    mcp_tool_calls += len(native_calls)
+    cypher_query_calls += sum(
+        call.name == "query_bloodhound"
+        or (call.name == "cypher_query" and call.arguments.get("info_type") == "run")
+        for call in native_calls
+    )
+    failed_tool_calls += sum(
+        call.interrupted
+        or call.outcome is None
+        or call.outcome.failure is not None
+        or (
+            call.outcome.query_receipt is not None
+            and call.outcome.query_receipt.get("success") is False
+        )
+        for call in native_calls
+    )
+    resource_read_calls += sum(
+        call.operation == "read_resource"
+        for trace in native_traces
+        for call in trace.protocol_calls
     )
     tokens_input = sum(attempt.provider.tokens_input for attempt in attempts)
     tokens_output = sum(attempt.provider.tokens_output for attempt in attempts)
@@ -500,7 +606,11 @@ def _run_operational_metrics(state: PrivateRunStateV2) -> RunOperationalMetricsV
     )
     return RunOperationalMetricsV2(
         resource_mode=(
-            "off" if state.checkpoint.run_identity.tool_loop is not None else "not_applicable"
+            "native"
+            if native
+            else "off"
+            if state.checkpoint.run_identity.tool_loop is not None
+            else "not_applicable"
         ),
         attempts_total=len(attempts),
         retries_total=retries_total,
@@ -530,6 +640,7 @@ def _run_operational_metrics(state: PrivateRunStateV2) -> RunOperationalMetricsV
 
 class ReadinessTrackV2(StrictModel):
     track: Track
+    target_fingerprint: str
     public_artifact_fingerprint: str
     oracle_artifact_fingerprint: str
     candidate_release_fingerprint: str
@@ -537,6 +648,7 @@ class ReadinessTrackV2(StrictModel):
     capability_profile_fingerprint: str
     graph_verification_fingerprint: str
     task_count: int = Field(strict=True, gt=0)
+    schedule: ScheduledTaskRosterV2
 
 
 class ModelReadinessV2(StrictModel):
@@ -561,9 +673,11 @@ class ModelReadinessV2(StrictModel):
 
 
 class CampaignReadinessV2(StrictModel):
-    schema_version: Literal["ori-v2-run-readiness-v12"] = READINESS_SCHEMA_VERSION
+    schema_version: Literal["ori-v2-run-readiness-v13"] = READINESS_SCHEMA_VERSION
     protocol_version: Literal["ori-eval-protocol-v2"] = PROTOCOL_VERSION
-    runner_version: Literal["ori-v2-model-campaign-v15"] = RUNNER_VERSION
+    runner_version: Literal["ori-v2-model-campaign-v16"] = RUNNER_VERSION
+    purpose: Literal["official", "diagnostic_canary"]
+    ranking_eligible: bool
     source_config_fingerprint: str
     source_manifest_sha256: str
     archive_sha256: str
@@ -580,6 +694,17 @@ class CampaignReadinessV2(StrictModel):
     def fingerprint_matches(self) -> CampaignReadinessV2:
         if self.model_count != len(self.models):
             raise ValueError("readiness model count does not match model receipts")
+        targets = {item.track.value: item.target_fingerprint for item in self.tracks}
+        if (
+            len(targets) != len(self.tracks)
+            or not targets
+            or self.target_fingerprint != canonical_sha256(targets)
+        ):
+            raise ValueError("readiness track target binding mismatch")
+        if self.ranking_eligible != (self.purpose == "official"):
+            raise ValueError("readiness ranking eligibility conflicts with purpose")
+        if any(item.schedule.purpose != self.purpose for item in self.tracks):
+            raise ValueError("readiness schedule purpose does not match campaign purpose")
         expected = canonical_sha256(
             self,
             exclude_fields=("readiness_fingerprint",),
@@ -606,10 +731,13 @@ class CampaignCompletedTrackV2(StrictModel):
 
 
 class CampaignLifecycleV2(StrictModel):
-    schema_version: Literal["ori-v2-campaign-lifecycle-v2"] = CAMPAIGN_LIFECYCLE_SCHEMA_VERSION
+    schema_version: Literal["ori-v2-campaign-lifecycle-v3"] = CAMPAIGN_LIFECYCLE_SCHEMA_VERSION
     protocol_version: Literal["ori-eval-protocol-v2"] = PROTOCOL_VERSION
-    runner_version: Literal["ori-v2-model-campaign-v15"] = RUNNER_VERSION
+    runner_version: Literal["ori-v2-model-campaign-v16"] = RUNNER_VERSION
     source_config_fingerprint: str
+    purpose: Literal["official", "diagnostic_canary"]
+    ranking_eligible: bool
+    schedules: tuple[ScheduledTaskRosterV2, ...]
     mode: Literal["readiness", "execution"]
     status: Literal["running", "interrupted", "failed", "completed"]
     started_at_utc: str
@@ -630,6 +758,12 @@ class CampaignLifecycleV2(StrictModel):
         completed = [entry.track for entry in self.completed_tracks]
         if len(completed) != len(set(completed)):
             raise ValueError("campaign lifecycle contains duplicate completed tracks")
+        if self.ranking_eligible != (self.purpose == "official"):
+            raise ValueError("campaign lifecycle ranking eligibility conflicts with purpose")
+        if len({item.track for item in self.schedules}) != len(self.schedules):
+            raise ValueError("campaign lifecycle contains duplicate scheduled tracks")
+        if any(item.purpose != self.purpose for item in self.schedules):
+            raise ValueError("campaign lifecycle schedule purpose mismatch")
         expected = canonical_sha256(
             self,
             exclude_fields=("lifecycle_fingerprint",),
@@ -650,9 +784,9 @@ class TrackRunCompletionV2(StrictModel):
 
 
 class TrackCompletionV2(StrictModel):
-    schema_version: Literal["ori-v2-track-completion-v1"] = TRACK_COMPLETION_SCHEMA_VERSION
+    schema_version: Literal["ori-v2-track-completion-v2"] = TRACK_COMPLETION_SCHEMA_VERSION
     protocol_version: Literal["ori-eval-protocol-v2"] = PROTOCOL_VERSION
-    runner_version: Literal["ori-v2-model-campaign-v15"] = RUNNER_VERSION
+    runner_version: Literal["ori-v2-model-campaign-v16"] = RUNNER_VERSION
     source_config_fingerprint: str
     track: Track
     candidate_release_fingerprint: str
@@ -660,6 +794,7 @@ class TrackCompletionV2(StrictModel):
     graph_verification_before_fingerprint: str
     graph_verification_after_fingerprint: str
     expected_task_count_per_run: int = Field(strict=True, gt=0)
+    schedule: ScheduledTaskRosterV2
     run_count: int = Field(strict=True, gt=0)
     result_count: int = Field(strict=True, ge=0)
     campaign_valid: bool
@@ -673,6 +808,13 @@ class TrackCompletionV2(StrictModel):
             raise ValueError("track completion run count does not match run receipts")
         if self.result_count != sum(run.result_count for run in self.runs):
             raise ValueError("track completion result count does not match run receipts")
+        if (
+            self.schedule.track is not self.track
+            or len(self.schedule.task_ids) != self.expected_task_count_per_run
+        ):
+            raise ValueError("track completion schedule does not match expected task count")
+        if self.result_count != self.run_count * self.expected_task_count_per_run:
+            raise ValueError("track completion result count is not the exact scheduled total")
         identities = [(run.provider, run.model, run.run_index) for run in self.runs]
         if len(identities) != len(set(identities)):
             raise ValueError("track completion contains duplicate run identities")
@@ -829,6 +971,8 @@ class _CampaignLifecycleController:
         output_dir: Path,
         source_config_fingerprint: str,
         preflight_only: bool,
+        purpose: Literal["official", "diagnostic_canary"] = "official",
+        schedules: tuple[ScheduledTaskRosterV2, ...] = (),
     ) -> _CampaignLifecycleController:
         path = output_dir / "campaign-lifecycle-v2.private.json"
         previous: CampaignLifecycleV2 | None = None
@@ -836,6 +980,12 @@ class _CampaignLifecycleController:
             previous = CampaignLifecycleV2.model_validate_json(path.read_text())
             if previous.source_config_fingerprint != source_config_fingerprint:
                 raise V2CampaignRunError("campaign lifecycle belongs to a different source config")
+            if (
+                previous.purpose != purpose
+                or previous.ranking_eligible != (purpose == "official")
+                or previous.schedules != schedules
+            ):
+                raise V2CampaignRunError("campaign lifecycle schedule or purpose changed")
         now = _utc_now()
         interruptions = list(previous.interruptions if previous is not None else ())
         if previous is not None and previous.status == "running":
@@ -861,6 +1011,9 @@ class _CampaignLifecycleController:
         receipt = _campaign_lifecycle(
             {
                 "source_config_fingerprint": source_config_fingerprint,
+                "purpose": purpose,
+                "ranking_eligible": purpose == "official",
+                "schedules": schedules,
                 "mode": "readiness" if preflight_only else "execution",
                 "status": "running",
                 "started_at_utc": (previous.started_at_utc if previous is not None else now),
@@ -1165,6 +1318,144 @@ def prepare_selected_tracks(
         )
         for track, item in prepared.items()
     }
+
+
+def prepare_diagnostic_canary_track(
+    resolved: ResolvedV2CampaignConfig,
+    snapshot: GraphSnapshot,
+    prepared: Mapping[Track, PreparedTrack],
+) -> dict[Track, PreparedTrack]:
+    """Rederive the fixed five-task MCP canary without weakening official selection.
+
+    A canary config deliberately carries only MCP execution artifacts, while
+    retaining the paired selected-release reference needed to bind it to the
+    original 50/50 OAIC release.  The selected receipt and diagnostic receipt
+    are both rederived from the complete candidate pool before anything can
+    reach provider configuration.
+    """
+
+    from .diagnostic_selection import (
+        DiagnosticSelectionReceiptV1,
+        select_diagnostic_canary,
+    )
+    from .oaic_recipes import OAICRecipeMetadata
+    from .release_selection import PairedSelectedRelease, SelectedReleaseReceipt
+
+    if (
+        resolved.config.purpose != "diagnostic_canary"
+        or resolved.selected_release is None
+        or resolved.canary_selection is None
+        or set(prepared) != {Track.MCP}
+    ):
+        raise V2CampaignRunError("diagnostic canary configuration is incomplete")
+    item = prepared[Track.MCP]
+    paths = resolved.tracks[Track.MCP]
+    if paths.release_metadata is None or paths.selection is None:
+        raise V2CampaignRunError("diagnostic canary is missing MCP selection metadata")
+    metadata = OAICRecipeMetadata.model_validate_json(paths.release_metadata.read_text())
+    mcp_selection = SelectedReleaseReceipt.model_validate_json(paths.selection.read_text())
+    paired = PairedSelectedRelease.model_validate_json(resolved.selected_release.read_text())
+    receipt = select_diagnostic_canary(
+        public=item.pair.public,
+        candidates=item.release,
+        metadata=metadata,
+        source_archive_sha256=_sha256(resolved.archive),
+        paired_release=paired,
+        mcp_selection=mcp_selection,
+    )
+    persisted = DiagnosticSelectionReceiptV1.model_validate_json(
+        resolved.canary_selection.read_text()
+    )
+    if persisted != receipt:
+        raise V2CampaignRunError("diagnostic canary receipt differs from certified selection")
+    if (
+        receipt.seed != snapshot.seed
+        or receipt.graph_fingerprint != snapshot.graph_fingerprint
+        or receipt.source_manifest_fingerprint
+        != canonical_sha256(json.loads(resolved.source_manifest.read_text()))
+    ):
+        raise V2CampaignRunError("diagnostic canary source binding mismatch")
+    return {
+        Track.MCP: replace(
+            item,
+            selected_task_ids=receipt.selected_task_ids,
+            selection_fingerprint=receipt.selection_fingerprint,
+            paired_release_fingerprint=receipt.paired_release_fingerprint,
+        )
+    }
+
+
+def prepare_native_selected_tracks(resolved, snapshot, direct, native):
+    """Bind a qualified native roster to the original certified 50/50 selection."""
+    from .native_qualification import NativeQualifiedArtifacts
+    from .oaic_recipes import OAICRecipeMetadata
+    from .release_selection import (
+        PairedSelectedRelease,
+        SelectedReleaseReceipt,
+        pair_selected_tracks,
+        select_candidate_track,
+    )
+
+    if (
+        resolved.selected_release is None
+        or set(resolved.tracks) != {Track.DIRECT, Track.MCP}
+        or type(native) is not NativeQualifiedArtifacts
+        or type(direct) is not PreparedTrack
+        or direct.track is not Track.DIRECT
+    ):
+        raise V2CampaignRunError("NATIVE_PAIRED_RELEASE_REQUIRED")
+    try:
+        native.__post_init__()
+        paths = resolved.tracks[Track.DIRECT]
+        direct_selection = select_candidate_track(
+            public=direct.pair.public,
+            candidates=direct.release,
+            metadata=OAICRecipeMetadata.model_validate_json(paths.release_metadata.read_text()),
+            source_archive_sha256=_sha256(resolved.archive),
+        )
+        if direct_selection != SelectedReleaseReceipt.model_validate_json(
+            paths.selection.read_text(),
+        ):
+            raise ValueError("Direct selection mismatch")
+        native_selection = native.prepared.selection
+        if native_selection != SelectedReleaseReceipt.model_validate_json(
+            resolved.tracks[Track.MCP].selection.read_text(),
+        ):
+            raise ValueError("native original selection mismatch")
+        paired = pair_selected_tracks(direct_selection, native_selection)
+        stored_pair = PairedSelectedRelease.model_validate_json(
+            resolved.selected_release.read_text(),
+        )
+        if (
+            paired != stored_pair
+            or paired.graph_fingerprint != snapshot.graph_fingerprint
+            or paired.seed != snapshot.seed
+            or paired.source_manifest_fingerprint
+            != canonical_sha256(json.loads(resolved.source_manifest.read_text()))
+            or paired.source_archive_sha256 != _sha256(resolved.archive)
+        ):
+            raise ValueError("paired source mismatch")
+        for item in (direct, native):
+            if any(
+                value != snapshot.graph_fingerprint
+                for value in (
+                    item.pair.public.graph_fingerprint,
+                    item.release.graph_fingerprint,
+                    item.live.graph_fingerprint,
+                )
+            ):
+                raise ValueError("paired graph mismatch")
+        return {
+            Track.DIRECT: replace(
+                direct,
+                selected_task_ids=direct_selection.selected_task_ids,
+                selection_fingerprint=direct_selection.selection_fingerprint,
+                paired_release_fingerprint=paired.release_fingerprint,
+            ),
+            Track.MCP: replace(native, paired_release=paired),
+        }
+    except (OSError, ValueError, TypeError, AttributeError) as exc:
+        raise V2CampaignRunError("NATIVE_PAIRED_RELEASE_MISMATCH") from exc
 
 
 def _git_revision(path: Path) -> str:
@@ -1664,6 +1955,13 @@ def _model_loop(
         raise V2CampaignRunError("certified v2 campaigns forbid MCP tool_loop=auto")
     if loop is MCPToolLoop.INSPECT:
         raise V2CampaignRunError("Inspect-backed v2 model campaigns are not enabled by run-v2")
+    if loop is MCPToolLoop.NATIVE_ANTHROPIC:
+        from .campaign_config import V2NativeMCPConfig
+
+        if not isinstance(configured, V2NativeMCPConfig) or model.provider != "anthropic":
+            raise V2CampaignRunError("native-anthropic requires an explicit native Anthropic cell")
+    elif model.provider == "anthropic":
+        raise V2CampaignRunError("Anthropic MCP requires native-anthropic")
     if model.provider == "ollama" and loop is not MCPToolLoop.NATIVE_OLLAMA:
         raise V2CampaignRunError(f"model {model.name} requires native-ollama MCP loop")
     if model.provider != "ollama" and loop is MCPToolLoop.NATIVE_OLLAMA:
@@ -1734,6 +2032,82 @@ def _validate_runtime_bounds(
             )
 
 
+def prepare_native_campaign_artifacts(resolved, profile):
+    """Check native selected artifacts offline, without granting live admission."""
+    from .native_feasibility import (
+        NativeFeasibilityInputError,
+        assess_native_selected_cell,
+        validate_native_development_track,
+    )
+    from .release_selection import SelectedReleaseReceipt
+
+    paths = resolved.tracks[Track.MCP]
+    if resolved.config.purpose == "diagnostic_canary":
+        from .native_diagnostic import compile_native_diagnostic
+
+        prepared = compile_native_diagnostic(resolved, profile)
+        if load_v2_pair(paths.public, paths.oracles) != prepared.pair:
+            raise V2CampaignRunError("NATIVE_DIAGNOSTIC_ARTIFACT_BINDING_MISMATCH")
+        return prepared
+    if paths.selection is None:
+        raise V2CampaignRunError("NATIVE_SELECTION_REQUIRED")
+    try:
+        result = assess_native_selected_cell(
+            manifest=json.loads(resolved.source_manifest.read_text()),
+            archive=resolved.archive.read_bytes(),
+            selection=SelectedReleaseReceipt.model_validate_json(paths.selection.read_text()),
+            profile=profile,
+        )
+    except (OSError, ValueError, TypeError) as exc:
+        raise V2CampaignRunError("NATIVE_ARTIFACT_INPUT_INVALID") from exc
+    if any(item.status == "harness_error" for item in result.tasks):
+        raise V2CampaignRunError("NATIVE_CERTIFICATION_HARNESS_ERROR")
+    if not result.offline_feasible or result.development is None:
+        raise V2CampaignRunError("NATIVE_SELECTED_CELL_UNSUPPORTED")
+    try:
+        prepared = validate_native_development_track(result.development)
+        supplied = load_v2_pair(paths.public, paths.oracles)
+        if supplied != prepared.pair:
+            raise NativeFeasibilityInputError("native artifacts differ from selected compilation")
+    except (OSError, ValueError, TypeError) as exc:
+        raise V2CampaignRunError("NATIVE_ARTIFACT_BINDING_MISMATCH") from exc
+    return prepared
+
+
+def prepare_native_qualification(config_path: Path):
+    """Prepare exact selected native qualification inputs without service calls."""
+    from .campaign_config import load_v2_native_qualification_config
+    from .live_projection import native_qualification_guard
+    from .native_capability import NativeCapabilityProfile, validate_native_capability_profile
+    from .native_feasibility import native_qualification_artifacts
+
+    resolved = load_v2_native_qualification_config(config_path)
+    profile = validate_native_capability_profile(
+        NativeCapabilityProfile.model_validate_json(
+            resolved.native_mcp_paths.capability_profile.read_text(),
+        )
+    )
+    config = resolved.config.defaults.mcp
+    if (
+        profile.implementation_id != config.implementation_id
+        or profile.backend != config.backend
+        or profile.runtime_fingerprint != config.runtime_fingerprint
+        or profile.dependency_lock_fingerprint != config.dependency_lock_fingerprint
+    ):
+        raise V2CampaignRunError("NATIVE_CONFIG_PROFILE_MISMATCH")
+    prepared = prepare_native_campaign_artifacts(resolved, profile)
+    corpus, offline = native_qualification_artifacts(prepared)
+    manifest = json.loads(resolved.source_manifest.read_text())
+    snapshot = build_archive_snapshot(resolved.archive, manifest, product=corpus.product)
+    guard, budget = native_qualification_guard(
+        corpus=corpus,
+        offline=offline,
+        profile=profile,
+        snapshot=snapshot,
+    )
+    return resolved, prepared, snapshot, offline, guard, budget
+
+
 def prepare_v2_campaign(
     config_path: Path,
 ) -> tuple[
@@ -1746,6 +2120,73 @@ def prepare_v2_campaign(
     """Load every immutable artifact and reject mismatches before network/model work."""
 
     resolved = load_v2_campaign_config(config_path)
+    if resolved.native_mcp_paths is not None and Track.MCP in resolved.config.track_modes:
+        from .native_capability import NativeCapabilityProfile, validate_native_capability_profile
+
+        native_profile = validate_native_capability_profile(
+            NativeCapabilityProfile.model_validate_json(
+                resolved.native_mcp_paths.capability_profile.read_text(),
+            ),
+        )
+        native_config = resolved.config.defaults.mcp
+        if (
+            native_profile.implementation_id != native_config.implementation_id
+            or native_profile.backend != native_config.backend
+            or native_profile.runtime_fingerprint != native_config.runtime_fingerprint
+            or native_profile.dependency_lock_fingerprint
+            != native_config.dependency_lock_fingerprint
+        ):
+            raise V2CampaignRunError("NATIVE_CONFIG_PROFILE_MISMATCH")
+        native_prepared = prepare_native_campaign_artifacts(resolved, native_profile)
+        if resolved.native_mcp_paths.qualification is not None:
+            from .native_qualification import load_native_qualification_artifacts
+
+            native_snapshot = build_archive_snapshot(
+                resolved.archive,
+                json.loads(resolved.source_manifest.read_text()),
+                product=native_prepared.corpus.product,
+            )
+            native_paths = resolved.tracks[Track.MCP]
+            try:
+                qualified = load_native_qualification_artifacts(
+                    native_prepared,
+                    native_snapshot,
+                    qualification_path=resolved.native_mcp_paths.qualification,
+                    work_path=resolved.native_mcp_paths.qualification_work,
+                    candidate_path=native_paths.candidates,
+                    live_path=native_paths.live_certification,
+                )
+            except (OSError, ValueError, TypeError) as exc:
+                raise V2CampaignRunError("NATIVE_QUALIFICATION_ARTIFACT_INVALID") from exc
+            if resolved.config.purpose == "diagnostic_canary":
+                from .native_diagnostic import original_diagnostic_inputs
+
+                _, _, _, paired = original_diagnostic_inputs(resolved)
+                prepared_all = {Track.MCP: replace(qualified, paired_release=paired)}
+            else:
+                if resolved.selected_release is None or Track.DIRECT not in resolved.tracks:
+                    raise V2CampaignRunError("NATIVE_PAIRED_RELEASE_REQUIRED")
+                prepared_all = prepare_native_selected_tracks(
+                    resolved,
+                    native_snapshot,
+                    _prepare_track(resolved, Track.DIRECT, native_snapshot),
+                    qualified,
+                )
+            native = prepared_all[Track.MCP]
+            prepared = {track: prepared_all[track] for track in resolved.config.track_modes}
+            _validate_model_bindings(resolved, prepared)
+            _validate_runtime_bounds(resolved, prepared)
+            return (
+                resolved,
+                native_snapshot,
+                prepared,
+                native.profile.source_revision,
+                _model_readiness(resolved),
+            )
+        # Replayed fixture qualification is not production execution admission.
+        # Never fall through to CE certification or invent verified privileges
+        # from a configured backend fingerprint. This boundary makes no calls.
+        raise V2CampaignRunError("NATIVE_CERTIFICATION_ADMISSION_UNAVAILABLE")
     manifest = json.loads(resolved.source_manifest.read_text())
     metadata = manifest.get("metadata") or {}
     snapshot = build_archive_snapshot(
@@ -1762,7 +2203,9 @@ def prepare_v2_campaign(
     oaic = snapshot.product == "oaic-2026-v1" or any(
         item.pair.public.product == "oaic-2026-v1" for item in prepared_all.values()
     )
-    if oaic or resolved.selected_release is not None:
+    if resolved.config.purpose == "diagnostic_canary":
+        prepared_all = prepare_diagnostic_canary_track(resolved, snapshot, prepared_all)
+    elif oaic or resolved.selected_release is not None:
         prepared_all = prepare_selected_tracks(resolved, snapshot, prepared_all)
     prepared = {track: prepared_all[track] for track in resolved.config.track_modes}
     _validate_model_bindings(resolved, prepared)
@@ -1831,20 +2274,69 @@ def _readiness(
     mcp_revision: str,
     mcp_launcher_provenance: dict[str, str | None] | None,
     model_readiness: tuple[ModelReadinessV2, ...],
+    native_session_observations: dict | None = None,
 ) -> CampaignReadinessV2:
+    native_mapping = _native_campaign_provenance(
+        prepared.get(Track.MCP),
+        native_session_observations,
+        mcp_launcher_provenance,
+    )
+    if native_mapping is not None:
+        native = prepared[Track.MCP]
+        try:
+            graph_receipts = tuple(
+                LiveGraphVerification.model_validate_json(
+                    receipts[track].model_dump_json(),
+                )
+                for track in prepared
+            )
+        except (ValueError, KeyError, AttributeError) as exc:
+            raise V2CampaignRunError("NATIVE_READINESS_BINDING_MISMATCH") from exc
+        if (
+            mcp_revision != native.profile.source_revision
+            or any(
+                fingerprint != snapshot.graph_fingerprint
+                for item in prepared.values()
+                for fingerprint in (
+                    item.pair.public.graph_fingerprint,
+                    item.release.graph_fingerprint,
+                    item.live.graph_fingerprint,
+                )
+            )
+            or any(
+                receipt.expected_graph_fingerprint != snapshot.graph_fingerprint
+                or receipt.observed_graph_fingerprint != snapshot.graph_fingerprint
+                or receipt.object_count != len(snapshot.entities)
+                or receipt.relationship_count != len(snapshot.relationships)
+                for receipt in graph_receipts
+            )
+        ):
+            raise V2CampaignRunError("NATIVE_READINESS_BINDING_MISMATCH")
+        mcp_launcher_provenance = native_mapping
+    targets = {
+        track: (
+            native_mapping["backend_binding_fingerprint"]
+            if track is Track.MCP and native_mapping is not None
+            else canonical_sha256(resolve_bhce_target(resolved.config.defaults.bhce_url))
+        )
+        for track in prepared
+    }
     payload = {
+        "purpose": resolved.config.purpose,
+        "ranking_eligible": resolved.config.purpose == "official",
         "source_config_fingerprint": resolved.source_config_fingerprint,
         "source_manifest_sha256": _sha256(resolved.source_manifest),
         "archive_sha256": _sha256(resolved.archive),
         "graph_fingerprint": snapshot.graph_fingerprint,
         "target_fingerprint": canonical_sha256(
-            resolve_bhce_target(resolved.config.defaults.bhce_url)
+            {track.value: value for track, value in targets.items()}
         ),
         "mcp_server_revision": mcp_revision,
         "mcp_launcher_provenance": mcp_launcher_provenance,
         "tracks": tuple(
             ReadinessTrackV2(
                 track=track,
+                target_fingerprint=targets[track],
                 public_artifact_fingerprint=item.pair.public.artifact_fingerprint,
                 oracle_artifact_fingerprint=item.pair.private.artifact_fingerprint,
                 candidate_release_fingerprint=item.release.release_fingerprint,
@@ -1852,6 +2344,7 @@ def _readiness(
                 capability_profile_fingerprint=item.profile.profile_fingerprint,
                 graph_verification_fingerprint=receipts[track].verification_fingerprint,
                 task_count=len(item.task_ids),
+                schedule=_scheduled_task_roster(resolved, item),
             )
             for track, item in prepared.items()
         ),
@@ -1877,6 +2370,22 @@ async def preflight_v2_campaign(config_path: Path) -> CampaignReadinessV2:
     return await run_v2_campaign(config_path, preflight_only=True)
 
 
+def _native_campaign_provenance(prepared, observations, historical_launcher):
+    """Bind native identity explicitly; never label Bolt with CE containment."""
+    from .native_qualification import NativeQualifiedArtifacts, native_launcher_provenance
+
+    if not isinstance(prepared, NativeQualifiedArtifacts):
+        if observations is not None:
+            raise V2CampaignRunError("NATIVE_PROVENANCE_TRACK_MISMATCH")
+        return None
+    if historical_launcher is not None or observations is None:
+        raise V2CampaignRunError("NATIVE_SESSION_OBSERVATIONS_REQUIRED")
+    try:
+        return native_launcher_provenance(prepared, observations)
+    except ValueError as exc:
+        raise V2CampaignRunError("NATIVE_LAUNCHER_PROVENANCE_INVALID") from exc
+
+
 def _provenance(
     *,
     resolved: ResolvedV2CampaignConfig,
@@ -1885,13 +2394,25 @@ def _provenance(
     run_index: int,
     loop: MCPToolLoop | None,
     mcp_launcher_provenance: dict[str, str | None] | None = None,
+    native_session_observations: dict | None = None,
 ) -> ModelRunProvenanceV2:
+    native_mapping = _native_campaign_provenance(
+        prepared,
+        native_session_observations,
+        mcp_launcher_provenance,
+    )
+    if native_mapping is not None:
+        mcp_launcher_provenance = native_mapping
     provider_identity = _provider_identity(model, resolved)
     run_identity = RunIdentity(
         provider=model.provider,
         model=model.model,
         run_index=run_index,
-        target_fingerprint=canonical_sha256(resolve_bhce_target(resolved.config.defaults.bhce_url)),
+        target_fingerprint=(
+            native_mapping["backend_binding_fingerprint"]
+            if native_mapping is not None
+            else canonical_sha256(resolve_bhce_target(resolved.config.defaults.bhce_url))
+        ),
         tool_loop=loop.value if loop is not None else None,
     )
     direct_config = DirectQuerySafetyConfig()
@@ -1902,7 +2423,15 @@ def _provenance(
         "archive_sha256": _sha256(resolved.archive),
         "candidate_release_fingerprint": prepared.release.release_fingerprint,
         "live_certification_fingerprint": prepared.live.artifact_fingerprint,
-        "containment_config_fingerprint": canonical_sha256(direct_config.to_jsonable()),
+        "schedule": _scheduled_task_roster(resolved, prepared),
+        "containment_config_fingerprint": canonical_sha256(
+            {
+                "native_backend_binding_fingerprint": native_mapping["backend_binding_fingerprint"],
+                "shared_coordination": direct_config.to_jsonable(),
+            }
+            if native_mapping is not None and prepared.profile.backend == "neo4j"
+            else direct_config.to_jsonable()
+        ),
         "runtime_implementation_fingerprint": (RUNNER_IMPLEMENTATION_FINGERPRINT),
         "requested_api_surface": provider_identity.requested_api_surface,
         "resolved_api_surface": provider_identity.resolved_api_surface,
@@ -1936,7 +2465,14 @@ def _provenance(
                 **(
                     {
                         "selection_fingerprint": prepared.selection_fingerprint,
-                        "paired_release_fingerprint": prepared.paired_release_fingerprint,
+                        **(
+                            {"paired_release_fingerprint": prepared.paired_release_fingerprint}
+                            if (
+                                native_mapping is None
+                                or prepared.paired_release_fingerprint is not None
+                            )
+                            else {}
+                        ),
                     }
                     if getattr(prepared, "selection_fingerprint", None) is not None
                     else {}
@@ -2112,7 +2648,12 @@ def _model_report(
         raise V2CampaignRunError("missing private run state for completed run")
     if state.scheduler.phase != "complete":
         raise V2CampaignRunError("cannot publish a run with pending retry scheduler work")
-    operational_metrics = _run_operational_metrics(state)
+    from .native_qualification import NativeQualifiedArtifacts
+
+    operational_metrics = _run_operational_metrics(
+        state,
+        native=type(prepared) is NativeQualifiedArtifacts,
+    )
     report = build_public_report(
         prepared.pair,
         prepared.profile,
@@ -2125,6 +2666,7 @@ def _model_report(
         "run_identity": provenance.run_identity,
         "candidate_release_fingerprint": prepared.release.release_fingerprint,
         "live_certification_fingerprint": prepared.live.artifact_fingerprint,
+        "schedule_fingerprint": provenance.schedule.schedule_fingerprint,
         "graph_verification_before_fingerprint": before.verification_fingerprint,
         "graph_verification_after_fingerprint": after.verification_fingerprint,
         "operational_metrics": operational_metrics,
@@ -2158,6 +2700,7 @@ def _track_completion(
         "graph_verification_before_fingerprint": before.verification_fingerprint,
         "graph_verification_after_fingerprint": after.verification_fingerprint,
         "expected_task_count_per_run": len(prepared.task_ids),
+        "schedule": _scheduled_task_roster(resolved, prepared),
         "run_count": len(runs),
         "result_count": sum(run.result_count for run in runs),
         "campaign_valid": all(run.campaign_valid for run in runs),
@@ -2272,6 +2815,54 @@ def _remaining_cooldown_seconds(
     return max(0.0, (not_before - current).total_seconds())
 
 
+async def run_native_development_task(
+    *,
+    prepared,
+    task_id: str,
+    native_bridge,
+    model: str,
+    model_base_url: str | None,
+    max_steps: int,
+    max_tokens: int = 2048,
+    read_timeout_seconds: float = 240.0,
+    tool_timeout_seconds: float = 60.0,
+    structured_output_mode: str = "prompt_local_validation",
+):
+    """Private development dispatch through the shared task runner, not a campaign.
+
+    The caller owns a fresh native session/bridge and its cleanup. No candidate
+    promotion, public reporting, readiness or durable campaign state is created.
+    """
+    from .native_feasibility import (
+        NativeFeasibilityInputError,
+        validate_native_development_track,
+    )
+
+    validated = validate_native_development_track(prepared)
+    if task_id not in validated.task_ids:
+        raise NativeFeasibilityInputError("task is outside the selected native cell")
+    index = validated.task_ids.index(task_id)
+    task = validated.pair.public.tasks[index]
+    return await run_mcp_model_task_v2(
+        task=task,
+        oracle=validated.pair.private.oracles[index],
+        resolver=IdentityResolver(validated.pair.private.identity_catalog),
+        profile=validated.profile,
+        bundle=None,
+        native_bridge=native_bridge,
+        certified=False,
+        model=model,
+        model_base_url=model_base_url,
+        tool_loop=task.binding.mcp_tool_loop,
+        max_steps=max_steps,
+        max_tokens=max_tokens,
+        read_timeout_seconds=read_timeout_seconds,
+        tool_timeout_seconds=tool_timeout_seconds,
+        structured_output_mode=structured_output_mode,
+        graph_fact_registry=validated.pair.private.graph_fact_registry,
+    )
+
+
 async def _run_model(
     *,
     resolved: ResolvedV2CampaignConfig,
@@ -2285,7 +2876,43 @@ async def _run_model(
     mcp_launcher_runtime: MCPLauncherRuntime | None = None,
     progress: ProgressReporter | None = None,
     lifecycle: _CampaignLifecycleController | None = None,
+    native_session_work=None,
+    native_observations: dict | None = None,
 ) -> tuple[ModelRunProvenanceV2, tuple[SampleResult, ...]]:
+    from uuid import uuid4
+
+    from .campaign_config import V2NativeMCPConfig
+    from .native_feasibility import NativeDevelopmentTrack
+    from .native_mcp_runtime import (
+        NativeMCPSession,
+        NativeModelToolBridge,
+        NativeSessionCleanupPending,
+    )
+    from .native_qualification import NativeQualifiedArtifacts
+
+    if isinstance(prepared, NativeDevelopmentTrack):
+        raise V2CampaignRunError("NATIVE_DEVELOPMENT_NOT_QUALIFIED")
+    native = type(prepared) is NativeQualifiedArtifacts
+    if native:
+        prepared.__post_init__()
+        if not callable(native_session_work) or native_observations is None:
+            raise V2CampaignRunError("NATIVE_ATTEMPT_SCOPE_REQUIRED")
+        configured = resolved.config.defaults.mcp
+        if (
+            not isinstance(configured, V2NativeMCPConfig)
+            or configured.implementation_id != prepared.profile.implementation_id
+            or configured.backend != prepared.profile.backend
+            or configured.runtime_fingerprint != prepared.profile.runtime_fingerprint
+            or configured.dependency_lock_fingerprint
+            != prepared.profile.dependency_lock_fingerprint
+            or loop is None
+            or loop.value != configured.tool_loop
+            or mcp_launcher_runtime is not None
+        ):
+            raise V2CampaignRunError("NATIVE_ATTEMPT_SCOPE_REQUIRED")
+    elif native_session_work is not None or native_observations is not None:
+        raise V2CampaignRunError("NATIVE_ATTEMPT_TRACK_MISMATCH")
+    coordinator.require_confirmed_native_completion()
     provenance = _provenance(
         resolved=resolved,
         prepared=prepared,
@@ -2297,6 +2924,7 @@ async def _run_model(
             if mcp_launcher_runtime is not None and resolved.mcp_dir is not None
             else None
         ),
+        **({"native_session_observations": native_observations} if native else {}),
     )
     run_dir = resolved.output_dir / prepared.track.value / model.name / f"run-{run_index:03d}"
     _guard_run_dir(run_dir, provenance)
@@ -2339,7 +2967,7 @@ async def _run_model(
     )
 
     bundle = None
-    if prepared.track is Track.MCP:
+    if prepared.track is Track.MCP and not native:
         if resolved.mcp_dir is None:
             raise V2CampaignRunError("MCP run is missing its resolved MCP checkout")
         bundle = await _load_bloodhound_mcp_bundle(
@@ -2463,6 +3091,7 @@ async def _run_model(
         scheduler_state: RetrySchedulerStateV2,
         completed_scheduler_state: RetrySchedulerStateV2 | None = None,
     ) -> tuple[SampleResult, ProviderRunRecord]:
+        coordinator.require_confirmed_native_completion()
         task = task_by_id[task_id]
         oracle = registry.for_task(task_id)
         task_started = time.monotonic()
@@ -2481,6 +3110,7 @@ async def _run_model(
         cancellation: V2ModelTaskCancelled | None = None
         direct_preflight_blocked = False
         mcp_preflight_blocked = False
+        native_recorded = False
         # Operator interruptions are auditable attempts but do not consume the
         # lifetime retry budget and must not hide the durable infrastructure
         # scope that caused this retry to be scheduled.
@@ -2555,9 +3185,22 @@ async def _run_model(
                         **transport_options,
                     )
             else:
-                if bundle is None or loop is None:
+                if (bundle is None and not native) or loop is None:
                     raise AssertionError("MCP model run is missing its runtime bundle")
-                if coordinator.circuit_open or bloodhound_retry:
+                if (
+                    native
+                    and prepared.profile.backend == "neo4j"
+                    and (coordinator.circuit_open or bloodhound_retry)
+                ):
+                    mcp_preflight_blocked = True
+                    sample, provider = unexecuted_model_record(
+                        task=task,
+                        oracle=oracle,
+                        model=model.requested_model,
+                        surface=prepared.track.value,
+                        detail="Native Bolt backend recovery requires a fresh verified interval",
+                    )
+                elif coordinator.circuit_open or bloodhound_retry:
                     health = await bhce.wait_until_healthy(
                         timeout_seconds=(resolved.config.defaults.health.timeout_seconds),
                         poll_interval=(resolved.config.defaults.health.poll_interval),
@@ -2577,35 +3220,135 @@ async def _run_model(
                     configured_mcp = resolved.config.defaults.mcp
                     if configured_mcp is None:
                         raise V2CampaignRunError("MCP run is missing defaults.mcp configuration")
-                    outcome, provider = await run_mcp_model_task_v2(
-                        task=task,
-                        oracle=oracle,
-                        resolver=resolver,
-                        profile=prepared.profile,
-                        bundle=bundle,
-                        model=model.requested_model,
-                        model_base_url=model_base_url,
-                        max_tokens=getattr(model, "max_output_tokens", 2048),
-                        api_surface=getattr(model, "api_surface", "auto"),
-                        structured_output_mode=getattr(
-                            model,
-                            "structured_output_mode",
-                            "prompt_local_validation",
-                        ),
-                        tool_loop=loop,
-                        max_steps=configured_mcp.max_steps,
-                        ollama_options=provider_options,
-                        telemetry_adapter=(configured_mcp.telemetry_adapter),
-                        read_timeout_seconds=(configured_mcp.read_timeout_seconds),
-                        tool_timeout_seconds=(configured_mcp.tool_timeout_seconds),
-                        graph_fact_registry=(prepared.pair.private.graph_fact_registry),
-                    )
-                    sample = outcome.sample
+
+                    async def invoke_mcp(native_bridge=None):
+                        return await run_mcp_model_task_v2(
+                            task=task,
+                            oracle=oracle,
+                            resolver=resolver,
+                            profile=prepared.profile,
+                            bundle=bundle,
+                            model=model.requested_model,
+                            model_base_url=model_base_url,
+                            max_tokens=getattr(model, "max_output_tokens", 2048),
+                            api_surface=getattr(model, "api_surface", "auto"),
+                            structured_output_mode=getattr(
+                                model,
+                                "structured_output_mode",
+                                "prompt_local_validation",
+                            ),
+                            tool_loop=loop,
+                            max_steps=configured_mcp.max_steps,
+                            ollama_options=provider_options,
+                            telemetry_adapter=(configured_mcp.telemetry_adapter),
+                            read_timeout_seconds=(configured_mcp.read_timeout_seconds),
+                            tool_timeout_seconds=(configured_mcp.tool_timeout_seconds),
+                            graph_fact_registry=(prepared.pair.private.graph_fact_registry),
+                            **(
+                                {"native_bridge": native_bridge, "native_qualification": prepared}
+                                if native
+                                else {}
+                            ),
+                            **(
+                                {"anthropic_binding": _anthropic_binding(model, resolved)}
+                                if native and model.provider == "anthropic"
+                                else {}
+                            ),
+                        )
+
+                    if native:
+                        admission_checked = False
+                        work_started = False
+
+                        async def before_work(observations):
+                            nonlocal admission_checked
+                            if admission_checked or work_started:
+                                raise V2CampaignRunError("NATIVE_ATTEMPT_SCOPE_REUSED")
+                            current = _provenance(
+                                resolved=resolved,
+                                prepared=prepared,
+                                model=model,
+                                run_index=run_index,
+                                loop=loop,
+                                native_session_observations=observations,
+                            )
+                            if current != provenance:
+                                raise V2CampaignRunError("NATIVE_ATTEMPT_PROVENANCE_MISMATCH")
+                            admission_checked = True
+
+                        async def native_work(session):
+                            nonlocal native_recorded, work_started
+                            if (
+                                not admission_checked
+                                or work_started
+                                or not isinstance(session, NativeMCPSession)
+                                or session._query_coordinator is not coordinator
+                                or session._capability_profile != prepared.profile
+                            ):
+                                raise V2CampaignRunError("NATIVE_ATTEMPT_SCOPE_INVALID")
+                            work_started = True
+                            coordinator.require_confirmed_native_completion()
+                            bridge = NativeModelToolBridge(
+                                session,
+                                task,
+                                attempt_id=uuid4().hex,
+                                native_certification=prepared.certifications[task_id],
+                            )
+                            interrupted = None
+                            try:
+                                outcome, record = await invoke_mcp(bridge)
+                                result = outcome.sample
+                            except V2ModelTaskCancelled as exc:
+                                result, record, interrupted = exc.sample, exc.provider, exc
+                            except NativeSessionCleanupPending:
+                                raise
+                            except Exception as exc:
+                                result, record = contain_model_runtime_exception(
+                                    task=task,
+                                    oracle=oracle,
+                                    model=model.requested_model,
+                                    surface=prepared.track.value,
+                                    error=exc,
+                                )
+                            native_recorded = True
+                            _record_attempt(
+                                task_id=task_id,
+                                sample=result,
+                                provider=record,
+                                phase=phase,
+                                recovery_round=recovery_round,
+                                started_at_utc=started_at_utc,
+                                scheduler_state=(
+                                    scheduler_state
+                                    if interrupted is not None
+                                    else completed_scheduler_state or scheduler_state
+                                ),
+                            )
+                            if interrupted is not None:
+                                raise interrupted
+                            coordinator.require_confirmed_native_completion()
+                            return result, record
+
+                        (sample, provider), _observations = await native_session_work(
+                            work=native_work,
+                            before_work=before_work,
+                        )
+                        if not native_recorded:
+                            raise V2CampaignRunError("NATIVE_ATTEMPT_NOT_EXECUTED")
+                    else:
+                        outcome, provider = await invoke_mcp()
+                        sample = outcome.sample
         except V2ModelTaskCancelled as exc:
+            if native_recorded:
+                raise
             sample = exc.sample
             provider = exc.provider
             cancellation = exc
+        except NativeSessionCleanupPending:
+            raise
         except Exception as exc:
+            if native_recorded:
+                raise
             sample, provider = contain_model_runtime_exception(
                 task=task,
                 oracle=oracle,
@@ -2613,23 +3356,25 @@ async def _run_model(
                 surface=prepared.track.value,
                 error=exc,
             )
-        _record_attempt(
-            task_id=task_id,
-            sample=sample,
-            provider=provider,
-            phase=phase,
-            recovery_round=recovery_round,
-            started_at_utc=started_at_utc,
-            scheduler_state=(
-                scheduler_state
-                if cancellation is not None
-                else completed_scheduler_state
-                if completed_scheduler_state is not None
-                else scheduler_state
-            ),
-        )
+        if not native_recorded:
+            _record_attempt(
+                task_id=task_id,
+                sample=sample,
+                provider=provider,
+                phase=phase,
+                recovery_round=recovery_round,
+                started_at_utc=started_at_utc,
+                scheduler_state=(
+                    scheduler_state
+                    if cancellation is not None
+                    else completed_scheduler_state
+                    if completed_scheduler_state is not None
+                    else scheduler_state
+                ),
+            )
         if cancellation is not None:
             raise cancellation
+        coordinator.require_confirmed_native_completion()
         _emit_progress(
             progress,
             _task_completion_progress(
@@ -2790,11 +3535,63 @@ async def _run_prepared_v2_campaign(
     progress: ProgressReporter | None,
     lifecycle: _CampaignLifecycleController,
 ) -> CampaignReadinessV2:
+    from ori.mcp_launcher import NativeMCPLauncherConfig
+
+    from .native_bolt_runtime import run_native_bolt_session_work
+    from .native_ce_runtime import native_ce_connection, run_native_ce_session_work
+    from .native_mcp_runtime import NativeCallDecision, NativeSessionCleanupPending
+    from .native_qualification import NativeQualifiedArtifacts
+
     receipts_before: dict[Track, LiveGraphVerification] = {}
     shared_preflight: tuple[GraphSnapshot, LiveGraphVerification] | None = None
     invalid_campaigns: list[str] = []
+    native = prepared.get(Track.MCP)
+    native = native if type(native) is NativeQualifiedArtifacts else None
+    native_bolt = native is not None and native.profile.backend == "neo4j"
+    native_observations = None
+    connection = None
+    native_launcher = None
+    client_options = parse_bhce_url(resolved.config.defaults.bhce_url)
+    if native is not None:
+        paths = resolved.native_mcp_paths
+        if paths is None or resolved.mcp_dir is None:
+            raise V2CampaignRunError("NATIVE_ATTEMPT_SCOPE_REQUIRED")
+        if native_bolt:
+            prefix = "BLOODHOUND" if native.profile.implementation_id == "mordavid" else "NEO4J"
+            connection = {
+                f"{prefix}_{key}": os.environ.get(f"{prefix}_{key}", "")
+                for key in ("URI", "USERNAME", "PASSWORD")
+            }
+            if any(not value.strip() for value in connection.values()):
+                raise V2CampaignRunError("NATIVE_CONNECTION_ENVIRONMENT_INVALID")
+        else:
+            connection = {
+                f"BLOODHOUND_{key}": os.environ.get(f"BLOODHOUND_{key}", "")
+                for key in ("DOMAIN", "TOKEN_ID", "TOKEN_KEY")
+            }
+            connection.update(
+                {
+                    f"BLOODHOUND_{key}": os.environ[f"BLOODHOUND_{key}"]
+                    for key in ("SCHEME", "PORT", "VERIFY_TLS")
+                    if f"BLOODHOUND_{key}" in os.environ
+                }
+            )
+            connection, client_options, _binding = native_ce_connection(connection)
+            if resolve_bhce_target(resolved.config.defaults.bhce_url) != {
+                key: client_options[key] for key in ("scheme", "domain", "port")
+            }:
+                raise V2CampaignRunError("NATIVE_CE_TARGET_MISMATCH")
+        native_launcher = NativeMCPLauncherConfig(
+            implementation_id=native.profile.implementation_id,
+            checkout=resolved.mcp_dir,
+            python_executable=paths.python_executable,
+            runtime_roots=paths.runtime_roots,
+            runtime_fingerprint=native.profile.runtime_fingerprint,
+            dependency_lock=paths.dependency_lock,
+            dependency_lock_fingerprint=native.profile.dependency_lock_fingerprint,
+        )
     mcp_launcher = None
-    if Track.MCP in resolved.config.track_modes:
+    if Track.MCP in resolved.config.track_modes and native is None:
         if resolved.mcp_dir is None:
             raise V2CampaignRunError("MCP campaign is missing its resolved MCP checkout")
         mcp_launcher = MCPLauncherConfig.local_checkout(resolved.mcp_dir)
@@ -2807,7 +3604,24 @@ async def _run_prepared_v2_campaign(
         else None
     )
 
-    async with BHCEClient(**parse_bhce_url(resolved.config.defaults.bhce_url)) as bhce:
+    def native_graph_receipt(observations, stage):
+        interval = observations[stage]
+        if not native_bolt:
+            return interval["graph_verification"]
+        databases = resolved.config.defaults.mcp.databases
+        if set(interval["graphs"]) != set(databases):
+            raise V2CampaignRunError("NATIVE_BOLT_GRAPH_SCOPE_MISMATCH")
+        # The owner has already verified every destination against the same
+        # expected snapshot. The legacy report needs one representative receipt;
+        # the complete interval remains in private native observations.
+        return interval["graphs"][databases[0]]["graph_verification"]
+
+    client_scope = (
+        nullcontext(None)
+        if native_bolt and Track.DIRECT not in prepared
+        else BHCEClient(**client_options)
+    )
+    async with client_scope as bhce:
         direct_config = DirectQuerySafetyConfig()
         coordinator = DirectQueryCoordinator(
             bhce=bhce,
@@ -2817,9 +3631,203 @@ async def _run_prepared_v2_campaign(
                 manifest_fingerprint=_sha256(resolved.source_manifest),
                 policy_version=direct_config.policy_version,
             ),
+            **(
+                {"native_backend_binding_fingerprint": native.profile.backend_binding_fingerprint}
+                if native_bolt
+                else {}
+            ),
         )
+
+        async def run_models(track, *, attempt_scope=None, observations=None):
+            completed_runs = []
+            for model in resolved.config.models:
+                loop = _model_loop(model, resolved) if track is Track.MCP else None
+                runs = (
+                    model.runs_per_model
+                    if model.runs_per_model is not None
+                    else resolved.config.defaults.runs_per_model
+                )
+                for run_index in range(1, runs + 1):
+                    provenance, results = await _run_model(
+                        resolved=resolved,
+                        prepared=prepared[track],
+                        model=model,
+                        run_index=run_index,
+                        bhce=bhce,
+                        coordinator=coordinator,
+                        loop=loop,
+                        runs_total=runs,
+                        mcp_launcher_runtime=(mcp_launcher_runtime if track is Track.MCP else None),
+                        progress=progress,
+                        lifecycle=lifecycle,
+                        **(
+                            {
+                                "native_session_work": attempt_scope,
+                                "native_observations": observations,
+                            }
+                            if attempt_scope is not None
+                            else {}
+                        ),
+                    )
+                    run_dir = (
+                        resolved.output_dir / track.value / model.name / f"run-{run_index:03d}"
+                    )
+                    completed_runs.append((provenance, results, run_dir))
+            return completed_runs
+
+        def finish_track(track, completed_runs, before, after):
+            _write_model(
+                resolved.output_dir / track.value / "graph-verification-after-v2.private.json",
+                after,
+            )
+            _emit_progress(
+                progress,
+                _graph_verification_progress(
+                    track=track,
+                    stage="post",
+                    receipt=after,
+                ),
+            )
+            completion, track_invalid = _publish_track_completion(
+                resolved=resolved,
+                prepared=prepared[track],
+                completed_runs=completed_runs,
+                before=before,
+                after=after,
+            )
+            lifecycle.record_track(completion)
+            invalid_campaigns.extend(track_invalid)
+            _emit_progress(
+                progress,
+                f"[{track.value}] reports published and track completion "
+                f"recorded ({completion.receipt_fingerprint[:12]})",
+            )
+
         for track in resolved.config.track_modes:
             lifecycle.activate_track(track)
+            if track is Track.MCP and native is not None:
+                coordinator.require_confirmed_native_completion()
+                count_runs = sum(
+                    model.runs_per_model
+                    if model.runs_per_model is not None
+                    else resolved.config.defaults.runs_per_model
+                    for model in resolved.config.models
+                )
+                attempts_per_task = resolved.config.defaults.max_infra_retries + 1
+                tasks = native.pair.public.tasks
+                task_calls = sum(
+                    max(task.binding.bounds.max_tool_calls, resolved.config.defaults.mcp.max_steps)
+                    for task in tasks
+                )
+                max_calls = max(1, count_runs * attempts_per_task * task_calls)
+                retry_config = getattr(resolved.config.defaults, "infra_retry", None)
+                cooldown = getattr(retry_config, "deferred_cooldown_seconds", 300.0)
+                timeout = 1200.0 + count_runs * (
+                    attempts_per_task * sum(task.binding.bounds.timeout_seconds for task in tasks)
+                    + attempts_per_task
+                    * len(tasks)
+                    * resolved.config.defaults.health.timeout_seconds
+                    + resolved.config.defaults.max_infra_retries * cooldown
+                )
+
+                async def before_native_work(observations):
+                    nonlocal native_observations
+                    native_observations = observations
+                    _atomic_write(
+                        resolved.output_dir / track.value / "native-session-before-v2.private.json",
+                        observations,
+                    )
+                    before = LiveGraphVerification.model_validate_json(
+                        json.dumps(
+                            native_graph_receipt(observations, "graph_before"),
+                        )
+                    )
+                    receipts_before[track] = before
+                    _write_model(
+                        resolved.output_dir
+                        / track.value
+                        / "graph-verification-before-v2.private.json",
+                        before,
+                    )
+                    _emit_progress(
+                        progress,
+                        _graph_verification_progress(
+                            track=track,
+                            stage="pre",
+                            receipt=before,
+                        ),
+                    )
+
+                async def native_work(session):
+                    if preflight_only:
+                        return []
+
+                    async def attempt_scope(*, work, before_work):
+                        await before_work(native_observations)
+                        return await work(session), native_observations
+
+                    return await run_models(
+                        track, attempt_scope=attempt_scope, observations=native_observations
+                    )
+
+                def guard(*args):
+                    coordinator.require_confirmed_native_completion()
+                    return NativeCallDecision(True, "native_read_only_shared_backend_containment")
+
+                track_dir = resolved.output_dir / track.value
+                track_dir.mkdir(parents=True, exist_ok=True)
+                descriptor, _log_path = tempfile.mkstemp(
+                    prefix="native-stderr-",
+                    suffix=".private.log",
+                    dir=track_dir,
+                )
+                with os.fdopen(descriptor, "w", encoding="utf-8") as private_log:
+                    try:
+                        owner = (
+                            run_native_bolt_session_work
+                            if native_bolt
+                            else run_native_ce_session_work
+                        )
+                        completed_runs, observations = await owner(
+                            config=native_launcher,
+                            profile=native.profile,
+                            connection=connection,
+                            private_stderr=private_log,
+                            expected=snapshot,
+                            guard=guard,
+                            max_calls=max_calls,
+                            work=native_work,
+                            before_work=before_native_work,
+                            timeout_seconds=timeout,
+                            session_call_timeout_seconds=(
+                                resolved.config.defaults.mcp.tool_timeout_seconds
+                            ),
+                            page_size=resolved.config.defaults.graph_page_size,
+                            query_coordinator=coordinator,
+                            **(
+                                {"databases": resolved.config.defaults.mcp.databases}
+                                if native_bolt
+                                else {}
+                            ),
+                        )
+                    except NativeSessionCleanupPending as pending:
+                        try:
+                            _emit_progress(
+                                progress, "NATIVE_SESSION_CLEANUP_PENDING: waiting; no publication"
+                            )
+                        finally:
+                            await pending.wait_for_cleanup()
+                        raise
+                native_observations = observations
+                _atomic_write(track_dir / "native-session-completed-v2.private.json", observations)
+                if not preflight_only:
+                    after = LiveGraphVerification.model_validate_json(
+                        json.dumps(
+                            native_graph_receipt(observations, "graph_after"),
+                        )
+                    )
+                    finish_track(track, completed_runs, receipts_before[track], after)
+                continue
             _emit_progress(
                 progress,
                 f"[{track.value}] verifying BloodHound graph before track",
@@ -2861,32 +3869,7 @@ async def _run_prepared_v2_campaign(
                 # every prepared track; repeated post-track snapshots add no
                 # evidence and can turn readiness into an hours-long operation.
                 continue
-            completed_runs: list[tuple[ModelRunProvenanceV2, tuple[SampleResult, ...], Path]] = []
-            for model in resolved.config.models:
-                loop = _model_loop(model, resolved) if track is Track.MCP else None
-                runs = (
-                    model.runs_per_model
-                    if model.runs_per_model is not None
-                    else resolved.config.defaults.runs_per_model
-                )
-                for run_index in range(1, runs + 1):
-                    provenance, results = await _run_model(
-                        resolved=resolved,
-                        prepared=prepared[track],
-                        model=model,
-                        run_index=run_index,
-                        bhce=bhce,
-                        coordinator=coordinator,
-                        loop=loop,
-                        runs_total=runs,
-                        mcp_launcher_runtime=(mcp_launcher_runtime if track is Track.MCP else None),
-                        progress=progress,
-                        lifecycle=lifecycle,
-                    )
-                    run_dir = (
-                        resolved.output_dir / track.value / model.name / f"run-{run_index:03d}"
-                    )
-                    completed_runs.append((provenance, results, run_dir))
+            completed_runs = await run_models(track)
             _emit_progress(
                 progress,
                 f"[{track.value}] verifying BloodHound graph after track",
@@ -2896,34 +3879,7 @@ async def _run_prepared_v2_campaign(
                 snapshot,
                 bhce,
             )
-            _write_model(
-                track_dir / "graph-verification-after-v2.private.json",
-                after,
-            )
-            _emit_progress(
-                progress,
-                _graph_verification_progress(
-                    track=track,
-                    stage="post",
-                    receipt=after,
-                ),
-            )
-            completion, track_invalid = _publish_track_completion(
-                resolved=resolved,
-                prepared=prepared[track],
-                completed_runs=completed_runs,
-                before=before,
-                after=after,
-            )
-            lifecycle.record_track(completion)
-            invalid_campaigns.extend(track_invalid)
-            _emit_progress(
-                progress,
-                (
-                    f"[{track.value}] reports published and track completion "
-                    f"recorded ({completion.receipt_fingerprint[:12]})"
-                ),
-            )
+            finish_track(track, completed_runs, before, after)
 
     readiness = _readiness(
         resolved=resolved,
@@ -2933,6 +3889,7 @@ async def _run_prepared_v2_campaign(
         mcp_revision=mcp_revision,
         mcp_launcher_provenance=mcp_launcher_provenance,
         model_readiness=model_readiness,
+        **({"native_session_observations": native_observations} if native is not None else {}),
     )
     _write_model(
         resolved.output_dir / "v2-run-readiness.private.json",
@@ -2959,6 +3916,8 @@ async def run_v2_campaign(
 ) -> CampaignReadinessV2:
     """Run exact V2 candidate catalogs, or stop after readiness when requested."""
 
+    from .native_mcp_runtime import NativeSessionCleanupPending
+
     _emit_progress(progress, "V2 CAMPAIGN: validating sealed artifacts and capabilities")
     (
         resolved,
@@ -2981,6 +3940,11 @@ async def run_v2_campaign(
             output_dir=resolved.output_dir,
             source_config_fingerprint=resolved.source_config_fingerprint,
             preflight_only=preflight_only,
+            purpose=getattr(resolved.config, "purpose", "official"),
+            schedules=tuple(
+                _scheduled_task_roster(resolved, prepared[track])
+                for track in resolved.config.track_modes
+            ),
         )
         signals = _SignalCancellation.install()
         try:
@@ -2994,6 +3958,13 @@ async def run_v2_campaign(
                 progress=progress,
                 lifecycle=lifecycle,
             )
+        except NativeSessionCleanupPending as pending:
+            lifecycle.fail("NativeSessionCleanupPending")
+            try:
+                _emit_progress(progress, "NATIVE_SESSION_CLEANUP_PENDING: waiting; no publication")
+            finally:
+                await pending.wait_for_cleanup()
+            raise V2CampaignRunError("NATIVE_SESSION_CLEANUP_PENDING") from None
         except asyncio.CancelledError:
             lifecycle.interrupt(
                 kind="signal" if signals.received_signal is not None else "task_cancelled",

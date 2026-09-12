@@ -98,6 +98,7 @@ class BHCEClient:
         scheme: str = "https",
         port: int = 443,
         verify_tls: bool | None = None,
+        trust_env: bool = True,
     ) -> None:
         self.domain = domain or os.environ["BLOODHOUND_DOMAIN"]
         self.token_id = token_id or os.environ["BLOODHOUND_TOKEN_ID"]
@@ -109,7 +110,8 @@ class BHCEClient:
             if verify_tls is not None
             else _env_bool("BLOODHOUND_VERIFY_TLS", default=True)
         )
-        self._client = httpx.AsyncClient(timeout=30.0, verify=self.verify_tls)
+        self.trust_env = trust_env
+        self._client = httpx.AsyncClient(timeout=30.0, verify=self.verify_tls, trust_env=trust_env)
 
     def _sign(self, method: str, path: str, body: bytes = b"") -> dict:
         """
@@ -144,7 +146,7 @@ class BHCEClient:
 
     def _url(self, path: str) -> str:
         base = f"{self.scheme}://{self.domain}"
-        if self.port not in (80, 443):
+        if self.port != (443 if self.scheme == "https" else 80):
             base += f":{self.port}"
         return base + path
 

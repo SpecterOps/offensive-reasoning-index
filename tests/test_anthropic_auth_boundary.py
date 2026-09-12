@@ -52,7 +52,8 @@ def _client(context, *, discovered=None, default_headers=None, native_init=None)
 
 def _message():
     return SimpleNamespace(
-        content=[SimpleNamespace(text="synthetic")],
+        content=[{"type": "text", "text": "synthetic"}],
+        stop_reason="end_turn",
         usage=SimpleNamespace(input_tokens=3, output_tokens=2),
     )
 

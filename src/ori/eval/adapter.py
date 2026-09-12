@@ -29,7 +29,9 @@ from .provider_contract import (
     ProviderRequest,
     ProviderTurn,
     ProviderTurnStatus,
+    anthropic_output_config,
     chat_completions_payload,
+    normalize_anthropic_message,
     normalize_chat_completion,
     resolve_api_surface,
     validate_release1_api_surface,
@@ -301,6 +303,9 @@ async def call_provider_text(
             model=model,
             thinking=thinking,
             provider_metrics=provider_metrics,
+            error=("PROVIDER_CAPABILITY: unsupported Anthropic continuation"
+                   if provider == "anthropic" and provider_metrics.get("provider_turn_status")
+                   == ProviderTurnStatus.CONTINUATION_REQUIRED.value else None),
         )
     except ProviderContractError as exc:
         return ModelResponse(
@@ -360,6 +365,7 @@ async def _call_provider(
     provider, name = model.split("/", 1)
 
     if provider == "anthropic":
+        output_config = anthropic_output_config(structured_output_schema)
         binding = anthropic_binding or prepare_anthropic_binding(model, base_url)
         import anthropic
 
@@ -387,12 +393,21 @@ async def _call_provider(
                 max_tokens=max_tokens,
                 system=system,
                 messages=messages,
+                **({"output_config": output_config} if output_config is not None else {}),
             )
             identity = anthropic_binding_identity(binding)
+            turn = normalize_anthropic_message(
+                resp, endpoint=binding.base_url, fallback_model=binding.model_slug,
+            )
+            metrics = _provider_turn_metrics(turn)
+            metrics.update(endpoint_family=identity["endpoint_family"],
+                           credential_source=identity["credential_source"],
+                           cache_read_input_tokens=turn.usage.cache_read_input_tokens,
+                           cache_creation_input_tokens=turn.usage.cache_creation_input_tokens,
+                           input_tokens_semantics="uncached_input")
             return (
-                resp.content[0].text, resp.usage.input_tokens, resp.usage.output_tokens, "",
-                {"endpoint_family": identity["endpoint_family"],
-                 "credential_source": identity["credential_source"]},
+                _direct_text_projection(turn, metrics), turn.usage.input_tokens or 0,
+                turn.usage.output_tokens or 0, turn.reasoning, metrics,
             )
         finally:
             await attempt.aclose()
@@ -719,6 +734,10 @@ def _direct_text_projection(turn: ProviderTurn, metrics: dict[str, object]) -> s
     as OUTPUT_INVALID without mislabeling them as provider infrastructure.
     """
 
+    if turn.status is ProviderTurnStatus.CONTINUATION_REQUIRED:
+        metrics.update(infra_scope="provider", infra_error_subtype="PROVIDER_CAPABILITY",
+                       infra_retryable=False)
+        return ""
     failure_subtypes = {
         ProviderTurnStatus.TOOL_CALLS: "TOOL_CALL_ONLY",
         ProviderTurnStatus.REFUSED: "REFUSAL",

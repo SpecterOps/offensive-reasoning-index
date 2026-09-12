@@ -344,8 +344,10 @@ def run_probe(
 def validate_status(payload: dict) -> None:
     _require(isinstance(payload, dict), "status", "status must be an object")
     for key, value in (
-        ("schema_version", "ori-v2-campaign-status-v2"),
+        ("schema_version", "ori-v2-campaign-status-v3"),
         ("protocol_version", "ori-eval-protocol-v2"),
+        ("purpose", "official"),
+        ("ranking_eligible", True),
         ("lifecycle_state", "not_started"),
         ("observed_state", "not_started"),
         ("next_action", "run_readiness"),

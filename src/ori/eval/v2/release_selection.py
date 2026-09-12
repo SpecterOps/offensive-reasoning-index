@@ -134,6 +134,14 @@ class PairedSelectedRelease(StrictModel):
         return self
 
 
+def _recipe_rank(entry, *, seed, track):
+    return (
+        canonical_sha256((SELECTOR_VERSION, PRODUCT, seed, track.value,
+                          entry.recipe_id, entry.variant_id)),
+        entry.recipe_id, entry.variant_id, entry.task_id,
+    )
+
+
 def select_candidate_track(
     *,
     public: PublicV2Artifact,
@@ -202,23 +210,7 @@ def select_candidate_track(
             for entry in pool
         ):
             raise ValueError("diagnostic identity leaked into main selection")
-        pool.sort(
-            key=lambda entry: (
-                canonical_sha256(
-                    (
-                        SELECTOR_VERSION,
-                        PRODUCT,
-                        public.seed,
-                        public.track.value,
-                        entry.recipe_id,
-                        entry.variant_id,
-                    )
-                ),
-                entry.recipe_id,
-                entry.variant_id,
-                entry.task_id,
-            )
-        )
+        pool.sort(key=lambda entry: _recipe_rank(entry, seed=public.seed, track=public.track))
         selected.extend(
             SelectedTaskIdentity(
                 task_id=entry.task_id,

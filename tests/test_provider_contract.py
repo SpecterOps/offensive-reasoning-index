@@ -17,10 +17,180 @@ from ori.eval.provider_contract import (
     ProviderTurnStatus,
     ToolArgumentParseStatus,
     chat_completions_payload,
+    normalize_anthropic_message,
     normalize_chat_completion,
     resolve_api_surface,
     validate_release1_api_surface,
 )
+
+
+def test_anthropic_blocks_usage_and_private_continuation():
+    blocks = [
+        {"type": "thinking", "thinking": "reason", "signature": "opaque-signature"},
+        {"type": "redacted_thinking", "data": "opaque-data"},
+        {"type": "text", "text": "one"}, {"type": "text", "text": "two"},
+    ]
+    message = {"content": blocks, "stop_reason": "end_turn", "usage": {
+        "input_tokens": 3, "output_tokens": 2, "cache_read_input_tokens": 7,
+        "cache_creation_input_tokens": 5,
+    }}
+    turn = normalize_anthropic_message(message)
+    assert turn.text == "onetwo" and turn.reasoning == "reason"
+    assert turn.api_surface is ProviderApiSurface.MESSAGES
+    assert turn.usage.total_tokens == 17 and turn.usage.input_tokens == 3
+    assert turn.usage.cache_read_input_tokens == 7 and turn.usage.usage_complete
+    assert turn.native_content_blocks == tuple(blocks)
+    blocks[0]["signature"] = "changed"
+    assert turn.native_content_blocks[0]["signature"] == "opaque-signature"
+    assert resolve_api_surface("anthropic") is ProviderApiSurface.MESSAGES
+    with pytest.raises(ProviderCapabilityError):
+        validate_release1_api_surface("openai", "messages")
+
+
+def test_anthropic_output_config_preserves_constraints_and_rejects_invalid(subtests):
+    from copy import deepcopy
+
+    from ori.eval.provider_contract import anthropic_output_config
+
+    schema = {"type": "object", "properties": {"count": {"type": "integer", "minimum": 0}},
+              "required": ["count"], "additionalProperties": False}
+    descriptor = {"name": "local-name", "strict": True, "schema": schema}
+    result = anthropic_output_config(descriptor)
+    assert result == {"format": {"type": "json_schema", "schema": schema}}
+    result["format"]["schema"]["properties"]["count"]["minimum"] = 2
+    assert schema["properties"]["count"]["minimum"] == 0
+    assert anthropic_output_config(None) is None
+    for case in ("strict", "extra", "dialect", "nonfinite", "invalid"):
+        with subtests.test(case=case):
+            value = deepcopy(descriptor)
+            if case == "strict":
+                value["strict"] = False
+            elif case == "extra":
+                value["unsupported"] = True
+            elif case == "dialect":
+                value["schema"]["$schema"] = "https://example.invalid/schema"
+            elif case == "nonfinite":
+                value["schema"]["minimum"] = float("nan")
+            else:
+                value["schema"]["type"] = "not-a-type"
+            with pytest.raises(ProviderCapabilityError):
+                anthropic_output_config(value)
+
+
+@pytest.mark.parametrize("reason,status", [
+    ("end_turn", ProviderTurnStatus.COMPLETED),
+    ("stop_sequence", ProviderTurnStatus.COMPLETED),
+    ("refusal", ProviderTurnStatus.REFUSED),
+    ("max_tokens", ProviderTurnStatus.TRUNCATED),
+    ("model_context_window_exceeded", ProviderTurnStatus.TRUNCATED),
+    ("pause_turn", ProviderTurnStatus.CONTINUATION_REQUIRED),
+])
+def test_anthropic_terminal_states_preserve_usage(reason, status):
+    from ori.eval.adapter import _direct_text_projection, _provider_turn_metrics
+
+    turn = normalize_anthropic_message({
+        "content": [{"type": "text", "text": "answer"}], "stop_reason": reason,
+        "usage": {"input_tokens": 2, "output_tokens": 1},
+    })
+    assert turn.status is status and turn.usage.output_tokens == 1
+    assert turn.usage.cache_read_input_tokens is None and turn.usage.total_tokens is None
+    assert not turn.usage.usage_complete
+    metrics = _provider_turn_metrics(turn)
+    projected = _direct_text_projection(turn, metrics)
+    assert projected == ("answer" if status is ProviderTurnStatus.COMPLETED else "")
+    if reason == "pause_turn":
+        assert metrics["infra_error_subtype"] == "PROVIDER_CAPABILITY"
+        assert "model_output_error" not in metrics and metrics["infra_retryable"] is False
+
+
+def test_anthropic_tool_calls_and_rejections(subtests):
+    from copy import deepcopy
+
+    from ori.eval.adapter import _direct_text_projection, _provider_turn_metrics
+
+    base = {"stop_reason": "tool_use", "content": [
+        {"type": "text", "text": "not a final answer"},
+        {"type": "tool_use", "id": "call-1", "name": "native_query", "input": {"q": "x"}},
+    ], "usage": {"input_tokens": 1, "output_tokens": 2}}
+    turn = normalize_anthropic_message(base)
+    assert turn.tool_calls[0].parsed_arguments == {"q": "x"}
+    assert _direct_text_projection(turn, _provider_turn_metrics(turn)) == ""
+    for case in ("duplicate", "input", "unknown_block", "unknown_stop", "no_calls", "bool_usage",
+                 "paused_tool"):
+        with subtests.test(case=case):
+            message = deepcopy(base)
+            if case == "duplicate":
+                message["content"].append(deepcopy(message["content"][-1]))
+            elif case == "input":
+                message["content"][-1]["input"] = []
+            elif case == "unknown_block":
+                message["content"][-1]["type"] = "server_tool_use"
+            elif case == "unknown_stop":
+                message["stop_reason"] = "new_reason"
+            elif case == "no_calls":
+                message["content"].pop()
+            elif case == "paused_tool":
+                message["stop_reason"] = "pause_turn"
+            else:
+                message["usage"]["input_tokens"] = True
+            with pytest.raises((ProviderProtocolError, ProviderCapabilityError)):
+                normalize_anthropic_message(message)
+
+
+@pytest.mark.parametrize("stop_reason", ["end_turn", "pause_turn"])
+def test_anthropic_direct_adapter_consumes_full_message_and_closes_attempt(
+    monkeypatch, stop_reason,
+):
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    from ori.eval import adapter
+
+    binding = SimpleNamespace(model_slug="fixture", base_url="https://fixture.invalid")
+    response = {"content": [
+        {"type": "thinking", "thinking": "reason", "signature": "sig"},
+        {"type": "text", "text": '{"answer":'}, {"type": "text", "text": "1}"},
+    ], "stop_reason": stop_reason, "usage": {
+        "input_tokens": 3, "output_tokens": 2, "cache_read_input_tokens": 7,
+        "cache_creation_input_tokens": 5,
+    }}
+    create = AsyncMock(return_value=response)
+    attempt = SimpleNamespace(client=SimpleNamespace(
+        default_headers={}, _validate_headers=lambda *args: None,
+        messages=SimpleNamespace(create=create),
+    ), aclose=AsyncMock())
+    monkeypatch.setattr(adapter, "prepare_anthropic_binding", lambda *args: binding)
+    monkeypatch.setattr(adapter, "materialize_anthropic_client", AsyncMock(return_value=attempt))
+    monkeypatch.setattr(adapter, "anthropic_binding_identity", lambda value: {
+        "endpoint_family": "anthropic_compat", "credential_source": "fixture",
+    })
+    result = asyncio.run(adapter.call_provider_text(
+        model="anthropic/fixture", messages=[{"role": "user", "content": "question"}],
+        system="system",
+        structured_output_schema={"name": "answer", "strict": True,
+                                  "schema": {"type": "object", "additionalProperties": False}},
+    ))
+    assert create.call_args.kwargs["output_config"] == {"format": {
+        "type": "json_schema", "schema": {"type": "object", "additionalProperties": False},
+    }}
+    assert result.thinking == "reason"
+    if stop_reason == "end_turn":
+        assert result.raw_text == '{"answer":1}' and result.error is None
+    else:
+        assert result.raw_text == "" and "PROVIDER_CAPABILITY" in result.error
+        assert not result.provider_metrics["infra_retryable"]
+    assert result.tokens_input == 3 and result.tokens_output == 2
+    assert result.provider_metrics["cache_read_input_tokens"] == 7
+    assert result.provider_metrics["resolved_api_surface"] == "messages"
+    assert "native_content_blocks" not in result.provider_metrics
+    attempt.aclose.assert_awaited_once()
+    materializations = adapter.materialize_anthropic_client.await_count
+    invalid = asyncio.run(adapter.call_provider_text(
+        model="anthropic/fixture", messages=[], system="system",
+        structured_output_schema={"name": "answer", "strict": False, "schema": {}},
+    ))
+    assert invalid.error is not None
+    assert adapter.materialize_anthropic_client.await_count == materializations
 
 
 def test_chat_completions_payload_projects_shared_request_contract() -> None:

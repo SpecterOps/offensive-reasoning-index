@@ -9,12 +9,14 @@ from typing import Any
 from .direct_adapter import DirectV2Outcome, execute_direct_v2
 from .mcp import EvidenceEvent, MCPToolLoop
 from .mcp_adapter import MCPV2Outcome, score_mcp_transcript_v2
+from .native_capability import NativeCapabilityProfile
 from .schema import (
     CapabilityProfile,
     ExecutionClass,
     GraphFactRegistry,
     OracleBundle,
     TaskBundle,
+    TaskCertification,
     VerdictStatus,
 )
 from .scoring import SampleOutcomeCode, SampleResult
@@ -24,6 +26,7 @@ class V2RuntimeSurface(StrEnum):
     DIRECT = "direct"
     MCP_NATIVE_OLLAMA = "mcp-native-ollama"
     MCP_NATIVE_OPENAI_COMPATIBLE = "mcp-native-openai-compatible"
+    MCP_NATIVE_ANTHROPIC = "mcp-native-anthropic"
     INSPECT = "inspect"
     OFFLINE = "offline"
 
@@ -148,7 +151,7 @@ def run_mcp_task_v2(
     task: TaskBundle,
     oracle: OracleBundle,
     resolver: Any,
-    profile: CapabilityProfile,
+    profile: CapabilityProfile | NativeCapabilityProfile,
     events: Sequence[EvidenceEvent],
     final_answer: Mapping[str, Any] | None,
     retry_answer: Mapping[str, Any] | None = None,
@@ -161,6 +164,9 @@ def run_mcp_task_v2(
     final_receipt_attested: bool = True,
     retry_receipt_attested: bool = True,
     retry_contract_error: str | None = None,
+    terminal_protocol_output_invalid: bool = False,
+    certified: bool = True,
+    native_certification: TaskCertification | None = None,
 ) -> MCPV2Outcome:
     """Dispatch every MCP/Inspect loop through the common finalizer."""
 
@@ -170,6 +176,7 @@ def run_mcp_task_v2(
             MCPToolLoop.NATIVE_OPENAI_COMPATIBLE
         ),
         V2RuntimeSurface.INSPECT: MCPToolLoop.INSPECT,
+        V2RuntimeSurface.MCP_NATIVE_ANTHROPIC: MCPToolLoop.NATIVE_ANTHROPIC,
     }
     try:
         tool_loop = loop_by_surface[surface]
@@ -193,4 +200,7 @@ def run_mcp_task_v2(
         final_receipt_attested=final_receipt_attested,
         retry_receipt_attested=retry_receipt_attested,
         retry_contract_error=retry_contract_error,
+        terminal_protocol_output_invalid=terminal_protocol_output_invalid,
+        certified=certified,
+        native_certification=native_certification,
     )

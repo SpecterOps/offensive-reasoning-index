@@ -290,7 +290,7 @@ def _assert_run_provenance_matches_evidence(
         provenance.source_manifest_sha256 != readiness.source_manifest_sha256
         or provenance.archive_sha256 != readiness.archive_sha256
         or base.graph_fingerprint != readiness.graph_fingerprint
-        or provenance.run_identity.target_fingerprint != readiness.target_fingerprint
+        or provenance.run_identity.target_fingerprint != track_readiness.target_fingerprint
         or base.track != track_readiness.track
         or base.public_artifact_fingerprint != track_readiness.public_artifact_fingerprint
         or base.oracle_artifact_fingerprint != track_readiness.oracle_artifact_fingerprint
@@ -525,7 +525,7 @@ def _load_track_reports(
             != receipt.graph_verification_after_fingerprint
         ):
             raise ModelCardBuildError(f"{track.value} graph-gate receipt mismatch")
-        if report.run_identity.target_fingerprint != readiness.target_fingerprint:
+        if report.run_identity.target_fingerprint != track_readiness.target_fingerprint:
             raise ModelCardBuildError(f"{track.value} target fingerprint mismatch")
         if track is Track.DIRECT and report.run_identity.tool_loop is not None:
             raise ModelCardBuildError("Direct report unexpectedly declares an MCP loop")

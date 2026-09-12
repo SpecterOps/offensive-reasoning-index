@@ -10,19 +10,21 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import os
+import signal
 import stat
 import subprocess
 import tempfile
+import threading
 import time
-from collections.abc import Callable, Sequence
-from contextlib import AbstractContextManager
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import AbstractContextManager, contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal, Protocol
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
-from .campaign_config import load_v2_campaign_config
+from .campaign_config import CampaignPurpose, ResolvedV2CampaignConfig, load_v2_campaign_config
 from .campaign_status import (
     CAMPAIGN_STATUS_SCHEMA_VERSION,
     CampaignStatusV1,
@@ -30,9 +32,11 @@ from .campaign_status import (
 )
 from .fingerprint import canonical_sha256
 from .model_card import ModelCardBuildError, build_model_card
-from .schema import StrictModel
+from .schema import Fingerprint, StrictModel
 
-SUPERVISOR_STATE_SCHEMA_VERSION = "ori-v2-campaign-supervisor-state-v1"
+SUPERVISOR_STATE_SCHEMA_VERSION = "ori-v2-campaign-supervisor-state-v2"
+_CHILD_TERMINATE_GRACE_SECONDS = 10.0
+_CHILD_KILL_GRACE_SECONDS = 2.0
 
 
 class CampaignSupervisorError(RuntimeError):
@@ -43,10 +47,37 @@ class SupervisorAlreadyRunningError(CampaignSupervisorError):
     """Raised when another supervisor owns the external supervisor-state lock."""
 
 
+class SupervisorInterruptedError(CampaignSupervisorError):
+    """A stop signal reached this supervisor, not an adopted campaign process."""
+
+
+class SupervisorCampaignBindingV1(StrictModel):
+    """The campaign-purpose identity pinned by an external supervisor.
+
+    The V2 config bytes already bind the selected purpose.  A diagnostic
+    canary additionally depends on a separate, mutable selection receipt, so
+    its fingerprint and fixed suite belong in the durable state as well.
+    """
+
+    purpose: CampaignPurpose
+    canary_suite: Literal["native-five-kind-v1"] | None = None
+    canary_selection_fingerprint: Fingerprint | None = None
+
+    @model_validator(mode="after")
+    def canary_identity_matches_purpose(self) -> SupervisorCampaignBindingV1:
+        if self.purpose == "official":
+            if self.canary_suite is not None or self.canary_selection_fingerprint is not None:
+                raise ValueError("official campaigns cannot carry a diagnostic-canary binding")
+        elif self.canary_suite is None or self.canary_selection_fingerprint is None:
+            raise ValueError("diagnostic canaries require a suite and selection fingerprint")
+        return self
+
+
 class SupervisorStateV1(StrictModel):
-    schema_version: Literal["ori-v2-campaign-supervisor-state-v1"] = SUPERVISOR_STATE_SCHEMA_VERSION
+    schema_version: Literal["ori-v2-campaign-supervisor-state-v2"] = SUPERVISOR_STATE_SCHEMA_VERSION
     source_config_fingerprint: str
     config_sha256: str
+    campaign: SupervisorCampaignBindingV1
     token_ceiling: int = Field(strict=True, gt=0)
     max_restarts: int = Field(strict=True, ge=0)
     restarts_used: int = Field(default=0, strict=True, ge=0)
@@ -61,6 +92,18 @@ class SupervisorStateV1(StrictModel):
     state_fingerprint: str
 
 
+class SupervisorChildOwnershipV1(StrictModel):
+    """A pre-spawn quarantine, not permission to adopt or signal a recorded PID."""
+
+    schema_version: Literal["ori-v2-supervisor-child-ownership-v1"] = (
+        "ori-v2-supervisor-child-ownership-v1"
+    )
+    source_config_fingerprint: str
+    config_sha256: str
+    launches: int
+    cleanup_confirmed: Literal[False] = False
+
+
 class SupervisorDecision(StrictModel):
     action: Literal[
         "run_readiness",
@@ -72,6 +115,7 @@ class SupervisorDecision(StrictModel):
     ]
     reason: str
     recovery: bool = False
+    campaign: SupervisorCampaignBindingV1 | None = None
 
 
 class ChildProcess(Protocol):
@@ -80,6 +124,60 @@ class ChildProcess(Protocol):
     def poll(self) -> int | None: ...
 
     def terminate(self) -> None: ...
+
+    def send_signal(self, signum: int) -> None: ...
+
+    def kill(self) -> None: ...
+
+
+class _OwnedSubprocess:
+    """Retain the original Popen child; use kernel-pinned signaling on Linux.
+
+    No status-reported PID or process-name lookup can acquire this authority.
+    Other POSIX platforms use the retained direct-child Popen handle. Children
+    have their own session so terminal signals reach them only via forwarding.
+    """
+
+    def __init__(self, command: Sequence[str]):
+        self._process = subprocess.Popen(tuple(command), start_new_session=True)  # noqa: S603
+        self.pid = self._process.pid
+        self._pidfd: int | None = None
+        self._lock = threading.RLock()
+        if hasattr(os, "pidfd_open") and hasattr(signal, "pidfd_send_signal"):
+            try:
+                self._pidfd = os.pidfd_open(self.pid)
+            except OSError:
+                # Still the Popen instance just created here, never an adopted
+                # identifier. A failed pin must not orphan a startup child.
+                self._process.kill()
+                self._process.wait(timeout=_CHILD_KILL_GRACE_SECONDS)
+                raise
+
+    def poll(self) -> int | None:
+        with self._lock:
+            result = self._process.poll()
+            if result is not None and self._pidfd is not None:
+                os.close(self._pidfd)
+                self._pidfd = None
+            return result
+
+    def send_signal(self, signum: int) -> None:
+        with self._lock:
+            if self.poll() is not None:
+                return
+            try:
+                if self._pidfd is not None:
+                    signal.pidfd_send_signal(self._pidfd, signum)
+                else:
+                    self._process.send_signal(signum)
+            except ProcessLookupError:
+                pass
+
+    def terminate(self) -> None:
+        self.send_signal(signal.SIGTERM)
+
+    def kill(self) -> None:
+        self.send_signal(signal.SIGKILL)
 
 
 def _utc_now() -> str:
@@ -102,7 +200,9 @@ def _validate_state_fingerprint(state: SupervisorStateV1) -> None:
         raise CampaignSupervisorError("supervisor state fingerprint is invalid")
 
 
-def _atomic_write_state(path: Path, state: SupervisorStateV1) -> None:
+def _atomic_write_state(
+    path: Path, state: SupervisorStateV1 | SupervisorChildOwnershipV1
+) -> None:
     """Durably replace one private supervisor state file."""
 
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -175,22 +275,16 @@ class SupervisorStateStore(AbstractContextManager["SupervisorStateStore"]):
 
     def __enter__(self) -> SupervisorStateStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0) | getattr(
-            os, "O_NOFOLLOW", 0
-        )
+        flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
         try:
             self._lock_descriptor = os.open(self.lock_path, flags, 0o600)
         except OSError as exc:
-            raise CampaignSupervisorError(
-                f"cannot open supervisor-state lock: {exc}"
-            ) from exc
+            raise CampaignSupervisorError(f"cannot open supervisor-state lock: {exc}") from exc
         lock_stat = os.fstat(self._lock_descriptor)
         if not stat.S_ISREG(lock_stat.st_mode):
             os.close(self._lock_descriptor)
             self._lock_descriptor = None
-            raise CampaignSupervisorError(
-                "cannot open supervisor-state lock: not a regular file"
-            )
+            raise CampaignSupervisorError("cannot open supervisor-state lock: not a regular file")
         try:
             fcntl.flock(self._lock_descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
@@ -231,6 +325,29 @@ def _status_total_tokens(status: CampaignStatusV1) -> int:
             "campaign status does not provide valid cumulative token accounting"
         )
     return value
+
+
+def _campaign_binding(resolved: ResolvedV2CampaignConfig) -> SupervisorCampaignBindingV1:
+    """Derive the no-secret identity that a supervisor must preserve on resume."""
+
+    if resolved.config.purpose == "official":
+        return SupervisorCampaignBindingV1(purpose="official")
+
+    if resolved.canary_selection is None:
+        raise CampaignSupervisorError("diagnostic canary selection is unavailable")
+    try:
+        from .diagnostic_selection import DiagnosticSelectionReceiptV1
+
+        selection = DiagnosticSelectionReceiptV1.model_validate_json(
+            _read_file_no_follow(resolved.canary_selection)
+        )
+    except (OSError, ValueError) as exc:
+        raise CampaignSupervisorError("diagnostic canary selection is invalid") from exc
+    return SupervisorCampaignBindingV1(
+        purpose="diagnostic_canary",
+        canary_suite=selection.suite,
+        canary_selection_fingerprint=selection.selection_fingerprint,
+    )
 
 
 def decide_supervisor_action(
@@ -299,6 +416,7 @@ def _new_state(
     *,
     status: CampaignStatusV1,
     config_sha256: str,
+    campaign: SupervisorCampaignBindingV1,
     token_ceiling: int,
     max_restarts: int,
     now: str,
@@ -308,6 +426,7 @@ def _new_state(
             "schema_version": SUPERVISOR_STATE_SCHEMA_VERSION,
             "source_config_fingerprint": status.source_config_fingerprint,
             "config_sha256": config_sha256,
+            "campaign": campaign,
             "token_ceiling": token_ceiling,
             "max_restarts": max_restarts,
             "restarts_used": 0,
@@ -341,14 +460,10 @@ def _updated_state(
             "restarts_used": (state.restarts_used if restarts_used is None else restarts_used),
             "launches": state.launches if launches is None else launches,
             "readiness_launches": (
-                state.readiness_launches
-                if readiness_launches is None
-                else readiness_launches
+                state.readiness_launches if readiness_launches is None else readiness_launches
             ),
             "execution_launches": (
-                state.execution_launches
-                if execution_launches is None
-                else execution_launches
+                state.execution_launches if execution_launches is None else execution_launches
             ),
             "total_tokens_observed": (
                 state.total_tokens_observed
@@ -423,25 +538,146 @@ class V2CampaignSupervisor:
             self.config_sha256 = hashlib.sha256(self.config_path.read_bytes()).hexdigest()
         except OSError as exc:
             raise CampaignSupervisorError(f"cannot read campaign config: {exc}") from exc
-        self.campaign_root = load_v2_campaign_config(self.config_path).output_dir
+        try:
+            self.resolved_config = load_v2_campaign_config(self.config_path)
+            self.campaign = _campaign_binding(self.resolved_config)
+        except (OSError, ValueError) as exc:
+            raise CampaignSupervisorError("campaign configuration is invalid") from exc
+        self.campaign_root = self.resolved_config.output_dir
         self.store = SupervisorStateStore(state_path, self.campaign_root)
+        self._ownership_path = self.store.path.with_name(
+            f"{self.store.path.name}.owned-child.private.json"
+        )
         self._owned_child: ChildProcess | None = None
+        self._launching = False
+        self._stop_signal: int | None = None
+        self._cleanup_lock = threading.Lock()
+        self._cleanup_error: BaseException | None = None
 
     @staticmethod
     def _launch(command: Sequence[str]) -> ChildProcess:
-        return subprocess.Popen(tuple(command))  # noqa: S603
+        return _OwnedSubprocess(command)
+
+    def _handle_stop_signal(self, signum: int, _frame: object) -> None:
+        if self._stop_signal is None:
+            self._stop_signal = signum
+        # Never throw asynchronously: even the first instruction of an except
+        # or finally block can be interrupted before a shielding flag is set.
+        # The cancellation watcher forwards to the exact captured child; main
+        # execution raises only at controlled checkpoints. No lock or Event
+        # operation belongs in this handler (either can be interrupted itself).
+
+    def _raise_if_cancelled(self) -> None:
+        if self._stop_signal is not None:
+            raise SupervisorInterruptedError("supervisor interrupted by an operator signal")
+
+    def _cleanup_owned_child(self) -> None:
+        with self._cleanup_lock:
+            if self._cleanup_error is not None:
+                raise self._cleanup_error
+            try:
+                self._cleanup_owned_child_locked()
+            except BaseException as exc:
+                self._cleanup_error = exc
+                raise
+
+    def _clear_owned_marker(self) -> None:
+        try:
+            self._ownership_path.unlink()
+        except FileNotFoundError:
+            return
+        descriptor = os.open(self._ownership_path.parent, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+    def _cleanup_owned_child_locked(self) -> None:
+        child = self._owned_child
+        if child is None:
+            return
+        if child.poll() is not None:
+            self._clear_owned_marker()
+            return
+        child.send_signal(self._stop_signal or signal.SIGTERM)
+        deadline = time.monotonic() + _CHILD_TERMINATE_GRACE_SECONDS
+        while child.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.05)
+        if child.poll() is None:
+            child.kill()
+            deadline = time.monotonic() + _CHILD_KILL_GRACE_SECONDS
+            while child.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.05)
+        if child.poll() is None:
+            raise CampaignSupervisorError("owned ORI child cleanup remains unconfirmed")
+        self._clear_owned_marker()
+
+    def _wait_for_next_poll(self) -> None:
+        remaining = self.poll_interval_seconds
+        while remaining > 0:
+            self._raise_if_cancelled()
+            interval = min(0.1, remaining)
+            self.sleeper(interval)
+            remaining -= interval
+        self._raise_if_cancelled()
+
+    @contextmanager
+    def _cancellation_boundary(self) -> Iterator[None]:
+        previous: dict[int, object] = {}
+        finished = threading.Event()
+
+        def cancellation_watch() -> None:
+            while not finished.wait(0.05):
+                if (
+                    self._stop_signal is not None
+                    and not self._launching
+                    and self._owned_child is not None
+                ):
+                    try:
+                        self._cleanup_owned_child()
+                    except BaseException:
+                        # The same stored error is raised by the main owner;
+                        # an uncertain cleanup never clears the durable marker.
+                        pass
+                    return
+
+        watcher = threading.Thread(
+            target=cancellation_watch, name="ori-supervisor-cancellation", daemon=True
+        )
+        try:
+            if threading.current_thread() is threading.main_thread():
+                for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+                    previous[signum] = signal.signal(signum, self._handle_stop_signal)
+            self._raise_if_cancelled()
+            watcher.start()
+            yield
+        except BaseException:
+            self._cleanup_owned_child()
+            raise
+        finally:
+            finished.set()
+            if watcher.ident is not None:
+                watcher.join(
+                    timeout=_CHILD_TERMINATE_GRACE_SECONDS + _CHILD_KILL_GRACE_SECONDS + 0.5
+                )
+            for signum, handler in previous.items():
+                signal.signal(signum, handler)
 
     def _command(self, execute: bool) -> tuple[str, ...]:
-        command = [self.ori_executable, "run-v2", "--config", str(self.config_path)]
+        command_name = "run-canary-v2" if self.campaign.purpose == "diagnostic_canary" else "run-v2"
+        command = [self.ori_executable, command_name, "--config", str(self.config_path)]
         if execute:
             command.append("--execute")
         return tuple(command)
 
     def _inspect(self) -> CampaignStatusV1:
+        self._raise_if_cancelled()
         try:
-            return self.inspector(self.config_path)
+            status = self.inspector(self.config_path)
         except ValueError as exc:
             raise CampaignSupervisorError(f"campaign status failed closed: {exc}") from exc
+        self._raise_if_cancelled()
+        return status
 
     def _load_or_create_state(self, status: CampaignStatusV1) -> SupervisorStateV1:
         if self.store.exists:
@@ -450,6 +686,10 @@ class V2CampaignSupervisor:
                 raise CampaignSupervisorError("supervisor state belongs to another config")
             if state.config_sha256 != self.config_sha256:
                 raise CampaignSupervisorError("campaign config bytes changed")
+            if state.campaign != self.campaign:
+                raise CampaignSupervisorError(
+                    "campaign purpose or diagnostic-canary binding changed"
+                )
             if state.token_ceiling != self.token_ceiling or state.max_restarts != self.max_restarts:
                 raise CampaignSupervisorError("supervisor policy changed across invocations")
             return state
@@ -463,12 +703,19 @@ class V2CampaignSupervisor:
         state = _new_state(
             status=status,
             config_sha256=self.config_sha256,
+            campaign=self.campaign,
             token_ceiling=self.token_ceiling,
             max_restarts=self.max_restarts,
             now=self.now(),
         )
         self.store.save(state)
         return state
+
+    def _with_campaign(self, decision: SupervisorDecision) -> SupervisorDecision:
+        """Expose the immutable purpose binding with every supervisor result."""
+
+        self._raise_if_cancelled()
+        return decision.model_copy(update={"campaign": self.campaign})
 
     def _observe_tokens(
         self, state: SupervisorStateV1, status: CampaignStatusV1
@@ -498,9 +745,7 @@ class V2CampaignSupervisor:
         if self._owned_child is not None and self._owned_child.poll() is None:
             raise CampaignSupervisorError("refusing to launch a second owned child")
         execute = decision.action == "run_execution"
-        prior_phase_launches = (
-            state.execution_launches if execute else state.readiness_launches
-        )
+        prior_phase_launches = state.execution_launches if execute else state.readiness_launches
         restarts = state.restarts_used
         if decision.recovery or prior_phase_launches > 0:
             if restarts >= state.max_restarts:
@@ -511,20 +756,40 @@ class V2CampaignSupervisor:
             now=self.now(),
             restarts_used=restarts,
             launches=state.launches + 1,
-            readiness_launches=(
-                state.readiness_launches + (0 if execute else 1)
-            ),
-            execution_launches=(
-                state.execution_launches + (1 if execute else 0)
-            ),
+            readiness_launches=(state.readiness_launches + (0 if execute else 1)),
+            execution_launches=(state.execution_launches + (1 if execute else 0)),
         )
         # Consume the launch/restart allowance before spawning.  A failed spawn
         # must not reset the external recovery budget.
         self.store.save(state)
+        self._raise_if_cancelled()
+        with self._cleanup_lock:
+            if self._cleanup_error is not None:
+                raise self._cleanup_error
+            self._cleanup_owned_child_locked()
+            # Retire the old launch before creating a new quarantine. An
+            # exception during the next Popen must never let an old, exited
+            # handle clear the new launch's unknown-cleanup marker.
+            self._owned_child = None
+        if self._ownership_path.exists() or self._ownership_path.is_symlink():
+            raise CampaignSupervisorError("prior owned ORI child cleanup remains unconfirmed")
+        _atomic_write_state(
+            self._ownership_path,
+            SupervisorChildOwnershipV1(
+                source_config_fingerprint=state.source_config_fingerprint,
+                config_sha256=self.config_sha256,
+                launches=state.launches,
+            ),
+        )
+        self._raise_if_cancelled()
+        self._launching = True
         try:
             self._owned_child = self.launcher(self._command(execute))
         except OSError as exc:
             raise CampaignSupervisorError(f"cannot launch ORI child: {exc}") from exc
+        finally:
+            self._launching = False
+        self._raise_if_cancelled()
         return state
 
     def _build_model_card(self, state: SupervisorStateV1) -> SupervisorStateV1:
@@ -546,11 +811,24 @@ class V2CampaignSupervisor:
     def run(self, *, max_polls: int | None = None) -> SupervisorDecision:
         """Supervise until a terminal/approval state (or a bounded test poll)."""
 
-        with self.store:
+        return self._run_loop(max_polls=max_polls)
+
+    def _run_loop(self, *, max_polls: int | None) -> SupervisorDecision:
+
+        # Keep the external ownership lock until exceptional cleanup finishes.
+        with self.store, self._cancellation_boundary():
             polls = 0
             status = self._inspect()
             state = self._load_or_create_state(status)
+            if self._ownership_path.exists() or self._ownership_path.is_symlink():
+                if self._owned_child is None:
+                    raise CampaignSupervisorError(
+                        "prior owned ORI child cleanup remains unconfirmed; monitor only"
+                    )
+                if self._owned_child.poll() is not None:
+                    self._cleanup_owned_child()
             while True:
+                self._raise_if_cancelled()
                 if state.budget_stop_requested:
                     raise CampaignSupervisorError("prior token-budget stop is terminal")
                 if state.source_config_fingerprint != status.source_config_fingerprint:
@@ -562,10 +840,9 @@ class V2CampaignSupervisor:
                     execute_approved=self.execute_approved,
                     state_exists=True,
                 )
-                child_running = (
-                    self._owned_child is not None
-                    and self._owned_child.poll() is None
-                )
+                child_running = self._owned_child is not None and self._owned_child.poll() is None
+                if self._owned_child is not None and not child_running:
+                    self._cleanup_owned_child()
                 if at_budget and decision.action != "complete":
                     if child_running:
                         state = self._request_budget_stop(state)
@@ -577,24 +854,29 @@ class V2CampaignSupervisor:
                 if child_running:
                     polls += 1
                     if max_polls is not None and polls >= max_polls:
-                        return SupervisorDecision(
-                            action="monitor",
-                            reason="bounded poll limit reached",
+                        return self._with_campaign(
+                            SupervisorDecision(
+                                action="monitor",
+                                reason="bounded poll limit reached",
+                            )
                         )
-                    self.sleeper(self.poll_interval_seconds)
+                    self._wait_for_next_poll()
                     status = self._inspect()
                     continue
                 if decision.action in {"stop", "await_execution_approval"}:
-                    return decision
+                    return self._with_campaign(decision)
                 if decision.action == "complete":
+                    self._cleanup_owned_child()
                     self._build_model_card(state)
-                    return decision
+                    return self._with_campaign(decision)
                 if decision.action in {"run_readiness", "run_execution"}:
                     state = self._launch_for_decision(state, decision)
                 polls += 1
                 if max_polls is not None and polls >= max_polls:
-                    return SupervisorDecision(action="monitor", reason="bounded poll limit reached")
-                self.sleeper(self.poll_interval_seconds)
+                    return self._with_campaign(
+                        SupervisorDecision(action="monitor", reason="bounded poll limit reached")
+                    )
+                self._wait_for_next_poll()
                 status = self._inspect()
 
 

@@ -9,7 +9,9 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import re
+from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -869,8 +871,28 @@ class QueryDenyCache:
         entry = self.entries.get(fingerprint)
         return entry.get("rule") if entry else None
 
+    @property
+    def native_recovery_required(self) -> bool:
+        return any(entry.get("rule") in {
+            "native_inflight", "native_interrupted", "native_transport_uncertain",
+        } for entry in self.entries.values())
+
+    def complete_native(self, fingerprint: str) -> None:
+        """Clear only a confirmed completed dispatch, retaining uncertainty on I/O failure."""
+        if self.reason_for(fingerprint) != "native_inflight":
+            raise ValueError("NATIVE_QUERY_COMPLETION_STATE_INVALID")
+        previous = self.entries.pop(fingerprint)
+        try:
+            self._persist()
+        except BaseException:
+            self.entries[fingerprint] = previous
+            raise
+
     def record(self, fingerprint: str, *, rule: str, detail: str) -> None:
-        if fingerprint in self.entries:
+        if fingerprint in self.entries and not (
+            self.reason_for(fingerprint) == "native_inflight"
+            and rule in {"native_interrupted", "native_transport_uncertain"}
+        ):
             return
         self.entries[fingerprint] = {
             "rule": rule,
@@ -893,11 +915,16 @@ class QueryDenyCache:
         }
         self.path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.path.with_name(f".{self.path.name}.{uuid4().hex}.tmp")
-        temporary.write_text(
-            json.dumps(payload, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
+        with temporary.open("w", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
         temporary.replace(self.path)
+        directory = os.open(self.path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
 
 
 class DirectQueryCoordinator:
@@ -910,6 +937,7 @@ class DirectQueryCoordinator:
         "server_unavailable",
         "server_error",
         "rate_limited",
+        "native_tool_error",
     }
 
     def __init__(
@@ -918,16 +946,29 @@ class DirectQueryCoordinator:
         bhce: BHCEClient,
         config: DirectQuerySafetyConfig,
         deny_cache: QueryDenyCache,
+        native_backend_binding_fingerprint: str | None = None,
     ) -> None:
+        if (native_backend_binding_fingerprint is not None
+                and (not isinstance(native_backend_binding_fingerprint, str)
+                     or re.fullmatch(r"[0-9a-f]{64}", native_backend_binding_fingerprint) is None)):
+            raise ValueError("native backend binding must be SHA-256")
         self.bhce = bhce
+        self.native_backend_binding_fingerprint = native_backend_binding_fingerprint
         self.config = config
         self.policy = DirectQueryPolicy(config)
         self.deny_cache = deny_cache
         self._lock = asyncio.Lock()
-        self.circuit_open = False
-        self.circuit_reason = ""
+        self.circuit_open = deny_cache.native_recovery_required
+        self.circuit_reason = "NATIVE_QUERY_RECOVERY_REQUIRED" if self.circuit_open else ""
+
+    def require_confirmed_native_completion(self) -> None:
+        if self.deny_cache.native_recovery_required:
+            self.circuit_open = True
+            self.circuit_reason = "NATIVE_QUERY_RECOVERY_REQUIRED"
+            raise ValueError("NATIVE_QUERY_RECOVERY_REQUIRED")
 
     def close_circuit(self) -> None:
+        self.require_confirmed_native_completion()
         self.circuit_open = False
         self.circuit_reason = ""
 
@@ -951,8 +992,30 @@ class DirectQueryCoordinator:
         *,
         include_properties: bool = True,
     ) -> CypherResult:
+        async def execute_query() -> CypherResult:
+            execution_kwargs = {
+                "server_timeout_seconds": self.config.server_timeout_seconds,
+                "client_timeout_seconds": self.config.client_timeout_seconds,
+            }
+            if not include_properties:
+                execution_kwargs["include_properties"] = False
+            return await self.bhce.run_cypher(query, **execution_kwargs)
+
+        return await self.execute_with(query, execute_query=execute_query)
+
+    async def execute_with(
+        self, query: str, *, execute_query: Callable[[], Awaitable[CypherResult]],
+    ) -> CypherResult:
+        """Apply shared containment to a harness-owned transport callback.
+
+        The callback executes the unchanged query and returns execution metadata;
+        native response projection stays with its caller. Callback exceptions and
+        cancellation propagate without being reclassified as backend failures.
+        """
         from .bhce import CypherResult
 
+        if not callable(execute_query):
+            raise TypeError("query execution callback must be callable")
         decision = self.policy.evaluate(query)
         if not decision.allowed:
             self.deny_cache.record(
@@ -974,46 +1037,81 @@ class DirectQueryCoordinator:
                 circuit_state="open" if self.circuit_open else "closed",
             )
 
-        cached_rule = self.deny_cache.reason_for(decision.fingerprint)
-        if cached_rule:
-            timeout_quarantine = cached_rule == "server_query_timeout"
-            return CypherResult(
-                success=False,
-                error=(
-                    "Direct query rejected because its fingerprint is already quarantined "
-                    f"by rule {cached_rule}"
-                ),
-                failure_type=("policy_rejected" if timeout_quarantine else "server_unavailable"),
-                failure_subtype=(
-                    "known_expensive_query"
-                    if timeout_quarantine
-                    else "quarantined_after_infra_failure"
-                ),
-                query_executed=False,
-                execution_attempts=0,
-                query_fingerprint=decision.fingerprint,
-                safety_policy_version=self.config.policy_version,
-                safety_rule=cached_rule,
-                bhce_health_after="not_checked",
-                circuit_state="open" if self.circuit_open else "closed",
-            )
+        return await self._execute_admitted_with(decision, execute_query=execute_query)
+
+    async def execute_native_with(
+        self, fingerprint: str, *, execute_query: Callable[[], Awaitable[CypherResult]],
+        backend_binding_fingerprint: str | None = None,
+    ) -> CypherResult:
+        """Serialize an already read-only-admitted native operation, without CySQL policy."""
+        if not callable(execute_query):
+            raise TypeError("query execution callback must be callable")
+        if not isinstance(fingerprint, str) or re.fullmatch(r"[0-9a-f]{64}", fingerprint) is None:
+            raise ValueError("native operation fingerprint must be SHA-256")
+        if backend_binding_fingerprint != self.native_backend_binding_fingerprint:
+            raise ValueError("native backend coordinator binding mismatch")
+        result = await self._execute_admitted_with(
+            QuerySafetyDecision(True, "native_read_only_operation", "", fingerprint),
+            execute_query=execute_query,
+            probe_ce_health=backend_binding_fingerprint is None,
+        )
+        result.safety_policy_version = None
+        if backend_binding_fingerprint is not None:
+            result.bhce_health_after = "not_applicable"
+        if result.safety_rule in (None, "", "allowed"):
+            result.safety_rule = "native_read_only_operation"
+        return result
+
+    async def _execute_admitted_with(
+        self, decision: QuerySafetyDecision, *,
+        execute_query: Callable[[], Awaitable[CypherResult]],
+        probe_ce_health: bool = True,
+    ) -> CypherResult:
+        from .bhce import CypherResult
 
         async with self._lock:
+            if self.deny_cache.native_recovery_required:
+                self.circuit_open = True
+                self.circuit_reason = "NATIVE_QUERY_RECOVERY_REQUIRED"
+                return self.skipped_result()
+            # A preceding query can enter quarantine while this call waits.
+            # Keep cache admission and execution under the same lock.
+            cached_rule = self.deny_cache.reason_for(decision.fingerprint)
+            if cached_rule:
+                timeout_quarantine = cached_rule == "server_query_timeout"
+                return CypherResult(
+                    success=False,
+                    error=(
+                        "Direct query rejected because its fingerprint is already quarantined "
+                        f"by rule {cached_rule}"
+                    ),
+                    failure_type=(
+                        "policy_rejected" if timeout_quarantine else "server_unavailable"
+                    ),
+                    failure_subtype=(
+                        "known_expensive_query"
+                        if timeout_quarantine
+                        else "quarantined_after_infra_failure"
+                    ),
+                    query_executed=False,
+                    execution_attempts=0,
+                    query_fingerprint=decision.fingerprint,
+                    safety_policy_version=self.config.policy_version,
+                    safety_rule=cached_rule,
+                    bhce_health_after="not_checked",
+                    circuit_state="open" if self.circuit_open else "closed",
+                )
             if self.circuit_open:
                 result = self.skipped_result()
                 result.query_fingerprint = decision.fingerprint
                 return result
 
-            execution_kwargs = {
-                "server_timeout_seconds": self.config.server_timeout_seconds,
-                "client_timeout_seconds": self.config.client_timeout_seconds,
-            }
-            if not include_properties:
-                execution_kwargs["include_properties"] = False
-            result = await self.bhce.run_cypher(query, **execution_kwargs)
+            result = await execute_query()
+            if not isinstance(result, CypherResult):
+                raise TypeError("query execution callback must return CypherResult")
             result.query_fingerprint = decision.fingerprint
             result.safety_policy_version = self.config.policy_version
-            result.safety_rule = "allowed"
+            result.safety_rule = decision.rule
             if result.success:
                 result.bhce_health_after = "not_checked"
                 result.circuit_state = "closed"
@@ -1030,7 +1128,7 @@ class DirectQueryCoordinator:
                 self.circuit_open = True
                 self.circuit_reason = result.error or "BloodHound authentication failure"
                 result.bhce_health_after = "not_checked"
-            elif result.failure_type in self._HEALTH_CHECK_FAILURES:
+            elif probe_ce_health and result.failure_type in self._HEALTH_CHECK_FAILURES:
                 try:
                     health = await self.bhce.check_health()
                     result.bhce_health_after = "healthy" if health.ok else "unhealthy"

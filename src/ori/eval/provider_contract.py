@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping, Sequence
+from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Literal, TypeAlias
@@ -22,6 +23,7 @@ class ProviderApiSurface(StrEnum):
     AUTO = "auto"
     CHAT_COMPLETIONS = "chat_completions"
     RESPONSES = "responses"
+    MESSAGES = "messages"
 
 
 class ProviderTurnStatus(StrEnum):
@@ -34,6 +36,7 @@ class ProviderTurnStatus(StrEnum):
     TRUNCATED = "truncated"
     CONTENT_FILTERED = "content_filtered"
     EMPTY = "empty"
+    CONTINUATION_REQUIRED = "continuation_required"
 
 
 class ToolArgumentParseStatus(StrEnum):
@@ -133,6 +136,8 @@ class ProviderUsage:
     total_tokens: int | None = None
     usage_reported: bool = False
     usage_complete: bool = False
+    cache_read_input_tokens: int | None = None
+    cache_creation_input_tokens: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -188,6 +193,7 @@ class ProviderTurn:
     model: str
     endpoint: str
     api_surface: ProviderApiSurface = ProviderApiSurface.CHAT_COMPLETIONS
+    native_content_blocks: tuple[dict[str, Any], ...] = ()
 
 
 def resolve_api_surface(
@@ -202,10 +208,16 @@ def resolve_api_surface(
     """
 
     surface = ProviderApiSurface(requested)
+    # Retain the historical configuration spelling as an explicit alias, while
+    # recording the actual Anthropic wire surface rather than Chat Completions.
+    if provider == "anthropic" and surface is ProviderApiSurface.CHAT_COMPLETIONS:
+        return ProviderApiSurface.MESSAGES
     if surface is not ProviderApiSurface.AUTO:
         return surface
     if provider == "codex":
         return ProviderApiSurface.RESPONSES
+    if provider == "anthropic":
+        return ProviderApiSurface.MESSAGES
     return ProviderApiSurface.CHAT_COMPLETIONS
 
 
@@ -215,6 +227,12 @@ def validate_release1_api_surface(provider: str, surface: ProviderApiSurface | s
     resolved = ProviderApiSurface(surface)
     if resolved is ProviderApiSurface.AUTO:
         resolved = resolve_api_surface(provider, resolved)
+    if resolved is ProviderApiSurface.MESSAGES and provider != "anthropic":
+        raise ProviderCapabilityError("Messages requires the Anthropic provider")
+    if provider == "anthropic" and resolved not in {
+        ProviderApiSurface.MESSAGES, ProviderApiSurface.CHAT_COMPLETIONS,
+    }:
+        raise ProviderCapabilityError("Anthropic requires the Messages API")
     if provider == "codex" and resolved is not ProviderApiSurface.RESPONSES:
         raise ProviderCapabilityError(
             "Provider 'codex' requires api_surface='responses' in Release 1"
@@ -298,6 +316,121 @@ def normalize_chat_completion(
         provider=provider,
         model=_optional_string(_field(envelope, "model", None)) or fallback_model,
         endpoint=endpoint,
+    )
+
+
+def anthropic_output_config(descriptor: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """Map ORI's strict schema descriptor to Messages without schema rewriting."""
+    if descriptor is None:
+        return None
+    from jsonschema import Draft202012Validator
+    from jsonschema.exceptions import SchemaError
+
+    if (not isinstance(descriptor, Mapping) or set(descriptor) != {"name", "strict", "schema"}
+            or descriptor["strict"] is not True
+            or not isinstance(descriptor["name"], str) or not descriptor["name"].strip()
+            or not isinstance(descriptor["schema"], dict)):
+        raise ProviderCapabilityError("Invalid Anthropic strict output descriptor")
+    schema = descriptor["schema"]
+    if schema.get("$schema") not in (None, "https://json-schema.org/draft/2020-12/schema"):
+        raise ProviderCapabilityError("Unsupported Anthropic output schema dialect")
+    try:
+        if json.loads(json.dumps(schema, allow_nan=False)) != schema:
+            raise ValueError("schema must use JSON containers and keys")
+        Draft202012Validator.check_schema(schema)
+    except (TypeError, ValueError, SchemaError):
+        raise ProviderCapabilityError("Invalid Anthropic output schema") from None
+    return {"format": {"type": "json_schema", "schema": deepcopy(schema)}}
+
+
+def normalize_anthropic_message(
+    envelope: Any, *, endpoint: str = "", fallback_model: str = "",
+) -> ProviderTurn:
+    """Interpret Messages blocks without losing private continuation material."""
+    content = _field(envelope, "content")
+    if not isinstance(content, (list, tuple)):
+        raise ProviderProtocolError("Anthropic content must be an array")
+    reason = _field(envelope, "stop_reason")
+    if not isinstance(reason, str) or reason not in {
+        "end_turn", "stop_sequence", "tool_use", "max_tokens", "refusal",
+        "pause_turn", "model_context_window_exceeded",
+    }:
+        raise ProviderProtocolError("Unsupported Anthropic stop reason")
+    raw_blocks, items, calls = [], [], []
+    texts, thoughts = [], []
+    ids = set()
+    for value in content:
+        block = value.model_dump(mode="json") if hasattr(value, "model_dump") else value
+        if not isinstance(block, Mapping):
+            raise ProviderProtocolError("Anthropic content block must be an object")
+        try:
+            raw = json.loads(json.dumps(dict(block), allow_nan=False))
+        except (TypeError, ValueError):
+            raise ProviderProtocolError("Anthropic content block is not JSON") from None
+        raw_blocks.append(deepcopy(raw))
+        kind = raw.get("type")
+        if kind in {"text", "thinking"}:
+            key = "text" if kind == "text" else "thinking"
+            text = raw.get(key)
+            if not isinstance(text, str):
+                raise ProviderProtocolError("Anthropic text block is malformed")
+            if kind == "text":
+                texts.append(text)
+                items.append(ProviderTextOutput(text=text))
+            else:
+                if not isinstance(raw.get("signature"), str):
+                    raise ProviderProtocolError("Anthropic thinking signature is missing")
+                thoughts.append(text)
+                items.append(ProviderReasoningOutput(reasoning=text))
+        elif kind == "redacted_thinking":
+            if not isinstance(raw.get("data"), str):
+                raise ProviderProtocolError("Anthropic redacted thinking is malformed")
+        elif kind == "tool_use":
+            call_id, name, arguments = raw.get("id"), raw.get("name"), raw.get("input")
+            if (not isinstance(call_id, str) or not call_id or call_id in ids
+                    or not isinstance(name, str) or not name or not isinstance(arguments, dict)):
+                raise ProviderProtocolError("Anthropic tool request is malformed")
+            ids.add(call_id)
+            call = ProviderToolCall(
+                id=call_id, name=name, raw_arguments=json.dumps(arguments, allow_nan=False),
+                parsed_arguments=deepcopy(arguments),
+                argument_parse_status=ToolArgumentParseStatus.VALID,
+            )
+            calls.append(call)
+            items.append(call)
+        else:
+            raise ProviderCapabilityError("Unsupported Anthropic content block type")
+    text, thinking = "".join(texts), "".join(thoughts)
+    if reason == "tool_use" and not calls:
+        raise ProviderProtocolError("Anthropic tool stop has no tool requests")
+    if calls and reason in {"end_turn", "stop_sequence", "pause_turn"}:
+        raise ProviderProtocolError("Anthropic tool requests have an incompatible stop reason")
+    status = (
+        ProviderTurnStatus.TRUNCATED if reason in {"max_tokens", "model_context_window_exceeded"}
+        else ProviderTurnStatus.REFUSED if reason == "refusal"
+        else ProviderTurnStatus.CONTINUATION_REQUIRED if reason == "pause_turn"
+        else ProviderTurnStatus.TOOL_CALLS if reason == "tool_use"
+        else ProviderTurnStatus.COMPLETED if text
+        else ProviderTurnStatus.REASONING_ONLY if thinking
+        else ProviderTurnStatus.EMPTY
+    )
+    usage = _field(envelope, "usage")
+    if usage is not None and not isinstance(usage, Mapping) and not hasattr(usage, "__dict__"):
+        raise ProviderProtocolError("Anthropic usage must be an object or null")
+    counts = {key: _optional_token_count(_field(usage, key)) for key in (
+        "input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens",
+    )}
+    # Anthropic input_tokens excludes cache reads/creation. Preserve that counter
+    # separately; missing cache counters cannot establish a total context count.
+    total = sum(counts.values()) if all(v is not None for v in counts.values()) else None
+    return ProviderTurn(
+        text=text, refusal=text if reason == "refusal" else "", reasoning=thinking,
+        tool_calls=tuple(calls), output_items=tuple(items), status=status, finish_reason=reason,
+        usage=ProviderUsage(**counts, total_tokens=total, usage_reported=usage is not None,
+                            usage_complete=all(v is not None for v in counts.values())),
+        response_id=_optional_string(_field(envelope, "id")), provider="anthropic",
+        model=_optional_string(_field(envelope, "model")) or fallback_model, endpoint=endpoint,
+        api_surface=ProviderApiSurface.MESSAGES, native_content_blocks=tuple(raw_blocks),
     )
 
 

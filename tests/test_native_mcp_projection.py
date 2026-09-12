@@ -221,6 +221,55 @@ def test_native_and_mcp_errors_are_not_graph_evidence(task, native):
     assert "private backend detail" not in projection.reason
 
 
+def test_mordavid_explicit_node_labels_are_required(simple_compiled, subtests):
+    from neo4j import Record
+    from neo4j.graph import Graph, Node
+
+    task = next(t.public for t in simple_compiled[3].tasks if t.public.claim_kind == "set")
+    base = ("MATCH (u:User) RETURN DISTINCT u AS entity, labels(u) AS labels "
+            "ORDER BY u.objectid SKIP 0 LIMIT 500")
+    for case in ("valid", "empty", "literal-labels", "other-variable", "case-variable",
+                 "constructed-map", "unknown-label", "two-types", "missing-id", "duplicate",
+                 "unknown-column", "empty-invalid-query"):
+        with subtests.test(case=case):
+            query = base
+            node = Node(Graph(), "1", 1, ["Base", "User"],
+                        {"objectid": "user-1", "name": "ALICE", "enabled": True})
+            # The pinned server uses Record.data(); preserve its real lossy
+            # node serialization plus the explicit labels column.
+            rows = [Record([("entity", node), ("labels", ["Base", "User"])]).data()]
+            if case in {"empty", "empty-invalid-query"}:
+                rows = []
+            if case in {"literal-labels", "empty-invalid-query"}:
+                query = query.replace("labels(u)", "['User']")
+            elif case == "other-variable":
+                query = query.replace("labels(u)", "labels(v)")
+            elif case == "case-variable":
+                query = query.replace("labels(u)", "labels(U)")
+            elif case == "constructed-map":
+                query = query.replace("u AS entity", "{objectid:u.objectid} AS entity")
+            elif case == "unknown-label":
+                rows[0]["labels"].append("UnqualifiedLabel")
+            elif case == "two-types":
+                rows[0]["labels"].append("Group")
+            elif case == "missing-id":
+                del rows[0]["entity"]["objectid"]
+            elif case == "duplicate":
+                rows.append(deepcopy(rows[0]))
+            elif case == "unknown-column":
+                rows[0]["extra"] = 1
+            result = _call({"success": True, "data": rows})
+            projection = project_native_result(
+                "mordavid", "query_bloodhound", {"query": query}, result, task,
+            )
+            assert (projection.status == "observed") is (case in {"valid", "empty"})
+            if case == "valid":
+                assert projection.evidence.entities[0].object_id == "user-1"
+                assert projection.evidence.entities[0].object_type == "User"
+                assert any(fact.key == "enabled" and fact.value is True
+                           for fact in projection.evidence.observed_properties)
+
+
 @pytest.mark.parametrize(
     "implementation,tool",
     (

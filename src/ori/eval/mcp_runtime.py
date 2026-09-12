@@ -1491,6 +1491,15 @@ def _tool_result_to_text(result: Any) -> str:
 
 
 def _ollama_tool_spec(tool_obj: Any) -> tuple[dict[str, Any], Any]:
+    from .v2.native_mcp_runtime import NativeToolCallable
+
+    if isinstance(tool_obj, NativeToolCallable):
+        descriptor = tool_obj.descriptor
+        return ({"type": "function", "function": {
+            "name": descriptor["name"],
+            "description": descriptor.get("description", ""),
+            "parameters": descriptor["inputSchema"],
+        }}, tool_obj)
     canonical_name = _canonical_tool_name(tool_obj)
     # Tools loaded from MCP are already Inspect executor callables. Local test
     # tools may still be passed as @tool factories, so only instantiate those.
@@ -1879,6 +1888,7 @@ async def _run_ollama_mcp_loop(
     progress_observer: Callable[[ModelResponse, list[Any]], None] | None = None,
     tool_timeout_seconds: float | None = None,
     finalization_schema: dict[str, Any] | None = None,
+    native_protocol_bridge=None,
 ) -> tuple[ModelResponse, MCPRunMetadata, list[Any]]:
     question = public_question or (task.question if task is not None else "")
     if not question:
@@ -1886,6 +1896,9 @@ async def _run_ollama_mcp_loop(
     system_prompt = system_prompt_override or (_mcp_system_prompt(task) if task is not None else "")
     if not system_prompt:
         raise ValueError("MCP loop requires a system prompt")
+    if native_protocol_bridge is not None:
+        system_prompt += "\n" + native_protocol_bridge.protocol_instructions
+        question += "\n" + native_protocol_bridge.protocol_catalog
     url = _native_ollama_chat_url(base_url)
     messages_payload: list[dict[str, Any]] = []
     if server_prompt_text.strip():
@@ -1936,7 +1949,9 @@ async def _run_ollama_mcp_loop(
     for step in range(max_steps):
         use_finalization_guard = (
             _env_flag("ORI_MCP_FINALIZATION_GUARD", True)
-            and (step >= max_steps - 1 or executed_tool_calls >= max_steps)
+            and (step >= max_steps - 1 or executed_tool_calls
+                 + (len(native_protocol_bridge.protocol_calls)
+                    if native_protocol_bridge is not None else 0) >= max_steps)
             and (
                 typed_finalization_ready
                 if tool_result_observer is not None
@@ -2021,6 +2036,23 @@ async def _run_ollama_mcp_loop(
             inspect_messages,
         )
 
+        if native_protocol_bridge is not None:
+            protocol = await _execute_mcp_tool(
+                native_protocol_bridge.dispatch_protocol_text,
+                {"text": content, "mixed_tools": bool(raw_tool_calls),
+                 "enabled": not use_finalization_guard and turn.get("finish_reason") == "stop"
+                 and executed_tool_calls + len(native_protocol_bridge.protocol_calls) < max_steps},
+                timeout_seconds=tool_timeout_seconds,
+            )
+            if protocol is not None:
+                result_text, accepted = protocol
+                if not accepted:
+                    final_content = content
+                    break
+                messages_payload.append({"role": "user", "content": result_text})
+                inspect_messages.append(ChatMessageUser(content=result_text))
+                _emit_mcp_loop_progress(progress_observer, progress_response, inspect_messages)
+                continue
         if not raw_tool_calls:
             final_content = content
             break
@@ -2031,7 +2063,8 @@ async def _run_ollama_mcp_loop(
             result_text = ""
             tool_error: ToolCallError | None = None
             infrastructure_error: MCPToolInfrastructureError | None = None
-            if executed_tool_calls >= max_steps:
+            if executed_tool_calls + (len(native_protocol_bridge.protocol_calls)
+                                       if native_protocol_bridge is not None else 0) >= max_steps:
                 result_text = json.dumps(
                     {
                         "success": False,
@@ -2182,6 +2215,7 @@ async def _run_openai_compat_mcp_loop(
     progress_observer: Callable[[ModelResponse, list[Any]], None] | None = None,
     tool_timeout_seconds: float | None = None,
     finalization_schema: dict[str, Any] | None = None,
+    native_protocol_bridge=None,
 ) -> tuple[ModelResponse, MCPRunMetadata, list[Any]]:
     question = public_question or (task.question if task is not None else "")
     if not question:
@@ -2189,6 +2223,9 @@ async def _run_openai_compat_mcp_loop(
     system_prompt = system_prompt_override or (_mcp_system_prompt(task) if task is not None else "")
     if not system_prompt:
         raise ValueError("MCP loop requires a system prompt")
+    if native_protocol_bridge is not None:
+        system_prompt += "\n" + native_protocol_bridge.protocol_instructions
+        question += "\n" + native_protocol_bridge.protocol_catalog
     url = _openai_compat_chat_url(base_url, model_name)
     resolved_telemetry_adapter = _infer_openai_compat_telemetry_adapter(
         telemetry_adapter,
@@ -2236,7 +2273,9 @@ async def _run_openai_compat_mcp_loop(
     for step in range(max_steps):
         use_finalization_guard = (
             _env_flag("ORI_MCP_FINALIZATION_GUARD", True)
-            and (step >= max_steps - 1 or executed_tool_calls >= max_steps)
+            and (step >= max_steps - 1 or executed_tool_calls
+                 + (len(native_protocol_bridge.protocol_calls)
+                    if native_protocol_bridge is not None else 0) >= max_steps)
             and (
                 typed_finalization_ready
                 if tool_result_observer is not None
@@ -2391,6 +2430,23 @@ async def _run_openai_compat_mcp_loop(
             inspect_messages,
         )
 
+        if native_protocol_bridge is not None:
+            protocol = await _execute_mcp_tool(
+                native_protocol_bridge.dispatch_protocol_text,
+                {"text": content, "mixed_tools": bool(raw_tool_calls),
+                 "enabled": not use_finalization_guard and finish_reason == "stop"
+                 and executed_tool_calls + len(native_protocol_bridge.protocol_calls) < max_steps},
+                timeout_seconds=tool_timeout_seconds,
+            )
+            if protocol is not None:
+                result_text, accepted = protocol
+                if not accepted:
+                    final_content = content
+                    break
+                messages_payload.append({"role": "user", "content": result_text})
+                inspect_messages.append(ChatMessageUser(content=result_text))
+                _emit_mcp_loop_progress(progress_observer, progress_response, inspect_messages)
+                continue
         if not raw_tool_calls:
             final_content = content
             break
@@ -2412,7 +2468,8 @@ async def _run_openai_compat_mcp_loop(
                     }
                 )
                 tool_error = ToolCallError(type="parsing", message=argument_error)
-            elif executed_tool_calls >= max_steps:
+            elif executed_tool_calls + (len(native_protocol_bridge.protocol_calls)
+                                         if native_protocol_bridge is not None else 0) >= max_steps:
                 result_text = json.dumps(
                     {
                         "success": False,

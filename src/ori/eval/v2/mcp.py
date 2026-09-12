@@ -19,6 +19,7 @@ from .fingerprint import canonical_sha256
 from .native_capability import NativeCapabilityProfile
 from .schema import (
     CapabilityProfile,
+    CertificationState,
     Fingerprint,
     MCPBindingMode,
     NonEmptyStr,
@@ -26,6 +27,7 @@ from .schema import (
     RelationshipSemantics,
     StrictModel,
     TaskBundle,
+    TaskCertification,
     ToolCapability,
     Track,
 )
@@ -46,6 +48,9 @@ _MCP_FINALIZATION_SOURCES = {
     "model_runtime": Path(__file__).with_name("model_runtime.py"),
     "output_compliance": Path(__file__).with_name("output_compliance.py"),
     "provider_loops": Path(__file__).parent.parent / "mcp_runtime.py",
+    "anthropic_loop": Path(__file__).parent.parent / "anthropic_mcp.py",
+    "anthropic_binding": Path(__file__).parent.parent / "anthropic_binding.py",
+    "provider_contract": Path(__file__).parent.parent / "provider_contract.py",
     "provider_transport": Path(__file__).parent.parent / "provider_transport.py",
     "codex_oauth": Path(__file__).parent.parent / "codex_oauth.py",
     "ollama_stream": Path(__file__).parent.parent / "ollama_stream.py",
@@ -80,6 +85,7 @@ class MCPToolLoop(StrEnum):
     INSPECT = "inspect"
     NATIVE_OLLAMA = "native-ollama"
     NATIVE_OPENAI_COMPATIBLE = "native-openai-compatible"
+    NATIVE_ANTHROPIC = "native-anthropic"
 
 
 CERTIFIED_MCP_TOOL_LOOPS = (
@@ -276,6 +282,7 @@ class FinalizationState(StrictModel):
     capability_profile_fingerprint: Fingerprint
     tool_loop: MCPToolLoop
     certified: bool
+    native_certification: TaskCertification | None = Field(default=None, repr=False)
     phase: FinalizationPhase = FinalizationPhase.COLLECTING
     events: tuple[EvidenceEvent, ...] = ()
     finalization_unlocked: bool = False
@@ -289,7 +296,15 @@ class FinalizationState(StrictModel):
         expected_unlocked = _events_unlock_finalization(self.events)
         if self.finalization_unlocked != expected_unlocked:
             raise ValueError("finalization_unlocked must be derived from evidence events")
-        if self.certified and self.tool_loop not in CERTIFIED_MCP_TOOL_LOOPS:
+        if self.native_certification is not None:
+            certificate = _validate_native_finalization_certificate(self.native_certification)
+            if (not self.certified or certificate.task_fingerprint != self.task_fingerprint
+                    or certificate.capability_profile_fingerprint
+                    != self.capability_profile_fingerprint):
+                raise ValueError("native certification state binding mismatch")
+        if (self.certified and self.tool_loop not in CERTIFIED_MCP_TOOL_LOOPS
+                and not (self.native_certification is not None
+                         and self.tool_loop is MCPToolLoop.NATIVE_ANTHROPIC)):
             raise ValueError("certified MCP state requires an explicit certified loop")
         if self.phase is FinalizationPhase.COLLECTING and self.finalization_unlocked:
             raise ValueError("claim-relevant evidence must move state to ready")
@@ -789,7 +804,7 @@ def _capability_proves_negative(capability: ToolCapability) -> bool:
 
 def classify_evidence_event(
     task: TaskBundle,
-    profile: CapabilityProfile,
+    profile: CapabilityProfile | NativeCapabilityProfile,
     *,
     kind: EvidenceEventKind,
     tool_name: str | None = None,
@@ -800,6 +815,18 @@ def classify_evidence_event(
     """Classify one observation using only a public task and capability profile."""
 
     _require_public_task(task)
+    if isinstance(profile, NativeCapabilityProfile):
+        from .native_proof import validate_native_task_binding
+
+        validate_native_task_binding(profile, task)
+        if kind not in {EvidenceEventKind.TASK_TIMEOUT, EvidenceEventKind.INFRASTRUCTURE_FAILURE,
+                        EvidenceEventKind.HARNESS_FAILURE, EvidenceEventKind.TRUNCATED}:
+            raise ValueError("native proof events require actual native result classification")
+        return EvidenceEvent(
+            kind=kind, task_fingerprint=task.task_fingerprint,
+            capability_profile_fingerprint=profile.profile_fingerprint,
+            tool_name=tool_name, operation=operation, resource_uri=resource_uri, reason=reason,
+        )
     validate_mcp_capability_profile(profile)
     if type(kind) is not EvidenceEventKind:
         raise TypeError("kind must be an EvidenceEventKind")
@@ -1039,7 +1066,24 @@ def validate_certified_mcp_loop(tool_loop: MCPToolLoop | str) -> MCPToolLoop:
         raise ValueError(f"unknown MCP tool loop; certified values: {supported}") from exc
     if resolved is MCPToolLoop.AUTO:
         raise ValueError("mcp_tool_loop='auto' is forbidden for certified v2 runs")
+    if resolved is MCPToolLoop.NATIVE_ANTHROPIC:
+        raise ValueError("native-anthropic is development-only, not certified")
     return resolved
+
+
+def _validate_native_finalization_certificate(certificate: TaskCertification) -> TaskCertification:
+    from .certification import certifier_fingerprint
+    from .comparator import COMPARATOR_FINGERPRINT
+    from .compiler import compiler_fingerprint
+
+    certificate = TaskCertification.model_validate_json(certificate.model_dump_json())
+    if (certificate.state is not CertificationState.CANDIDATE or certificate.failures
+            or certificate.live_proof_fingerprint is None
+            or certificate.certifier_fingerprint != certifier_fingerprint()
+            or certificate.compiler_fingerprint != compiler_fingerprint()
+            or certificate.comparator_fingerprint != COMPARATOR_FINGERPRINT):
+        raise ValueError("native finalization requires a current candidate certification")
+    return certificate
 
 
 def initial_finalization_state(
@@ -1048,6 +1092,7 @@ def initial_finalization_state(
     *,
     tool_loop: MCPToolLoop | str,
     certified: bool = True,
+    native_certification: TaskCertification | None = None,
 ) -> FinalizationState:
     """Create the immutable initial state for one MCP sample."""
 
@@ -1057,19 +1102,38 @@ def initial_finalization_state(
 
         validate_native_task_binding(profile, task)
         if certified:
-            raise ValueError("NATIVE_CERTIFICATION_UNAVAILABLE: native live admission is required")
+            if native_certification is None:
+                raise ValueError(
+                    "NATIVE_CERTIFICATION_UNAVAILABLE: native live admission is required",
+                )
+            native_certification = _validate_native_finalization_certificate(native_certification)
+            if (native_certification.task_id != task.task_id
+                    or native_certification.task_fingerprint != task.task_fingerprint
+                    or native_certification.capability_profile_fingerprint
+                    != profile.profile_fingerprint
+                    or native_certification.certified_profile_id != profile.profile_id
+                    or native_certification.bounds_fingerprint
+                    != canonical_sha256(task.binding.bounds)):
+                raise ValueError("native certification task/profile/bounds binding mismatch")
+        elif native_certification is not None:
+            raise ValueError("development finalization cannot carry native certification")
         # Reuse the same reducer for offline native replay without asserting
         # that a configured native profile is a certified execution boundary.
-        validate_certified_mcp_loop(tool_loop)
+        if MCPToolLoop(tool_loop) is not MCPToolLoop.NATIVE_ANTHROPIC:
+            validate_certified_mcp_loop(tool_loop)
     else:
+        if native_certification is not None:
+            raise ValueError("legacy finalization cannot carry native certification")
         validate_mcp_capability_profile(profile)
         validate_mcp_binding(task, profile)
-    resolved_loop = validate_certified_mcp_loop(tool_loop) if certified else MCPToolLoop(tool_loop)
+    resolved_loop = (validate_certified_mcp_loop(tool_loop)
+                     if certified and native_certification is None else MCPToolLoop(tool_loop))
     return FinalizationState(
         task_fingerprint=task.task_fingerprint,
         capability_profile_fingerprint=profile.profile_fingerprint,
         tool_loop=resolved_loop,
         certified=certified,
+        native_certification=native_certification,
     )
 
 

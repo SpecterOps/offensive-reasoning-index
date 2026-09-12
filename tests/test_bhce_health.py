@@ -8,6 +8,43 @@ import httpx
 from ori.eval.bhce import BHCEClient, CypherResult
 
 
+def test_native_ce_effective_connection_and_port_routing(monkeypatch):
+    import httpx
+
+    from ori.eval.bhce import BHCEClient
+    from ori.eval.v2.native_ce_runtime import native_ce_connection
+
+    original = httpx.AsyncClient
+    observed = []
+
+    def client(**kwargs):
+        assert kwargs["trust_env"] is False
+        return original(**kwargs, transport=httpx.MockTransport(lambda request: (
+            observed.append(str(request.url)),
+            httpx.Response(200, json={"data": {"nodes": {}, "edges": []}}),
+        )[1]))
+
+    monkeypatch.setattr(httpx, "AsyncClient", client)
+    monkeypatch.setenv("HTTPS_PROXY", "http://unrelated.invalid:9999")
+    for scheme, port in (("https", "443"), ("http", "80"), ("https", "80"), ("http", "443")):
+        child, options, binding = native_ce_connection({
+            "BLOODHOUND_DOMAIN": "Fixture.Invalid", "BLOODHOUND_TOKEN_ID": "fixture-id",
+            "BLOODHOUND_TOKEN_KEY": "fixture-key", "BLOODHOUND_SCHEME": scheme,
+            "BLOODHOUND_PORT": port,
+        })
+        assert child["BLOODHOUND_DOMAIN"] == options["domain"] == binding["domain"]
+        assert int(child["BLOODHOUND_PORT"]) == options["port"] == binding["port"]
+        assert "fixture-id" not in str(binding) and "fixture-key" not in str(binding)
+
+        async def query():
+            async with BHCEClient(**options) as bhce:
+                assert (await bhce.check_health()).ok
+
+        asyncio.run(query())
+        suffix = "" if (scheme, port) in {("https", "443"), ("http", "80")} else f":{port}"
+        assert observed[-1] == f"{scheme}://fixture.invalid{suffix}/api/v2/graphs/cypher"
+
+
 def test_classify_error_infra() -> None:
     assert BHCEClient.classify_error("HTTP 502: Bad Gateway") == "infra"
     assert BHCEClient.classify_error("Request failed: timed out") == "infra"

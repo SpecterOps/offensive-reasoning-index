@@ -11,7 +11,7 @@ from pydantic import Field, PrivateAttr, field_validator, model_validator
 
 from ..anthropic_binding import AnthropicBinding
 from ..ollama_binding import OllamaEndpoint
-from .schema import PROTOCOL_VERSION, StrictModel, Track
+from .schema import PROTOCOL_VERSION, Fingerprint, StrictModel, Track
 
 ReasoningEffort = Literal[
     "none",
@@ -27,6 +27,8 @@ StructuredOutputMode = Literal[
     "prompt_local_validation",
     "json_schema",
 ]
+
+CampaignPurpose = Literal["official", "diagnostic_canary"]
 
 
 class V2TrackArtifactPaths(StrictModel):
@@ -73,6 +75,63 @@ class V2MCPConfig(StrictModel):
     tool_timeout_seconds: float = Field(default=60.0, strict=True, gt=0)
 
 
+class V2NativeMCPConfig(V2MCPConfig):
+    """Explicit native lane; configuration never asserts qualification."""
+
+    mode: Literal["native"]
+    tool_loop: Literal["native-openai-compatible", "native-ollama", "native-anthropic"] = (
+        "native-openai-compatible"
+    )
+    implementation_id: Literal["mwnickerson", "mordavid", "armadin"]
+    capability_profile: str
+    python_executable: str
+    runtime_roots: tuple[str, ...] = Field(min_length=1)
+    runtime_fingerprint: Fingerprint
+    dependency_lock: str
+    dependency_lock_fingerprint: Fingerprint
+    backend: Literal["bhce", "neo4j"]
+    databases: tuple[str, ...]
+    qualification: str | None = None
+    qualification_work: str | None = None
+    original_config: str | None = None
+
+    @field_validator("runtime_roots", "databases", mode="before")
+    @classmethod
+    def yaml_sequences(cls, value):
+        return tuple(value) if isinstance(value, list) else value
+
+    @model_validator(mode="after")
+    def native_backend_is_explicit(self) -> V2NativeMCPConfig:
+        if self.implementation_id == "mwnickerson":
+            valid = self.backend == "bhce" and not self.databases
+        elif self.implementation_id == "mordavid":
+            valid = self.backend == "neo4j" and self.databases == ("neo4j", "bloodhound")
+        else:
+            valid = (
+                self.backend == "neo4j"
+                and len(self.databases) == 1
+                and bool(self.databases[0].strip())
+            )
+        if not valid:
+            raise ValueError("NATIVE_BACKEND_CONFIGURATION_MISMATCH")
+        if (self.qualification is None) != (self.qualification_work is None) or any(
+            value is not None and not value.strip()
+            for value in (self.qualification, self.qualification_work)
+        ):
+            raise ValueError("NATIVE_QUALIFICATION_PATHS_INVALID")
+        if any(
+            not path.strip()
+            for path in (
+                self.capability_profile,
+                self.python_executable,
+                self.dependency_lock,
+                *self.runtime_roots,
+            )
+        ):
+            raise ValueError("NATIVE_PATH_CONFIGURATION_INVALID")
+        return self
+
+
 class V2Defaults(StrictModel):
     concurrency: int = Field(default=1, strict=True, gt=0)
     runs_per_model: int = Field(default=1, strict=True, gt=0)
@@ -83,7 +142,7 @@ class V2Defaults(StrictModel):
     infra_retry: V2InfrastructureRetryConfig = V2InfrastructureRetryConfig()
     graph_page_size: int = Field(default=500, strict=True, gt=0, le=2000)
     health: V2HealthConfig = V2HealthConfig()
-    mcp: V2MCPConfig | None = None
+    mcp: V2NativeMCPConfig | V2MCPConfig | None = None
 
     @model_validator(mode="after")
     def certified_concurrency_is_serial(self) -> V2Defaults:
@@ -111,6 +170,7 @@ class V2ModelEntry(StrictModel):
         "auto",
         "chat_completions",
         "responses",
+        "messages",
     ] = "auto"
     structured_output_mode: StructuredOutputMode = "prompt_local_validation"
     max_output_tokens: int = Field(default=2048, strict=True, gt=0, le=32768)
@@ -118,6 +178,7 @@ class V2ModelEntry(StrictModel):
     model_base_url: str | None = None
     mcp_tool_loop: (
         Literal[
+            "native-anthropic",
             "native-openai-compatible",
             "native-ollama",
         ]
@@ -174,13 +235,28 @@ class V2CampaignConfig(StrictModel):
     output_dir: str
     defaults: V2Defaults
     models: list[V2ModelEntry]
+    # Omitted historical configurations retain the ordinary selected-release
+    # behavior.  Diagnostic canaries opt in explicitly and can never be
+    # admitted through the official branch below.
+    purpose: CampaignPurpose = "official"
     selected_release: str | None = None
+    canary_selection: str | None = None
 
     @model_validator(mode="after")
     def exact_modes_and_models(self) -> V2CampaignConfig:
         if not self.modes or len(self.modes) != len(set(self.modes)):
             raise ValueError("v2 modes must be non-empty and unique")
-        if self.selected_release is not None:
+        if self.purpose == "diagnostic_canary":
+            if self.modes != ["mcp"] or set(self.tracks) != {"mcp"}:
+                raise ValueError("diagnostic canaries require exactly the MCP track")
+            if self.selected_release is None or self.canary_selection is None:
+                raise ValueError(
+                    "diagnostic canaries require paired selected_release and canary_selection"
+                )
+            mcp = self.tracks["mcp"]
+            if mcp.release_metadata is None or mcp.selection is None:
+                raise ValueError("diagnostic canaries require MCP release metadata and selection")
+        elif self.selected_release is not None:
             if set(self.tracks) != {"direct", "mcp"} or any(
                 paths.release_metadata is None or paths.selection is None
                 for paths in self.tracks.values()
@@ -219,6 +295,7 @@ class V2CampaignConfig(StrictModel):
                     "openai",
                     "openai-compat",
                 }
+                | ({"anthropic"} if isinstance(self.defaults.mcp, V2NativeMCPConfig) else set())
             )
             if unsupported:
                 raise ValueError(
@@ -240,7 +317,23 @@ class ResolvedV2TrackPaths(StrictModel):
     selection: Path | None = None
 
 
+class ResolvedNativeMCPPaths(StrictModel):
+    capability_profile: Path
+    python_executable: Path
+    runtime_roots: tuple[Path, ...]
+    dependency_lock: Path
+    qualification: Path | None = None
+    qualification_work: Path | None = None
+    original_config: Path | None = None
+
+
 class ResolvedV2CampaignConfig(StrictModel):
+    _native_mcp_paths: ResolvedNativeMCPPaths | None = PrivateAttr(default=None)
+
+    @property
+    def native_mcp_paths(self) -> ResolvedNativeMCPPaths | None:
+        return self._native_mcp_paths
+
     _anthropic_bindings: Mapping[str, AnthropicBinding] | None = PrivateAttr(default=None)
     _anthropic_mutation_fingerprint: str | None = PrivateAttr(default=None)
     _ollama_endpoints: Mapping[str, OllamaEndpoint] | None = PrivateAttr(default=None)
@@ -254,6 +347,7 @@ class ResolvedV2CampaignConfig(StrictModel):
     config: V2CampaignConfig
     source_config_fingerprint: str
     selected_release: Path | None = None
+    canary_selection: Path | None = None
 
 
 def _resolve(base: Path, raw: str) -> Path:
@@ -263,6 +357,15 @@ def _resolve(base: Path, raw: str) -> Path:
 
 def load_v2_campaign_config(path: Path) -> ResolvedV2CampaignConfig:
     """Load a V2-only YAML file and resolve paths relative to that file."""
+    return _load_v2_config(path, native_qualification=False)
+
+
+def load_v2_native_qualification_config(path: Path) -> ResolvedV2CampaignConfig:
+    """Load qualification inputs without demanding the certification outputs."""
+    return _load_v2_config(path, native_qualification=True)
+
+
+def _load_v2_config(path: Path, *, native_qualification: bool) -> ResolvedV2CampaignConfig:
 
     from .fingerprint import canonical_sha256
 
@@ -273,6 +376,10 @@ def load_v2_campaign_config(path: Path) -> ResolvedV2CampaignConfig:
     if not isinstance(raw, dict):
         raise ValueError("v2 campaign config must be a YAML mapping")
     config = V2CampaignConfig.model_validate(raw)
+    if native_qualification and (
+        not isinstance(config.defaults.mcp, V2NativeMCPConfig) or Track.MCP not in config.tracks
+    ):
+        raise ValueError("NATIVE_QUALIFICATION_CONFIGURATION_REQUIRED")
     base = path.parent.resolve()
     resolved_tracks = {
         Track(track): ResolvedV2TrackPaths(
@@ -295,6 +402,9 @@ def load_v2_campaign_config(path: Path) -> ResolvedV2CampaignConfig:
         selected_release=_resolve(base, config.selected_release)
         if config.selected_release
         else None,
+        canary_selection=_resolve(base, config.canary_selection)
+        if config.canary_selection
+        else None,
         mcp_dir=(
             _resolve(base, config.defaults.mcp.mcp_dir) if config.defaults.mcp is not None else None
         ),
@@ -310,14 +420,15 @@ def load_v2_campaign_config(path: Path) -> ResolvedV2CampaignConfig:
             for value in (
                 paths.public,
                 paths.oracles,
-                paths.candidates,
-                paths.live_certification,
-                paths.release_metadata,
+                paths.candidates if not native_qualification else None,
+                paths.live_certification if not native_qualification else None,
+                paths.release_metadata if not native_qualification else None,
                 paths.selection,
             )
             if value is not None
         ),
         *((resolved.selected_release,) if resolved.selected_release is not None else ()),
+        *((resolved.canary_selection,) if resolved.canary_selection is not None else ()),
     )
     missing = [str(item) for item in required if not item.exists()]
     if missing:
@@ -326,4 +437,38 @@ def load_v2_campaign_config(path: Path) -> ResolvedV2CampaignConfig:
         raise ValueError("v2 campaign config paths do not exist: " + str(resolved.mcp_dir))
     if resolved.mcp_dir is not None and not resolved.mcp_dir.is_dir():
         raise ValueError("v2 MCP path is not a directory")
+    native = config.defaults.mcp
+    if isinstance(native, V2NativeMCPConfig):
+        # Preserve the venv executable's spelling: resolving its symlink here
+        # would silently choose the base interpreter instead of the venv.
+        python = Path(native.python_executable).expanduser()
+        python = python.absolute() if python.is_absolute() else (base / python).absolute()
+        paths = ResolvedNativeMCPPaths(
+            capability_profile=_resolve(base, native.capability_profile),
+            python_executable=python,
+            runtime_roots=tuple(_resolve(base, root) for root in native.runtime_roots),
+            dependency_lock=_resolve(base, native.dependency_lock),
+            qualification=_resolve(base, native.qualification) if native.qualification else None,
+            qualification_work=(
+                _resolve(base, native.qualification_work) if native.qualification_work else None
+            ),
+            original_config=_resolve(base, native.original_config)
+            if native.original_config
+            else None,
+        )
+        if any(
+            not item.is_file()
+            for item in (
+                paths.capability_profile,
+                paths.python_executable,
+                paths.dependency_lock,
+            )
+        ) or any(not root.is_dir() for root in paths.runtime_roots):
+            raise ValueError("NATIVE_CONFIGURATION_PATHS_INVALID")
+        if not native_qualification and any(
+            item is not None and not item.is_file()
+            for item in (paths.qualification, paths.qualification_work)
+        ):
+            raise ValueError("NATIVE_QUALIFICATION_PATHS_INVALID")
+        resolved._native_mcp_paths = paths
     return resolved

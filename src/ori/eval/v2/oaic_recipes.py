@@ -637,9 +637,77 @@ def _negative_draft(recipe, snapshot, paths):
     )
 
 
+def _compile_oaic_recipe(recipe, snapshot, paths, facts, *, track, native_profile=None,
+                         native_tool_loop="native-openai-compatible"):
+    if recipe not in OAIC_RECIPE_REGISTRY:
+        raise c.V2CompileError("unknown or altered OAIC recipe")
+    if track not in recipe.supported_tracks:
+        raise c.V2CompileError("unsupported OAIC recipe track")
+    draft = (
+        _selection_draft(recipe, snapshot, paths)
+        if recipe.claim_kind in {"set", "count"}
+        else c._route_draft(_legacy(recipe), snapshot, paths)
+        if recipe.claim_kind == "route"
+        else _decision_draft(recipe, snapshot, paths)
+        if recipe.claim_kind == "decision"
+        else _negative_draft(recipe, snapshot, paths)
+    )
+    cardinality = (
+        draft.expected_count
+        if draft.expected_count is not None
+        else len(draft.expected_entities) or len(draft.route_variants) or 1
+    )
+    binding = c._binding(
+        track, claim=draft.claim, expected_cardinality=cardinality,
+        native_profile=native_profile,
+        native_tool_loop=native_tool_loop,
+    )
+    # Every decision subject is a declared input, not an inferred answer.
+    # Keep this OAIC correction separate from historical product contracts.
+    inputs = (
+        draft.resolved_roles
+        if isinstance(draft.claim, DecisionClaim)
+        else c._public_input_entities(draft)
+    )
+    public = c._fingerprinted_task_bundle(
+        task_id=_task_id(recipe, track),
+        product=PRODUCT,
+        claim=draft.claim,
+        policy=draft.policy,
+        binding=binding,
+        input_entities=inputs,
+        question=c._question_with_public_inputs(draft.question_template, inputs),
+    )
+    oracle = c._fingerprinted_oracle(
+        draft=draft,
+        public=public,
+        snapshot=snapshot,
+        graph_fact_registry_fingerprint=facts.registry_fingerprint,
+    )
+    migration = c.MigrationRecord(
+        product=PRODUCT,
+        track=track,
+        legacy_task_id=recipe.recipe_id,
+        legacy_template_id=recipe.template_id,
+        legacy_grade_mode=draft.legacy.grade_mode,
+        family=recipe.family,
+        tier=recipe.tier,
+        cost_band=c._cost_band(binding),
+        path_concentration_key=recipe.concentration_key,
+        candidate_task_ids=(public.task_id,),
+        status=draft.status,
+        claim_kind=recipe.claim_kind,
+        semantics=draft.claim.semantics,
+        reference_source=draft.reference_source,
+        notes=draft.notes,
+    )
+    return c.CompiledTask(public=public, oracle=oracle, migration=migration)
+
+
 def compile_oaic_product(
     manifest: Mapping[str, Any], snapshot: GraphSnapshot, *, track: Track,
     native_profile: Any | None = None,
+    native_tool_loop: str = "native-openai-compatible",
 ) -> c.CompiledCorpus:
     if (
         manifest.get("schema_version") != "ori-generated-manifest-v2"
@@ -657,68 +725,11 @@ def compile_oaic_product(
             f"unknown={sorted(set(paths) - known)}"
         )
     facts = c.build_graph_fact_registry(snapshot)
-    compiled = []
-    for recipe in OAIC_RECIPE_REGISTRY:
-        if track not in recipe.supported_tracks:
-            raise c.V2CompileError("unsupported OAIC recipe track")
-        draft = (
-            _selection_draft(recipe, snapshot, paths)
-            if recipe.claim_kind in {"set", "count"}
-            else c._route_draft(_legacy(recipe), snapshot, paths)
-            if recipe.claim_kind == "route"
-            else _decision_draft(recipe, snapshot, paths)
-            if recipe.claim_kind == "decision"
-            else _negative_draft(recipe, snapshot, paths)
-        )
-        cardinality = (
-            draft.expected_count
-            if draft.expected_count is not None
-            else len(draft.expected_entities) or len(draft.route_variants) or 1
-        )
-        binding = c._binding(
-            track, claim=draft.claim, expected_cardinality=cardinality,
-            native_profile=native_profile,
-        )
-        # Every decision subject is a declared input, not an inferred answer.
-        # Keep this OAIC correction separate from historical product contracts.
-        inputs = (
-            draft.resolved_roles
-            if isinstance(draft.claim, DecisionClaim)
-            else c._public_input_entities(draft)
-        )
-        public = c._fingerprinted_task_bundle(
-            task_id=_task_id(recipe, track),
-            product=PRODUCT,
-            claim=draft.claim,
-            policy=draft.policy,
-            binding=binding,
-            input_entities=inputs,
-            question=c._question_with_public_inputs(draft.question_template, inputs),
-        )
-        oracle = c._fingerprinted_oracle(
-            draft=draft,
-            public=public,
-            snapshot=snapshot,
-            graph_fact_registry_fingerprint=facts.registry_fingerprint,
-        )
-        migration = c.MigrationRecord(
-            product=PRODUCT,
-            track=track,
-            legacy_task_id=recipe.recipe_id,
-            legacy_template_id=recipe.template_id,
-            legacy_grade_mode=draft.legacy.grade_mode,
-            family=recipe.family,
-            tier=recipe.tier,
-            cost_band=c._cost_band(binding),
-            path_concentration_key=recipe.concentration_key,
-            candidate_task_ids=(public.task_id,),
-            status=draft.status,
-            claim_kind=recipe.claim_kind,
-            semantics=draft.claim.semantics,
-            reference_source=draft.reference_source,
-            notes=draft.notes,
-        )
-        compiled.append(c.CompiledTask(public=public, oracle=oracle, migration=migration))
+    compiled = [
+        _compile_oaic_recipe(recipe, snapshot, paths, facts, track=track,
+                             native_profile=native_profile, native_tool_loop=native_tool_loop)
+        for recipe in OAIC_RECIPE_REGISTRY
+    ]
     if Counter(t.public.claim_kind for t in compiled) != {
         "set": 34,
         "count": 32,

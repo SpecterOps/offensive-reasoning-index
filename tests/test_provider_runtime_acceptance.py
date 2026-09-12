@@ -46,6 +46,10 @@ class _NoGraph:
     execute = staticmethod(_deny)
     wait_until_healthy = staticmethod(_deny)
 
+    def require_confirmed_native_completion(self) -> None:
+        # A local cache check is not a graph operation; this fixture has no native work.
+        return None
+
 
 def test_v1_adapter_internal_fault_retains_legacy_artifact_contract(monkeypatch):
     _isolate(monkeypatch)

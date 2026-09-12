@@ -15,6 +15,7 @@ from ori.eval.direct_query_safety import (
     normalize_query_for_fingerprint,
 )
 
+from .fingerprint import canonical_sha256
 from .mcp import EvidenceEvent, EvidenceEventKind
 from .native_capability import NativeCapabilityProfile, validate_native_capability_profile
 from .native_mcp_projection import project_native_result
@@ -28,6 +29,21 @@ class NativeSetProofState:
     binding: tuple[str, str] | None = None
     total: tuple[str, int] | None = None
     pages: dict[str, dict[int, frozenset[str]]] = field(default_factory=dict)
+    page_evidence: dict[str, dict[int, EvidenceIR]] = field(default_factory=dict)
+    completed_evidence: EvidenceIR | None = None
+
+    @staticmethod
+    def _page_facts(evidence):
+        # Native graph-map iteration order and generated observed_N roles are
+        # representation details, not changes to an ordered query population.
+        return {
+            "entities": {entity.object_id: entity.model_dump(mode="json", exclude={"role"})
+                         for entity in evidence.entities},
+            "properties": sorted(
+                (fact.model_dump(mode="json") for fact in evidence.observed_properties),
+                key=canonical_sha256,
+            ),
+        }
 
     def observe(self, profile, task, query: str, evidence: EvidenceIR) -> bool:
         from .model_runtime import (
@@ -42,6 +58,7 @@ class NativeSetProofState:
         if self.binding not in (None, binding):
             raise ValueError("native set state cannot cross task/profile bindings")
         self.binding = binding
+        self.completed_evidence = None
         bounds = task.binding.bounds
         if _is_count_query(query):
             if (not bounds.require_total_count or evidence.count is None
@@ -56,6 +73,8 @@ class NativeSetProofState:
             self.total = total
         else:
             if (evidence.count is not None or evidence.edges
+                    or re.search(r"\b(?:WITH|UNWIND|CALL|UNION)\b",
+                                 _mask_literals_and_comments(query), flags=re.IGNORECASE)
                     or not _query_matches_public_claim(task, query, is_count=False)):
                 return False
             expected = task.acceptance_spec.selection.projection_type
@@ -81,9 +100,17 @@ class NativeSetProofState:
             if window[0] in pages and pages[window[0]] != ids:
                 raise ValueError("native set page changed during proof")
             pages[window[0]] = ids
+            observed = self.page_evidence.setdefault(key, {})
+            prior = observed.get(window[0])
+            if prior is not None and self._page_facts(prior) != self._page_facts(evidence):
+                raise ValueError("native set page facts changed during proof")
+            observed[window[0]] = evidence
             if not bounds.require_total_count:
-                return (window[0] == bounds.result_offset
-                        and len(ids) <= bounds.max_result_cardinality)
+                complete = (window[0] == bounds.result_offset
+                            and len(ids) <= bounds.max_result_cardinality)
+                if complete:
+                    self.completed_evidence = evidence
+                return complete
         if self.total is None:
             return False
         count_key, total_count = self.total
@@ -100,6 +127,14 @@ class NativeSetProofState:
                 continue
             identities = set().union(*pages.values())
             if sum(map(len, pages.values())) == len(identities) == total_count:
+                observed = [self.page_evidence[key][offset] for offset in offsets]
+                self.completed_evidence = EvidenceIR(
+                    task_id=task.task_id,
+                    entities=tuple(entity for page in observed for entity in page.entities),
+                    observed_properties=tuple(fact for page in observed
+                                              for fact in page.observed_properties),
+                    raw_digest=canonical_sha256([page.raw_digest for page in observed]),
+                )
                 return True
         return False
 
@@ -240,7 +275,7 @@ qualified backend guard. A fabricated dictionary is not an execution receipt.
         return event(EvidenceEventKind.QUERY_ERROR, "native_tool_failed")
     if projection.status != "observed" or projection.evidence is None:
         return event(EvidenceEventKind.IRRELEVANT, "native_evidence_inconclusive")
-    if task.claim_kind == "set" and profile.implementation_id == "mwnickerson":
+    if task.claim_kind == "set" and profile.implementation_id in {"mwnickerson", "mordavid"}:
         query = arguments.get("query")
         if (set_state is not None and isinstance(query, str)
                 and set_state.observe(profile, task, query, projection.evidence)):

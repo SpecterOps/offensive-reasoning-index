@@ -1540,6 +1540,38 @@ def _assert_scoring_subset_report(pair, profile, scoring):
     assert tuple(row.task_id for row in subset_report.rows) == tuple(sorted(subset_ids))
 
 
+def test_native_base_provenance_keeps_schema_and_rejects_mixed_profiles(simple_compiled):
+    from ori.eval.v2.campaign import RunProvenanceV2
+    from tests.support.v2_mcp import native_profile
+
+    manifest, snapshot, direct, legacy_mcp = simple_compiled
+    profile = native_profile("mwnickerson")
+    native = compile_legacy_product(
+        manifest, snapshot, product="simple", track=Track.MCP, native_profile=profile,
+    )
+
+    def pair_for(corpus):
+        public, private = build_artifacts(corpus, identity_catalog=snapshot.entities)
+        return V2ArtifactPair(public=public, private=private)
+
+    pair = pair_for(native)
+    provenance = build_run_provenance(pair, profile)
+    assert RunProvenanceV2.model_validate_json(provenance.model_dump_json()) == provenance
+    assert provenance.capability_profile_fingerprint == profile.profile_fingerprint
+    assert provenance.public_artifact_fingerprint == pair.public.artifact_fingerprint
+    legacy = build_run_provenance(pair_for(direct), capability_profile_for_track(Track.DIRECT))
+    assert provenance.model_dump().keys() == legacy.model_dump().keys()
+    assert provenance.schema_version == legacy.schema_version == "ori-eval-run-provenance-v2"
+    with pytest.raises(ValueError, match="task/profile binding"):
+        build_run_provenance(pair, native_profile("mordavid"))
+    with pytest.raises(ValueError, match="task/profile binding"):
+        build_run_provenance(pair_for(legacy_mcp), profile)
+    with pytest.raises(CampaignArtifactError, match="requires an MCP"):
+        build_run_provenance(pair_for(direct), profile)
+    with pytest.raises(CampaignArtifactError, match="requires its native profile"):
+        build_run_provenance(pair, capability_profile_for_track(Track.MCP))
+
+
 def _assert_scoring_output_guard(pair, profile, snapshot, mcp, tmp_path):
     provenance = build_run_provenance(pair, profile)
     output_dir = tmp_path / "campaign"

@@ -100,7 +100,7 @@ For every poll:
 
 1. Run `campaign-status --json` against the exact config.
 2. If the command exits non-zero, stop and alert.
-3. Require the expected `ori-v2-campaign-status-v2` schema and source-config
+3. Require the expected `ori-v2-campaign-status-v3` schema and source-config
    fingerprint.
 4. Read only `observed_state`, `resume_allowed`, `next_action`, progress,
    per-track completion/validity, and safe outcome counts.
@@ -187,6 +187,26 @@ provider budget. For a 25-million-token operator budget, the example stops at
 24 million observed tokens and permits no restart after a budget stop. A
 supervisor may signal only the child it launched itself; an adopted lock-held
 campaign is monitor-only.
+
+### Owned-child cancellation and recovery
+
+The installed supervisor forwards SIGINT, SIGTERM, and SIGHUP to its exact
+original child and performs bounded cleanup, including escalation if that child
+does not exit. Inspection failures also trigger cleanup. Signal handling does not
+adopt a process from a recorded PID, process name, or reused process group.
+
+Before each launch, it durably writes a sibling marker named
+`<state-filename>.owned-child.private.json`. Only confirmation that the original
+captured child exited removes that launch's marker. An uncertain spawn or cleanup
+leaves the marker in place and blocks another launch, even if campaign status
+otherwise permits resume. The marker is a quarantine receipt, not authority to
+signal or adopt any process.
+
+If the marker remains, stop automated recovery and preserve it with the supervisor
+state and campaign evidence. Do not delete it, switch state paths to bypass it,
+or guess which process to kill. Escalate to the operator for an independently
+verified containment and recovery decision. Status inspection remains read-only;
+it cannot certify cleanup of an unknown child.
 
 ## Completion and archival
 

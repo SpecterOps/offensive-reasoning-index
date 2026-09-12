@@ -26,6 +26,7 @@ from .live_projection import (
     SurfaceProjection,
     project_direct_fixture,
     project_mcp_fixture,
+    project_native_fixture,
     semantic_evidence_fingerprint,
 )
 from .native_capability import NativeCapabilityProfile, validate_native_capability_profile
@@ -159,6 +160,11 @@ def build_offline_certification_catalog(
         for task in corpus.tasks
     )
     validate_fixture_coverage_artifacts(certifications)
+    return _offline_catalog_from_certifications(corpus, profile, certifications)
+
+
+def _offline_catalog_from_certifications(corpus, profile, certifications):
+    """Serialize existing validated fixture results without running them twice."""
     payload = {
         "product": corpus.product,
         "track": corpus.track,
@@ -394,6 +400,92 @@ class LiveCertificationProof(StrictModel):
         if self.proof_fingerprint != expected:
             raise ValueError("live certification proof fingerprint mismatch")
         return self
+
+
+class NativeLiveCertificationProof(LiveCertificationProof):
+    """Explicit native proof; never inferred from a historical serialized proof."""
+
+    proof_kind: Literal["native-completed-session-v1"]
+    qualification_fingerprint: str
+    qualification_work_fingerprint: str
+    interoperability_fingerprint: str
+    backend_binding_fingerprint: str
+
+    @model_validator(mode="after")
+    def native_bindings_are_present(self) -> NativeLiveCertificationProof:
+        for value in (
+            self.qualification_fingerprint, self.qualification_work_fingerprint,
+            self.interoperability_fingerprint, self.backend_binding_fingerprint,
+        ):
+            if len(value) != 64 or any(c not in "0123456789abcdef" for c in value):
+                raise ValueError("invalid native qualification fingerprint")
+        return self
+
+
+def build_native_live_certification_proof(
+    task: CompiledTask, offline: OfflineCertification, profile: NativeCapabilityProfile,
+    *, archive_snapshot: GraphSnapshot, live_snapshot_before: GraphSnapshot,
+    live_snapshot_after: GraphSnapshot, qualification: dict, work_result: dict,
+) -> NativeLiveCertificationProof:
+    """Bind replayed native work and fixture parity to a completed native session.
+
+    The caller retains the private qualification and work objects for admission
+    revalidation. This builder alone does not promote a task or admit a campaign.
+    """
+    from .live_projection import validate_native_interoperability
+    from .native_bolt_runtime import validate_completed_native_bolt_qualification
+    from .native_ce_runtime import (
+        CE_QUALIFICATION_KIND,
+        validate_completed_native_ce_qualification,
+    )
+
+    validate_native_capability_profile(profile)
+    if any(snapshot.graph_fingerprint != task.oracle.graph_fingerprint for snapshot in (
+        archive_snapshot, live_snapshot_before, live_snapshot_after,
+    )):
+        raise CertificationError("native certification graph fingerprint mismatch")
+    validator = (validate_completed_native_ce_qualification
+                 if qualification.get("qualification_kind") == CE_QUALIFICATION_KIND
+                 else validate_completed_native_bolt_qualification)
+    qualification_fingerprint = validator(
+        qualification, profile=profile, expected=archive_snapshot, work_result=work_result,
+    )
+    records = work_result.get("tasks")
+    if (not isinstance(records, list) or not records
+            or any(not isinstance(record, dict) for record in records)):
+        raise CertificationError("native qualification work inventory missing")
+    ids = [record.get("task_id") for record in records]
+    if any(not isinstance(task_id, str) for task_id in ids) or len(ids) != len(set(ids)):
+        raise CertificationError("native qualification work inventory invalid")
+    if task.public.task_id not in ids:
+        raise CertificationError("native qualification task missing")
+    record = records[ids.index(task.public.task_id)]
+    interoperability_fingerprint = validate_native_interoperability(
+        record, compiled=task, offline=offline, profile=profile, snapshot=archive_snapshot,
+    )
+    parity = build_fixture_parity_cases(task, offline, live_snapshot_before)
+    projections = build_projection_parity_cases(
+        task, offline, profile, archive_snapshot=archive_snapshot,
+        live_snapshot=live_snapshot_before,
+    )
+    payload = {
+        "proof_kind": "native-completed-session-v1",
+        "task_id": task.public.task_id, "task_fingerprint": task.public.task_fingerprint,
+        "oracle_fingerprint": task.oracle.oracle_fingerprint,
+        "fixture_fingerprint": offline.fixtures.fixture_fingerprint,
+        "certifier_fingerprint": certifier_fingerprint(),
+        "capability_profile_id": profile.profile_id,
+        "capability_profile_fingerprint": profile.profile_fingerprint,
+        "graph_fingerprint_before": live_snapshot_before.graph_fingerprint,
+        "graph_fingerprint_after": live_snapshot_after.graph_fingerprint,
+        "parity_cases": parity, "projection_cases": projections,
+        "qualification_fingerprint": qualification_fingerprint,
+        "qualification_work_fingerprint": canonical_sha256(work_result),
+        "interoperability_fingerprint": interoperability_fingerprint,
+        "backend_binding_fingerprint": profile.backend_binding_fingerprint,
+    }
+    payload["proof_fingerprint"] = canonical_sha256(payload)
+    return NativeLiveCertificationProof.model_validate(payload)
 
 
 def build_live_certification_proof(
@@ -632,13 +724,27 @@ def _projection_case(
 def build_projection_parity_cases(
     task: CompiledTask,
     offline: OfflineCertification,
-    profile: CapabilityProfile,
+    profile: CapabilityProfile | NativeCapabilityProfile,
     *,
     archive_snapshot: GraphSnapshot,
     live_snapshot: GraphSnapshot,
 ) -> tuple[ProjectionParityCase, ...]:
     """Run every fixture through the declared direct or MCP adapter."""
 
+    native = isinstance(profile, NativeCapabilityProfile)
+    if native:
+        from .native_proof import validate_native_task_binding
+
+        validate_native_task_binding(profile, task.public)
+        certification = offline.certification
+        if (
+            certification.task_fingerprint != task.public.task_fingerprint
+            or certification.oracle_fingerprint != task.oracle.oracle_fingerprint
+            or certification.capability_profile_fingerprint != profile.profile_fingerprint
+        ):
+            raise CertificationError("native fixture parity certification binding mismatch")
+    elif task.public.binding.mcp_binding_mode == "native":
+        raise CertificationError("native fixture parity requires its native capability profile")
     if (
         archive_snapshot.graph_fingerprint
         != live_snapshot.graph_fingerprint
@@ -691,7 +797,8 @@ def build_projection_parity_cases(
                 snapshot=live_snapshot,
             )
         else:
-            archive_projection = project_mcp_fixture(
+            mcp_projector = project_native_fixture if native else project_mcp_fixture
+            archive_projection = mcp_projector(
                 task=task.public,
                 oracle=task.oracle,
                 case=case,
@@ -699,7 +806,7 @@ def build_projection_parity_cases(
                 profile=profile,
                 snapshot=archive_snapshot,
             )
-            live_projection = project_mcp_fixture(
+            live_projection = mcp_projector(
                 task=task.public,
                 oracle=task.oracle,
                 case=case,
@@ -770,7 +877,7 @@ class LiveCertificationCatalog(StrictModel):
     offline_catalog_fingerprint: str
     verification_before_fingerprint: str
     verification_after_fingerprint: str
-    proofs: tuple[LiveCertificationProof, ...]
+    proofs: tuple[NativeLiveCertificationProof | LiveCertificationProof, ...]
     certifications: tuple[TaskCertification, ...]
     candidate_catalog: CatalogRelease
     artifact_fingerprint: str
@@ -903,6 +1010,60 @@ def live_certify_corpus(
     return LiveCertificationCatalog.model_validate(payload)
 
 
+def live_certify_native_corpus(
+    corpus: CompiledCorpus, offline: OfflineCertificationCatalog, profile: NativeCapabilityProfile,
+    *, archive_snapshot: GraphSnapshot, live_snapshot_before: GraphSnapshot,
+    live_snapshot_after: GraphSnapshot, qualification: dict, work_result: dict,
+) -> LiveCertificationCatalog:
+    """Certify every supplied native task against one completed acquisition.
+
+    Native verification fingerprints cover every required backend destination,
+    rather than borrowing a single CE verification receipt. Selection and current
+    campaign readiness remain independent admission requirements.
+    """
+    from .live_projection import native_corpus_qualification_inputs
+
+    tasks, certificates, _ = native_corpus_qualification_inputs(
+        corpus=corpus, offline=offline, profile=profile, snapshot=archive_snapshot,
+    )
+    records = work_result.get("tasks")
+    if (not isinstance(records, list)
+            or any(not isinstance(record, dict) for record in records)
+            or [record.get("task_id") for record in records]
+            != [task.public.task_id for task in tasks]):
+        raise CertificationError("native qualification complete roster mismatch")
+    proofs = []
+    certifications = {}
+    for task, certificate in zip(tasks, certificates, strict=True):
+        proof = build_native_live_certification_proof(
+            task, certificate, profile, archive_snapshot=archive_snapshot,
+            live_snapshot_before=live_snapshot_before, live_snapshot_after=live_snapshot_after,
+            qualification=qualification, work_result=work_result,
+        )
+        # The builder just revalidated the completed interval and actual raw
+        # evidence. Share accounting without repeating the same graph replay.
+        certification = _promote_validated_candidate(task, certificate, profile, proof)
+        proofs.append(proof)
+        certifications[task.public.task_id] = certification
+    release = _build_validated_catalog_release(corpus, certifications, profile)
+    payload = {
+        "schema_version": LIVE_CERTIFICATION_SCHEMA_VERSION,
+        "protocol_version": "ori-eval-protocol-v2",
+        "product": corpus.product, "track": corpus.track,
+        "graph_fingerprint": corpus.graph_fingerprint,
+        "capability_profile_fingerprint": profile.profile_fingerprint,
+        "certifier_fingerprint": certifier_fingerprint(),
+        "offline_catalog_fingerprint": offline.artifact_fingerprint,
+        "verification_before_fingerprint": canonical_sha256(qualification["graph_before"]),
+        "verification_after_fingerprint": canonical_sha256(qualification["graph_after"]),
+        "proofs": tuple(proofs),
+        "certifications": tuple(certifications[task.public.task_id] for task in tasks),
+        "candidate_catalog": release,
+    }
+    payload["artifact_fingerprint"] = canonical_sha256(payload)
+    return LiveCertificationCatalog.model_validate(payload)
+
+
 def promote_candidate(
     task: CompiledTask,
     offline: OfflineCertification,
@@ -911,11 +1072,39 @@ def promote_candidate(
 ) -> TaskCertification:
     """Promote one offline-certified task only after exact live parity."""
 
+    if type(proof) is not LiveCertificationProof:
+        raise CertificationError("native proof requires native qualification admission")
     validate_capability_profile(profile)
+    return _promote_validated_candidate(task, offline, profile, proof)
+
+
+def promote_native_candidate(
+    task: CompiledTask, offline: OfflineCertification, profile: NativeCapabilityProfile,
+    proof: NativeLiveCertificationProof, *, archive_snapshot: GraphSnapshot,
+    live_snapshot_before: GraphSnapshot, live_snapshot_after: GraphSnapshot,
+    qualification: dict, work_result: dict,
+) -> TaskCertification:
+    """Revalidate completed native acquisition and raw evidence before promotion."""
+    if type(proof) is not NativeLiveCertificationProof:
+        raise CertificationError("native promotion requires an explicit native proof")
+    rebuilt = build_native_live_certification_proof(
+        task, offline, profile, archive_snapshot=archive_snapshot,
+        live_snapshot_before=live_snapshot_before, live_snapshot_after=live_snapshot_after,
+        qualification=qualification, work_result=work_result,
+    )
+    if proof != rebuilt:
+        raise CertificationError("native qualification proof mismatch")
+    return _promote_validated_candidate(task, offline, profile, rebuilt)
+
+
+def _promote_validated_candidate(task, offline, profile, proof) -> TaskCertification:
+    """Shared accounting after the distinct legacy/native admission boundaries."""
     base = offline.certification
     mismatches: list[str] = []
     if base.state is not CertificationState.OFFLINE_CERTIFIED:
         mismatches.append("offline state")
+    if base.failures:
+        mismatches.append("retained offline failures")
     if task.public.task_id != base.task_id or proof.task_id != base.task_id:
         mismatches.append("task ID")
     if task.public.task_fingerprint != base.task_fingerprint:
@@ -976,6 +1165,11 @@ def build_catalog_release(
     """Publish an exact one-track candidate catalog for later selection."""
 
     validate_capability_profile(profile)
+    return _build_validated_catalog_release(corpus, certifications, profile)
+
+
+def _build_validated_catalog_release(corpus, certifications, profile) -> CatalogRelease:
+    """Shared serialization after the owning legacy or native qualification gate."""
     validate_semantic_equivalence_classes(corpus)
     task_ids = [task.public.task_id for task in corpus.tasks]
     if set(certifications) != set(task_ids):

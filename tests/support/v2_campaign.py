@@ -29,6 +29,22 @@ _E = "e" * 64
 _F = "f" * 64
 
 
+def _schedule(track: Track) -> campaign_runner.ScheduledTaskRosterV2:
+    payload = {
+        "track": track,
+        "purpose": "official",
+        "ranking_eligible": True,
+        "suite": "candidate-catalog-v1",
+        "selection_fingerprint": "5" * 64,
+        "task_ids": (f"{track.value}-task",),
+        "schedule_fingerprint": "0" * 64,
+    }
+    payload["schedule_fingerprint"] = canonical_sha256(
+        payload, exclude_fields=("schedule_fingerprint",)
+    )
+    return campaign_runner.ScheduledTaskRosterV2.model_validate(payload)
+
+
 def _config(tmp_path: Path, tracks: tuple[Track, ...] = (Track.DIRECT,)) -> Path:
     for name in ("manifest.json", "archive.zip"):
         (tmp_path / name).touch()
@@ -121,6 +137,7 @@ def _provenance(track: Track, run_index: int = 1) -> campaign_runner.ModelRunPro
         "archive_sha256": "4" * 64,
         "candidate_release_fingerprint": "5" * 64,
         "live_certification_fingerprint": "6" * 64,
+        "schedule": _schedule(track),
         "containment_config_fingerprint": "7" * 64,
         "runtime_implementation_fingerprint": "8" * 64,
         "runtime_config_fingerprint": "9" * 64,
@@ -319,6 +336,7 @@ def _report(
         "run_identity": provenance.run_identity,
         "candidate_release_fingerprint": provenance.candidate_release_fingerprint,
         "live_certification_fingerprint": provenance.live_certification_fingerprint,
+        "schedule_fingerprint": provenance.schedule.schedule_fingerprint,
         "graph_verification_before_fingerprint": "c" * 64,
         "graph_verification_after_fingerprint": "d" * 64,
         "operational_metrics": campaign_runner._run_operational_metrics(state),
@@ -335,6 +353,7 @@ def _readiness(config_fingerprint: str, tracks: tuple[Track, ...]):
     track_receipts = tuple(
         campaign_runner.ReadinessTrackV2(
             track=track,
+            target_fingerprint="2" * 64,
             public_artifact_fingerprint=_A,
             oracle_artifact_fingerprint=_B,
             candidate_release_fingerprint="5" * 64,
@@ -342,6 +361,7 @@ def _readiness(config_fingerprint: str, tracks: tuple[Track, ...]):
             capability_profile_fingerprint="1" * 64,
             graph_verification_fingerprint="c" * 64,
             task_count=1,
+            schedule=_schedule(track),
         )
         for track in tracks
     )
@@ -362,11 +382,13 @@ def _readiness(config_fingerprint: str, tracks: tuple[Track, ...]):
         "schema_version": campaign_runner.READINESS_SCHEMA_VERSION,
         "protocol_version": "ori-eval-protocol-v2",
         "runner_version": campaign_runner.RUNNER_VERSION,
+        "purpose": "official",
+        "ranking_eligible": True,
         "source_config_fingerprint": config_fingerprint,
         "source_manifest_sha256": "3" * 64,
         "archive_sha256": "4" * 64,
         "graph_fingerprint": _D,
-        "target_fingerprint": "2" * 64,
+        "target_fingerprint": canonical_sha256({track.value: "2" * 64 for track in tracks}),
         "mcp_server_revision": "revision",
         "mcp_launcher_provenance": None,
         "tracks": track_receipts,
@@ -405,6 +427,7 @@ def _track_receipt(
         "graph_verification_before_fingerprint": "c" * 64,
         "graph_verification_after_fingerprint": "d" * 64,
         "expected_task_count_per_run": 1,
+        "schedule": _schedule(track),
         "run_count": 1,
         "result_count": 1,
         "campaign_valid": report.report.summary.campaign_valid,
@@ -426,10 +449,19 @@ def _lifecycle(
     checkpointed_results: int = 0,
     completed: tuple[campaign_runner.TrackCompletionV2, ...] = (),
     active: tuple[Track, str, int] | None = None,
+    tracks: tuple[Track, ...] | None = None,
 ):
+    scheduled_tracks = (
+        tracks
+        or tuple(item.track for item in completed)
+        or ((active[0],) if active is not None else (Track.DIRECT,))
+    )
     return campaign_runner._campaign_lifecycle(
         {
             "source_config_fingerprint": config_fingerprint,
+            "purpose": "official",
+            "ranking_eligible": True,
+            "schedules": tuple(_schedule(track) for track in scheduled_tracks),
             "mode": mode,
             "status": status,
             "started_at_utc": "2026-08-30T12:00:00+00:00",
@@ -486,6 +518,7 @@ def _completed_campaign(
             status="completed",
             checkpointed_results=len(tracks),
             completed=tuple(receipts),
+            tracks=tracks,
         ),
     )
     return config, resolved

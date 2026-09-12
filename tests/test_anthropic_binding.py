@@ -188,6 +188,7 @@ def _provenance_fixture(state, resolved):
         track=Track.DIRECT,
         pair=object(),
         profile=object(),
+        task_ids=("synthetic-provenance-task",),
         release=SimpleNamespace(release_fingerprint="b" * 64),
         live=SimpleNamespace(artifact_fingerprint="c" * 64),
     )
@@ -992,8 +993,16 @@ def test_anthropic_private_header_resume_guard(monkeypatch, tmp_path, subtests):
                 continue
             if case == "G22":
                 order = []
+                scheduled = SimpleNamespace(
+                    track=Track.DIRECT,
+                    task_ids=("synthetic-provenance-task",),
+                    selection_fingerprint=None,
+                    release=SimpleNamespace(release_fingerprint="b" * 64),
+                )
                 s.patch.setattr(
-                    runner, "prepare_v2_campaign", lambda path: (resolved, None, {}, "", ())
+                    runner,
+                    "prepare_v2_campaign",
+                    lambda path: (resolved, None, {Track.DIRECT: scheduled}, "", ()),
                 )
                 actual_guard = runner._guard_anthropic_headers
 
@@ -1302,6 +1311,19 @@ def test_anthropic_credential_route_admission(monkeypatch, tmp_path, subtests):
 
 
 def test_anthropic_readiness_binding_schema(monkeypatch, tmp_path, subtests):
+    track = SimpleNamespace(
+        track=Track.DIRECT,
+        task_ids=("synthetic-readiness-task",),
+        pair=SimpleNamespace(
+            public=SimpleNamespace(artifact_fingerprint="1" * 64),
+            private=SimpleNamespace(artifact_fingerprint="2" * 64),
+        ),
+        release=SimpleNamespace(release_fingerprint="3" * 64),
+        live=SimpleNamespace(artifact_fingerprint="4" * 64),
+        profile=SimpleNamespace(profile_fingerprint="5" * 64),
+    )
+    tracks = {Track.DIRECT: track}
+    receipts = {Track.DIRECT: SimpleNamespace(verification_fingerprint="6" * 64)}
     ids = ("J0", "J1", "J2", "J3", "J4", "J5", "J6")
     visited = []
     for case in ids:
@@ -1337,13 +1359,13 @@ def test_anthropic_readiness_binding_schema(monkeypatch, tmp_path, subtests):
                 first = runner._readiness(
                     resolved=resolved,
                     snapshot=SimpleNamespace(graph_fingerprint="b" * 64),
-                    prepared={},
-                    receipts={},
+                    prepared=tracks,
+                    receipts=receipts,
                     mcp_revision="",
                     mcp_launcher_provenance=None,
                     model_readiness=(valid,),
                 )
-                assert first.schema_version == "ori-v2-run-readiness-v12"
+                assert first.schema_version == "ori-v2-run-readiness-v13"
                 if case == "J0":
                     changed = runner.ModelReadinessV2.model_validate_json(
                         json.dumps({**payload, "anthropic_binding_fingerprint": "c" * 64})
@@ -1351,8 +1373,8 @@ def test_anthropic_readiness_binding_schema(monkeypatch, tmp_path, subtests):
                     second = runner._readiness(
                         resolved=resolved,
                         snapshot=SimpleNamespace(graph_fingerprint="b" * 64),
-                        prepared={},
-                        receipts={},
+                        prepared=tracks,
+                        receipts=receipts,
                         mcp_revision="",
                         mcp_launcher_provenance=None,
                         model_readiness=(changed,),

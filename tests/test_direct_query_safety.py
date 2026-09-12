@@ -21,6 +21,30 @@ def _policy() -> DirectQueryPolicy:
     return DirectQueryPolicy(DirectQuerySafetyConfig())
 
 
+def test_native_inflight_survives_restart_and_failed_completion_write(tmp_path, monkeypatch):
+    config = DirectQuerySafetyConfig()
+    path = tmp_path / "deny.json"
+    cache = QueryDenyCache(path, manifest_fingerprint="fixture",
+                          policy_version=config.policy_version)
+    cache.record("unrelated", rule="server_query_timeout", detail="fixture")
+    cache.record("native", rule="native_inflight", detail="fixture")
+    loaded = QueryDenyCache(path, manifest_fingerprint="fixture",
+                           policy_version=config.policy_version)
+    assert loaded.native_recovery_required
+    with monkeypatch.context() as context:
+        def fail_write():
+            raise OSError("write failed")
+        context.setattr(loaded, "_persist", fail_write)
+        with pytest.raises(OSError):
+            loaded.complete_native("native")
+        assert loaded.native_recovery_required
+    loaded.complete_native("native")
+    assert not loaded.native_recovery_required
+    assert loaded.reason_for("unrelated") == "server_query_timeout"
+    assert not QueryDenyCache(path, manifest_fingerprint="fixture",
+                             policy_version=config.policy_version).native_recovery_required
+
+
 def test_phase0_greedy_query_is_rejected_without_bloodhound() -> None:
     query = (
         "MATCH p=(a {name:'TTHOMAS@GRANITEMANUFACTURING.LOCAL'})-[*1..]->"
@@ -412,6 +436,155 @@ def test_policy_rejection_never_calls_bloodhound(tmp_path) -> None:
     assert result.query_executed is False
     assert result.execution_attempts == 0
     assert bhce.queries == []
+
+
+def test_callback_transport_shares_rejection_cache_and_health(tmp_path, subtests) -> None:
+    query = "MATCH (u:User {name: 'A@TEST.LOCAL'}) RETURN u"
+    bhce = FakeBHCE([])
+    coordinator = _coordinator(tmp_path, bhce)
+    calls = []
+
+    async def callback():
+        calls.append(True)
+        return CypherResult(success=False, failure_type="query_timeout", error="timeout")
+
+    rejected = asyncio.run(coordinator.execute_with(
+        "MATCH p=(a)-[*1..]->(b) RETURN p", execute_query=callback,
+    ))
+    assert rejected.failure_type == "policy_rejected" and not calls
+    result = asyncio.run(coordinator.execute_with(query, execute_query=callback))
+    assert result.failure_type == "query_timeout" and result.bhce_health_after == "healthy"
+    assert bhce.health_calls == 1 and calls == [True] and not bhce.queries
+    cached = asyncio.run(coordinator.execute_with(query, execute_query=callback))
+    assert cached.failure_subtype == "known_expensive_query" and calls == [True]
+    legacy_cached = asyncio.run(coordinator.execute(query))
+    assert legacy_cached.failure_subtype == "known_expensive_query" and not bhce.queries
+
+    other_query = "MATCH (u:User {name: 'B@TEST.LOCAL'}) RETURN u"
+    for failure, healthy, expected_health, opens in (
+        ("transport_error", False, "unhealthy", True),
+        ("transport_error", True, "healthy", False),
+        ("native_tool_error", True, "healthy", False),
+        ("native_tool_error", False, "unhealthy", True),
+        ("auth_error", True, "not_checked", True),
+    ):
+        with subtests.test(failure=failure, healthy=healthy):
+            coordinator.close_circuit()
+            bhce.health_ok = healthy
+
+            async def failed():
+                calls.append(True)
+                return CypherResult(success=False, failure_type=failure, error="fixture")
+
+            result = asyncio.run(coordinator.execute_with(other_query, execute_query=failed))
+            assert result.failure_type == failure and result.bhce_health_after == expected_health
+            assert coordinator.circuit_open is opens
+            if opens:
+                prior_calls = len(calls)
+                skipped = asyncio.run(coordinator.execute_with(other_query, execute_query=failed))
+                assert skipped.failure_type == "circuit_open" and not skipped.query_executed
+                assert len(calls) == prior_calls
+            assert coordinator.deny_cache.reason_for(coordinator.policy.evaluate(
+                other_query,
+            ).fingerprint) is None
+
+
+@pytest.mark.parametrize("native_operation", [False, True])
+def test_callback_and_legacy_execution_share_one_lock(tmp_path, native_operation) -> None:
+    query = "MATCH (u:User {name: 'A@TEST.LOCAL'}) RETURN u"
+
+    async def scenario():
+        entered, release = asyncio.Event(), asyncio.Event()
+        bhce = FakeBHCE([CypherResult(success=True)])
+        coordinator = _coordinator(tmp_path, bhce)
+
+        async def callback():
+            entered.set()
+            await release.wait()
+            return CypherResult(success=True)
+
+        native = asyncio.create_task(
+            coordinator.execute_native_with(query_fingerprint(query), execute_query=callback)
+            if native_operation else coordinator.execute_with(query, execute_query=callback)
+        )
+        await entered.wait()
+        direct = asyncio.create_task(coordinator.execute(query, include_properties=False))
+        await asyncio.sleep(0)
+        assert not bhce.queries and not direct.done()
+        release.set()
+        first, second = await asyncio.gather(native, direct)
+        assert first.success and second.success
+        assert first.query_fingerprint == second.query_fingerprint
+        assert first.safety_rule == (
+            "native_read_only_operation" if native_operation else "allowed"
+        )
+        assert bhce.queries == [(query, 10.0, 15.0)]
+        assert bhce.include_properties == [False]
+
+    asyncio.run(scenario())
+
+
+def test_callback_contract_and_exceptions_do_not_poison_coordinator(tmp_path, subtests) -> None:
+    query = "MATCH (u:User {name: 'A@TEST.LOCAL'}) RETURN u"
+    bhce = FakeBHCE([CypherResult(success=True)])
+    coordinator = _coordinator(tmp_path, bhce)
+    with pytest.raises(TypeError, match="callable"):
+        asyncio.run(coordinator.execute_with(query, execute_query=None))
+    for value in (None, RuntimeError("fixture"), asyncio.CancelledError()):
+        with subtests.test(value=type(value).__name__):
+            async def callback():
+                if isinstance(value, BaseException):
+                    raise value
+                return value
+
+            expected = type(value) if isinstance(value, BaseException) else TypeError
+            with pytest.raises(expected):
+                asyncio.run(coordinator.execute_with(query, execute_query=callback))
+            assert not coordinator.circuit_open
+            assert not coordinator._lock.locked()
+            assert bhce.health_calls == 0 and not bhce.queries
+    assert asyncio.run(coordinator.execute(query)).success
+
+
+def test_queued_duplicate_observes_new_timeout_quarantine(tmp_path) -> None:
+    query = "MATCH (u:User {name: 'A@TEST.LOCAL'}) RETURN u"
+
+    async def scenario():
+        entered, release, queued = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        bhce = FakeBHCE([])
+        coordinator = _coordinator(tmp_path, bhce)
+        calls = []
+
+        async def first_callback():
+            calls.append("first")
+            entered.set()
+            await release.wait()
+            return CypherResult(success=False, failure_type="query_timeout", error="timeout")
+
+        async def duplicate_callback():
+            calls.append("duplicate")
+            return CypherResult(success=True)
+
+        async def duplicate():
+            queued.set()
+            return await coordinator.execute_with(query, execute_query=duplicate_callback)
+
+        first = asyncio.create_task(coordinator.execute_with(query, execute_query=first_callback))
+        await entered.wait()
+        second = asyncio.create_task(duplicate())
+        await queued.wait()
+        assert not second.done() and calls == ["first"]
+        release.set()
+        timed_out, skipped = await asyncio.gather(first, second)
+        assert timed_out.failure_type == "query_timeout"
+        assert timed_out.bhce_health_after == "healthy" and not coordinator.circuit_open
+        assert skipped.failure_type == "policy_rejected"
+        assert skipped.failure_subtype == "known_expensive_query"
+        assert not skipped.query_executed and skipped.execution_attempts == 0
+        assert skipped.query_fingerprint == timed_out.query_fingerprint
+        assert calls == ["first"] and bhce.health_calls == 1 and not bhce.queries
+
+    asyncio.run(scenario())
 
 
 def test_admitted_query_executes_once_with_bloodhound_timeout(tmp_path) -> None:

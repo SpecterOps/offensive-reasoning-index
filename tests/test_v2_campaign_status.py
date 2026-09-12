@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -434,6 +435,72 @@ def test_completed_campaign_validates_full_accounting(tmp_path: Path) -> None:
     assert status.graph_fingerprint == _D
 
 
+def test_completed_campaign_rejects_public_rows_outside_durable_schedule(
+    tmp_path: Path,
+) -> None:
+    """A coherent count cannot substitute for the fingerprinted task roster."""
+
+    config, resolved = _completed_campaign(tmp_path)
+    run_dir = resolved.output_dir / "direct" / "gpt-test" / "run-001"
+    report_path = run_dir / "public-report-v2.json"
+    report = json.loads(report_path.read_text())
+    report["report"]["rows"][0]["task_id"] = "different-but-counted-task"
+    report["report"]["report_fingerprint"] = canonical_sha256(
+        report["report"], exclude_fields=("report_fingerprint",)
+    )
+    report["artifact_fingerprint"] = canonical_sha256(
+        report, exclude_fields=("artifact_fingerprint",)
+    )
+    report_path.write_text(json.dumps(report) + "\n")
+
+    receipt_path = resolved.output_dir / "direct" / "track-completion-v2.private.json"
+    receipt = json.loads(receipt_path.read_text())
+    receipt["runs"][0]["public_report_fingerprint"] = report["artifact_fingerprint"]
+    receipt["receipt_fingerprint"] = canonical_sha256(
+        receipt, exclude_fields=("receipt_fingerprint",)
+    )
+    receipt_path.write_text(json.dumps(receipt) + "\n")
+
+    lifecycle_path = resolved.output_dir / "campaign-lifecycle-v2.private.json"
+    lifecycle = json.loads(lifecycle_path.read_text())
+    lifecycle["completed_tracks"][0]["receipt_fingerprint"] = receipt["receipt_fingerprint"]
+    lifecycle["lifecycle_fingerprint"] = canonical_sha256(
+        lifecycle, exclude_fields=("lifecycle_fingerprint",)
+    )
+    lifecycle_path.write_text(json.dumps(lifecycle) + "\n")
+
+    with pytest.raises(CampaignStatusError, match="task IDs do not exactly match schedule"):
+        inspect_v2_campaign_status(config)
+
+
+def test_public_export_redacts_provider_and_model_identifiers(tmp_path: Path) -> None:
+    from ori.eval.v2.campaign_export import export_v2_campaign_public
+
+    config, _resolved = _completed_campaign(tmp_path)
+    destination = export_v2_campaign_public(
+        config_path=config,
+        output_dir=tmp_path / "public-export",
+    )
+
+    serialized = destination.read_text()
+    payload = json.loads(serialized)
+    assert payload["schema_version"] == "ori-v2-campaign-public-export-v2"
+    assert '"model_label": "model-001"' in serialized
+    assert "gpt-test" not in serialized
+    assert "codex" not in serialized
+    assert payload["schedules"] == [
+        {
+            "candidate_release_fingerprint": "5" * 64,
+            "live_certification_fingerprint": "6" * 64,
+            "schedule_fingerprint": _provenance(Track.DIRECT).schedule.schedule_fingerprint,
+            "selection_fingerprint": "5" * 64,
+            "suite": "candidate-catalog-v1",
+            "task_count": 1,
+            "track": "direct",
+        }
+    ]
+
+
 def test_status_usage_counts_every_durable_provider_attempt(tmp_path: Path) -> None:
     config, resolved = _completed_campaign(tmp_path)
     provenance = _provenance(Track.DIRECT)
@@ -565,7 +632,7 @@ def test_campaign_status_cli_supports_human_and_json_output(tmp_path: Path) -> N
     assert "Next action: run readiness" in human.output
     assert "Usage: 0 total tokens (0 input + 0 output) across 0 provider attempts" in human.output
     assert machine.exit_code == 0
-    assert '"schema_version": "ori-v2-campaign-status-v2"' in machine.output
+    assert '"schema_version": "ori-v2-campaign-status-v3"' in machine.output
 
 
 @pytest.mark.parametrize("failure", ("corrupt", "incompatible"))
@@ -590,5 +657,12 @@ def test_campaign_status_cli_exits_nonzero_on_untrusted_evidence(
     )
 
     assert result.exit_code != 0
-    assert "Error:" in result.output
-    assert "ori-v2-campaign-status-v2" not in result.output
+    assert json.loads(result.output) == {
+        "error": {
+            "code": "V2_CAMPAIGN_STATUS_FAILED",
+            "message": "v2 campaign command failed; inspect local operator logs",
+        },
+        "exit_code": 1,
+        "outcome": "error",
+        "schema_version": "ori-v2-campaign-status-result-v1",
+    }

@@ -23,13 +23,14 @@ from .campaign_runner import (
     ModelPublicReportV2,
     ModelRunProvenanceV2,
     PrivateRunStateV2,
+    ScheduledTaskRosterV2,
     TrackCompletionV2,
     _attempt_consumes_retry_budget,
     _attempt_is_retry_eligible,
 )
 from .schema import PROTOCOL_VERSION, StrictModel, Track
 
-CAMPAIGN_STATUS_SCHEMA_VERSION = "ori-v2-campaign-status-v2"
+CAMPAIGN_STATUS_SCHEMA_VERSION = "ori-v2-campaign-status-v3"
 _LIFECYCLE_NAME = "campaign-lifecycle-v2.private.json"
 _READINESS_NAME = "v2-run-readiness.private.json"
 _LOCK_NAME = ".ori-v2-campaign.lock"
@@ -94,6 +95,9 @@ class CampaignTrackStatusV1(StrictModel):
     live_certification_fingerprint: str | None = None
     graph_verification_before_fingerprint: str | None = None
     graph_verification_after_fingerprint: str | None = None
+    schedule_fingerprint: str | None = None
+    selection_fingerprint: str | None = None
+    suite: str | None = None
 
 
 class CampaignProgressV1(StrictModel):
@@ -112,9 +116,11 @@ class CampaignProgressV1(StrictModel):
 
 
 class CampaignStatusV1(StrictModel):
-    schema_version: Literal["ori-v2-campaign-status-v2"] = CAMPAIGN_STATUS_SCHEMA_VERSION
+    schema_version: Literal["ori-v2-campaign-status-v3"] = CAMPAIGN_STATUS_SCHEMA_VERSION
     protocol_version: Literal["ori-eval-protocol-v2"] = PROTOCOL_VERSION
     source_config_fingerprint: str
+    purpose: Literal["official", "diagnostic_canary"]
+    ranking_eligible: bool
     lifecycle_state: Literal[
         "not_started",
         "running",
@@ -237,11 +243,12 @@ def _read_run(
     provider: str,
     provider_model: str,
     run_index: int,
-    expected_tasks: int | None,
+    expected_schedule: ScheduledTaskRosterV2 | None,
     max_infra_retries: int,
     track_receipt: TrackCompletionV2 | None,
     allow_uncommitted_report: bool,
 ) -> tuple[CampaignRunStatusV1, ModelRunProvenanceV2 | None]:
+    expected_tasks = len(expected_schedule.task_ids) if expected_schedule is not None else None
     provenance_path = run_dir / _PROVENANCE_NAME
     state_path = run_dir / _STATE_NAME
     report_path = run_dir / _REPORT_NAME
@@ -275,6 +282,8 @@ def _read_run(
         raise CampaignStatusError(
             f"{track.value}/{model_name}/run-{run_index:03d} provenance does not match config"
         )
+    if expected_schedule is not None and provenance.schedule != expected_schedule:
+        raise CampaignStatusError("model-run provenance schedule does not match campaign roster")
 
     state: PrivateRunStateV2 | None = None
     if state_path.exists():
@@ -302,8 +311,16 @@ def _read_run(
         # only a semantic-unique subset of those bindings (for example V29's
         # 42/55 release from the larger 46/70 certification inventory).  Compare
         # readiness with durable scheduled results, not the full binding inventory.
-        if expected_tasks is not None and len(state.checkpoint.results) > expected_tasks:
-            raise CampaignStatusError("private run state result count exceeds readiness schedule")
+        if expected_schedule is not None:
+            expected_ids = set(expected_schedule.task_ids)
+            checkpoint_ids = {item.task_id for item in state.checkpoint.results}
+            attempt_ids = {item.task_id for item in state.attempts}
+            if not checkpoint_ids.issubset(expected_ids) or not attempt_ids.issubset(expected_ids):
+                raise CampaignStatusError("private run state contains off-schedule tasks")
+            if len(state.checkpoint.results) > expected_tasks:
+                raise CampaignStatusError(
+                    "private run state result count exceeds readiness schedule"
+                )
 
     report: ModelPublicReportV2 | None = None
     if report_path.exists():
@@ -325,6 +342,21 @@ def _read_run(
             != provenance.base.capability_profile_fingerprint
         ):
             raise CampaignStatusError("model public report disagrees with run provenance")
+        if expected_schedule is not None:
+            expected_ids = set(expected_schedule.task_ids)
+            report_ids = {item.task_id for item in report.report.rows}
+            if report.schedule_fingerprint != expected_schedule.schedule_fingerprint:
+                raise CampaignStatusError(
+                    "model public report schedule does not match campaign roster"
+                )
+            if report_ids != expected_ids or len(report.report.rows) != expected_tasks:
+                raise CampaignStatusError(
+                    "model public report task IDs do not exactly match schedule"
+                )
+            if report.report.summary.scheduled != expected_tasks:
+                raise CampaignStatusError(
+                    "model public report scheduled count does not match roster"
+                )
         if state is None:
             raise CampaignStatusError("completed model public report has no private run state")
         if len(state.checkpoint.results) != len(report.report.rows):
@@ -355,6 +387,15 @@ def _read_run(
             or receipt_run.invalid_reasons != report.report.summary.invalid_reasons
         ):
             raise CampaignStatusError("track completion run does not match its artifacts")
+        if expected_schedule is not None:
+            checkpoint_ids = {item.task_id for item in state.checkpoint.results}
+            if (
+                checkpoint_ids != set(expected_schedule.task_ids)
+                or len(state.checkpoint.results) != expected_tasks
+            ):
+                raise CampaignStatusError("completed run does not exactly match schedule")
+            if receipt_run.result_count != expected_tasks:
+                raise CampaignStatusError("track completion run count does not match schedule")
         if (
             report.graph_verification_before_fingerprint
             != track_receipt.graph_verification_before_fingerprint
@@ -475,6 +516,8 @@ def inspect_v2_campaign_status(config_path: Path) -> CampaignStatusV1:
         )
         return CampaignStatusV1(
             source_config_fingerprint=resolved.source_config_fingerprint,
+            purpose=resolved.config.purpose,
+            ranking_eligible=resolved.config.purpose == "official",
             lifecycle_state="not_started",
             observed_state="not_started",
             progress=CampaignProgressV1(
@@ -494,6 +537,15 @@ def inspect_v2_campaign_status(config_path: Path) -> CampaignStatusV1:
     assert isinstance(lifecycle, CampaignLifecycleV2)
     if lifecycle.source_config_fingerprint != resolved.source_config_fingerprint:
         raise CampaignStatusError("campaign lifecycle belongs to a different source config")
+    if lifecycle.purpose != resolved.config.purpose or lifecycle.ranking_eligible != (
+        resolved.config.purpose == "official"
+    ):
+        raise CampaignStatusError("campaign lifecycle purpose does not match config")
+    lifecycle_schedules = {item.track: item for item in lifecycle.schedules}
+    if len(lifecycle_schedules) != len(lifecycle.schedules) or set(lifecycle_schedules) != set(
+        resolved.config.track_modes
+    ):
+        raise CampaignStatusError("campaign lifecycle schedules do not match config tracks")
 
     lock_contended = _lock_is_contended(output_dir)
     if lifecycle.status == "running":
@@ -512,6 +564,10 @@ def inspect_v2_campaign_status(config_path: Path) -> CampaignStatusV1:
         readiness = loaded
         if readiness.source_config_fingerprint != resolved.source_config_fingerprint:
             raise CampaignStatusError("campaign readiness belongs to a different source config")
+        if readiness.purpose != resolved.config.purpose or readiness.ranking_eligible != (
+            resolved.config.purpose == "official"
+        ):
+            raise CampaignStatusError("campaign readiness purpose does not match config")
         if len(readiness.tracks) != len(resolved.config.track_modes) or {
             item.track for item in readiness.tracks
         } != set(resolved.config.track_modes):
@@ -524,6 +580,8 @@ def inspect_v2_campaign_status(config_path: Path) -> CampaignStatusV1:
             readiness_models != configured_models
         ):
             raise CampaignStatusError("campaign readiness models do not match config")
+        if {item.track: item.schedule for item in readiness.tracks} != lifecycle_schedules:
+            raise CampaignStatusError("campaign readiness schedules disagree with lifecycle")
     else:
         execution_evidence = lifecycle.checkpointed_results > 0 or bool(lifecycle.completed_tracks)
         if not execution_evidence:
@@ -560,10 +618,14 @@ def inspect_v2_campaign_status(config_path: Path) -> CampaignStatusV1:
         if receipt.run_count != expected_track_runs:
             raise CampaignStatusError("track completion run count disagrees with config")
         ready = readiness_by_track.get(track)
+        schedule = ready.schedule if ready is not None else lifecycle_schedules[track]
+        if receipt.schedule != schedule:
+            raise CampaignStatusError("track completion schedule disagrees with lifecycle")
         if ready is not None and (
             receipt.expected_task_count_per_run != ready.task_count
             or receipt.candidate_release_fingerprint != ready.candidate_release_fingerprint
             or receipt.live_certification_fingerprint != ready.live_certification_fingerprint
+            or receipt.schedule != ready.schedule
         ):
             raise CampaignStatusError("track completion disagrees with readiness")
         track_receipts[track] = receipt
@@ -594,7 +656,7 @@ def inspect_v2_campaign_status(config_path: Path) -> CampaignStatusV1:
             provider=provider,
             provider_model=provider_model,
             run_index=run_index,
-            expected_tasks=(ready.task_count if ready is not None else None),
+            expected_schedule=(ready.schedule if ready is not None else lifecycle_schedules[track]),
             max_infra_retries=resolved.config.defaults.max_infra_retries,
             track_receipt=track_receipts.get(track),
             allow_uncommitted_report=lifecycle.status in {"running", "interrupted"},
@@ -616,12 +678,14 @@ def inspect_v2_campaign_status(config_path: Path) -> CampaignStatusV1:
                 != ready.capability_profile_fingerprint
                 or provenance.source_manifest_sha256 != readiness.source_manifest_sha256
                 or provenance.archive_sha256 != readiness.archive_sha256
+                or provenance.schedule != ready.schedule
             ):
                 raise CampaignStatusError("run provenance disagrees with readiness")
             if receipt is not None and (
                 provenance.candidate_release_fingerprint != receipt.candidate_release_fingerprint
                 or provenance.live_certification_fingerprint
                 != receipt.live_certification_fingerprint
+                or provenance.schedule != receipt.schedule
             ):
                 raise CampaignStatusError("run provenance disagrees with track completion")
 
@@ -637,6 +701,7 @@ def inspect_v2_campaign_status(config_path: Path) -> CampaignStatusV1:
         track_runs = [item for item in run_statuses if item.track is track]
         receipt = track_receipts.get(track)
         ready = readiness_by_track.get(track)
+        schedule = ready.schedule if ready is not None else lifecycle_schedules[track]
         track_statuses.append(
             CampaignTrackStatusV1(
                 track=track,
@@ -678,6 +743,9 @@ def inspect_v2_campaign_status(config_path: Path) -> CampaignStatusV1:
                 graph_verification_after_fingerprint=(
                     receipt.graph_verification_after_fingerprint if receipt is not None else None
                 ),
+                schedule_fingerprint=schedule.schedule_fingerprint,
+                selection_fingerprint=schedule.selection_fingerprint,
+                suite=schedule.suite,
             )
         )
 
@@ -742,6 +810,8 @@ def inspect_v2_campaign_status(config_path: Path) -> CampaignStatusV1:
 
     return CampaignStatusV1(
         source_config_fingerprint=resolved.source_config_fingerprint,
+        purpose=resolved.config.purpose,
+        ranking_eligible=resolved.config.purpose == "official",
         lifecycle_state=lifecycle.status,
         observed_state=observed_state,
         mode=lifecycle.mode,

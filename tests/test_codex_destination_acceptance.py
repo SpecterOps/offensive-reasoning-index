@@ -109,18 +109,25 @@ def _sdk(mp):
 
         async def stream():
             yield SimpleNamespace(
-                type="response.output_text.delta", delta="answer",
-                item_id="message-1", output_index=0, content_index=0,
+                type="response.output_text.delta",
+                delta="answer",
+                item_id="message-1",
+                output_index=0,
+                content_index=0,
             )
             yield SimpleNamespace(
                 type="response.completed",
                 response=SimpleNamespace(
                     id="synthetic-response",
                     status="completed",
-                    output=[SimpleNamespace(
-                        type="message", id="message-1", status="completed",
-                        content=[SimpleNamespace(type="output_text", text="answer")],
-                    )],
+                    output=[
+                        SimpleNamespace(
+                            type="message",
+                            id="message-1",
+                            status="completed",
+                            content=[SimpleNamespace(type="output_text", text="answer")],
+                        )
+                    ],
                     usage=SimpleNamespace(input_tokens=3, output_tokens=2, total_tokens=5),
                 ),
             )
@@ -467,6 +474,7 @@ def test_codex_provenance_is_secret_free_and_endpoint_bound(
         release=SimpleNamespace(release_fingerprint="a" * 64),
         live=SimpleNamespace(artifact_fingerprint="b" * 64),
         certifications={},
+        selected_task_ids=tuple(task.task_id for task in public.tasks),
     )
     visited = []
     for index in range(2):

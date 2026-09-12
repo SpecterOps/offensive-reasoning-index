@@ -198,17 +198,17 @@ def test_codex_readiness_requires_and_records_requested_effort(
         campaign_runner._model_readiness(resolved)
 
 
-def test_v12_campaign_schemas_cannot_accept_prior_run_state() -> None:
+def test_v13_campaign_schemas_cannot_accept_prior_run_state() -> None:
     provenance_schema = campaign_runner.ModelRunProvenanceV2.model_json_schema()
     state_schema = campaign_runner.PrivateRunStateV2.model_json_schema()
     readiness_schema = campaign_runner.CampaignReadinessV2.model_json_schema()
     runner_source = inspect.getsource(campaign_runner._run_model)
 
     assert provenance_schema["properties"]["schema_version"]["const"] == (
-        "ori-v2-model-campaign-v15"
+        "ori-v2-model-campaign-v16"
     )
     assert state_schema["properties"]["schema_version"]["const"] == ("ori-v2-private-run-state-v7")
-    assert readiness_schema["properties"]["schema_version"]["const"] == ("ori-v2-run-readiness-v12")
+    assert readiness_schema["properties"]["schema_version"]["const"] == ("ori-v2-run-readiness-v13")
     assert campaign_runner.RUN_STATE_NAME == "run-state-v7.private.json"
     assert "RUN_STATE_NAME" in runner_source
     assert "run-state-v4.private.json" not in runner_source

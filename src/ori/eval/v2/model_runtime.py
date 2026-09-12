@@ -17,7 +17,9 @@ from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError, ValidationError
 from pydantic import Field, model_validator
 
-from ori.eval.adapter import ModelResponse, call_provider_text
+from ori.eval.adapter import ModelResponse, _provider_exception_metrics, call_provider_text
+from ori.eval.anthropic_binding import AnthropicBinding, prepare_anthropic_binding
+from ori.eval.anthropic_mcp import run_anthropic_mcp_loop
 from ori.eval.direct_query_safety import normalize_query_for_fingerprint
 from ori.eval.mcp_runtime import (
     DEFAULT_MCP_OLLAMA_READ_TIMEOUT_SECONDS,
@@ -54,6 +56,7 @@ from .mcp import (
     SCHEMA_ONLY_RETRY_INSTRUCTION,
     EvidenceEvent,
     EvidenceEventKind,
+    FinalizationState,
     MCPToolLoop,
     ToolObservation,
     classify_evidence_event,
@@ -61,6 +64,8 @@ from .mcp import (
     validate_certified_mcp_loop,
 )
 from .mcp_adapter import MCPV2Outcome
+from .native_capability import NativeCapabilityProfile
+from .native_mcp_runtime import NativeCallOutcome, NativeModelToolBridge
 from .output_compliance import (
     OutputComplianceError,
     is_schema_compliant_json,
@@ -158,6 +163,52 @@ class SchemaRepairExecutionV1(StrictModel):
         return self
 
 
+class NativeToolInvocation(StrictModel):
+    name: str = Field(min_length=1)
+    arguments: dict[str, Any]
+    outcome: NativeCallOutcome | None
+    interrupted: bool
+    consumed: bool
+
+
+class NativeProtocolInvocation(StrictModel):
+    operation: Literal["get_prompt", "read_resource", "invalid_request"]
+    target: Any
+    arguments: Any
+    outcome: NativeCallOutcome | None
+    interrupted: bool
+    duplicate_read: bool
+    evidence_producing: Literal[False]
+
+
+class NativeExecutionTrace(StrictModel):
+    """Optional private provider-metrics entry; never an admission receipt."""
+
+    schema_version: Literal["ori-native-execution-v1", "ori-native-execution-v2"]
+    implementation_id: Literal["mwnickerson", "mordavid", "armadin"]
+    task_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    capability_profile_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    attempt_id: str = Field(min_length=1)
+    certified: bool = Field(strict=True)
+    native_certification_fingerprint: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    interrupted: bool
+    tool_calls: tuple[NativeToolInvocation, ...]
+    protocol_calls: tuple[NativeProtocolInvocation, ...]
+
+    @model_validator(mode="after")
+    def interruption_is_not_completion(self):
+        if self.certified != (self.native_certification_fingerprint is not None):
+            raise ValueError("native candidate trace requires its certification fingerprint")
+        if self.certified != (self.schema_version == "ori-native-execution-v2"):
+            raise ValueError("native candidate trace requires its versioned schema")
+        for call in (*self.tool_calls, *self.protocol_calls):
+            if call.interrupted and call.outcome is not None:
+                raise ValueError("interrupted native invocation cannot invent completion")
+            if isinstance(call, NativeToolInvocation) and call.consumed and call.outcome is None:
+                raise ValueError("consumed native invocation requires its actual outcome")
+        return self
+
+
 class ProviderRunRecord(StrictModel):
     """Private model-call evidence retained beside the exact v2 checkpoint."""
 
@@ -183,6 +234,26 @@ class ProviderRunRecord(StrictModel):
 
     @model_validator(mode="after")
     def fingerprint_matches(self) -> ProviderRunRecord:
+        if "native_execution" in self.provider_metrics:
+            trace = NativeExecutionTrace.model_validate_json(
+                json.dumps(self.provider_metrics["native_execution"], allow_nan=False)
+            )
+            if self.surface == "direct" or trace.task_fingerprint != self.task_fingerprint:
+                raise ValueError("native execution trace does not match the MCP task record")
+            if self.mcp_tool_receipts:
+                raise ValueError("native execution cannot claim historical receipts")
+            if self.mcp_finalization is not None:
+                state = FinalizationState.model_validate_json(
+                    json.dumps(self.mcp_finalization, allow_nan=False),
+                )
+                if (state.certified != trace.certified
+                        or state.task_fingerprint != trace.task_fingerprint
+                        or state.capability_profile_fingerprint
+                        != trace.capability_profile_fingerprint
+                        or (state.native_certification.certification_fingerprint
+                            if state.native_certification is not None else None)
+                        != trace.native_certification_fingerprint):
+                    raise ValueError("native trace and finalization certification differ")
         if "schema_repair_execution" in self.provider_metrics:
             if self.surface == "direct":
                 raise ValueError("Direct records cannot contain MCP schema repair execution")
@@ -228,8 +299,11 @@ def _record(
     mcp_transcript: tuple[dict[str, Any], ...] = (),
     transcript_digest: str | None = None,
     schema_repair_execution: SchemaRepairExecutionV1 | None = None,
+    native_bridge: NativeModelToolBridge | None = None,
 ) -> ProviderRunRecord:
     provider_metrics = dict(response.provider_metrics)
+    if native_bridge is not None:
+        provider_metrics["native_execution"] = native_bridge.private_execution_trace()
     if schema_repair_execution is not None:
         provider_metrics["schema_repair_execution"] = schema_repair_execution.model_dump(
             mode="json"
@@ -311,6 +385,10 @@ def _provider_infrastructure_details(
 
     module = type(exc).__module__.split(".", 1)[0]
     name = type(exc).__name__
+    if module == "anthropic":
+        metrics = _provider_exception_metrics(exc)
+        if metrics is not None:
+            return metrics["infra_error_subtype"], metrics["infra_retryable"]
     if module != "openai":
         return None
     if name == "APITimeoutError":
@@ -650,6 +728,16 @@ def direct_system_prompt(task: TaskBundle) -> str:
 def _mcp_evidence_result_contract(task: TaskBundle) -> dict[str, Any]:
     """Describe model-neutral MCP completeness evidence from public bounds."""
 
+    from .schema import NativeClaimEvidenceContract
+
+    native_contract = task.binding.mcp_evidence_contract
+    if isinstance(native_contract, NativeClaimEvidenceContract):
+        return {
+            "version": native_contract.contract_version,
+            "claim_kind": task.claim_kind,
+            "native_contract": native_contract.model_dump(mode="json"),
+            "execution_bounds": task.binding.bounds.model_dump(mode="json"),
+        }
     bounds = task.binding.bounds
     common = {
         "read_only": True,
@@ -752,7 +840,25 @@ def _mcp_evidence_result_contract(task: TaskBundle) -> dict[str, Any]:
 
 
 def mcp_system_prompt(task: TaskBundle) -> str:
+    from .schema import NativeClaimEvidenceContract
+
     request = _provider_request(task, direct=False)
+    if isinstance(task.binding.mcp_evidence_contract, NativeClaimEvidenceContract):
+        return (
+            "You are being evaluated on a controlled synthetic BloodHound graph. "
+            "Use only the provided read-only native tools. Follow the native proof "
+            "alternatives and requirements in evidence_result_contract, together with "
+            "the declared execution bounds. Other native tools may be used for "
+            "exploration, but their results do not establish completion unless the "
+            "contract declares them as proof alternatives. A truncated or incomplete "
+            "result is not proof; obtain a later independently complete proof before "
+            "finalizing. Preserve exact case-sensitive graph identifiers and use the "
+            "public canonical name or objectid in query predicates. Never invent "
+            "missing identities, labels, relationships, properties or resource content. "
+            "Finish with only one JSON object matching submission_schema, with ordered "
+            "edge witnesses where the public contract requires them. Do not include "
+            "commentary or markdown.\n\n" + json.dumps(request, sort_keys=True)
+        )
     return (
         "You are being evaluated on a controlled synthetic BloodHound CE graph. "
         "Use only the provided read-only BloodHound tools. High-level tools may be "
@@ -3610,10 +3716,21 @@ def _bind_final_answer_to_receipts(
     shared EvidenceIR/comparator boundary.
     """
 
+    from .fingerprint import canonical_json_bytes
+    from .native_mcp_runtime import NativeModelToolBridge
+
     if answer is None or not projector.finalization_ready:
         return answer
+    native_evidence = None
+    if isinstance(projector, NativeModelToolBridge):
+        native_evidence = projector.attested_evidence
+        if native_evidence is None:
+            return None
     bound = dict(answer)
     if task.claim_kind == "set":
+        if native_evidence is not None:
+            bound["entities"] = sorted(entity.object_id for entity in native_evidence.entities)
+            return bound
         page_ids = (
             set().union(*projector.page_identity_ids.values())
             if (projector.page_identity_ids)
@@ -3636,7 +3753,7 @@ def _bind_final_answer_to_receipts(
     except ValidationError:
         return answer
 
-    receipt = next(
+    receipt = None if native_evidence is not None else next(
         (
             item
             for item in reversed(projector.receipts)
@@ -3646,12 +3763,29 @@ def _bind_final_answer_to_receipts(
         ),
         None,
     )
-    if receipt is None:
+    if receipt is None and native_evidence is None:
         return bound
-    identities, edge_facts, property_facts = _receipt_graph_facts(
-        task,
-        _tool_payload(receipt.result_text),
-    )
+    if native_evidence is not None:
+        identities = tuple(entity.object_id for entity in native_evidence.entities)
+        native_edge_properties = {}
+        for edge in (*native_evidence.edges, *native_evidence.supporting_edges):
+            source_id, target_id = edge.source_id, edge.target_id
+            if edge.direction.value == "inbound":
+                source_id, target_id = target_id, source_id
+            key = (source_id.casefold(), edge.relationship, target_id.casefold())
+            native_edge_properties.setdefault(key, []).append({
+                fact.key: canonical_json_bytes(fact.value) for fact in edge.properties
+            })
+        edge_facts = set(native_edge_properties)
+        property_facts = {
+            entity_property_fact_key(fact.entity_id, fact.key, fact.value)
+            for fact in native_evidence.observed_properties
+        }
+    else:
+        identities, edge_facts, property_facts = _receipt_graph_facts(
+            task,
+            _tool_payload(receipt.result_text),
+        )
     schema_properties = task.answer_schema.get("properties", {})
 
     def resolved(token: Any) -> str | None:
@@ -3720,6 +3854,22 @@ def _bind_final_answer_to_receipts(
                 relationship = canonical_relationship_kind(relationship)
             except ValueError:
                 relationship = relationship.strip()
+            if native_evidence is not None:
+                if edge.get("direction") == "inbound":
+                    source, target = target, source
+                properties = edge.get("properties", {})
+                if isinstance(properties, list):
+                    if len({fact["key"] for fact in properties}) != len(properties):
+                        return None
+                    properties = {fact["key"]: fact["value"] for fact in properties}
+                claimed = {key: canonical_json_bytes(value) for key, value in properties.items()}
+                if not any(
+                    all(observed.get(key) == value for key, value in claimed.items())
+                    for observed in native_edge_properties.get(
+                        (source.casefold(), relationship, target.casefold()), []
+                    )
+                ):
+                    return None
             if (source.casefold(), relationship, target.casefold()) in edge_facts:
                 retained.append(edge)
             else:
@@ -4211,7 +4361,20 @@ async def _schema_only_retry(
     request_timeout_seconds: float,
     transcript: tuple[dict[str, Any], ...] = (),
     structured_output_schema: dict[str, Any] | None = None,
+    native_history: list[dict[str, Any]] | None = None,
+    anthropic_binding: AnthropicBinding | None = None,
 ) -> ModelResponse:
+    if model.startswith("anthropic/"):
+        if native_history is None or anthropic_binding is None:
+            raise ProviderCapabilityError("Anthropic repair requires native history and binding")
+        return await transport(
+            model=model, messages=[*native_history,
+                                   {"role": "user", "content": SCHEMA_ONLY_RETRY_INSTRUCTION}],
+            system=mcp_system_prompt(task), base_url=model_base_url, max_tokens=max_tokens,
+            api_surface=api_surface, request_timeout_seconds=request_timeout_seconds,
+            anthropic_binding=anthropic_binding,
+            structured_output_schema=structured_output_schema,
+        )
     native_ollama = model.startswith("ollama/")
     argument_error = "Ollama repair transcript requires object tool arguments"
 
@@ -4295,8 +4458,8 @@ async def run_mcp_model_task_v2(
     task: TaskBundle,
     oracle: OracleBundle,
     resolver: IdentityResolver,
-    profile: CapabilityProfile,
-    bundle: MCPServerBundle,
+    profile: CapabilityProfile | NativeCapabilityProfile,
+    bundle: MCPServerBundle | None,
     model: str,
     model_base_url: str | None,
     tool_loop: MCPToolLoop | str,
@@ -4310,20 +4473,86 @@ async def run_mcp_model_task_v2(
     api_surface: ProviderApiSurface | str = ProviderApiSurface.AUTO,
     structured_output_mode: str = "prompt_local_validation",
     transport: TextTransport = call_provider_text,
+    native_bridge: NativeModelToolBridge | None = None,
+    certified: bool = True,
+    anthropic_binding: AnthropicBinding | None = None,
+    native_qualification=None,
 ) -> tuple[MCPV2Outcome, ProviderRunRecord]:
-    """Run one certified native MCP loop and finalize through the V2 reducer."""
+    """Shared task execution; native development requires explicit uncertified opt-in."""
 
-    resolved_loop = validate_certified_mcp_loop(tool_loop)
+    native = isinstance(profile, NativeCapabilityProfile)
+    if type(certified) is not bool:
+        raise V2ModelRuntimeError("certified must be explicit boolean")
+    native_certification = None
+    if native:
+        from .native_proof import validate_native_task_binding
+
+        if bundle is not None or not isinstance(native_bridge, NativeModelToolBridge):
+            raise V2ModelRuntimeError("native execution requires its native bridge")
+        if certified:
+            from .native_feasibility import native_qualification_artifacts
+            from .native_qualification import NativeQualifiedArtifacts
+
+            if type(native_qualification) is not NativeQualifiedArtifacts:
+                raise V2ModelRuntimeError(
+                    "native certified execution requires qualified artifacts; "
+                    "development requires certified=False",
+                )
+            native_qualification.__post_init__()
+            native_qualification_artifacts(native_qualification.prepared)
+            if task.task_id not in native_qualification.task_ids:
+                raise V2ModelRuntimeError("native task is outside qualified artifacts")
+            index = native_qualification.task_ids.index(task.task_id)
+            if (task != native_qualification.pair.public.tasks[index]
+                    or oracle != native_qualification.pair.private.oracles[index]
+                    or profile != native_qualification.profile
+                    or graph_fact_registry
+                    != native_qualification.pair.private.graph_fact_registry):
+                raise V2ModelRuntimeError(
+                    "native task/oracle/profile differs from qualified artifacts",
+                )
+            native_certification = native_qualification.certifications[task.task_id]
+        elif native_qualification is not None:
+            raise V2ModelRuntimeError("native development cannot claim qualified artifacts")
+        if native_bridge.native_certification != native_certification:
+            raise V2ModelRuntimeError("native bridge certification differs from runner")
+        validate_native_task_binding(profile, task)
+        if (native_bridge.task != task or native_bridge.profile != profile
+                or native_bridge.runner_claimed or native_bridge.native_tool_calls
+                or native_bridge.protocol_calls or native_bridge.events
+                or native_bridge.interrupted):
+            raise V2ModelRuntimeError("native task runner requires a fresh matching attempt")
+    elif (not certified or native_bridge is not None or bundle is None
+          or native_qualification is not None):
+        raise V2ModelRuntimeError("historical task execution requires its certified server bundle")
+    resolved_loop = (MCPToolLoop(tool_loop) if native
+                     else validate_certified_mcp_loop(tool_loop))
     provider_name = model.split("/", 1)[0]
+    if resolved_loop is MCPToolLoop.NATIVE_ANTHROPIC:
+        if (not native or provider_name != "anthropic"
+                or structured_output_mode not in {"prompt_local_validation", "json_schema"}):
+            raise ProviderCapabilityError("native-anthropic requires native prompt validation")
+        if ollama_options:
+            raise ProviderCapabilityError("Anthropic MCP does not accept Ollama options")
+        anthropic_binding = anthropic_binding or prepare_anthropic_binding(model, model_base_url)
+        attempted_url = model_base_url or (model.rsplit("@", 1)[1] if "@" in model else None)
+        if (model.split("/", 1)[1].split("@", 1)[0] != anthropic_binding.model_slug
+                or attempted_url is not None
+                and attempted_url.rstrip("/") != anthropic_binding.base_url):
+            raise ProviderCapabilityError("Anthropic MCP binding mismatch")
+    elif provider_name == "anthropic" or anthropic_binding is not None:
+        raise ProviderCapabilityError("Anthropic MCP requires native-anthropic")
     requested_api_surface = ProviderApiSurface(api_surface)
     resolved_api_surface = resolve_api_surface(provider_name, requested_api_surface)
     validate_release1_api_surface(provider_name, resolved_api_surface)
     if task.binding.mcp_tool_loop != resolved_loop.value:
         raise V2ModelRuntimeError("runtime MCP loop does not match the task binding fingerprint")
-    if task.binding.mcp_resource_mode != "off":
+    if task.binding.mcp_resource_mode != ("native" if native else "off"):
         raise V2ModelRuntimeError("certified v2 MCP tasks require resource_mode=off")
 
-    projector = MCPTranscriptProjector(task, profile)
+    if native:
+        native_bridge.runner_claimed = True
+    projector = native_bridge if native else MCPTranscriptProjector(task, profile)
     bounded_steps = min(max_steps, task.binding.bounds.max_tool_calls)
     partial_response: ModelResponse | None = None
     partial_messages: list[Any] = []
@@ -4362,7 +4591,8 @@ async def run_mcp_model_task_v2(
         "public_question": task.question,
         "model_name": model,
         "base_url": model_base_url,
-        "tools": bundle.tools,
+        "tools": native_bridge.tools if native else bundle.tools,
+        "native_protocol_bridge": native_bridge if native else None,
         "max_steps": bounded_steps,
         # The discovered BloodHound prompt describes a different, resource-first
         # workflow and can contradict this certified resource_mode=off contract.
@@ -4370,9 +4600,13 @@ async def run_mcp_model_task_v2(
         # authoritative runtime system prompt to the evaluated model.
         "server_prompt_text": "",
         "server_prompt_name": "",
-        "available_prompt_names": bundle.available_prompt_names,
-        "prompt_discovery_status": bundle.prompt_discovery_status,
-        "resource_mode": "off",
+        "available_prompt_names": ([p["name"] for p in native_bridge.protocol_surfaces["prompts"]]
+                                   if native else bundle.available_prompt_names),
+        "prompt_discovery_status": (
+            "discovered" if native_bridge.protocol_surfaces["availability"]["prompts"]
+            else "unavailable"
+        ) if native else bundle.prompt_discovery_status,
+        "resource_mode": "native" if native else "off",
         "system_prompt_override": mcp_system_prompt(task),
         "tool_result_observer": projector.observe,
         "progress_observer": observe_progress,
@@ -4388,7 +4622,9 @@ async def run_mcp_model_task_v2(
         ),
     }
     surface = (
-        V2RuntimeSurface.MCP_NATIVE_OPENAI_COMPATIBLE
+        V2RuntimeSurface.MCP_NATIVE_ANTHROPIC
+        if resolved_loop is MCPToolLoop.NATIVE_ANTHROPIC
+        else V2RuntimeSurface.MCP_NATIVE_OPENAI_COMPATIBLE
         if resolved_loop is MCPToolLoop.NATIVE_OPENAI_COMPATIBLE
         else V2RuntimeSurface.MCP_NATIVE_OLLAMA
     )
@@ -4397,7 +4633,19 @@ async def run_mcp_model_task_v2(
     deadline = asyncio.timeout_at(task_deadline)
     try:
         async with deadline:
-            if resolved_loop is MCPToolLoop.NATIVE_OPENAI_COMPATIBLE:
+            if resolved_loop is MCPToolLoop.NATIVE_ANTHROPIC:
+                response, messages = await run_anthropic_mcp_loop(
+                    bridge=native_bridge, binding=anthropic_binding,
+                    system_prompt=mcp_system_prompt(task), max_steps=bounded_steps,
+                    max_tokens=max_tokens, read_timeout_seconds=read_timeout_seconds,
+                    tool_timeout_seconds=tool_timeout_seconds, progress_observer=observe_progress,
+                    streaming=True,
+                    finalization_schema=(
+                        _json_schema_response_format(task.answer_schema, name="ori_mcp_submission")
+                        if structured_output_mode == "json_schema" else None
+                    ),
+                )
+            elif resolved_loop is MCPToolLoop.NATIVE_OPENAI_COMPATIBLE:
                 response, _trajectory, messages = await _run_openai_compat_mcp_loop(
                     **loop_kwargs,
                     max_tokens=max_tokens,
@@ -4448,7 +4696,8 @@ async def run_mcp_model_task_v2(
             surface=surface.value,
             response=response,
             mcp_events=tuple(projector.events),
-            mcp_tool_receipts=tuple(projector.receipts),
+            mcp_tool_receipts=() if native else tuple(projector.receipts),
+            native_bridge=native_bridge,
             mcp_transcript=transcript,
             transcript_digest=canonical_sha256(transcript),
             schema_repair_execution=schema_repair_execution,
@@ -4610,6 +4859,8 @@ async def run_mcp_model_task_v2(
     if (
         projector.finalization_ready
         and not terminal_runtime_failure
+        and not (native and any(call["operation"] == "invalid_request"
+                               for call in native_bridge.protocol_calls))
         and not _answer_schema_valid(
             task,
             final_answer,
@@ -4642,6 +4893,9 @@ async def run_mcp_model_task_v2(
                     api_surface=requested_api_surface,
                     request_timeout_seconds=remaining_seconds,
                     transcript=_transcript_payload(messages),
+                    **({"native_history": response.provider_metrics.get("native_history"),
+                        "anthropic_binding": anthropic_binding}
+                       if resolved_loop is MCPToolLoop.NATIVE_ANTHROPIC else {}),
                     structured_output_schema=(
                         _json_schema_response_format(
                             task.answer_schema,
@@ -4679,7 +4933,8 @@ async def run_mcp_model_task_v2(
                     surface=surface.value,
                     response=interrupted_response,
                     mcp_events=tuple(projector.events),
-                    mcp_tool_receipts=tuple(projector.receipts),
+                    mcp_tool_receipts=() if native else tuple(projector.receipts),
+                    native_bridge=native_bridge,
                     mcp_transcript=transcript,
                     transcript_digest=canonical_sha256(transcript),
                     schema_repair_execution=schema_repair_execution,
@@ -4846,6 +5101,15 @@ async def run_mcp_model_task_v2(
         final_receipt_attested=final_receipt_attested,
         retry_receipt_attested=retry_receipt_attested,
         retry_contract_error=retry_contract_error,
+        terminal_protocol_output_invalid=(
+            native_bridge is not None
+            and any(
+                call["operation"] == "invalid_request"
+                for call in native_bridge.protocol_calls
+            )
+        ),
+        certified=certified,
+        native_certification=native_certification,
     )
     combined_response = response
     if retry_response is not None:
@@ -4878,6 +5142,7 @@ async def run_mcp_model_task_v2(
     if (
         outcome.sample.execution_class is ExecutionClass.INFRA_FAILURE
         and "infra_scope" not in combined_response.provider_metrics
+        and not native
     ):
         failed_receipt = next(
             (
@@ -4911,7 +5176,8 @@ async def run_mcp_model_task_v2(
         surface=surface.value,
         response=combined_response,
         mcp_events=tuple(projector.events),
-        mcp_tool_receipts=tuple(projector.receipts),
+        mcp_tool_receipts=() if native else tuple(projector.receipts),
+        native_bridge=native_bridge,
         mcp_finalization=outcome.finalization.model_dump(mode="json"),
         mcp_transcript=tuple(transcript_payload),
         transcript_digest=canonical_sha256(transcript_payload),

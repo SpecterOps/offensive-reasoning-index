@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import shutil
+import stat
 import subprocess
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -134,6 +136,160 @@ class MCPLaunchSpec:
     command: str
     args: tuple[str, ...]
     cwd: str | None
+
+
+@dataclass(frozen=True)
+class NativeMCPLauncherConfig:
+    """Explicit offline-installed native source and interpreter, never an installer."""
+
+    implementation_id: str
+    checkout: Path
+    python_executable: Path
+    runtime_roots: tuple[Path, ...] = ()
+    runtime_fingerprint: str | None = None
+    dependency_lock: Path | None = None
+    dependency_lock_fingerprint: str | None = None
+
+
+def prepare_native_mcp_launch(config: NativeMCPLauncherConfig) -> tuple[MCPLaunchSpec, dict]:
+    """Verify pinned source bytes and prepare argv without starting the server.
+
+    Interpreter identity is observed, not qualification of its dependency/import
+    closure. Callers must separately qualify that closure and recheck at spawn
+    and session completion. This is not a sandbox against concurrent local writes.
+    """
+    from .eval.v2.fingerprint import canonical_sha256
+    from .eval.v2.native_mcp_profiles import get_native_implementation
+
+    if os.name != "posix":
+        raise ValueError("NATIVE_LAUNCH_PLATFORM_UNQUALIFIED")
+    source = get_native_implementation(config.implementation_id)
+    if bool(config.runtime_roots) != (config.runtime_fingerprint is not None):
+        raise ValueError("NATIVE_RUNTIME_BINDING_INCOMPLETE")
+    if ((config.dependency_lock is None) != (config.dependency_lock_fingerprint is None)
+            or config.dependency_lock is not None and not config.runtime_roots):
+        raise ValueError("NATIVE_DEPENDENCY_BINDING_INCOMPLETE")
+    runtime_fingerprint = None
+    if config.runtime_roots:
+        from .native_runtime import verify_native_runtime_roots
+
+        runtime_fingerprint = verify_native_runtime_roots(
+            config.runtime_roots, config.runtime_fingerprint,
+        )
+    checkout = config.checkout.resolve(strict=True)
+    python = config.python_executable.absolute()
+    if not checkout.is_dir() or not python.is_file() or not os.access(python, os.X_OK):
+        raise ValueError("NATIVE_LAUNCH_PATH_INVALID")
+    if python.is_relative_to(checkout) or python.resolve().is_relative_to(checkout):
+        raise ValueError("NATIVE_RUNTIME_MUST_BE_EXTERNAL")
+    for ancestor in (checkout, *checkout.parents):
+        dotenv = ancestor / ".env"
+        if dotenv.exists() or dotenv.is_symlink():
+            raise ValueError("NATIVE_DOTENV_CONFIGURATION_FORBIDDEN")
+
+    def git(*args):
+        try:
+            result = subprocess.run(
+                ["git", "--no-replace-objects", "-c", "core.fsmonitor=false",
+                 "-C", str(checkout), *args],
+                capture_output=True, timeout=10, check=True,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise ValueError("NATIVE_SOURCE_VERIFICATION_FAILED") from exc
+        return result.stdout
+
+    if git("rev-parse", "HEAD").decode().strip() != source.revision:
+        raise ValueError("NATIVE_SOURCE_REVISION_MISMATCH")
+    expected = {}
+    for record in git("ls-tree", "-rz", "--full-tree", source.revision).split(b"\0"):
+        if not record:
+            continue
+        metadata, name = record.split(b"\t", 1)
+        mode, kind, object_id = metadata.split()
+        path = Path(os.fsdecode(name))
+        if (kind != b"blob" or mode not in {b"100644", b"100755"}
+                or path.is_absolute() or ".." in path.parts or ".git" in path.parts):
+            raise ValueError("NATIVE_SOURCE_ENTRY_UNSUPPORTED")
+        expected[path.as_posix()] = (mode, object_id)
+    expected_directories = {
+        parent.as_posix() for name in expected for parent in Path(name).parents
+        if parent != Path(".")
+    }
+
+    def traversal_error(error):
+        raise ValueError("NATIVE_SOURCE_TRAVERSAL_FAILED") from None
+
+    observed = set()
+    for directory, directories, files in os.walk(
+        checkout, followlinks=False, onerror=traversal_error,
+    ):
+        root = Path(directory)
+        if root == checkout:
+            directories[:] = [name for name in directories if name != ".git"]
+            files = [name for name in files if name != ".git"]
+        if any((root / name).is_symlink() for name in (*directories, *files)):
+            raise ValueError("NATIVE_SOURCE_SYMLINK_FORBIDDEN")
+        if any(
+            (root / name).relative_to(checkout).as_posix() not in expected_directories
+            or not stat.S_ISDIR((root / name).lstat().st_mode)
+            for name in directories
+        ):
+            raise ValueError("NATIVE_SOURCE_EXTRA_DIRECTORY")
+        for name in files:
+            path = root / name
+            relative = path.relative_to(checkout).as_posix()
+            if relative not in expected or not stat.S_ISREG(path.lstat().st_mode):
+                raise ValueError("NATIVE_SOURCE_EXTRA_FILE")
+            mode, object_id = expected[relative]
+            content = path.read_bytes()
+            digest = hashlib.sha1(b"blob " + str(len(content)).encode() + b"\0" + content)
+            executable = bool(path.stat().st_mode & 0o111)
+            if digest.hexdigest().encode() != object_id or executable != (mode == b"100755"):
+                raise ValueError("NATIVE_SOURCE_CONTENT_MISMATCH")
+            observed.add(relative)
+    if observed != set(expected) or source.entrypoint not in observed:
+        raise ValueError("NATIVE_SOURCE_MISSING_FILE")
+    spec = MCPLaunchSpec(str(python), ("-E", "-s", "-B", str(checkout / source.entrypoint)),
+                         str(checkout))
+    provenance = {
+        "implementation_id": source.implementation_id, "source_revision": source.revision,
+        "checkout": str(checkout), "python_executable": str(python),
+        "interpreter_sha256": hashlib.sha256(python.read_bytes()).hexdigest(),
+        "source_tree_fingerprint": canonical_sha256(
+            {name: [mode.decode(), blob.decode()] for name, (mode, blob) in expected.items()},
+        ),
+        "source_bytes_verified": True, "runtime_qualified": False, "campaign_admitted": False,
+        "runtime_content_fingerprint": runtime_fingerprint,
+        "runtime_content_verified": runtime_fingerprint is not None,
+    }
+    return spec, provenance
+
+
+def native_mcp_subprocess_env(
+    implementation_id: str, *, connection: Mapping[str, str],
+    sdk_defaults: Mapping[str, str],
+) -> dict[str, str]:
+    """Override SDK defaults explicitly; do not forward arbitrary parent values."""
+    from .eval.v2.native_mcp_profiles import get_native_implementation
+
+    source = get_native_implementation(implementation_id)
+    if source.backend == "bhce":
+        required = {"BLOODHOUND_DOMAIN", *source.credential_env_names}
+        optional = {"BLOODHOUND_PORT", "BLOODHOUND_SCHEME", "BLOODHOUND_VERIFY_TLS"}
+    else:
+        prefix = "BLOODHOUND" if implementation_id == "mordavid" else "NEO4J"
+        required = {f"{prefix}_URI", *source.credential_env_names}
+        optional = {"REQUEST_TIMEOUT", "MAX_RETRIES", "LOG_LEVEL"} if prefix == "NEO4J" else set()
+    if (set(connection) - required - optional or not required <= set(connection)
+            or any(not isinstance(value, str) or not value.strip() or "\0" in value
+                   for value in connection.values())):
+        raise ValueError("NATIVE_CONNECTION_ENVIRONMENT_INVALID")
+    # stdio_client merges SDK defaults before explicit values. Empty overrides
+    # prevent inheritance without modifying this process's environment.
+    environment = {key: "" for key in sdk_defaults}
+    environment.update({"PATH": os.defpath, "PYTHONDONTWRITEBYTECODE": "1"})
+    environment.update(connection)
+    return environment
 
 
 @dataclass(frozen=True)

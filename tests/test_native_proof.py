@@ -33,6 +33,89 @@ from ori.eval.v2.schema import (
 )
 
 
+def test_native_candidate_finalization_bindings_and_retry_preservation(subtests):
+    from ori.eval.v2.compiler import compile_legacy_product
+    from ori.eval.v2.fingerprint import canonical_sha256
+    from ori.eval.v2.fixtures import offline_certify
+    from ori.eval.v2.graph import graph_identity_resolver
+    from ori.eval.v2.mcp import (
+        EvidenceEvent,
+        EvidenceEventKind,
+        FinalizationAttempt,
+        FinalizationState,
+        FinalOutputStatus,
+        initial_finalization_state,
+        reduce_finalization,
+    )
+    from ori.eval.v2.profiles import capability_profile_for_track
+    from ori.eval.v2.runtime import V2RuntimeSurface, run_mcp_task_v2
+    from ori.eval.v2.schema import TaskCertification
+    from tests.support.v2_compiler import _generated_product
+    from tests.support.v2_mcp import native_profile
+
+    manifest, snapshot = _generated_product("simple", 1234)
+    profile = native_profile("mwnickerson")
+    corpus = compile_legacy_product(
+        manifest, snapshot, product="simple", track=Track.MCP, native_profile=profile,
+    )
+    compiled = next(item for item in corpus.tasks if item.public.claim_kind == "count")
+    task = compiled.public
+    payload = offline_certify(compiled, snapshot, native_profile=profile).certification.model_dump(
+        mode="json",
+    )
+    # A self-hashed candidate tests lower-level binding, not live qualification.
+    # Campaign acquisition and proof reconstruction are covered separately.
+    payload.update(state="candidate", certified_profile_id=profile.profile_id,
+                   live_proof_fingerprint="1" * 64)
+
+    def certificate(**changes):
+        value = {**payload, **changes}
+        value["certification_fingerprint"] = canonical_sha256(
+            value, exclude_fields=("certification_fingerprint",),
+        )
+        return TaskCertification.model_validate_json(json.dumps(value))
+
+    cert = certificate()
+    for loop in ("native-openai-compatible", "native-ollama", "native-anthropic"):
+        with subtests.test(loop=loop):
+            state = initial_finalization_state(task, profile, tool_loop=loop,
+                                               native_certification=cert)
+            state = reduce_finalization(state, EvidenceEvent(
+                kind=EvidenceEventKind.USEFUL_POSITIVE, task_fingerprint=task.task_fingerprint,
+                capability_profile_fingerprint=profile.profile_fingerprint,
+                tool_name="cypher_query", operation="run",
+            ))
+            state = reduce_finalization(state, FinalizationAttempt(
+                status=FinalOutputStatus.MALFORMED,
+            ))
+            assert state.phase.value == "retry_schema_only"
+            assert state.native_certification == cert
+            assert FinalizationState.model_validate_json(state.model_dump_json()) == state
+    with pytest.raises(ValueError, match="NATIVE_CERTIFICATION_UNAVAILABLE"):
+        initial_finalization_state(task, profile, tool_loop="native-anthropic")
+    with pytest.raises(ValueError, match="development"):
+        initial_finalization_state(task, profile, tool_loop="native-anthropic",
+                                   certified=False, native_certification=cert)
+    with pytest.raises(ValueError, match="legacy"):
+        initial_finalization_state(task, capability_profile_for_track(Track.MCP),
+                                   tool_loop="native-openai-compatible", native_certification=cert)
+    for field in ("task_id", "task_fingerprint", "capability_profile_fingerprint",
+                  "certified_profile_id", "bounds_fingerprint", "compiler_fingerprint",
+                  "comparator_fingerprint", "certifier_fingerprint"):
+        with subtests.test(field=field), pytest.raises(ValueError):
+            altered = "wrong" if field.endswith("_id") else "0" * 64
+            initial_finalization_state(task, profile, tool_loop="native-anthropic",
+                                       native_certification=certificate(**{field: altered}))
+    args = dict(surface=V2RuntimeSurface.MCP_NATIVE_ANTHROPIC, task=task, oracle=compiled.oracle,
+                resolver=graph_identity_resolver(snapshot), profile=profile,
+                events=(), final_answer=None)
+    result = run_mcp_task_v2(**args, native_certification=cert)
+    assert result.finalization.native_certification == cert
+    for field in ("oracle_fingerprint", "graph_fingerprint"):
+        with subtests.test(field=field), pytest.raises(ValueError, match="oracle/graph"):
+            run_mcp_task_v2(**args, native_certification=certificate(**{field: "0" * 64}))
+
+
 @pytest.mark.parametrize("implementation", ["mwnickerson", "mordavid"])
 def test_native_absence_requires_complete_scope_and_zero_preserving_counts(
     implementation, subtests,
@@ -98,6 +181,118 @@ def test_native_absence_requires_complete_scope_and_zero_preserving_counts(
             assert outcome.proof_event.kind.value == expected
 
 
+@pytest.mark.parametrize("implementation", ["mwnickerson", "mordavid"])
+def test_native_model_bridge_consumes_actual_receipts_once(implementation, monkeypatch):
+    from ori.eval.mcp_runtime import _ollama_tool_spec, _run_openai_compat_mcp_loop
+    from ori.eval.v2.native_mcp_runtime import NativeModelToolBridge
+
+    payload = ({"success": True, "info_type": "run", "has_results": True,
+                "node_count": 0, "edge_count": 0,
+                "data": {"nodes": {}, "edges": [], "literals": [{"key": "n", "value": 3}]}}
+               if implementation == "mwnickerson" else
+               {"success": True, "data": [{"n": 3}]})
+    profile, session, calls = _native_session(implementation, payload)
+    claim = CountClaim.model_validate({
+        "kind": "count", "claim_id": "public-users", "semantics": "direct",
+        "population_scope": PopulationScope.BENCHMARK_NAMESPACE,
+        "selection": {"projection_role": "item", "projection_type": "User"},
+    })
+    task = _fingerprinted_task_bundle(
+        task_id="native-users-count", product="simple", claim=claim,
+        policy=ExactCountPolicy(kind="exact_count"),
+        binding=_binding(Track.MCP, claim=claim, expected_cardinality=3, native_profile=profile),
+        input_entities=(), question="Count all User objects in the benchmark graph.",
+    )
+    bridge = NativeModelToolBridge(session, task, attempt_id="attempt-1")
+    with pytest.raises(ValueError, match="cannot reuse"):
+        NativeModelToolBridge(session, task, attempt_id="attempt-1")
+    name = get_native_implementation(implementation).generic_query_tool
+    tool = next(t for t in bridge.tools if t.descriptor["name"] == name)
+    spec, executor = _ollama_tool_spec(tool)
+    assert spec["function"]["name"] == name
+    assert spec["function"]["parameters"] == tool.descriptor["inputSchema"]
+    spec["function"]["parameters"]["private_mutation"] = True
+    assert "private_mutation" not in tool.descriptor["inputSchema"]
+    arguments = {"query": "MATCH (u:User) RETURN count(u) AS n"}
+    if implementation == "mwnickerson":
+        arguments["info_type"] = "run"
+    text = asyncio.run(executor(**arguments))
+    assert calls == [(name, arguments)]
+    assert not bridge.finalization_ready
+    assert bridge.observe(name, arguments, text, None)
+    assert len(bridge.outcomes) == 1
+    assert not bridge.observe(name, arguments, text, None)
+    assert bridge.events[-1].kind.value == "harness_failure"
+    fresh = NativeModelToolBridge(session, task, attempt_id="attempt-2")
+    assert not fresh.finalization_ready
+    assert not fresh.observe("unknown", {}, "rejected", object())
+    assert fresh.events[-1].kind.value == "query_error"
+    text = asyncio.run(next(t for t in fresh.tools if t.descriptor["name"] == name)(**arguments))
+    assert not fresh.observe(name, arguments, text + "fabricated", None)
+    assert fresh.events[-1].kind.value == "harness_failure"
+    loop_bridge = NativeModelToolBridge(session, task, attempt_id="attempt-3")
+    turns = []
+
+    async def provider_turn(**kwargs):
+        turns.append(kwargs)
+        if len(turns) == 1:
+            submitted = next(t for t in kwargs["tools"] if t["function"]["name"] == name)
+            assert submitted["function"]["parameters"] == tool.descriptor["inputSchema"]
+        else:
+            assert loop_bridge.finalization_ready
+        return {"model": "offline-stub", "content": "" if len(turns) == 1 else '{"count":3}',
+                "prompt_tokens": 2, "completion_tokens": 1,
+                "tool_calls": [{"id": "native-1", "type": "function", "function": {
+                    "name": name, "arguments": json.dumps(arguments),
+                }}] if len(turns) == 1 else []}
+
+    monkeypatch.setattr("ori.eval.mcp_runtime._openai_compat_chat_turn", provider_turn)
+    response, _, transcript = asyncio.run(_run_openai_compat_mcp_loop(
+        task=None, public_question=task.question, model_name="offline-stub",
+        base_url="http://localhost:8080/v1", extra_body=None, tools=loop_bridge.tools,
+        max_steps=3, system_prompt_override="Offline native integration test.",
+        tool_result_observer=loop_bridge.observe,
+    ))
+    assert response.raw_text == '{"count":3}'
+    assert len(turns) == 2 and len(loop_bridge.outcomes) == 1
+    assert loop_bridge.finalization_ready and transcript
+    from ori.eval.mcp_runtime import MCPToolInfrastructureError
+    from ori.eval.v2.native_mcp_runtime import NativeCallOutcome
+
+    async def native_error(*args, **kwargs):
+        return NativeCallOutcome(True, 0.1, raw_result={"isError": True, "content": [
+            {"type": "text", "text": "Native server explains unsupported query"},
+        ]}, failure="TOOL_ERROR")
+
+    error_bridge = NativeModelToolBridge(session, task, attempt_id="native-error")
+    monkeypatch.setattr(session, "call_tool", native_error)
+    error_text = asyncio.run(error_bridge._execute(name, arguments))
+    assert error_text == "Native server explains unsupported query"
+    assert not error_bridge.observe(name, arguments, error_text, None)
+    assert error_bridge.events[-1].kind.value == "query_error"
+
+    async def unavailable(*args, **kwargs):
+        return NativeCallOutcome(True, 0.1, failure="INFRA_ERROR")
+
+    failed_bridge = NativeModelToolBridge(session, task, attempt_id="attempt-4")
+    monkeypatch.setattr(session, "call_tool", unavailable)
+    with pytest.raises(MCPToolInfrastructureError):
+        asyncio.run(failed_bridge._execute(name, arguments))
+    assert not failed_bridge.observe(name, arguments, "serialized error", object())
+    assert failed_bridge.events[-1].kind.value == "infrastructure_failure"
+
+    async def cancelled(*args, **kwargs):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(session, "call_tool", cancelled)
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(loop_bridge._execute(name, arguments))
+    assert loop_bridge.interrupted and not loop_bridge.finalization_ready
+    assert len(loop_bridge.outcomes) == 1  # Only the earlier completed call.
+    with pytest.raises(RuntimeError, match="ATTEMPT_INTERRUPTED"):
+        asyncio.run(loop_bridge._execute(name, arguments))
+
+
 def _native_session(implementation, payload):
     """Real session dispatch with only the external MCP transport stubbed."""
     source = get_native_implementation(implementation)
@@ -130,16 +325,29 @@ def _native_session(implementation, payload):
     ), calls
 
 
-def test_main_native_sets_require_matching_count_and_distinct_pages(subtests):
+@pytest.mark.parametrize("implementation", ["mwnickerson", "mordavid"])
+def test_main_native_sets_require_matching_count_and_distinct_pages(subtests, implementation):
+    from ori.eval.v2.model_runtime import _bind_final_answer_to_receipts
+    from ori.eval.v2.native_mcp_runtime import NativeModelToolBridge
+
     for case in ("count-first", "page-first", "missing-count", "wrong-count",
-                 "wrong-population", "nondistinct", "wrong-offset", "wrong-type", "empty"):
+                 "wrong-population", "nondistinct", "wrong-offset", "wrong-type", "empty",
+                 "window-filtered", "window-reduced"):
         with subtests.test(case=case):
             payload = {}
-            profile, session, calls = _native_session("mwnickerson", payload)
+            profile, session, calls = _native_session(implementation, payload)
+            tool_name = "cypher_query" if implementation == "mwnickerson" else "query_bloodhound"
+
+            def arguments(query):
+                return ({"info_type": "run", "query": query}
+                        if implementation == "mwnickerson" else {"query": query})
             claim = SetClaim(
                 kind="set", claim_id="all-users", semantics="direct",
                 population_scope=PopulationScope.BENCHMARK_NAMESPACE,
-                selection=SelectionExpression(projection_role="item", projection_type="User"),
+                selection=SelectionExpression(
+                    projection_role="item", projection_type="User",
+                    limit=500 if case.startswith("window-") else None,
+                ),
             )
             task = _fingerprinted_task_bundle(
                 task_id="native-users", product="simple", claim=claim,
@@ -162,6 +370,12 @@ def test_main_native_sets_require_matching_count_and_distinct_pages(subtests):
                           f"SKIP {500 if case == 'wrong-offset' else 0} LIMIT 500")
             if case == "nondistinct":
                 page_query = page_query.replace("DISTINCT ", "")
+            if case.startswith("window-"):
+                stage = "WITH u WHERE false" if case == "window-filtered" else (
+                    "WITH head(collect(u)) AS u"
+                )
+                page_query = page_query.replace(" RETURN", f" {stage} RETURN")
+                nodes = {} if case == "window-filtered" else {"0": nodes["0"]}
             count_payload = {
                 "success": True, "info_type": "run", "has_results": True,
                 "node_count": 0, "edge_count": 0,
@@ -172,19 +386,49 @@ def test_main_native_sets_require_matching_count_and_distinct_pages(subtests):
                 "node_count": len(nodes), "edge_count": 0,
                 "data": {"nodes": nodes, "edges": [], "literals": []},
             }
+            if implementation == "mordavid":
+                count_payload = {"success": True, "data": [{"total": count}]}
+                page_query = page_query.replace(
+                    "RETURN DISTINCT u ORDER",
+                    "RETURN DISTINCT u AS entity, labels(u) AS labels ORDER",
+                ).replace("RETURN u ORDER", "RETURN u AS entity, labels(u) AS labels ORDER")
+                page_payload = {"success": True, "data": [
+                    {"entity": {"objectid": node["objectId"]}, "labels": [node["kind"]]}
+                    for node in nodes.values()
+                ]}
             sequence = [(count_query, count_payload), (page_query, page_payload)]
             if case == "page-first":
                 sequence.reverse()
             elif case == "missing-count":
                 sequence = sequence[1:]
-            outcomes = []
+            bridge = NativeModelToolBridge(session, task, attempt_id="model-a/run-1/attempt-1")
+            executor = next(t for t in bridge.tools if t.descriptor["name"] == tool_name)
+            if implementation == "mwnickerson" and case.startswith("window-"):
+                # Preserve independent proof-adjudicator negatives even though
+                # model admission now rejects these queries before execution.
+                # Harness fixture replay is distinct from a model bridge attempt.
+                replayed = []
+                for query, response in sequence:
+                    payload.clear()
+                    payload.update(response)
+                    replayed.append(asyncio.run(session.call_tool(
+                        tool_name, arguments(query), task, attempt_id="fixture-replay",
+                    )))
+                assert len(calls) == len(sequence)
+                assert all(item.executed and item.failure is None for item in replayed)
+                assert all(not item.proof_event.unlocks_finalization for item in replayed)
+                with pytest.raises(RuntimeError, match="^NATIVE_MCP_POLICY_REJECTED$"):
+                    asyncio.run(executor(**arguments(page_query)))
+                assert len(calls) == len(sequence)
+                assert not bridge.outcomes[-1].executed
+                assert not bridge.finalization_ready
+                continue
             for query, response in sequence:
                 payload.clear()
                 payload.update(response)
-                outcomes.append(asyncio.run(session.call_tool(
-                    "cypher_query", {"info_type": "run", "query": query}, task,
-                    attempt_id="model-a/run-1/attempt-1",
-                )))
+                text = asyncio.run(executor(**arguments(query)))
+                bridge.observe(tool_name, arguments(query), text, None)
+            outcomes = bridge.outcomes
             assert len(calls) == len(sequence)
             assert all(outcome.executed and outcome.failure is None for outcome in outcomes)
             assert outcomes[-1].proof_event.unlocks_finalization is (
@@ -192,18 +436,48 @@ def test_main_native_sets_require_matching_count_and_distinct_pages(subtests):
             )
             if len(outcomes) == 2:
                 assert not outcomes[0].proof_event.unlocks_finalization
+            if bridge.finalization_ready:
+                bound = _bind_final_answer_to_receipts(
+                    task, {"entities": ["unobserved-invented-id"]}, projector=bridge, resolver=None,
+                )
+                assert bound["entities"] == sorted(n["objectId"] for n in nodes.values())
+                assert all(r["consumed"] for r in bridge.native_tool_calls)
+                assert [r["arguments"] for r in bridge.native_tool_calls] == [
+                    arguments(query) for query, _ in sequence
+                ]
             if case == "count-first":
+                exploration_query = page_query.replace(":User", ":Group")
+                exploration_payload = deepcopy(page_payload)
+                if implementation == "mordavid":
+                    exploration_payload["data"] = [{
+                        "entity": {"objectid": "exploration-only"}, "labels": ["Group"],
+                    }]
+                else:
+                    exploration_payload["data"]["nodes"] = {
+                        "0": {"objectId": "exploration-only", "kind": "Group"},
+                    }
+                    exploration_payload["node_count"] = 1
+                payload.clear()
+                payload.update(exploration_payload)
+                text = asyncio.run(executor(**arguments(exploration_query)))
+                bridge.observe(tool_name, arguments(exploration_query), text, None)
+                assert "exploration-only" in bridge.observed_identity_ids
+                assert _bind_final_answer_to_receipts(
+                    task, {"entities": []}, projector=bridge, resolver=None,
+                )["entities"] == sorted(n["objectId"] for n in nodes.values())
+                payload.clear()
+                payload.update(page_payload)
                 # Reusing the transport for another repetition/retry must not
                 # reuse the prior count. The new attempt sees only a page.
                 retry = asyncio.run(session.call_tool(
-                    "cypher_query", {"info_type": "run", "query": page_query}, task,
+                    tool_name, arguments(page_query), task,
                     attempt_id="model-a/run-1/attempt-2",
                 ))
                 assert retry.executed and retry.failure is None
                 assert not retry.proof_event.unlocks_finalization
                 prior_calls = len(calls)
                 missing_attempt = asyncio.run(session.call_tool(
-                    "cypher_query", {"info_type": "run", "query": page_query}, task,
+                    tool_name, arguments(page_query), task,
                 ))
                 assert not missing_attempt.executed and missing_attempt.failure == "HARNESS_ERROR"
                 assert len(calls) == prior_calls
@@ -246,7 +520,39 @@ def test_native_set_coverage_handles_multiple_pages_and_fixed_windows(subtests):
 
             if windowed:
                 assert not page(0, range(2))
+                for stage in ("WITH u WHERE false", "WITH head(collect(u)) AS u"):
+                    assert not state.observe(
+                        profile, task, f"MATCH (u:User) {stage} RETURN DISTINCT u "
+                        "ORDER BY u.objectid SKIP 500 LIMIT 500",
+                        EvidenceIR(task_id=task.task_id, raw_digest="c" * 64),
+                    )
                 assert page(500, range(2))
+                from ori.eval.v2.schema import EntityPropertyFact
+
+                fact_state = NativeSetProofState()
+                query = "MATCH (u:User) RETURN DISTINCT u ORDER BY u.objectid SKIP 500 LIMIT 500"
+                evidence = EvidenceIR(
+                    task_id=task.task_id, raw_digest="a" * 64,
+                    entities=tuple(EntityRef(object_id=f"user-{i}", object_type="User",
+                                             role=f"observed_{i}") for i in range(2)),
+                    observed_properties=tuple(EntityPropertyFact(
+                        entity_id=f"user-{i}", key="enabled", value=True,
+                    ) for i in range(2)),
+                )
+                assert fact_state.observe(profile, task, query, evidence)
+                reordered = evidence.model_copy(update={
+                    "raw_digest": "b" * 64,
+                    "entities": tuple(entity.model_copy(update={"role": f"observed_{i}"})
+                                      for i, entity in enumerate(reversed(evidence.entities))),
+                    "observed_properties": tuple(reversed(evidence.observed_properties)),
+                })
+                assert fact_state.observe(profile, task, query, reordered)
+                changed = reordered.model_copy(update={"observed_properties": (
+                    reordered.observed_properties[0].model_copy(update={"value": False}),
+                    reordered.observed_properties[1],
+                )})
+                with pytest.raises(ValueError, match="page facts changed"):
+                    fact_state.observe(profile, task, query, changed)
                 continue
             assert not state.observe(
                 profile, task, "MATCH (u:User) RETURN count(DISTINCT u) AS total",
@@ -384,6 +690,10 @@ def test_native_decision_subjects_require_one_directed_witness(subtests):
 
 @pytest.mark.parametrize("implementation", ["mwnickerson", "armadin"])
 def test_native_route_requires_returned_public_directed_connectivity(implementation, subtests):
+    from ori.eval.v2.identity import IdentityResolver
+    from ori.eval.v2.model_runtime import _bind_final_answer_to_receipts
+    from ori.eval.v2.native_mcp_runtime import NativeModelToolBridge
+
     for case in ("positive", "reversed", "disconnected", "wrong-id", "wrong-type",
                  "node-only", "wrong-selector", "over-bound"):
         with subtests.test(case=case):
@@ -449,10 +759,40 @@ def test_native_route_requires_returned_public_directed_connectivity(implementat
                 input_entities=(source, target),
                 question="Return a directed path with edges from ALICE to ADMINS.",
             )
-            outcome = asyncio.run(session.call_tool(tool, arguments, task))
+            bridge = NativeModelToolBridge(session, task, attempt_id="route-attempt")
+            executor = next(t for t in bridge.tools if t.descriptor["name"] == tool)
+            text = asyncio.run(executor(**arguments))
+            bridge.observe(tool, arguments, text, None)
+            outcome = bridge.outcomes[-1]
             assert calls == [(tool, arguments)]
             assert outcome.executed and outcome.failure is None
             assert outcome.proof_event.unlocks_finalization is (case == "positive")
+            if case == "positive":
+                answer = {"path_status": "found", "entities": ["user-1", "group-1"], "edges": [{
+                    "source_id": "user-1", "target_id": "group-1", "relationship": "MemberOf",
+                }]}
+                resolver = IdentityResolver((source, target))
+                assert _bind_final_answer_to_receipts(
+                    task, answer, projector=bridge, resolver=resolver,
+                ) is not None
+                answer["edges"][0]["relationship"] = "AdminTo"
+                assert _bind_final_answer_to_receipts(
+                    task, answer, projector=bridge, resolver=resolver,
+                ) is None
+                answer["edges"][0]["relationship"] = "MemberOf"
+                answer["edges"][0]["properties"] = {"invented": True}
+                assert _bind_final_answer_to_receipts(
+                    task, answer, projector=bridge, resolver=resolver,
+                ) is None
+                del answer["edges"][0]["properties"]
+                answer["edges"][0]["direction"] = "inbound"
+                assert _bind_final_answer_to_receipts(
+                    task, answer, projector=bridge, resolver=resolver,
+                ) is None
+                answer["edges"][0].update(source_id="group-1", target_id="user-1")
+                assert _bind_final_answer_to_receipts(
+                    task, answer, projector=bridge, resolver=resolver,
+                ) is not None
 
 
 @pytest.mark.parametrize("implementation", ["mwnickerson", "mordavid"])

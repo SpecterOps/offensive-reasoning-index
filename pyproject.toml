@@ -20,6 +20,7 @@ dependencies = [
     "pydantic>=2.12,<3",
     "psutil>=5.9",
     "jsonschema>=4.26,<5",
+    "packaging>=24",
 ]
 
 [project.scripts]

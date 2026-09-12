@@ -22,6 +22,13 @@ from .provider_contract import ProviderAuthenticationError, ProviderCapabilityEr
 DEFAULT_ANTHROPIC_BASE_URL = "https://api.anthropic.com"
 _AUTH_HEADERS = frozenset({"authorization", "x-api-key", "proxy-authorization", "cookie"})
 _SDK_HASHES = {
+    "lib/streaming/_messages.py": (
+        "cf8088c4e60919a7d4d67c3dcfba6c16ff17eef28fd69348174e584c0630047b"
+    ),
+    "lib/streaming/_types.py": "f2ede3f18696d8a68c6c09a8d87174b7bf80550f45303d91988fa083799306f2",
+    "resources/messages/messages.py": (
+        "c0b07f6f23df15b0da19ef8d4482f85315fc74b3e0f0ff6d0849b32391a15bd0"
+    ),
     "_client.py": "240329ad19a78f1b990b1856a78c8e42691c54244cf60f8f55da96074e53c944",
     "_base_client.py": "19f44698fbd96dfb93e320b54643339dcc2788907a58dc94c86884bc41048e74",
     "lib/credentials/_chain.py": "9cf6f174ae345645e293ba0ccaf0204619de17d244ef361cd0c1e43a6c9f3455",

@@ -38,7 +38,9 @@ def prohibit_external(event, args):
 sys.addaudithook(prohibit_external)
 """
 
-_CHILD = _ISOLATION + r"""
+_CHILD = (
+    _ISOLATION
+    + r"""
 import asyncio
 import os
 from pathlib import Path
@@ -76,7 +78,19 @@ else:
             source_config_fingerprint="a" * 64,
             config=SimpleNamespace(models=(), track_modes=()),
         )
-    runner.prepare_v2_campaign = lambda _: (resolved, None, {}, "test", ())
+    prepared = (
+        {
+            Track.DIRECT: SimpleNamespace(
+                track=Track.DIRECT,
+                task_ids=("direct-task",),
+                selection_fingerprint=None,
+                release=SimpleNamespace(release_fingerprint="b" * 64),
+            )
+        }
+        if mode in {"readiness", "execution"}
+        else {}
+    )
+    runner.prepare_v2_campaign = lambda _: (resolved, None, prepared, "test", ())
 
     async def controlled_body(**kwargs):
         kwargs["lifecycle"].activate_track(Track.DIRECT)
@@ -93,6 +107,7 @@ else:
             raise
         print("INTERRUPTED", flush=True)
 """
+)
 
 
 def _environment(root: Path) -> dict[str, str]:
@@ -141,7 +156,9 @@ def _child(root: Path, mode: str) -> Iterator[subprocess.Popen[str]]:
 @pytest.mark.parametrize("mode", ["campaign_lock", "supervisor_lock"])
 @pytest.mark.parametrize("exit_mode", ["release", "crash"])
 def test_real_process_locks_exclude_contenders_and_release_after_exit(
-    tmp_path: Path, mode: str, exit_mode: str,
+    tmp_path: Path,
+    mode: str,
+    exit_mode: str,
 ) -> None:
     def lock():
         if mode == "campaign_lock":
@@ -173,7 +190,8 @@ def test_real_process_locks_exclude_contenders_and_release_after_exit(
 
 @pytest.mark.parametrize("termination", [signal.SIGTERM, signal.SIGKILL])
 def test_real_runner_interruption_is_durable_and_recoverable(
-    tmp_path: Path, termination: signal.Signals,
+    tmp_path: Path,
+    termination: signal.Signals,
 ) -> None:
     output = tmp_path / "campaign"
     receipt_path = output / "campaign-lifecycle-v2.private.json"
@@ -244,10 +262,17 @@ def _status_cli(root: Path, config: Path) -> subprocess.CompletedProcess[str]:
     assert _file_snapshot(root) == before, "status changed campaign/config evidence"
     output = result.stdout + result.stderr
     for forbidden in (
-        str(root), "SECRET_PROMPT", "SECRET_PROVIDER_RESPONSE",
-        "SECRET_TOOL_ARGUMENT", "SECRET_CREDENTIAL_VALUE", "/private/operator/campaign",
-        '"raw_response"', '"mcp_transcript"', '"mcp_tool_receipts"',
-        '"credential_source"', '"detail"',
+        str(root),
+        "SECRET_PROMPT",
+        "SECRET_PROVIDER_RESPONSE",
+        "SECRET_TOOL_ARGUMENT",
+        "SECRET_CREDENTIAL_VALUE",
+        "/private/operator/campaign",
+        '"raw_response"',
+        '"mcp_transcript"',
+        '"mcp_tool_receipts"',
+        '"credential_source"',
+        '"detail"',
     ):
         assert forbidden not in output
     return result
@@ -256,16 +281,20 @@ def _status_cli(root: Path, config: Path) -> subprocess.CompletedProcess[str]:
 def _file_snapshot(root: Path) -> dict[Path, tuple[int, str]]:
     return {
         path.relative_to(root): (
-            path.stat().st_mtime_ns, hashlib.sha256(path.read_bytes()).hexdigest(),
+            path.stat().st_mtime_ns,
+            hashlib.sha256(path.read_bytes()).hexdigest(),
         )
-        for path in root.rglob("*") if path.is_file()
+        for path in root.rglob("*")
+        if path.is_file()
     }
 
 
 @pytest.mark.parametrize("mode", ["readiness", "execution"])
 @pytest.mark.parametrize("termination", [signal.SIGTERM, signal.SIGKILL])
 def test_status_cli_observes_live_process_and_safe_recovery_action(
-    tmp_path: Path, mode: str, termination: signal.Signals,
+    tmp_path: Path,
+    mode: str,
+    termination: signal.Signals,
 ) -> None:
     config = _config(tmp_path)
     with _child(tmp_path, mode) as process:
@@ -286,9 +315,7 @@ def test_status_cli_observes_live_process_and_safe_recovery_action(
         "interrupted" if termination == signal.SIGTERM else "stale_running"
     )
     assert status["resume_allowed"] is True
-    assert status["next_action"] == (
-        "run_readiness" if mode == "readiness" else "resume_campaign"
-    )
+    assert status["next_action"] == ("run_readiness" if mode == "readiness" else "resume_campaign")
     assert status["progress"]["provider_attempts"] == 0
     assert status["progress"]["total_tokens"] == 0
 
@@ -308,5 +335,13 @@ def test_status_cli_redacts_private_evidence_and_refuses_corruption(tmp_path: Pa
         receipt.write_text(untrusted)
         rejected = _status_cli(tmp_path, config)
         assert rejected.returncode != 0
-        assert "Error:" in rejected.stderr
-        assert "ori-v2-campaign-status-v2" not in rejected.stdout
+        assert rejected.stderr == ""
+        assert json.loads(rejected.stdout) == {
+            "error": {
+                "code": "V2_CAMPAIGN_STATUS_FAILED",
+                "message": "v2 campaign command failed; inspect local operator logs",
+            },
+            "exit_code": 1,
+            "outcome": "error",
+            "schema_version": "ori-v2-campaign-status-result-v1",
+        }

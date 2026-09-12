@@ -184,6 +184,9 @@ def _raw_route() -> dict:
 
 
 class FakeCoordinator:
+    def require_confirmed_native_completion(self) -> None:
+        """This synthetic coordinator performs no native background work."""
+
     def __init__(self, result: CypherResult, *, enabled: bool = True) -> None:
         self.result = result
         self.config = DirectQuerySafetyConfig(enabled=enabled)

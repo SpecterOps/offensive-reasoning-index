@@ -9,7 +9,7 @@ from collections import Counter
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 import click
 import yaml
@@ -777,6 +777,296 @@ def main() -> None:
     load_dotenv(override=False)
 
 
+def _require_absolute_path(value: Path, *, option_name: str) -> Path:
+    """Keep supervisor inputs independent of the caller's working directory."""
+
+    if not value.is_absolute():
+        raise click.BadParameter("must be an absolute path", param_hint=option_name)
+    return value
+
+
+def _v2_command_error_payload(*, schema_version: str, code: str) -> dict[str, object]:
+    """Return the path-free error envelope used by V2 JSON command adapters."""
+
+    return {
+        "schema_version": schema_version,
+        "outcome": "error",
+        "error": {
+            "code": code,
+            "message": "v2 campaign command failed; inspect local operator logs",
+        },
+        "exit_code": 1,
+    }
+
+
+def _emit_v2_json_error(*, schema_version: str, code: str, exit_code: int = 1) -> NoReturn:
+    """Emit only the fixed V2 JSON error contract and terminate nonzero.
+
+    JSON callers are commonly supervisors or offline qualification tools.  A
+    parser, path, backend, or provider exception can carry local paths or
+    connection metadata, so it must never be serialized into their interface.
+    Human invocations retain Click's actionable diagnostic separately.
+    """
+
+    click.echo(
+        json.dumps(
+            {
+                **_v2_command_error_payload(schema_version=schema_version, code=code),
+                "exit_code": exit_code,
+            },
+            sort_keys=True,
+        )
+    )
+    raise click.exceptions.Exit(exit_code)
+
+
+@main.command(name="inspect-canary-v2")
+@click.option(
+    "--config",
+    "config_path",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+)
+@click.option("--json", "as_json", is_flag=True)
+def inspect_canary_v2_command(config_path: Path, as_json: bool) -> None:
+    """Validate exactly five diagnostic outcomes offline, without exposing task identities."""
+    from .eval.v2.diagnostic_result import inspect_canary_result
+
+    try:
+        result = inspect_canary_result(config_path)
+    except Exception:
+        if as_json:
+            _emit_v2_json_error(
+                schema_version="ori-v2-diagnostic-result-v1", code="DIAGNOSTIC_INSPECTION_FAILED"
+            )
+        raise click.ClickException("DIAGNOSTIC_INSPECTION_FAILED") from None
+    if as_json:
+        click.echo(result.model_dump_json())
+    else:
+        click.echo("DIAGNOSTIC INSPECTION: VALID (five non-ranking outcomes)")
+        for row in result.outcomes:
+            click.echo(f"  {row.kind}: {row.outcome.value}")
+
+
+@main.command(name="inspect-artifacts-v2")
+@click.option(
+    "--config",
+    "config_path",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+)
+@click.option("--json", "as_json", is_flag=True)
+def inspect_artifacts_v2_command(config_path: Path, as_json: bool) -> None:
+    """Validate original paired release inputs offline; JSON contains private paths."""
+    from .eval.v2.native_setup import inspect_artifact_index
+
+    try:
+        result = inspect_artifact_index(config_path)
+    except Exception:
+        if as_json:
+            _emit_v2_json_error(
+                schema_version="ori-v2-artifact-index-v1", code="ARTIFACT_INDEX_INVALID"
+            )
+        raise click.ClickException("ARTIFACT_INDEX_INVALID") from None
+    click.echo(json.dumps(result, sort_keys=True) if as_json else "ARTIFACT INDEX: VALID")
+
+
+@main.command(name="prepare-native-config-v2")
+@click.option(
+    "--config",
+    "config_path",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+)
+@click.option(
+    "--native-profile", required=True, type=click.Path(exists=True, dir_okay=False, path_type=Path)
+)
+@click.option(
+    "--runtime-spec", required=True, type=click.Path(exists=True, dir_okay=False, path_type=Path)
+)
+@click.option("--output-dir", required=True, type=click.Path(file_okay=False, path_type=Path))
+@click.option("--model", required=True)
+@click.option("--model-name", required=True)
+@click.option("--model-base-url", required=True)
+@click.option("--max-infra-retries", type=click.IntRange(min=0), default=1)
+@click.option("--json", "as_json", is_flag=True)
+def prepare_native_config_v2_command(as_json: bool, **kwargs) -> None:
+    """Prepare one native MCP-only model config from the unchanged paired release."""
+    from .eval.v2.native_setup import prepare_native_config
+
+    try:
+        result = prepare_native_config(**kwargs)
+    except Exception:
+        if as_json:
+            _emit_v2_json_error(
+                schema_version="ori-v2-native-config-result-v1",
+                code="NATIVE_CONFIG_PREPARATION_FAILED",
+            )
+        raise click.ClickException("NATIVE_CONFIG_PREPARATION_FAILED") from None
+    click.echo(
+        json.dumps(result, sort_keys=True)
+        if as_json
+        else "NATIVE CONFIG: PREPARED (no service calls)"
+    )
+
+
+@main.command(name="integration-info")
+@click.option(
+    "--json",
+    "json_output",
+    is_flag=True,
+    default=False,
+    help="Emit the versioned machine integration contract as JSON.",
+)
+def integration_info_command(json_output: bool) -> None:
+    """Describe installed, offline-safe ORI integration capabilities."""
+
+    from .eval.v2.integration_info import integration_info_payload
+
+    payload = integration_info_payload()
+    if json_output:
+        click.echo(json.dumps(payload, indent=2, sort_keys=True))
+        return
+
+    build = payload["build"]
+    v2 = payload["v2"]
+    capabilities = payload["capabilities"]
+    click.echo("ORI INTEGRATION INFO")
+    click.echo(f"  Contract: {payload['integration_contract_version']}")
+    click.echo(f"  Distribution: {build['distribution']} {build['distribution_version']}")
+    click.echo(f"  Installed source fingerprint: {build['installed_source_fingerprint']}")
+    click.echo(f"  V2 protocol: {v2['protocol_version']} ({v2['runner_version']})")
+    click.echo(f"  Campaign status schema: {v2['schemas']['campaign_status']}")
+    click.echo(f"  Supervisor state schema: {v2['schemas']['supervisor_state']}")
+    click.echo(
+        "  Diagnostic canary: "
+        + ("supported" if capabilities["diagnostic_canary"] else "not supported")
+    )
+    click.echo(
+        "  Validated public export: "
+        + ("supported" if capabilities["validated_public_export"] else "not supported")
+    )
+    click.echo("  Native registry:")
+    for implementation in payload["native_implementation_registry"]:
+        click.echo(
+            "    "
+            f"{implementation['implementation_id']}: {implementation['revision']} "
+            f"({implementation['backend']})"
+        )
+
+
+@main.command(name="supervise-v2")
+@click.option(
+    "--config",
+    "config_path",
+    required=True,
+    type=click.Path(file_okay=True, dir_okay=False, path_type=Path),
+    help="Absolute path to the exact protocol-v2 campaign YAML.",
+)
+@click.option(
+    "--state",
+    "state_path",
+    required=True,
+    type=click.Path(file_okay=True, dir_okay=False, path_type=Path),
+    help="Absolute private supervisor-state path outside the campaign output directory.",
+)
+@click.option(
+    "--ori-executable",
+    required=True,
+    type=click.Path(file_okay=True, dir_okay=False, path_type=Path),
+    help="Absolute path to the approved installed ORI console executable.",
+)
+@click.option(
+    "--token-ceiling",
+    required=True,
+    type=click.IntRange(min=1),
+    help="Maximum cumulative provider tokens observable by the supervisor.",
+)
+@click.option(
+    "--max-restarts",
+    required=True,
+    type=click.IntRange(min=0),
+    help="Maximum durable supervisor restarts after the initial launch.",
+)
+@click.option(
+    "--poll-interval-seconds",
+    default=15.0,
+    show_default=True,
+    type=click.FloatRange(min=0, min_open=True),
+    help="Seconds between read-only campaign-status checks.",
+)
+@click.option(
+    "--execute-approved",
+    is_flag=True,
+    default=False,
+    help="Explicitly authorize execution or execution recovery after readiness.",
+)
+@click.option(
+    "--json",
+    "json_output",
+    is_flag=True,
+    default=False,
+    help="Emit a versioned supervisor decision or error envelope as JSON.",
+)
+def supervise_v2_command(
+    config_path: Path,
+    state_path: Path,
+    ori_executable: Path,
+    token_ceiling: int,
+    max_restarts: int,
+    poll_interval_seconds: float,
+    execute_approved: bool,
+    json_output: bool,
+) -> None:
+    """Run the durable installed V2 campaign supervisor.
+
+    This command is only an installed adapter.  All state, budget, status,
+    recovery, and owned-child rules remain in ``campaign_supervisor``.
+    """
+
+    from .eval.v2.campaign_supervisor import CampaignSupervisorError, supervise_v2_campaign
+    from .eval.v2.supervisor_cli import (
+        supervisor_error_payload,
+        supervisor_exit_code,
+        supervisor_result_payload,
+    )
+
+    try:
+        config_path = _require_absolute_path(config_path, option_name="--config")
+        state_path = _require_absolute_path(state_path, option_name="--state")
+        ori_executable = _require_absolute_path(ori_executable, option_name="--ori-executable")
+        decision = supervise_v2_campaign(
+            config_path=config_path,
+            state_path=state_path,
+            token_ceiling=token_ceiling,
+            max_restarts=max_restarts,
+            execute_approved=execute_approved,
+            poll_interval_seconds=poll_interval_seconds,
+            ori_executable=str(ori_executable),
+        )
+    except (CampaignSupervisorError, OSError, ValueError, click.ClickException) as exc:
+        if json_output:
+            click.echo(json.dumps(supervisor_error_payload(), sort_keys=True))
+        else:
+            click.echo(f"supervisor stopped: {exc}", err=True)
+        raise click.exceptions.Exit(1) from exc
+
+    if json_output:
+        click.echo(
+            json.dumps(supervisor_result_payload(decision, execute_approved=execute_approved))
+        )
+    elif decision.action == "await_execution_approval":
+        click.echo("paid execution requires --execute-approved", err=True)
+    elif decision.action == "stop":
+        click.echo(f"supervisor stopped: {decision.reason}", err=True)
+    else:
+        click.echo(f"supervisor: {decision.reason}")
+
+    exit_code = supervisor_exit_code(decision)
+    if exit_code:
+        raise click.exceptions.Exit(exit_code)
+
+
 @main.group(name="discovery")
 def discovery_group() -> None:
     """Compile, preflight, and grade V28-native open-world discovery artifacts."""
@@ -970,7 +1260,10 @@ def benchmark_describe(name: str) -> None:
     default=None,
     help="Optional artifact filename prefix. Defaults to <benchmark>-<version>-seed-<seed>.",
 )
-def benchmark_generate(name: str, seed: int, output_dir: str, output_prefix: str | None) -> None:
+@click.option("--json", "json_output", is_flag=True, default=False)
+def benchmark_generate(
+    name: str, seed: int, output_dir: str, output_prefix: str | None, json_output: bool = False
+) -> None:
     """Generate a seeded benchmark dataset and manifest."""
 
     try:
@@ -1052,6 +1345,29 @@ def benchmark_generate(name: str, seed: int, output_dir: str, output_prefix: str
         },
     )
 
+    if json_output:
+        from .eval.v2.native_setup import file_reference
+
+        click.echo(
+            json.dumps(
+                {
+                    "schema_version": "ori-generation-result-v1",
+                    "outcome": "generated",
+                    "product": benchmark.name,
+                    "seed": seed,
+                    "provider_calls": 0,
+                    "service_contacts": 0,
+                    "artifacts": {
+                        "source_manifest": file_reference(
+                            manifest_path, schema_version=manifest["schema_version"]
+                        ),
+                        "source_archive": file_reference(zip_path),
+                    },
+                },
+                sort_keys=True,
+            )
+        )
+        return
     click.echo(f"Generated benchmark: {benchmark.name}")
     click.echo(f"  Version: {profile.benchmark_version}")
     click.echo(f"  Generator: {profile.generator_version}")
@@ -1143,6 +1459,13 @@ def benchmark_run(name: str, mode: str) -> None:
 @click.option("--servers", type=int, default=4, help="Number of servers")
 @click.option("--output", "-o", type=click.Path(), default="datasets/output", help="Output path")
 @click.option("--zip/--no-zip", "as_zip", default=True, help="Output as zip (BH CE ingest format)")
+@click.option(
+    "--json",
+    "json_output",
+    is_flag=True,
+    default=False,
+    help="Emit artifact references for a named product; no service calls.",
+)
 def generate(
     benchmark: str | None,
     domain: str,
@@ -1152,18 +1475,31 @@ def generate(
     servers: int,
     output: str,
     as_zip: bool,
+    json_output: bool = False,
 ) -> None:
     """Generate a synthetic AD graph or named benchmark product."""
     if benchmark is not None:
         ctx = click.get_current_context()
-        ctx.invoke(
-            benchmark_generate,
-            name=benchmark,
-            seed=seed,
-            output_dir=output,
-            output_prefix=None,
-        )
+        try:
+            ctx.invoke(
+                benchmark_generate,
+                name=benchmark,
+                seed=seed,
+                output_dir=output,
+                output_prefix=None,
+                json_output=json_output,
+            )
+        except Exception:
+            if json_output:
+                _emit_v2_json_error(
+                    schema_version="ori-generation-result-v1", code="GENERATION_FAILED"
+                )
+            raise
         return
+    if json_output:
+        _emit_v2_json_error(
+            schema_version="ori-generation-result-v1", code="NAMED_PRODUCT_REQUIRED"
+        )
 
     click.echo(f"Generating graph: domain={domain}, seed={seed}")
 
@@ -1238,12 +1574,20 @@ def generate(
     type=click.Path(file_okay=False),
     help="Directory for separated public/private v2 artifacts.",
 )
+@click.option(
+    "--json",
+    "json_output",
+    is_flag=True,
+    default=False,
+    help="Emit versioned machine-readable artifact identities.",
+)
 def compile_v2_command(
     manifest_path: str,
     archive_path: str,
     product: str,
     track: str,
     output_dir: str,
+    json_output: bool,
 ) -> None:
     """Compile and offline-certify one explicit v2 product track."""
     from .eval.v2.cli_support import compile_v2_files
@@ -1257,8 +1601,36 @@ def compile_v2_command(
             track=Track(track),
             output_dir=Path(output_dir),
         )
-    except ValueError as exc:
+    except Exception as exc:
+        if json_output:
+            _emit_v2_json_error(
+                schema_version="ori-v2-compile-result-v1",
+                code="V2_COMPILE_FAILED",
+            )
+        if not isinstance(exc, ValueError):
+            raise
         raise click.ClickException(str(exc)) from exc
+
+    if json_output:
+        click.echo(
+            json.dumps(
+                {
+                    "schema_version": "ori-v2-compile-result-v1",
+                    "outcome": "passed",
+                    "product": product,
+                    "track": track,
+                    "artifacts": {
+                        label: {
+                            "path": str(path),
+                            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                        }
+                        for label, path in paths.items()
+                    },
+                },
+                sort_keys=True,
+            )
+        )
+        return
 
     click.echo("V2 COMPILE: PASS")
     for label, path in paths.items():
@@ -1286,12 +1658,20 @@ def compile_v2_command(
     help="Directory containing both certify-v2-live catalogs.",
 )
 @click.option("--output-dir", required=True, type=click.Path(file_okay=False))
+@click.option(
+    "--json",
+    "json_output",
+    is_flag=True,
+    default=False,
+    help="Emit versioned machine-readable selection identities.",
+)
 def select_v2_command(
     manifest_path: str,
     archive_path: str,
     compiled_dir: str,
     certification_dir: str,
     output_dir: str,
+    json_output: bool,
 ) -> None:
     """Select a paired OAIC release: exactly 50 Direct and 50 MCP tasks."""
     from .eval.v2.cli_support import select_v2_files
@@ -1304,11 +1684,113 @@ def select_v2_command(
             certification_dir=Path(certification_dir),
             output_dir=Path(output_dir),
         )
-    except (ValueError, OSError) as exc:
+    except Exception as exc:
+        if json_output:
+            _emit_v2_json_error(
+                schema_version="ori-v2-selection-result-v1",
+                code="V2_SELECTION_FAILED",
+            )
+        if not isinstance(exc, (ValueError, OSError)):
+            raise
         raise click.ClickException(str(exc)) from exc
+    if json_output:
+        click.echo(
+            json.dumps(
+                {
+                    "schema_version": "ori-v2-selection-result-v1",
+                    "outcome": "passed",
+                    "provider_calls": 0,
+                    "artifacts": {
+                        label: {
+                            "path": str(path),
+                            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                        }
+                        for label, path in paths.items()
+                    },
+                },
+                sort_keys=True,
+            )
+        )
+        return
     click.echo("V2 SELECTION: PASS (50 Direct + 50 MCP; no service or model calls)")
     for label, path in paths.items():
         click.echo(f"  {label}: {path}")
+
+
+@main.command(name="prepare-canary-v2")
+@click.option(
+    "--config",
+    "config_path",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False),
+    help="Official paired-release V2 campaign YAML.",
+)
+@click.option(
+    "--suite",
+    required=True,
+    type=click.Choice(["native-five-kind-v1"]),
+    help="Fixed diagnostic-only suite to derive from the certified MCP pool.",
+)
+@click.option(
+    "--output-dir",
+    required=True,
+    type=click.Path(file_okay=False),
+    help="Fresh directory for the diagnostic selection and derived config.",
+)
+@click.option(
+    "--json",
+    "json_output",
+    is_flag=True,
+    default=False,
+    help="Emit the derived canary artifact paths as JSON.",
+)
+def prepare_canary_v2_command(
+    config_path: str,
+    suite: str,
+    output_dir: str,
+    json_output: bool,
+) -> None:
+    """Prepare an offline, non-ranking five-kind diagnostic canary."""
+
+    from .eval.v2.cli_support import prepare_canary_v2_files
+
+    try:
+        paths = prepare_canary_v2_files(
+            config_path=Path(config_path),
+            suite=suite,
+            output_dir=Path(output_dir),
+        )
+    except Exception as exc:
+        if json_output:
+            _emit_v2_json_error(
+                schema_version="ori-v2-canary-preparation-result-v1",
+                code="V2_CANARY_PREPARATION_FAILED",
+            )
+        if not isinstance(exc, (OSError, ValueError)):
+            raise
+        raise click.ClickException(str(exc)) from exc
+
+    if json_output:
+        click.echo(
+            json.dumps(
+                {
+                    "schema_version": "ori-v2-canary-preparation-result-v1",
+                    "outcome": "prepared",
+                    "purpose": "diagnostic_canary",
+                    "ranking_eligible": False,
+                    "suite": suite,
+                    "artifacts": {name: str(path) for name, path in paths.items()},
+                },
+                sort_keys=True,
+            )
+        )
+        return
+
+    click.echo("V2 DIAGNOSTIC CANARY: PREPARED")
+    click.echo("  Purpose: diagnostic_canary (not ranking eligible)")
+    click.echo(f"  Suite: {suite}")
+    for name, path in paths.items():
+        click.echo(f"  {name}: {path}")
 
 
 @main.command(name="run-v2")
@@ -1328,7 +1810,14 @@ def select_v2_command(
         "flag, run only artifact, capability, health, and live-graph gates."
     ),
 )
-def run_v2_command(config_path: str, execute: bool) -> None:
+@click.option(
+    "--json",
+    "json_output",
+    is_flag=True,
+    default=False,
+    help="Emit a versioned readiness or completion projection as JSON.",
+)
+def run_v2_command(config_path: str, execute: bool, json_output: bool) -> None:
     """Preflight or execute an explicit, candidate-certified V2 campaign."""
     import asyncio
 
@@ -1336,16 +1825,41 @@ def run_v2_command(config_path: str, execute: bool) -> None:
     from .eval.v2.campaign_runner import run_v2_campaign
 
     try:
+        resolved = load_v2_campaign_config(Path(config_path))
+        if resolved.config.purpose != "official":
+            raise ValueError(
+                "run-v2 requires purpose: official; use run-canary-v2 for diagnostic canaries"
+            )
         readiness = asyncio.run(
             run_v2_campaign(
                 Path(config_path),
                 preflight_only=not execute,
-                progress=click.echo,
+                progress=None if json_output else click.echo,
             )
         )
-    except ValueError as exc:
+    except Exception as exc:
+        if json_output:
+            _emit_v2_json_error(
+                schema_version="ori-v2-run-result-v1",
+                code="V2_RUN_FAILED",
+            )
+        if not isinstance(exc, (OSError, ValueError)):
+            raise
         raise click.ClickException(str(exc)) from exc
 
+    if json_output:
+        click.echo(
+            json.dumps(
+                {
+                    "schema_version": "ori-v2-run-result-v1",
+                    "outcome": "completed" if execute else "readiness_passed",
+                    "execute": execute,
+                    "readiness": readiness.model_dump(mode="json"),
+                },
+                sort_keys=True,
+            )
+        )
+        return
     if execute:
         click.echo("V2 MODEL CAMPAIGN: COMPLETE")
     else:
@@ -1363,7 +1877,108 @@ def run_v2_command(config_path: str, execute: bool) -> None:
             f"  {track.track.value}: {track.task_count} candidate tasks "
             f"(release={track.candidate_release_fingerprint[:12]})"
         )
-    resolved = load_v2_campaign_config(Path(config_path))
+    click.echo(f"  Readiness: {resolved.output_dir / 'v2-run-readiness.private.json'}")
+
+
+@main.command(name="run-canary-v2")
+@click.option(
+    "--config",
+    "config_path",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False),
+    help="Prepared diagnostic-canary V2 campaign YAML.",
+)
+@click.option(
+    "--execute",
+    is_flag=True,
+    default=False,
+    help="Launch only the configured diagnostic-canary model calls after readiness passes.",
+)
+@click.option(
+    "--json",
+    "json_output",
+    is_flag=True,
+    default=False,
+    help="Emit the canary readiness or completion projection as JSON.",
+)
+def run_canary_v2_command(config_path: str, execute: bool, json_output: bool) -> None:
+    """Run or preflight a typed diagnostic-canary V2 campaign.
+
+    The normal V2 runner validates the explicit ``diagnostic_canary`` purpose,
+    canary selection receipt, five-task schedule, graph gates, checkpoint
+    namespace, and model boundary.  This command adds no scheduler or model
+    behavior of its own.
+    """
+
+    import asyncio
+
+    from .eval.v2.campaign_config import load_v2_campaign_config
+    from .eval.v2.campaign_runner import run_v2_campaign
+    from .eval.v2.cli_support import ensure_native_canary_qualification
+
+    try:
+        asyncio.run(ensure_native_canary_qualification(Path(config_path)))
+        resolved = load_v2_campaign_config(Path(config_path))
+        if resolved.config.purpose != "diagnostic_canary":
+            raise ValueError("run-canary-v2 requires purpose: diagnostic_canary")
+        readiness = asyncio.run(
+            run_v2_campaign(
+                Path(config_path),
+                preflight_only=not execute,
+                progress=None if json_output else click.echo,
+            )
+        )
+    except Exception as exc:
+        if json_output:
+            _emit_v2_json_error(
+                schema_version="ori-v2-canary-run-result-v1",
+                code="V2_CANARY_RUN_FAILED",
+            )
+        if not isinstance(exc, (OSError, ValueError)):
+            raise
+        raise click.ClickException(str(exc)) from exc
+
+    if json_output:
+        click.echo(
+            json.dumps(
+                {
+                    "schema_version": "ori-v2-canary-run-result-v1",
+                    "outcome": "completed" if execute else "readiness_passed",
+                    "purpose": "diagnostic_canary",
+                    "ranking_eligible": False,
+                    "execute": execute,
+                    "readiness": {
+                        "graph_fingerprint": readiness.graph_fingerprint,
+                        "model_count": readiness.model_count,
+                        "tracks": [
+                            {
+                                "track": track.track.value,
+                                "task_count": track.task_count,
+                                "candidate_release_fingerprint": (
+                                    track.candidate_release_fingerprint
+                                ),
+                            }
+                            for track in readiness.tracks
+                        ],
+                    },
+                },
+                sort_keys=True,
+            )
+        )
+        return
+
+    if execute:
+        click.echo("V2 DIAGNOSTIC CANARY: COMPLETE")
+    else:
+        click.echo("V2 DIAGNOSTIC CANARY READINESS: PASS")
+        click.echo("  No model calls were launched. Add --execute to run the canary.")
+    click.echo(f"  Graph: {readiness.graph_fingerprint}")
+    click.echo(f"  Models: {readiness.model_count}")
+    for track in readiness.tracks:
+        click.echo(
+            f"  {track.track.value}: {track.task_count} diagnostic tasks "
+            f"(release={track.candidate_release_fingerprint[:12]})"
+        )
     click.echo(f"  Readiness: {resolved.output_dir / 'v2-run-readiness.private.json'}")
 
 
@@ -1388,7 +2003,14 @@ def campaign_status_command(config_path: str, json_output: bool) -> None:
 
     try:
         status = inspect_v2_campaign_status(Path(config_path))
-    except ValueError as exc:
+    except Exception as exc:
+        if json_output:
+            _emit_v2_json_error(
+                schema_version="ori-v2-campaign-status-result-v1",
+                code="V2_CAMPAIGN_STATUS_FAILED",
+            )
+        if not isinstance(exc, ValueError):
+            raise
         raise click.ClickException(str(exc)) from exc
 
     if json_output:
@@ -1440,6 +2062,86 @@ def campaign_status_command(config_path: str, json_output: bool) -> None:
     click.echo(f"  Resume allowed: {'yes' if status.resume_allowed else 'no'}")
 
 
+@main.command(name="export-campaign-v2")
+@click.option(
+    "--config",
+    "config_path",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False),
+    help="Exact completed V2 campaign YAML.",
+)
+@click.option(
+    "--output-dir",
+    required=True,
+    type=click.Path(file_okay=False),
+    help="Destination directory for the validated public summary.",
+)
+@click.option(
+    "--public",
+    "public_output",
+    is_flag=True,
+    default=False,
+    help="Acknowledge that this command writes a redacted public summary.",
+)
+@click.option(
+    "--json",
+    "json_output",
+    is_flag=True,
+    default=False,
+    help="Emit the validated public-export path and purpose as JSON.",
+)
+def export_campaign_v2_command(
+    config_path: str,
+    output_dir: str,
+    public_output: bool,
+    json_output: bool,
+) -> None:
+    """Export validated, redacted V2 campaign aggregates only."""
+
+    from .eval.v2.campaign_config import load_v2_campaign_config
+    from .eval.v2.campaign_export import export_v2_campaign_public
+
+    if not public_output:
+        if json_output:
+            _emit_v2_json_error(
+                schema_version="ori-v2-campaign-export-result-v1",
+                code="V2_CAMPAIGN_EXPORT_FAILED",
+            )
+        raise click.UsageError("export-campaign-v2 requires --public")
+    try:
+        resolved = load_v2_campaign_config(Path(config_path))
+        destination = export_v2_campaign_public(
+            config_path=Path(config_path),
+            output_dir=Path(output_dir),
+        )
+    except Exception as exc:
+        if json_output:
+            _emit_v2_json_error(
+                schema_version="ori-v2-campaign-export-result-v1",
+                code="V2_CAMPAIGN_EXPORT_FAILED",
+            )
+        if not isinstance(exc, (OSError, ValueError)):
+            raise
+        raise click.ClickException(str(exc)) from exc
+
+    purpose = resolved.config.purpose
+    payload = {
+        "schema_version": "ori-v2-campaign-export-result-v1",
+        "outcome": "exported",
+        "purpose": purpose,
+        "ranking_eligible": purpose == "official",
+        "public_export": str(destination),
+    }
+    if json_output:
+        click.echo(json.dumps(payload, sort_keys=True))
+        return
+
+    label = "DIAGNOSTIC CANARY" if purpose == "diagnostic_canary" else "OFFICIAL"
+    click.echo(f"V2 {label} PUBLIC EXPORT: PASS")
+    click.echo(f"  Purpose: {purpose}")
+    click.echo(f"  Export: {destination}")
+
+
 @main.command(name="certify-v2-live")
 @click.option(
     "--manifest",
@@ -1465,6 +2167,13 @@ def campaign_status_command(config_path: str, json_output: bool) -> None:
 )
 @click.option("--bhce-url", default=None, help="Override BH CE base URL.")
 @click.option("--page-size", type=click.IntRange(min=1, max=2000), default=1000)
+@click.option(
+    "--json",
+    "json_output",
+    is_flag=True,
+    default=False,
+    help="Emit versioned machine-readable certification identities.",
+)
 def certify_v2_live_command(
     manifest_path: str,
     archive_path: str,
@@ -1472,6 +2181,7 @@ def certify_v2_live_command(
     output_dir: str,
     bhce_url: str | None,
     page_size: int,
+    json_output: bool,
 ) -> None:
     """Certify both v2 tracks against a controlled BloodHound graph."""
     import asyncio
@@ -1489,62 +2199,464 @@ def certify_v2_live_command(
                 page_size=page_size,
             )
         )
-    except ValueError as exc:
+    except Exception as exc:
+        if json_output:
+            _emit_v2_json_error(
+                schema_version="ori-v2-live-certification-result-v1",
+                code="V2_LIVE_CERTIFICATION_FAILED",
+            )
+        if not isinstance(exc, ValueError):
+            raise
         raise click.ClickException(str(exc)) from exc
 
+    if json_output:
+        click.echo(
+            json.dumps(
+                {
+                    "schema_version": "ori-v2-live-certification-result-v1",
+                    "outcome": "passed",
+                    "product": product,
+                    "artifacts": {
+                        label: {
+                            "path": str(path),
+                            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                        }
+                        for label, path in paths.items()
+                    },
+                },
+                sort_keys=True,
+            )
+        )
+        return
     click.echo("V2 LIVE CERTIFICATION: PASS")
     for label, path in paths.items():
         click.echo(f"  {label}: {path}")
 
 
+@main.command(name="check-native-feasibility")
+@click.option("--manifest", "manifest_path", required=True, type=str)
+@click.option("--archive", "archive_path", required=True, type=str)
+@click.option("--selection", "selection_path", required=True, type=str)
+@click.option("--native-profile", "profile_path", required=True, type=str)
+@click.option(
+    "--output-dir",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Export native tasks and sealed oracles to a new private directory if feasible.",
+)
+@click.option("--json", "as_json", is_flag=True, help="Print redacted aggregate status as JSON.")
+def check_native_feasibility_command(
+    manifest_path: str,
+    archive_path: str,
+    selection_path: str,
+    profile_path: str,
+    as_json: bool,
+    output_dir: Path | None,
+) -> None:
+    """Check all selected MCP tasks offline; never launch a model or MCP server.
+
+    Exit 0: offline feasible; 1: invalid inputs; 2: unsupported cell;
+    3: compiler/certifier defect. No result means live admission or ranking.
+    """
+    from .eval.v2.native_capability import NativeCapabilityProfile
+    from .eval.v2.native_feasibility import (
+        NativeFeasibilityInputError,
+        assess_native_selected_cell,
+        write_native_development_artifacts,
+    )
+    from .eval.v2.protocol import _read_json
+    from .eval.v2.release_selection import SelectedReleaseReceipt
+
+    try:
+        inputs = dict(
+            manifest=_read_json(Path(manifest_path)),
+            archive=Path(archive_path).read_bytes(),
+            selection=SelectedReleaseReceipt.model_validate_json(Path(selection_path).read_text()),
+            profile=NativeCapabilityProfile.model_validate_json(Path(profile_path).read_text()),
+        )
+    except (ValueError, TypeError, OSError) as exc:
+        # Input paths, source contents and raw validation errors remain private.
+        if as_json:
+            _emit_v2_json_error(
+                schema_version="ori-native-feasibility-v1", code="NATIVE_FEASIBILITY_INPUT_INVALID"
+            )
+        raise click.ClickException("NATIVE_FEASIBILITY_INPUT_INVALID") from exc
+    try:
+        result = assess_native_selected_cell(**inputs)
+    except NativeFeasibilityInputError as exc:
+        if as_json:
+            _emit_v2_json_error(
+                schema_version="ori-native-feasibility-v1", code="NATIVE_FEASIBILITY_INPUT_INVALID"
+            )
+        raise click.ClickException("NATIVE_FEASIBILITY_INPUT_INVALID") from exc
+    except Exception:
+        if as_json:
+            _emit_v2_json_error(
+                schema_version="ori-native-feasibility-v1",
+                code="NATIVE_FEASIBILITY_HARNESS_ERROR",
+                exit_code=3,
+            )
+        click.echo("NATIVE_FEASIBILITY_HARNESS_ERROR", err=True)
+        raise click.exceptions.Exit(3) from None
+    counts = Counter(task.status for task in result.tasks)
+    status = (
+        "harness_error"
+        if counts["harness_error"]
+        else "offline_feasible"
+        if result.offline_feasible
+        else "unsupported"
+    )
+    if output_dir is not None and status == "offline_feasible":
+        try:
+            write_native_development_artifacts(result.development, output_dir)
+        except Exception as exc:
+            if as_json:
+                _emit_v2_json_error(
+                    schema_version="ori-native-feasibility-v1",
+                    code="NATIVE_ARTIFACT_EXPORT_FAILED",
+                )
+            raise click.ClickException("NATIVE_ARTIFACT_EXPORT_FAILED") from exc
+    summary = {
+        "schema_version": "ori-native-feasibility-v1",
+        "implementation": result.implementation_id,
+        "status": status,
+        "selected_tasks": len(result.tasks),
+        "offline_supported": counts["offline_supported"],
+        "unsupported": counts["unsupported"],
+        "harness_errors": counts["harness_error"],
+        "campaign_admitted": False,
+        "provider_calls": 0,
+        "artifacts": {},
+    }
+    if output_dir is not None:
+        summary["artifacts_written"] = status == "offline_feasible"
+        if status == "offline_feasible":
+            from .eval.v2.native_setup import file_reference
+
+            summary["artifacts"] = {
+                "public": file_reference(output_dir / "native-public-v2.json"),
+                "oracles": file_reference(output_dir / "native-oracles-v2.private.json"),
+            }
+    if as_json:
+        click.echo(json.dumps(summary, sort_keys=True))
+    else:
+        click.echo(f"NATIVE OFFLINE FEASIBILITY: {status.upper()}")
+        click.echo(
+            f"Selected: {len(result.tasks)}; supported: {counts['offline_supported']}; "
+            f"unsupported: {counts['unsupported']}; "
+            f"harness errors: {counts['harness_error']}"
+        )
+        click.echo(
+            "No services contacted. Live qualification and campaign admission remain required."
+        )
+        if output_dir is not None and status == "offline_feasible":
+            click.echo(
+                "Wrote native-public-v2.json and native-oracles-v2.private.json; "
+                "these are development artifacts, not candidate certification."
+            )
+    if status != "offline_feasible":
+        raise click.exceptions.Exit(3 if status == "harness_error" else 2)
+
+
+@main.command(name="qualify-native-mcp")
+@click.option("--config", "config_path", required=True, type=click.Path(path_type=Path))
+@click.option("--output-dir", type=click.Path(path_type=Path), default=None)
+@click.option(
+    "--execute",
+    is_flag=True,
+    help="Run controlled native qualification services; never contact a model.",
+)
+@click.option("--json", "as_json", is_flag=True, help="Print redacted aggregate status.")
+def qualify_native_mcp_command(
+    config_path: Path, output_dir: Path | None, execute: bool, as_json: bool
+) -> None:
+    """Prepare native qualification offline; service execution is explicit."""
+    import asyncio
+
+    from .eval.v2.cli_support import run_native_qualification_owned
+
+    try:
+        summary = asyncio.run(
+            run_native_qualification_owned(
+                config_path=config_path,
+                output_dir=output_dir,
+                execute=execute,
+                pending_status=lambda message: click.echo(message, err=True),
+            )
+        )
+    except Exception as exc:
+        # Parser, transport and filesystem exceptions may contain private inputs.
+        safe = str(exc)
+        allowed = {
+            "NATIVE_SELECTED_CELL_UNSUPPORTED",
+            "NATIVE_CE_QUALIFICATION_UNAVAILABLE",
+            "NATIVE_QUALIFICATION_OUTPUT_REQUIRED",
+            "NATIVE_CONNECTION_ENVIRONMENT_INVALID",
+            "NATIVE_SESSION_CLEANUP_PENDING",
+        }
+        code = safe if safe in allowed else "NATIVE_QUALIFICATION_FAILED"
+        if as_json:
+            _emit_v2_json_error(schema_version="ori-native-qualification-v1", code=code)
+        raise click.ClickException(code) from None
+    if as_json:
+        click.echo(json.dumps(summary, sort_keys=True))
+    else:
+        click.echo(f"NATIVE QUALIFICATION: {summary['status'].upper()}")
+        click.echo("No provider calls. Campaign admission remains separate.")
+
+
+@main.command(name="fingerprint-native-runtime")
+@click.option(
+    "--runtime-root",
+    "runtime_roots",
+    required=True,
+    multiple=True,
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="Ordered, disjoint frozen runtime roots; repeat for each root.",
+)
+@click.option(
+    "--dependency-lock", required=True, type=click.Path(exists=True, dir_okay=False, path_type=Path)
+)
+@click.option("--json", "as_json", is_flag=True)
+def fingerprint_native_runtime_command(
+    runtime_roots: tuple[Path, ...],
+    dependency_lock: Path,
+    as_json: bool,
+) -> None:
+    """Hash installed runtime bytes and a lock without launching any process.
+
+    This does not install packages, inspect interpreter startup, verify installed
+    dependencies, discover MCP capabilities, or qualify a campaign.
+    """
+    from .native_runtime import fingerprint_native_runtime_roots
+
+    try:
+        result = {
+            "schema_version": "ori-native-runtime-fingerprint-v1",
+            "provider_calls": 0,
+            "runtime_fingerprint": fingerprint_native_runtime_roots(
+                tuple(path.absolute() for path in runtime_roots),
+            ),
+            "dependency_lock_fingerprint": hashlib.sha256(dependency_lock.read_bytes()).hexdigest(),
+        }
+    except Exception as exc:
+        if as_json:
+            _emit_v2_json_error(
+                schema_version="ori-native-runtime-fingerprint-v1",
+                code="NATIVE_RUNTIME_FINGERPRINT_FAILED",
+            )
+        raise click.ClickException("NATIVE_RUNTIME_FINGERPRINT_FAILED") from exc
+    if as_json:
+        click.echo(json.dumps(result, sort_keys=True))
+    else:
+        for key, value in result.items():
+            click.echo(f"{key}: {value}")
+        click.echo("Byte hashes only. No startup, dependency or campaign qualification.")
+
+
+@main.command(name="discover-native-profile")
+@click.option(
+    "--implementation",
+    "implementation_id",
+    required=True,
+    type=click.Choice(["mwnickerson", "mordavid", "armadin"]),
+)
+@click.option(
+    "--mcp-dir", required=True, type=click.Path(exists=True, file_okay=False, path_type=Path)
+)
+@click.option(
+    "--python-executable",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+)
+@click.option(
+    "--runtime-root",
+    "runtime_roots",
+    required=True,
+    multiple=True,
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+)
+@click.option("--runtime-fingerprint", required=True)
+@click.option(
+    "--dependency-lock", required=True, type=click.Path(exists=True, dir_okay=False, path_type=Path)
+)
+@click.option("--dependency-lock-fingerprint", required=True)
+@click.option(
+    "--manifest",
+    "source_manifest_path",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+)
+@click.option(
+    "--archive",
+    "archive_path",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+)
+@click.option("--product", required=True, type=click.Choice(["simple", "complex", "oaic-2026-v1"]))
+@click.option("--database", "databases", multiple=True)
+@click.option("--output-dir", required=True, type=click.Path(file_okay=False, path_type=Path))
+@click.option("--timeout-seconds", default=1200.0, type=click.FloatRange(min=0, min_open=True))
+@click.option("--page-size", default=500, type=click.IntRange(min=1, max=2000))
+@click.option(
+    "--execute",
+    is_flag=True,
+    help="Launch native discovery and controlled-backend reads; no model calls.",
+)
+@click.option("--json", "as_json", is_flag=True)
+def discover_native_profile_command(
+    implementation_id: str,
+    mcp_dir: Path,
+    python_executable: Path,
+    runtime_roots: tuple[Path, ...],
+    runtime_fingerprint: str,
+    dependency_lock: Path,
+    dependency_lock_fingerprint: str,
+    source_manifest_path: Path,
+    archive_path: Path,
+    product: str,
+    databases: tuple[str, ...],
+    output_dir: Path,
+    timeout_seconds: float,
+    page_size: int,
+    execute: bool,
+    as_json: bool,
+) -> None:
+    """Check offline inputs, or explicitly discover a private native profile.
+
+    Default operation launches no processes or services and creates no profile.
+    Discovery does not qualify tasks or admit a campaign.
+    """
+    import asyncio
+
+    from .eval.v2.native_bootstrap import discover_native_profile_files
+    from .mcp_launcher import NativeMCPLauncherConfig
+
+    config = NativeMCPLauncherConfig(
+        implementation_id=implementation_id,
+        checkout=mcp_dir.absolute(),
+        python_executable=python_executable.absolute(),
+        runtime_roots=tuple(path.absolute() for path in runtime_roots),
+        runtime_fingerprint=runtime_fingerprint,
+        dependency_lock=dependency_lock.absolute(),
+        dependency_lock_fingerprint=dependency_lock_fingerprint,
+    )
+    try:
+        result = asyncio.run(
+            discover_native_profile_files(
+                config=config,
+                source_manifest_path=source_manifest_path,
+                archive_path=archive_path,
+                product=product,
+                databases=databases,
+                output_dir=output_dir,
+                execute=execute,
+                timeout_seconds=timeout_seconds,
+                page_size=page_size,
+            )
+        )
+    except Exception as exc:
+        if as_json:
+            _emit_v2_json_error(
+                schema_version="ori-native-profile-discovery-v1",
+                code="NATIVE_PROFILE_DISCOVERY_FAILED",
+            )
+        raise click.ClickException("NATIVE_PROFILE_DISCOVERY_FAILED") from exc
+    if as_json:
+        click.echo(json.dumps(result, sort_keys=True))
+    else:
+        click.echo(f"NATIVE PROFILE SETUP: {result['status']}")
+        click.echo("No provider calls. Qualification and campaign admission remain separate.")
+
+
 @main.command(name="verify-native-graph")
-@click.option("--manifest", "manifest_path", required=True,
-              type=click.Path(exists=True, dir_okay=False))
-@click.option("--archive", "archive_path", required=True,
-              type=click.Path(exists=True, dir_okay=False))
-@click.option("--product", required=True,
-              type=click.Choice(["simple", "complex", "oaic-2026-v1"]))
-@click.option("--implementation", "implementation_id", required=True,
-              type=click.Choice(["mordavid", "armadin"]))
-@click.option("--database", required=True,
-              help="Explicit Neo4j database; no default or alias inference.")
-@click.option("--output", "output_path", required=True, type=click.Path(dir_okay=False),
-              help="New private verification file ending in .private.json.")
+@click.option(
+    "--manifest", "manifest_path", required=True, type=click.Path(exists=True, dir_okay=False)
+)
+@click.option(
+    "--archive", "archive_path", required=True, type=click.Path(exists=True, dir_okay=False)
+)
+@click.option("--product", required=True, type=click.Choice(["simple", "complex", "oaic-2026-v1"]))
+@click.option(
+    "--implementation",
+    "implementation_id",
+    required=True,
+    type=click.Choice(["mordavid", "armadin"]),
+)
+@click.option(
+    "--database", required=True, help="Explicit Neo4j database; no default or alias inference."
+)
+@click.option(
+    "--output",
+    "output_path",
+    required=True,
+    type=click.Path(dir_okay=False),
+    help="New private verification file ending in .private.json.",
+)
 @click.option("--page-size", type=click.IntRange(min=1, max=2000), default=500)
 @click.option("--timeout-seconds", type=click.FloatRange(min=0, min_open=True), default=120.0)
-@click.option("--transaction-timeout-seconds",
-              type=click.FloatRange(min=0, min_open=True), default=60.0)
-@click.option("--auxiliary-label", "auxiliary_labels", multiple=True,
-              help="Permitted additional node label, e.g. Base; fingerprinted, not inferred.")
+@click.option(
+    "--transaction-timeout-seconds", type=click.FloatRange(min=0, min_open=True), default=60.0
+)
+@click.option(
+    "--auxiliary-label",
+    "auxiliary_labels",
+    multiple=True,
+    help="Permitted additional node label, e.g. Base; fingerprinted, not inferred.",
+)
+@click.option(
+    "--read-only-scope",
+    is_flag=True,
+    help="Check read-only privileges and bracket native databases with access observations.",
+)
 def verify_native_graph_command(
-    manifest_path: str, archive_path: str, product: str, implementation_id: str,
-    database: str, output_path: str, page_size: int, timeout_seconds: float,
-    transaction_timeout_seconds: float, auxiliary_labels: tuple[str, ...],
+    manifest_path: str,
+    archive_path: str,
+    product: str,
+    implementation_id: str,
+    database: str,
+    output_path: str,
+    page_size: int,
+    timeout_seconds: float,
+    transaction_timeout_seconds: float,
+    auxiliary_labels: tuple[str, ...],
+    read_only_scope: bool,
 ) -> None:
     """Read a controlled native Bolt graph without models, MCP launch, or writes.
 
     Uses BLOODHOUND_URI/USERNAME/PASSWORD for mordavid, or
     NEO4J_URI/USERNAME/PASSWORD for armadin. This is graph verification, not
-    proof of source/runtime isolation, privileges, or native campaign admission.
+    proof of source/runtime isolation or native campaign admission. Privilege
+    observations require --read-only-scope; the default checks one graph only.
     """
     import asyncio
 
     from .eval.v2.native_bolt_runtime import NativeBackendError, verify_native_graph_files
 
     try:
-        asyncio.run(verify_native_graph_files(
-            source_manifest_path=Path(manifest_path), archive_path=Path(archive_path),
-            product=product, implementation_id=implementation_id, database=database,
-            output_path=Path(output_path), page_size=page_size, timeout_seconds=timeout_seconds,
-            transaction_timeout_seconds=transaction_timeout_seconds,
-            auxiliary_labels=auxiliary_labels,
-        ))
+        asyncio.run(
+            verify_native_graph_files(
+                source_manifest_path=Path(manifest_path),
+                archive_path=Path(archive_path),
+                product=product,
+                implementation_id=implementation_id,
+                database=database,
+                output_path=Path(output_path),
+                page_size=page_size,
+                timeout_seconds=timeout_seconds,
+                transaction_timeout_seconds=transaction_timeout_seconds,
+                auxiliary_labels=auxiliary_labels,
+                read_only_scope=read_only_scope,
+            )
+        )
     except NativeBackendError as exc:
         raise click.ClickException(str(exc)) from exc
     except Exception as exc:
         # Driver exceptions and invalid manifests can contain private data.
         raise click.ClickException("NATIVE_BACKEND_VERIFICATION_FAILED") from exc
     click.echo("NATIVE GRAPH SCORING PARITY: PASS")
+    if read_only_scope:
+        click.echo("NATIVE READ-ONLY SCOPE OBSERVATIONS: PASS (not quiescence or topology proof)")
     click.echo("No model or MCP server launched. Native campaign admission remains unverified.")
 
 

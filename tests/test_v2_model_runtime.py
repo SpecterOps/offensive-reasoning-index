@@ -4701,6 +4701,9 @@ def test_v2_run_model_emits_task_retry_completion_and_resume_progress(
             self.closed = 0
             self.circuit_open = False
 
+        def require_confirmed_native_completion(self) -> None:
+            pass
+
         def close_circuit(self) -> None:
             self.closed += 1
 
@@ -4946,6 +4949,350 @@ def test_v2_run_model_emits_task_retry_completion_and_resume_progress(
     assert any("HARNESS_ERROR" in message for message in contained_progress)
 
 
+@pytest.mark.parametrize(
+    "backend,mode", [
+        (backend, mode) for backend in ("bhce", "neo4j")
+        for mode in ("valid", "cleanup", "cancel", "pending", "changed", "coordinator")
+    ] + [("neo4j", "circuit")],
+)
+def test_native_scheduler_records_inside_owned_attempt(monkeypatch, tmp_path, mode, backend):
+    from ori.eval.v2 import campaign_config, native_mcp_runtime, native_qualification
+
+    events, persisted, bridges = [], [], []
+    profile = SimpleNamespace(backend=backend,
+                              implementation_id="mwnickerson" if backend == "bhce" else "mordavid",
+                              runtime_fingerprint="1" * 64,
+                              dependency_lock_fingerprint="2" * 64)
+    config = SimpleNamespace(**vars(profile), tool_loop="native-openai-compatible",
+                             max_steps=16, telemetry_adapter="auto", read_timeout_seconds=10,
+                             tool_timeout_seconds=10)
+    # Qualification, native execution and checkpoint encoding are independently
+    # covered. This focused test exercises the scheduler/owner sequencing seam.
+    class Qualified:
+        track = Track.MCP
+        task_ids = (DIRECT_TASK.task_id,)
+        certifications = {DIRECT_TASK.task_id: object()}
+
+        def __post_init__(self):
+            pass
+
+    prepared = Qualified()
+    prepared.profile = profile
+    prepared.pair = SimpleNamespace(
+        public=SimpleNamespace(tasks=(DIRECT_TASK,)),
+        private=SimpleNamespace(identity_catalog=DIRECT_ORACLE.resolved_roles,
+                                graph_fact_registry=None),
+    )
+    class Session:
+        _capability_profile = profile
+
+    def bridge(session, task, **kwargs):
+        assert isinstance(session, Session) and task == DIRECT_TASK
+        assert kwargs["native_certification"] is prepared.certifications[task.task_id]
+        bridges.append(kwargs["attempt_id"])
+        return object()
+
+    monkeypatch.setattr(native_qualification, "NativeQualifiedArtifacts", Qualified)
+    monkeypatch.setattr(campaign_config, "V2NativeMCPConfig", SimpleNamespace)
+    monkeypatch.setattr(native_mcp_runtime, "NativeMCPSession", Session)
+    monkeypatch.setattr(native_mcp_runtime, "NativeModelToolBridge", bridge)
+    def provenance(**kwargs):
+        return SimpleNamespace(run_identity="fixture", observations=kwargs.get(
+            "native_session_observations"))
+
+    monkeypatch.setattr(campaign_runner, "_provenance", provenance)
+    monkeypatch.setattr(campaign_runner, "_guard_run_dir", lambda *args: None)
+    monkeypatch.setattr(campaign_runner, "_load_state", lambda *args, **kwargs: None)
+    monkeypatch.setattr(campaign_runner, "OracleRegistry", lambda _: SimpleNamespace(
+        for_task=lambda _: DIRECT_ORACLE))
+    monkeypatch.setattr(campaign_runner, "build_checkpoint", lambda *args, **kwargs: object())
+    monkeypatch.setattr(campaign_runner, "_state", lambda **kwargs: kwargs)
+
+    def write(path, state):
+        if path.name == campaign_runner.RUN_STATE_NAME:
+            events.append("persist")
+            persisted.append(tuple(state["attempts"]))
+
+    monkeypatch.setattr(campaign_runner, "_write_model", write)
+    async def forbidden(*args, **kwargs):
+        raise AssertionError("native attempt cannot load a legacy bundle")
+
+    monkeypatch.setattr(campaign_runner, "_load_bloodhound_mcp_bundle", forbidden)
+    sample = SampleResult(
+        task_id=DIRECT_TASK.task_id, task_fingerprint=DIRECT_TASK.task_fingerprint,
+        oracle_fingerprint=DIRECT_ORACLE.oracle_fingerprint,
+        execution_class=ExecutionClass.MODEL_FAILURE, outcome=SampleOutcomeCode.OUTPUT_INVALID,
+        output_compliant=False,
+    )
+    provider = model_runtime._record(task=DIRECT_TASK, model="codex/gpt-test", surface="mcp",
+                                     response=_response("{}"))
+    async def run(**kwargs):
+        assert kwargs["native_qualification"] is prepared
+        assert kwargs["bundle"] is None and kwargs["native_bridge"] is not None
+        events.append("provider")
+        if mode == "cancel":
+            raise V2ModelTaskCancelled(sample, provider)
+        return SimpleNamespace(sample=sample), provider
+
+    monkeypatch.setattr(campaign_runner, "run_mcp_model_task_v2", run)
+    async def owner(*, work, before_work):
+        events.append("open")
+        try:
+            await before_work({"identity": "changed" if mode == "changed" else "fixture"})
+            result = await work(Session())
+            assert persisted and persisted[-1][-1].provider == provider
+            return result, {}
+        finally:
+            events.append("cleanup")
+            if mode == "cleanup":
+                raise ValueError("fixture cleanup failure")
+            if mode == "pending":
+                # Retained task ownership is tested by the native owner suite.
+                raise native_mcp_runtime.NativeSessionCleanupPending(
+                    None, cancellation_requested=False, startup_timed_out=False,
+                )
+
+    resolved = SimpleNamespace(output_dir=tmp_path, mcp_dir=None, config=SimpleNamespace(
+        defaults=SimpleNamespace(mcp=config, max_infra_retries=0,
+                                 model_base_url=None, reasoning_effort=None)))
+    model = SimpleNamespace(name="fixture", provider="codex", model="gpt-test",
+                            requested_model="codex/gpt-test", model_base_url=None, options={})
+    coordinator = SimpleNamespace(
+        circuit_open=mode == "circuit", require_confirmed_native_completion=lambda: None,
+    )
+    Session._query_coordinator = object() if mode == "coordinator" else coordinator
+    operation = campaign_runner._run_model(
+        resolved=resolved, prepared=prepared, model=model, run_index=1, bhce=object(),
+        coordinator=coordinator, loop=MCPToolLoop.NATIVE_OPENAI_COMPATIBLE,
+        runs_total=1, native_session_work=owner, native_observations={"identity": "fixture"},
+    )
+    if mode in {"cleanup", "cancel", "pending"}:
+        error = (
+            V2ModelTaskCancelled if mode == "cancel" else
+            native_mcp_runtime.NativeSessionCleanupPending if mode == "pending" else ValueError
+        )
+        with pytest.raises(error):
+            asyncio.run(operation)
+    else:
+        asyncio.run(operation)
+    if mode == "circuit":
+        assert "provider" not in events and "open" not in events and not bridges
+        assert persisted[-1][-1].sample.execution_class is ExecutionClass.UNEXECUTED
+    elif mode in {"changed", "coordinator"}:
+        assert "provider" not in events and not bridges
+    else:
+        assert events.index("provider") < events.index("persist") < events.index("cleanup")
+        assert len(persisted[-1]) == 1 and persisted[-1][0].provider == provider
+        assert len(bridges) == 1
+
+
+@pytest.mark.parametrize("mode", [
+    "execute", "preflight", "post_failure", "cleanup_pending", "owner_binding_failure",
+])
+@pytest.mark.parametrize("implementation,direct_track", [
+    ("mwnickerson", True), ("mordavid", True), ("mordavid", False),
+    ("armadin", True), ("armadin", False),
+])
+def test_native_outer_track_uses_one_owned_session(monkeypatch, tmp_path, mode,
+                                                  implementation, direct_track):
+    import ori.mcp_launcher as launcher_module
+    from ori.eval.v2 import native_bolt_runtime, native_ce_runtime, native_qualification
+    from ori.eval.v2.fingerprint import canonical_sha256
+    from ori.eval.v2.graph import LiveGraphVerification
+    from ori.eval.v2.native_mcp_runtime import NativeSessionCleanupPending
+
+    events, model_calls, owners, clients = [], [], [], []
+    payload = dict(schema_version="ori-live-graph-verification-v2",
+                   expected_graph_fingerprint="a" * 64, observed_graph_fingerprint="a" * 64,
+                   page_size=500, object_queries=1, relationship_queries=1,
+                   object_count=1, relationship_count=1, normalized_artifacts=())
+    receipt = LiveGraphVerification(**payload, verification_fingerprint=canonical_sha256(payload))
+    observed = {"graph_before": {"graph_verification": receipt.model_dump(mode="json")},
+                "runtime": {"fixture": True}, "native_discovery": {"tools": []}}
+    bolt = implementation != "mwnickerson"
+    databases = (("neo4j", "bloodhound") if implementation == "mordavid" else ("fixture-home",))
+    if bolt:
+        observed["graph_before"] = {"graphs": {
+            database: {"graph_verification": receipt.model_dump(mode="json")}
+            for database in databases
+        }}
+    class Qualified:
+        profile = SimpleNamespace(backend="neo4j" if bolt else "bhce",
+                                  implementation_id=implementation,
+                                  backend_binding_fingerprint="3" * 64,
+                                  runtime_fingerprint="1" * 64,
+                                  dependency_lock_fingerprint="2" * 64)
+        pair = SimpleNamespace(public=SimpleNamespace(tasks=(DIRECT_TASK,)))
+
+    monkeypatch.setattr(native_qualification, "NativeQualifiedArtifacts", Qualified)
+    prepared = {Track.DIRECT: object(), Track.MCP: Qualified()}
+    if not direct_track:
+        del prepared[Track.DIRECT]
+    monkeypatch.setattr(launcher_module, "NativeMCPLauncherConfig", lambda **kwargs: kwargs)
+    for key, value in {"DOMAIN": "fixture.invalid", "TOKEN_ID": "fixture-id",
+                       "TOKEN_KEY": "fixture-key", "SCHEME": "https", "PORT": "443",
+                       "VERIFY_TLS": "true"}.items():
+        monkeypatch.setenv(f"BLOODHOUND_{key}", value)
+    prefix = "BLOODHOUND" if implementation == "mordavid" else "NEO4J"
+    for key, value in {"URI": "bolt://fixture.invalid:7687", "USERNAME": "native-user",
+                       "PASSWORD": "native-password"}.items():
+        monkeypatch.setenv(f"{prefix}_{key}", value)
+    class Client:
+        def __init__(self, **kwargs):
+            assert direct_track or not bolt
+            assert kwargs["domain"] == "fixture.invalid"
+            if not bolt:
+                assert kwargs["trust_env"] is False and kwargs["token_id"] == "fixture-id"
+            clients.append(self)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            events.append("client_closed")
+
+    class Coordinator:
+        def __init__(self, **kwargs):
+            self.bhce = kwargs["bhce"]
+            assert kwargs.get("native_backend_binding_fingerprint") == ("3" * 64 if bolt else None)
+
+        def require_confirmed_native_completion(self):
+            pass
+
+    monkeypatch.setattr(campaign_runner, "BHCEClient", Client)
+    monkeypatch.setattr(campaign_runner, "DirectQueryCoordinator", Coordinator)
+    monkeypatch.setattr(campaign_runner, "QueryDenyCache", lambda *args, **kwargs: object())
+    monkeypatch.setattr(campaign_runner, "resolve_mcp_launcher_runtime",
+                        lambda *args: pytest.fail("native cannot resolve legacy launcher"))
+    session = object()
+    async def owner(**kwargs):
+        owners.append(kwargs)
+        assert kwargs["query_coordinator"].bhce is (clients[0] if clients else None)
+        if bolt:
+            assert kwargs["databases"] == databases
+            assert kwargs["connection"] == {
+                f"{prefix}_URI": "bolt://fixture.invalid:7687",
+                f"{prefix}_USERNAME": "native-user", f"{prefix}_PASSWORD": "native-password",
+            }
+        assert kwargs["private_stderr"].fileno() >= 0
+        assert kwargs["max_calls"] >= 3 * 2 * 16
+        assert kwargs["timeout_seconds"] >= 3 * 2 * DIRECT_TASK.binding.bounds.timeout_seconds
+        assert kwargs["guard"]("mwnickerson", "cypher_query", {}).allowed
+        if mode == "owner_binding_failure":
+            # The owner independently verifies actual target observations;
+            # this seam test proves its rejection cannot reach the provider.
+            raise ValueError("fixture backend binding mismatch")
+        events.append("native_open")
+        await kwargs["before_work"](observed)
+        result = await kwargs["work"](session)
+        if mode == "cleanup_pending":
+            async def cleanup():
+                await asyncio.sleep(0)
+                assert "pending_status" in events
+                assert not kwargs["private_stderr"].closed
+                assert "client_closed" not in events
+                events.append("native_closed")
+                raise RuntimeError("fixture retained worker failure")
+
+            raise NativeSessionCleanupPending(
+                asyncio.create_task(cleanup()), cancellation_requested=True,
+                startup_timed_out=False,
+            )
+        events.append("native_closed")
+        if mode == "post_failure":
+            raise ValueError("fixture post graph failure")
+        return result, {**observed, "graph_after": observed["graph_before"]}
+
+    monkeypatch.setattr(native_ce_runtime, "run_native_ce_session_work", owner)
+    monkeypatch.setattr(native_bolt_runtime, "run_native_bolt_session_work", owner)
+    async def graph(*args, **kwargs):
+        return object(), receipt
+
+    async def before(*args, **kwargs):
+        return object(), receipt, False
+
+    monkeypatch.setattr(campaign_runner, "_graph_before_track", before)
+    monkeypatch.setattr(campaign_runner, "_health_and_graph", graph)
+    monkeypatch.setattr(campaign_runner, "_graph_verification_progress", lambda **kwargs: "graph")
+    monkeypatch.setattr(campaign_runner, "_write_model", lambda *args: None)
+    monkeypatch.setattr(campaign_runner, "_model_loop",
+                        lambda *args: MCPToolLoop.NATIVE_OPENAI_COMPATIBLE)
+    async def run_model(**kwargs):
+        model_calls.append(kwargs)
+        if kwargs["prepared"] is prepared[Track.MCP]:
+            async def check(actual):
+                assert actual == observed
+
+            async def work(actual):
+                assert actual is session
+                events.append("native_attempt")
+                return "attempt"
+
+            value, _ = await kwargs["native_session_work"](work=work, before_work=check)
+            assert value == "attempt" and kwargs["native_observations"] == observed
+        return object(), ()
+
+    monkeypatch.setattr(campaign_runner, "_run_model", run_model)
+    def publish(**kwargs):
+        if kwargs["prepared"] is prepared[Track.MCP]:
+            assert "native_closed" in events
+            events.append("native_publish")
+        return SimpleNamespace(receipt_fingerprint="fixture"), []
+
+    monkeypatch.setattr(campaign_runner, "_publish_track_completion", publish)
+    def readiness(**kwargs):
+        assert kwargs["native_session_observations"]["runtime"] == observed["runtime"]
+        return object()
+
+    monkeypatch.setattr(campaign_runner, "_readiness", readiness)
+    source = tmp_path / "manifest.json"
+    source.write_text("{}")
+    paths = SimpleNamespace(python_executable=tmp_path / "python", runtime_roots=(tmp_path,),
+                            dependency_lock=tmp_path / "lock")
+    models = (SimpleNamespace(name="first", runs_per_model=None),
+              SimpleNamespace(name="second", runs_per_model=1))
+    resolved = SimpleNamespace(output_dir=tmp_path, mcp_dir=tmp_path, native_mcp_paths=paths,
+        source_manifest=source, config=SimpleNamespace(models=models,
+            track_modes=tuple(prepared), defaults=SimpleNamespace(
+                bhce_url="https://fixture.invalid:443", runs_per_model=2, max_infra_retries=1,
+                mcp=SimpleNamespace(max_steps=16, tool_timeout_seconds=90, databases=databases),
+                health=SimpleNamespace(timeout_seconds=60),
+                graph_page_size=500)))
+    lifecycle = SimpleNamespace(activate_track=lambda _: None, record_track=lambda _: None)
+    operation = campaign_runner._run_prepared_v2_campaign(
+        resolved=resolved, snapshot=object(), prepared=prepared, mcp_revision="fixture",
+        model_readiness=(), preflight_only=mode == "preflight",
+        progress=lambda message: events.append("pending_status")
+        if message.startswith("NATIVE_SESSION_CLEANUP_PENDING") else None,
+        lifecycle=lifecycle,
+    )
+    if mode == "cleanup_pending":
+        with pytest.raises(NativeSessionCleanupPending):
+            asyncio.run(operation)
+        if clients:
+            assert events.index("native_closed") < events.index("client_closed")
+        assert "native_publish" not in events
+    elif mode in {"post_failure", "owner_binding_failure"}:
+        with pytest.raises(ValueError, match="post graph|backend binding"):
+            asyncio.run(operation)
+        assert "native_publish" not in events
+    else:
+        asyncio.run(operation)
+    assert len(owners) == 1
+    assert len(clients) == (1 if direct_track or not bolt else 0)
+    assert len(model_calls) == (
+        0 if mode == "preflight" else 3 * int(direct_track)
+        if mode == "owner_binding_failure" else 3 * len(prepared)
+    )
+    assert events.count("native_attempt") == (
+        0 if mode in {"preflight", "owner_binding_failure"} else 3
+    )
+    if mode in {"execute", "preflight"}:
+        stored = json.loads((tmp_path / "mcp/native-session-completed-v2.private.json").read_text())
+        assert stored["graph_before"] == observed["graph_before"]
+        assert stored["graph_after"] == observed["graph_before"]
+
+
 def test_v2_run_model_runs_ordered_multi_round_recovery_and_removes_terminal_tasks(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
@@ -5024,6 +5371,9 @@ def test_v2_run_model_runs_ordered_multi_round_recovery_and_removes_terminal_tas
 
     class Coordinator:
         circuit_open = False
+
+        def require_confirmed_native_completion(self) -> None:
+            pass
 
         def close_circuit(self) -> None:
             self.circuit_open = False
@@ -5265,6 +5615,9 @@ def test_resumed_deferred_bloodhound_retry_rechecks_health_before_provider(
         circuit_open = False
         closed = 0
 
+        def require_confirmed_native_completion(self) -> None:
+            pass
+
         def close_circuit(self) -> None:
             self.closed += 1
 
@@ -5461,6 +5814,9 @@ def test_interrupted_cooldown_and_deferred_attempt_resume_without_resetting_budg
     class FreshCoordinator:
         circuit_open = False
         closed = 0
+
+        def require_confirmed_native_completion(self) -> None:
+            pass
 
         def close_circuit(self) -> None:
             self.closed += 1
@@ -5715,10 +6071,30 @@ def test_interrupted_primary_attempt_resumes_with_monotonic_attempt_number(
         "model": model,
         "run_index": 1,
         "bhce": SimpleNamespace(),
-        "coordinator": SimpleNamespace(circuit_open=False),
+        "coordinator": SimpleNamespace(
+            circuit_open=False, require_confirmed_native_completion=lambda: None,
+        ),
         "loop": None,
         "runs_total": 1,
     }
+
+    from ori.eval.direct_query_safety import (
+        DirectQueryCoordinator,
+        DirectQuerySafetyConfig,
+        QueryDenyCache,
+    )
+    safety = DirectQuerySafetyConfig()
+    cache = QueryDenyCache(tmp_path / "native-deny.json", manifest_fingerprint="fixture",
+                           policy_version=safety.policy_version)
+    cache.record("native", rule="native_inflight", detail="interrupted native dispatch")
+    blocked_coordinator = DirectQueryCoordinator(
+        bhce=SimpleNamespace(), config=safety, deny_cache=cache,
+    )
+    with pytest.raises(ValueError, match="NATIVE_QUERY_RECOVERY_REQUIRED"):
+        asyncio.run(campaign_runner._run_model(
+            **{**runner_args, "coordinator": blocked_coordinator},
+        ))
+    assert calls == 0 and state_holder["value"] is None
 
     with pytest.raises(asyncio.CancelledError):
         asyncio.run(campaign_runner._run_model(**runner_args))
@@ -5768,6 +6144,9 @@ def test_mcp_run_checks_open_circuit_before_provider(
         def __init__(self) -> None:
             self.circuit_open = True
             self.closed = 0
+
+        def require_confirmed_native_completion(self) -> None:
+            pass
 
         def close_circuit(self) -> None:
             self.closed += 1

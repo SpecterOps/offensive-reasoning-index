@@ -55,6 +55,7 @@ def _provenance(s, resolved):
             track=Track.DIRECT,
             pair=object(),
             profile=object(),
+            task_ids=("synthetic-provenance-task",),
             release=SimpleNamespace(release_fingerprint="b" * 64),
             live=SimpleNamespace(artifact_fingerprint="c" * 64),
         ),

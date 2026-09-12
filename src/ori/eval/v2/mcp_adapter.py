@@ -37,6 +37,7 @@ from .schema import (
     OracleBundle,
     PathStatus,
     TaskBundle,
+    TaskCertification,
     VerdictStatus,
 )
 from .scoring import SampleOutcomeCode, SampleResult
@@ -132,7 +133,9 @@ def score_mcp_transcript_v2(
     final_receipt_attested: bool = True,
     retry_receipt_attested: bool = True,
     retry_contract_error: str | None = None,
+    terminal_protocol_output_invalid: bool = False,
     certified: bool = True,
+    native_certification: TaskCertification | None = None,
 ) -> MCPV2Outcome:
     """Reduce one typed transcript and call the shared comparator exactly once."""
 
@@ -141,7 +144,13 @@ def score_mcp_transcript_v2(
         profile,
         tool_loop=tool_loop,
         certified=certified,
+        native_certification=native_certification,
     )
+    if state.native_certification is not None and (
+        state.native_certification.oracle_fingerprint != oracle.oracle_fingerprint
+        or state.native_certification.graph_fingerprint != oracle.graph_fingerprint
+    ):
+        raise ValueError("native certification oracle/graph binding mismatch")
     for event in events:
         state = reduce_finalization(state, event)
 
@@ -150,6 +159,39 @@ def score_mcp_transcript_v2(
         "task_fingerprint": task.task_fingerprint,
         "oracle_fingerprint": oracle.oracle_fingerprint,
     }
+    if terminal_protocol_output_invalid:
+        if not isinstance(profile, NativeCapabilityProfile):
+            raise ValueError("terminal protocol output requires a native profile")
+        terminal_outcomes = {
+            FinalizationPhase.INFRASTRUCTURE_FAILURE: (
+                ExecutionClass.INFRA_FAILURE, SampleOutcomeCode.INFRA_ERROR
+            ),
+            FinalizationPhase.HARNESS_FAILURE: (
+                ExecutionClass.HARNESS_FAILURE, SampleOutcomeCode.HARNESS_ERROR
+            ),
+            FinalizationPhase.TASK_TIMEOUT: (
+                ExecutionClass.MODEL_FAILURE, SampleOutcomeCode.TASK_TIMEOUT
+            ),
+        }
+        if state.phase not in terminal_outcomes:
+            state = state.model_copy(update={
+                "phase": FinalizationPhase.OUTPUT_INVALID,
+                "terminal_reason": "NATIVE_PROTOCOL_OUTPUT_INVALID",
+            })
+        execution_class, outcome = terminal_outcomes.get(
+            state.phase,
+            (ExecutionClass.MODEL_FAILURE, SampleOutcomeCode.OUTPUT_INVALID),
+        )
+        return MCPV2Outcome(
+            finalization=state,
+            sample=SampleResult(
+                **base,
+                execution_class=execution_class,
+                outcome=outcome,
+                output_compliant=False,
+                detail=state.terminal_reason,
+            ),
+        )
     observed_ids = frozenset(
         value.casefold() for value in observed_identity_ids
     )
