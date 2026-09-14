@@ -8,6 +8,8 @@ import pytest
 from ori.eval.bhce import CypherResult
 from ori.eval.v2.graph import (
     GraphSnapshot,
+    _ce_local_group_objects,
+    _relationships,
     _scalar_properties,
     build_archive_snapshot,
     collect_live_snapshot,
@@ -53,10 +55,9 @@ def test_archive_snapshot_is_deterministic_and_resolves_aliases() -> None:
     assert first == second
     assert first.graph_fingerprint == second.graph_fingerprint
     archive_nodes = manifest["stats"]["total_nodes"]  # type: ignore[index]
-    computer_count = sum(
-        entity.object_type == "Computer" for entity in first.entities
+    assert len(first.objects) == archive_nodes + sum(
+        entity.object_type == "ADLocalGroup" for entity in first.entities
     )
-    assert len(first.objects) == archive_nodes + (computer_count * 4)
     user = next(entity for entity in first.entities if entity.object_type == "User")
     assert user.object_id in first.entity(user.object_id).object_id
     assert user.canonical_name
@@ -104,6 +105,32 @@ def test_archive_snapshot_includes_ce_local_group_identity_and_edges() -> None:
         (local_group_id, "LocalToComputer", computer.object_id)
         for local_group_id in local_group_ids
     } <= snapshot.edge_keys
+
+
+def test_ce_local_groups_require_a_populated_collection() -> None:
+    computer = {
+        "ObjectIdentifier": "S-1-5-21-1-2-3-1000",
+        "LocalAdmins": {"Results": [{"ObjectIdentifier": "unknown-principal"}]},
+        "RemoteDesktopUsers": {"Results": []},
+        "DcomUsers": {"Results": []},
+        "PSRemoteUsers": {"Results": []},
+    }
+    records = (("Computer", computer),)
+
+    assert [item.entity.object_id for item in _ce_local_group_objects(records)] == [
+        "S-1-5-21-1-2-3-1000-544"
+    ]
+    relationship_keys = {
+        (edge.source_id, edge.relationship, edge.target_id)
+        for edge in _relationships(records)
+    }
+    assert relationship_keys == {
+        (
+            "S-1-5-21-1-2-3-1000-544",
+            "LocalToComputer",
+            "S-1-5-21-1-2-3-1000",
+        )
+    }
 
 
 def test_archive_snapshot_seed_change_changes_graph_identity() -> None:

@@ -47,9 +47,10 @@ def test_oaic_generation_preserves_base_and_certifies_near_misses(subtests):
                 for _ in range(path.metadata["max_hops"]):
                     frontier = set().union(*(adjacency.get(node, set()) for node in frontier))
                     reached.update(frontier)
-                assert path.target_node == path.metadata["near_miss"]
-                assert path.target_node in reached
-                assert path.metadata["negative_target"] not in reached
+                assert path.target_node == path.metadata["negative_target"]
+                assert path.target_node not in reached
+                assert path.metadata["near_miss"] in reached
+                assert path.metadata["negative_target"] in path.verification_cypher
                 assert snapshot.entity(path.metadata["negative_target"])
     assert len(set(fingerprints)) == 3
     product = get_benchmark("oaic-2026-v1")

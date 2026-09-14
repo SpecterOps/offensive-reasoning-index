@@ -94,7 +94,6 @@ CE_NORMALIZED_ARTIFACTS = (
     "stable list-valued properties projected as scalar membership facts",
     "relationship collection and ACL bookkeeping excluded",
 )
-_CE_LOCAL_GROUP_RIDS = frozenset({"544", "555", "562", "580"})
 _CE_LOCAL_GROUP_FIELDS = {
     "LocalAdmins": "544",
     "RemoteDesktopUsers": "555",
@@ -133,6 +132,27 @@ _GPO_CHANGE_RELATIONSHIPS = {
     "DcomUsers": "ExecuteDCOM",
     "PSRemoteUsers": "CanPSRemote",
 }
+
+
+def _materialized_ce_local_group_fields(
+    record: Mapping[str, Any],
+) -> tuple[tuple[str, str], ...]:
+    """Return the CE local groups that SharpHound ingest will materialize.
+
+    BloodHound CE creates an ``ADLocalGroup`` only when the corresponding
+    collected local-group result set contains at least one principal.  An empty
+    but successfully collected result does not create the derived node.  Keep
+    the archive snapshot aligned with that ingest behavior rather than
+    projecting four synthetic groups for every computer.
+    """
+
+    populated: list[tuple[str, str]] = []
+    for field, rid in _CE_LOCAL_GROUP_FIELDS.items():
+        collection = record.get(field)
+        local_group = collection if isinstance(collection, Mapping) else {}
+        if local_group.get("Results"):
+            populated.append((field, rid))
+    return tuple(populated)
 
 
 class GraphObject(StrictModel):
@@ -631,7 +651,7 @@ def _relationships(
             f"{record.get('ObjectIdentifier')}-{rid}"
             for object_type, record in materialized
             if object_type == "Computer" and record.get("ObjectIdentifier")
-            for rid in _CE_LOCAL_GROUP_RIDS
+            for _, rid in _materialized_ce_local_group_fields(record)
         )
     edges: dict[tuple[str, str, str], EdgeWitness] = {}
     domain_ids = {
@@ -732,7 +752,7 @@ def _relationships(
                 add(_edge(target_id, "CoerceToTGT", domain_id))
 
             if object_type == "Computer":
-                for field, rid in _CE_LOCAL_GROUP_FIELDS.items():
+                for field, rid in _materialized_ce_local_group_fields(record):
                     local_group_id = f"{target_id}-{rid}"
                     add(_edge(local_group_id, "LocalToComputer", target_id))
                     collection = record.get(field)
@@ -779,7 +799,7 @@ def _relationships(
 def _ce_local_group_objects(
     records: Iterable[tuple[str, Mapping[str, Any]]],
 ) -> tuple[GraphObject, ...]:
-    """Project the four deterministic CE local-group nodes for every computer.
+    """Project CE-derived local-group nodes for populated computer results.
 
     BloodHound CE materializes these nodes during SharpHound ingest and exposes
     them to both direct Cypher and MCP path queries. They therefore belong in
@@ -794,7 +814,7 @@ def _ce_local_group_objects(
         computer_id = str(record.get("ObjectIdentifier") or "").strip()
         if not computer_id:
             continue
-        for rid in sorted(_CE_LOCAL_GROUP_RIDS):
+        for _, rid in _materialized_ce_local_group_fields(record):
             object_id = f"{computer_id}-{rid}"
             objects.append(
                 GraphObject(

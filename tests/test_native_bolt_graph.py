@@ -1123,10 +1123,12 @@ def test_native_graph_command_real_archive_and_ce_derived_inventory(tmp_path, mo
     from ori.generator.archive_validation import _relationships_from_archive
     from ori.generator.graph import ADGraph
     from ori.generator.org import build_org
+    from ori.generator.security import apply_baseline_security
     from ori.generator.serializer import _build_zip, project_nodes_for_sharphound
 
     graph = ADGraph("TEST.LOCAL", seed=67)
     build_org(graph, num_users=2, num_workstations=1, num_servers=1)
+    apply_baseline_security(graph)
     archive = _build_zip(graph)
     manifest = {
         "schema_version": "ori-generated-manifest-v2", "seed": 67,

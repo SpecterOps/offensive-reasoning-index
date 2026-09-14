@@ -50,8 +50,10 @@ def build_oaic_graph(
 ) -> ADGraph:
     """Build complex first, then dedicated absent-target/real-near-miss pairs.
 
-    ``target_node`` remains the real planted path endpoint. Absence recipes use
-    metadata ``negative_target``; no nonexistent edge enters ``path_edges``.
+    ``target_node`` and ``verification_cypher`` bind the intended absent
+    endpoint.  The reachable near-miss branch stays in ``path_edges`` and
+    metadata, so ingest verification proves both the absence claim and that
+    its deliberately confusable alternative was materialized.
     """
     graph = build_phase4_complex_graph(
         domain=domain, seed=seed, users=users, workstations=workstations, servers=servers
@@ -84,11 +86,11 @@ def build_oaic_graph(
                 category="bounded_absence",
                 description="A present near-miss branch does not establish the target link.",
                 source_node=source.object_id,
-                target_node=near.object_id,
+                target_node=target.object_id,
                 path_edges=edges,
                 verification_cypher=(
                     f"MATCH p=(s {{objectid: '{source.object_id}'}})"
-                    f"-[:{relationship}*1..{hops}]->(t {{objectid: '{near.object_id}'}}) RETURN p"
+                    f"-[:{relationship}*1..{hops}]->(t {{objectid: '{target.object_id}'}}) RETURN p"
                 ),
                 metadata={
                     "negative_control": True,
