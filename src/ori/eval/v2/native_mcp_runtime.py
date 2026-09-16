@@ -70,7 +70,7 @@ def validate_native_session_observations(
     normal, isolated = startup["python_startup"], startup["python_isolated_startup"]
     python, checkout = Path(runtime["python_executable"]), Path(runtime["checkout"])
     roots = [Path(root) for root in startup["runtime_roots"]]
-    isolated_base_prefix = Path(isolated["base_prefix"])
+    isolated_base_prefix = Path(isolated["base_prefix"]).resolve()
     isolated_external_paths = {
         path for path in isolated["paths"]
         if Path(path) != checkout

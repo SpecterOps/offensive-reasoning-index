@@ -181,6 +181,7 @@ def inspect_native_python_startup(
             base_prefix = Path(observation["base_prefix"])
             if not base_prefix.is_absolute():
                 raise ValueError("relative base prefix")
+            base_prefix = base_prefix.resolve()
             paths = observation["paths"]
             if not isinstance(paths, list) or not paths:
                 raise ValueError("probe paths")
