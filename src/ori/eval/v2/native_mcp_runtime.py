@@ -14,6 +14,7 @@ import json
 import logging
 import math
 import os
+import re
 import stat
 import time
 from collections.abc import Awaitable, Callable
@@ -292,8 +293,13 @@ async def open_native_mcp_session(
         except Exception as exc:
             # Raw native exceptions may contain private connection data. Their
             # native stderr remains in the caller-owned private diagnostic file.
+            # A strict symbolic code is safe to preserve for the supervising
+            # qualification layer; every other exception stays collapsed.
             if not ready.done():
-                ready.set_exception(ValueError("NATIVE_SESSION_START_FAILED"))
+                cause_code = str(exc)
+                if not re.fullmatch(r"[A-Z][A-Z0-9_]{2,127}", cause_code):
+                    cause_code = "NATIVE_SESSION_START_FAILED"
+                ready.set_exception(ValueError(cause_code))
             else:
                 if isinstance(exc, ValueError) and str(exc) in {
                     "NATIVE_LAUNCH_CHANGED", "NATIVE_RUNTIME_STARTUP_CHANGED",

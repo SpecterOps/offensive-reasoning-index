@@ -354,7 +354,7 @@ def test_native_session_lifecycle_owns_cleanup_and_private_startup(monkeypatch, 
             "drift": "LAUNCH_CHANGED",
             "cleanup_timeout": "CLEANUP_TIMEOUT",
             "runtime_drift": "STARTUP_CHANGED",
-            "runtime_rejected": "START_FAILED",
+            "runtime_rejected": "RUNTIME_STARTUP_HOOK_UNSUPPORTED",
         }[case]
         with pytest.raises(ValueError, match=expected):
             asyncio.run(scenario())

@@ -799,7 +799,13 @@ def _v2_command_error_payload(*, schema_version: str, code: str) -> dict[str, ob
     }
 
 
-def _emit_v2_json_error(*, schema_version: str, code: str, exit_code: int = 1) -> NoReturn:
+def _emit_v2_json_error(
+    *,
+    schema_version: str,
+    code: str,
+    exit_code: int = 1,
+    cause_code: str | None = None,
+) -> NoReturn:
     """Emit only the fixed V2 JSON error contract and terminate nonzero.
 
     JSON callers are commonly supervisors or offline qualification tools.  A
@@ -808,15 +814,15 @@ def _emit_v2_json_error(*, schema_version: str, code: str, exit_code: int = 1) -
     Human invocations retain Click's actionable diagnostic separately.
     """
 
-    click.echo(
-        json.dumps(
-            {
-                **_v2_command_error_payload(schema_version=schema_version, code=code),
-                "exit_code": exit_code,
-            },
-            sort_keys=True,
-        )
-    )
+    payload = {
+        **_v2_command_error_payload(schema_version=schema_version, code=code),
+        "exit_code": exit_code,
+    }
+    # An exception may carry paths, endpoint metadata, or credentials. Preserve
+    # only a deliberately symbolic cause code for machine-supervisor diagnosis.
+    if cause_code is not None and re.fullmatch(r"[A-Z][A-Z0-9_]{2,127}", cause_code):
+        payload["error"]["cause_code"] = cause_code
+    click.echo(json.dumps(payload, sort_keys=True))
     raise click.exceptions.Exit(exit_code)
 
 
@@ -2560,6 +2566,7 @@ def discover_native_profile_command(
             _emit_v2_json_error(
                 schema_version="ori-native-profile-discovery-v1",
                 code="NATIVE_PROFILE_DISCOVERY_FAILED",
+                cause_code=str(exc),
             )
         raise click.ClickException("NATIVE_PROFILE_DISCOVERY_FAILED") from exc
     if as_json:

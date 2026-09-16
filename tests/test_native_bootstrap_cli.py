@@ -141,3 +141,16 @@ def test_discovery_cli_preserves_explicit_inputs_and_default_no_execute(tmp_path
     assert result.exit_code != 0
     assert "NATIVE_PROFILE_DISCOVERY_FAILED" in result.output
     assert "private-endpoint" not in result.output
+
+    async def symbolic_fail(**kwargs):
+        raise ValueError("NATIVE_CE_HEALTH_FAILED")
+
+    monkeypatch.setattr(native_bootstrap, "discover_native_profile_files", symbolic_fail)
+    result = CliRunner().invoke(main, args)
+    assert result.exit_code != 0
+    payload = json.loads(result.output)
+    assert payload["error"] == {
+        "code": "NATIVE_PROFILE_DISCOVERY_FAILED",
+        "cause_code": "NATIVE_CE_HEALTH_FAILED",
+        "message": "v2 campaign command failed; inspect local operator logs",
+    }
