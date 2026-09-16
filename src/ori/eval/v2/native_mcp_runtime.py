@@ -70,8 +70,23 @@ def validate_native_session_observations(
     normal, isolated = startup["python_startup"], startup["python_isolated_startup"]
     python, checkout = Path(runtime["python_executable"]), Path(runtime["checkout"])
     roots = [Path(root) for root in startup["runtime_roots"]]
+    isolated_base_prefix = Path(isolated["base_prefix"])
+    isolated_external_paths = {
+        path for path in isolated["paths"]
+        if Path(path) != checkout
+        and not any(Path(path).is_relative_to(root) for root in roots)
+    }
+
+    def permitted_path(path: Path) -> bool:
+        return (
+            path == checkout
+            or any(path.is_relative_to(root) for root in roots)
+            or (str(path) in isolated_external_paths and path.is_relative_to(isolated_base_prefix))
+        )
+
     if (not python.is_absolute() or not checkout.is_absolute() or not roots
             or any(not root.is_absolute() for root in roots)
+            or not isolated_base_prefix.is_absolute()
             or normal["prefix"] != str(python.parent.parent)
             or normal["prefix"] == normal["base_prefix"]
             or any(normal[key] != isolated[key] for key in ("version", "abi", "platform"))
@@ -87,10 +102,8 @@ def validate_native_session_observations(
                 or not isinstance(original_paths, list) or len(original_paths) != len(paths)
                 or any(not isinstance(path, str) or (path and not Path(path).is_absolute())
                        for path in original_paths)
-                or any(not Path(path).is_absolute() or not (
-                    Path(path) == checkout
-                    or any(Path(path).is_relative_to(root) for root in roots)
-                ) for path in paths)
+                or any(not Path(path).is_absolute() or not permitted_path(Path(path))
+                       for path in paths)
                 or observation["site_packages"] != [
                     path for original, path in zip(original_paths, paths, strict=True)
                     if original and Path(original).name == "site-packages"

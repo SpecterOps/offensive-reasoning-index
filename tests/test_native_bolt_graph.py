@@ -553,8 +553,9 @@ def test_completed_qualification_replays_observations(subtests):
                                       "distribution_inventory_fingerprint": canonical_sha256({})},
                  }},
     )
-    for case in ("valid", "sorted_json", "site_alias", "flags_only", "drift", "missing_graph",
-                 "discovery",
+    for case in (
+        "valid", "sorted_json", "site_alias", "isolated_stdlib", "flags_only", "drift",
+        "missing_graph", "discovery",
                  "runtime", "cleanup", "borrowed_work", "false_source", "missing_digest",
                  "missing_startup", "wrong_interpreter", "external_import", "isolated_mismatch"):
         with subtests.test(case=case):
@@ -565,6 +566,11 @@ def test_completed_qualification_replays_observations(subtests):
                 startup = supplied["runtime"]["runtime_startup"]["python_startup"]
                 startup["paths"][1] = "/fixture/venv/packages"
                 startup["site_packages"] = ["/fixture/venv/packages"]
+            elif case == "isolated_stdlib":
+                startup = supplied["runtime"]["runtime_startup"]
+                for key in ("python_startup", "python_isolated_startup"):
+                    startup[key]["paths"].append("/fixture/base/lib/python3.12")
+                    startup[key]["original_paths"].append("/fixture/base/lib/python3.12")
             elif case == "flags_only":
                 supplied = {"runtime_qualified": True, "session_cleanup_confirmed": True}
             elif case == "drift":
@@ -593,7 +599,7 @@ def test_completed_qualification_replays_observations(subtests):
                 supplied["runtime"]["runtime_startup"]["python_startup"]["paths"].append("/other")
             elif case == "isolated_mismatch":
                 supplied["runtime"]["runtime_startup"]["python_isolated_startup"]["abi"] = "wrong"
-            if case in {"valid", "sorted_json", "site_alias"}:
+            if case in {"valid", "sorted_json", "site_alias", "isolated_stdlib"}:
                 assert validate_completed_native_bolt_qualification(
                     supplied, profile=profile, expected=expected, work_result="fixture-work",
                 ) == canonical_sha256(supplied)

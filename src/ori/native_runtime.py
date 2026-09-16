@@ -165,7 +165,7 @@ def inspect_native_python_startup(
         "abi=sys.implementation.cache_tag,platform=sys.platform)))"
     )
 
-    def probe(flags):
+    def probe(flags, *, isolated_external_paths: frozenset[str] | None):
         try:
             result = subprocess.run(
                 [str(python), *flags, "-c", script], cwd=checkout,
@@ -178,6 +178,9 @@ def inspect_native_python_startup(
                 "paths", "prefix", "base_prefix", "version", "abi", "platform",
             }:
                 raise ValueError("probe shape")
+            base_prefix = Path(observation["base_prefix"])
+            if not base_prefix.is_absolute():
+                raise ValueError("relative base prefix")
             paths = observation["paths"]
             if not isinstance(paths, list) or not paths:
                 raise ValueError("probe paths")
@@ -188,7 +191,16 @@ def inspect_native_python_startup(
                     raise ValueError("relative probe path")
                 path = Path(item).resolve() if item else checkout
                 if path != checkout and not contained(path):
-                    raise ValueError("external probe path")
+                    # A venv necessarily imports its base interpreter's stdlib.
+                    # The isolated invocation is the trusted baseline for that
+                    # unavoidable external surface; normal startup may not add
+                    # any other external import location.
+                    if (isolated_external_paths is None
+                            and not path.is_relative_to(base_prefix)):
+                        raise ValueError("external isolated probe path")
+                    if (isolated_external_paths is not None
+                            and str(path) not in isolated_external_paths):
+                        raise ValueError("external normal probe path")
                 if path.exists() and not path.is_dir():
                     raise ValueError("archive import path")
                 normalized.append(str(path))
@@ -201,8 +213,12 @@ def inspect_native_python_startup(
         except (OSError, ValueError, SyntaxError, subprocess.SubprocessError):
             raise ValueError("NATIVE_RUNTIME_STARTUP_PROBE_FAILED") from None
 
-    isolated = probe(("-I", "-S", "-B"))
-    normal = probe(("-E", "-s", "-B"))
+    isolated = probe(("-I", "-S", "-B"), isolated_external_paths=None)
+    isolated_external_paths = frozenset(
+        path for path in isolated["paths"]
+        if path != str(checkout) and not contained(Path(path))
+    )
+    normal = probe(("-E", "-s", "-B"), isolated_external_paths=isolated_external_paths)
     if (normal["prefix"] != str(venv) or normal["prefix"] == normal["base_prefix"]
             or any(normal[key] != isolated[key] for key in ("version", "abi", "platform"))):
         raise ValueError("NATIVE_RUNTIME_STARTUP_IDENTITY_MISMATCH")

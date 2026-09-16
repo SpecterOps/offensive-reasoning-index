@@ -130,6 +130,7 @@ def test_frozen_runtime_rejects_unreadable_traversal(tmp_path, monkeypatch):
 @pytest.mark.parametrize("case", [
     "valid", "pth", "customize", "editable", "system_site", "external_path",
     "identity", "changed", "stderr", "timeout", "customize_package", "archive",
+    "isolated_stdlib",
     "dependency_valid", "dependency_missing", "dependency_alias",
 ])
 def test_native_startup_qualification_is_bounded_and_fail_closed(tmp_path, monkeypatch, case):
@@ -145,6 +146,9 @@ def test_native_startup_qualification_is_bounded_and_fail_closed(tmp_path, monke
     )
     checkout = tmp_path / "source"
     checkout.mkdir()
+    stdlib = tmp_path / "stdlib"
+    if case == "isolated_stdlib":
+        stdlib.mkdir()
     dependency_options = {}
     site = venv / "lib" / "python3.12" / "site-packages"
     if case.startswith("dependency_"):
@@ -185,19 +189,27 @@ def test_native_startup_qualification_is_bounded_and_fail_closed(tmp_path, monke
         normal = "-S" not in argv
         if normal and case == "changed":
             python.write_text("runtime drift")
+        if case == "isolated_stdlib":
+            paths = [str(stdlib), str(root)]
+            base_prefix = str(tmp_path)
+        elif case == "external_path":
+            paths = [str(root)] if not normal else [str(tmp_path)]
+            base_prefix = str(root)
+        else:
+            paths = [str(site)] if case.startswith("dependency_") else [str(root)]
+            base_prefix = str(root)
         return SimpleNamespace(
             stderr=b"private diagnostic" if case == "stderr" else b"",
             stdout=repr({
-                "paths": ([str(site)] if case.startswith("dependency_") else
-                          [str(tmp_path) if case == "external_path" else str(root)]),
+                "paths": paths,
                 "prefix": str(root if case == "identity" or not normal else venv),
-                "base_prefix": str(root), "version": [3, 12, 0],
+                "base_prefix": base_prefix, "version": [3, 12, 0],
                 "abi": "cpython-312", "platform": "fixture",
             }).encode(),
         )
 
     monkeypatch.setattr(subprocess, "run", run)
-    if case in {"valid", "dependency_valid", "dependency_alias"}:
+    if case in {"valid", "dependency_valid", "dependency_alias", "isolated_stdlib"}:
         result = inspect_native_python_startup(
             python=python, checkout=checkout, roots=(root,), expected_fingerprint=expected,
             **dependency_options,
