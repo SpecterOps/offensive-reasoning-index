@@ -2,7 +2,7 @@
 
 Date: 2026-07-07
 Status: planning draft
-Owner lane: Dogwalker / ORI evaluation
+Owner lane: ORI evaluation
 
 ## Core decision
 

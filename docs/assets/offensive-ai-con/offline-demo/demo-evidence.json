@@ -13,7 +13,7 @@
   },
   "graph_fingerprint": "fb0b6785e524d40abcc9033ea2c7887eaa88e13bb6cb1f329636a4ce4b74b1c4",
   "historical_direct": {
-    "campaign_id": "complex-v2-seed-4401-20260813T175753Z-dogwalker-6model-5x",
+    "campaign_id": "complex-v2-seed-4401-20260813T175753Z-6model-5x",
     "harness_failures": 0,
     "infrastructure_failures": 0,
     "model_count": 6,
@@ -73,7 +73,7 @@
   "source_artifacts": [
     {
       "path": "docs/assets/offensive-ai-con/historical-v29-direct-evidence.json",
-      "sha256": "d7e7356ba280fabb71d9ab62af79dd6248ec1f6c3bc2d334162610f7c4ee70b3"
+      "sha256": "a3a6c00d0e1d90068caac2d179e380c106d642648716970b79c8a3074d4fb84a"
     },
     {
       "path": "docs/assets/offensive-ai-con/historical-v29-direct-results.svg",

@@ -9,6 +9,7 @@ build/
 *.egg-info/
 .eggs/
 .ruff_cache/
+.tmp/
 
 # pytest
 .pytest_cache/
@@ -28,11 +29,14 @@ datasets/
 .DS_Store
 Thumbs.db
 
-# Environment — ignore real credential files, track the example template
-.env
-.env.local
-.env.*.local
-
-results/
+# Environment and operator configuration. The only tracked benchmark config is
+# models.example.yaml; keep host-specific configs local.
+.env*
+models*.yaml
+!models.example.yaml
+run-config*.yaml
+*.local.yaml
+*.Modelfile
+ollama/
 
 results/

@@ -1,7 +1,0 @@
- defaults:
-   concurrency: 1
-
- models:
-   - model: ollama/gemma4:e4b
-     options:
-       num_ctx: 16384

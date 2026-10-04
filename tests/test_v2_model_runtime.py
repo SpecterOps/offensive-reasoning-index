@@ -1184,6 +1184,71 @@ def test_selection_fixture_query_realizes_the_public_contract() -> None:
     )
 
 
+def test_ordered_route_fixture_query_matches_single_and_multiple_mechanisms() -> None:
+    single_query = _mcp_fixture_query(MCP_TASK, count=False)
+    assert "MATCH p=(input0)-[:MemberOf]->(input1)" in single_query
+    assert model_runtime._query_matches_public_claim(
+        MCP_TASK,
+        single_query,
+        is_count=False,
+    )
+
+    multiple_task = MCP_TASK.model_copy(
+        update={
+            "binding": MCP_TASK.binding.model_copy(
+                update={
+                    "bounds": MCP_TASK.binding.bounds.model_copy(
+                        update={"max_hops": 2}
+                    )
+                }
+            ),
+            "acceptance_spec": MCP_TASK.acceptance_spec.model_copy(
+                update={
+                    "required_mechanisms": ("GenericAll", "MemberOf"),
+                    "mechanisms_are_ordered": True,
+                }
+            ),
+        }
+    )
+    multiple_query = _mcp_fixture_query(multiple_task, count=False)
+
+    assert "MATCH p=(input0)-[:GenericAll]->(hop0)-[:MemberOf]->(input1)" in multiple_query
+    assert model_runtime._query_matches_public_claim(
+        multiple_task,
+        multiple_query,
+        is_count=False,
+    )
+
+
+def test_unordered_route_fixture_query_keeps_bounded_wildcard_fallback() -> None:
+    unordered_task = MCP_TASK.model_copy(
+        update={
+            "binding": MCP_TASK.binding.model_copy(
+                update={
+                    "bounds": MCP_TASK.binding.bounds.model_copy(
+                        update={"max_hops": 2}
+                    )
+                }
+            ),
+            "acceptance_spec": MCP_TASK.acceptance_spec.model_copy(
+                update={
+                    "route_acceptance": RouteAcceptanceKind.ANY_GRAPH_VALID,
+                    "required_mechanisms": (),
+                    "mechanisms_are_ordered": False,
+                }
+            ),
+        }
+    )
+    query = _mcp_fixture_query(unordered_task, count=False)
+
+    assert "MATCH p=(input0)-[*1..2]->(input1)" in query
+    assert model_runtime._query_matches_public_claim(
+        unordered_task,
+        query,
+        is_count=False,
+    )
+
+
 def test_direct_model_runtime_executes_exactly_once_through_coordinator() -> None:
     query = "MATCH p=(a)-[:MemberOf]->(b) RETURN p LIMIT 1"
     provider_request: dict[str, Any] = {}

@@ -881,7 +881,7 @@ The exact current complex boundary is:
 | Complex graph fingerprint | `fb0b6785e524d40abcc9033ea2c7887eaa88e13bb6cb1f329636a4ce4b74b1c4` |
 | Certified/scheduled direct | 46 / 42 |
 | Certified/scheduled MCP | 70 / 55 |
-| Readiness config | `results/v2/complex-seed-4401/models-v2-seven-models-high-v29-2026-08-12.yaml` |
+| Readiness config | A machine-local config was used; operator configs are not distributed. |
 
 These limits are part of the result, not footnotes to hide. A trustworthy
 benchmark says exactly what has and has not been proven.
@@ -911,8 +911,8 @@ benchmark says exactly what has and has not been proven.
 
 - [Complex V1 Development Campaign Freeze](complex-v1-development-freeze.md)
   preserves the original evidence and eight frozen defects.
-- [Benchmark Correctness V2 Plan](plans/2026-07-25-benchmark-correctness-v2.md)
-  is the implementation checklist and full incident ledger.
+- [V2 Task Authoring and Certification](benchmark-v2-task-authoring.md)
+  documents the current task implementation and certification contract.
 - [V2 Certification Evidence](benchmark-v2-certification-evidence.md) records
   corpus counts, deterministic generation, live graph gates, artifact
   fingerprints, and review closures.

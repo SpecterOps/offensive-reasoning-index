@@ -223,8 +223,9 @@ prior certification stale.
 
 ### Model-backed V2 campaigns
 
-`ori run-v2` is the only model-backed V2 entry point. It accepts the strict
-`models.v2.example.yaml` shape and rejects unknown fields, V1 protocol values,
+`ori run-v2` is the only model-backed V2 entry point. It accepts the strict V2
+campaign-config shape shown in the [README](../README.md#local-v2-model-config)
+and rejects unknown fields, V1 protocol values,
 mixed track sets, `resource_mode` other than `off`, implicit/automatic tool
 loops, concurrency above one, and provider/loop combinations unsupported by
 the native runtime.
@@ -482,6 +483,10 @@ non-fatal and cannot change execution or scoring.
 
 ## V2 compile and certification commands
 
+Set `ORI_BH_ENV_FILE` to your protected BloodHound environment file as described
+in the [README](../README.md#first-full-campaign-gpt-56-sol-vs-gpt-55) before
+running the live commands below.
+
 Compile and offline-certify one product track:
 
 ```bash
@@ -496,7 +501,7 @@ uv run ori compile-v2 \
 Live-certify both tracks without invoking a model:
 
 ```bash
-uv run --env-file ../Bloodhound-MCP/.env \
+uv run --env-file "$ORI_BH_ENV_FILE" \
   ori certify-v2-live \
   --manifest datasets/benchmarks/complex-v1-seed-4401_manifest.json \
   --archive datasets/benchmarks/complex-v1-seed-4401.zip \
@@ -507,12 +512,11 @@ uv run --env-file ../Bloodhound-MCP/.env \
 This command is read-only. A graph mismatch is a stop condition, not permission
 to upload or replace data.
 
-Create a machine-local campaign config, then run readiness without providers:
+Create an ignored machine-local campaign config using the README example, then
+run readiness without providers:
 
 ```bash
-cp models.v2.example.yaml models.v2.local.yaml
-
-uv run --env-file ../Bloodhound-MCP/.env \
+uv run --env-file "$ORI_BH_ENV_FILE" \
   ori run-v2 \
   --config models.v2.local.yaml
 ```
@@ -537,7 +541,7 @@ infrastructure failures. Model-authored Cypher does not inherit that retry.
 No model call occurs unless `--execute` is supplied:
 
 ```bash
-uv run --env-file ../Bloodhound-MCP/.env \
+uv run --env-file "$ORI_BH_ENV_FILE" \
   ori run-v2 \
   --config models.v2.local.yaml \
   --execute

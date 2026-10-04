@@ -4,6 +4,10 @@ This runbook describes the standalone operator workflow for Phase 4 v1.
 It covers dataset generation, generated artifacts, BloodHound CE handoff points,
 and the MCP resources run profile.
 
+This is a historical workflow. Its original operator config is not distributed;
+the checked-in `models.example.yaml` is for the current simple/complex workflow
+and cannot run these legacy profiles without local adaptation.
+
 ## Scope
 
 Phase 4 v1 adds an advanced AD benchmark profile without replacing the Phase 3
@@ -19,13 +23,10 @@ Implemented scenario families:
 The BloodHound CE upload and ingest verification step is intentionally deferred
 until the operator confirms a live BH CE ingest window.
 
-## Config File
+## Local Config Requirement
 
-Canonical config:
-
-```text
-run-config-phase4-v1.yaml
-```
+Create a private `phase4-v1.local.yaml` with the legacy profiles described here.
+No Phase 4 operator config is shipped in the repository.
 
 Profiles:
 
@@ -43,7 +44,7 @@ them, but explicit `--profile` invocations still run them.
 Generate the dataset before any Phase 4 eval run:
 
 ```bash
-uv run ori run --config run-config-phase4-v1.yaml --profile phase4_v1
+uv run ori run --config phase4-v1.local.yaml --profile phase4_v1
 ```
 
 Expected generated outputs:
@@ -69,7 +70,7 @@ sizing:
 The generated graph is seed-reproducible. The same profile inputs and seed should
 produce the same manifest and SharpHound-compatible zip. To create a variant,
 copy the profile or edit the `seed`, `domain`, or `sizing` fields in
-`run-config-phase4-v1.yaml`, then regenerate.
+`phase4-v1.local.yaml`, then regenerate.
 
 Current generated manifest summary for seed `4401`:
 
@@ -121,7 +122,7 @@ No-MCP direct Cypher eval:
 
 ```bash
 uv run ori run \
-  --config run-config-phase4-v1.yaml \
+  --config phase4-v1.local.yaml \
   --profile phase4_v1_direct_best_stage3
 ```
 
@@ -135,7 +136,7 @@ Full MCP eval with tools, resources, and MCP prompt discovery:
 
 ```bash
 uv run ori run \
-  --config run-config-phase4-v1.yaml \
+  --config phase4-v1.local.yaml \
   --profile phase4_v1_full_mcp_best_stage3
 ```
 
@@ -180,86 +181,12 @@ the task alone. The full MCP run measures whether the model can use BloodHound M
 tools, reference resources, and the discovered MCP system prompt to reason over
 the live graph.
 
-## API Model Profiles
+## Model Providers
 
-For OpenAI-compatible APIs, set the model to `openai-compat/...`, provide the
-base URL, and force the native OpenAI-compatible MCP tool loop.
-
-ORI uses `OPENAI_COMPAT_API_KEY` only as the explicit override for generic
-OpenAI-compatible endpoints. OpenRouter selects `OPENROUTER_API_KEY`, Nous
-selects `NOUS_API_KEY` (with `NOUS_PORTAL_API_KEY` as an alias), and official
-OpenAI selects `OPENAI_API_KEY`. Keep keys out of run-config YAML and other
-tracked files. The selected key works for both direct and MCP inference.
-
-For Nous Portal, use `https://inference-api.nousresearch.com/v1` as the base URL
-and set `NOUS_API_KEY` before running ORI.
-
-Reusable examples live in:
-
-```text
-docs/openai-compatible-model-examples.yaml
-```
-
-Copy one disabled profile from that file into a generated run config or into
-`run-config-phase4-v1.yaml`, then update the provider URL, model name,
-and output path.
-
-Local llama.cpp example:
-
-```yaml
-model:
-  name: llama-cpp-qwen
-  model: openai-compat/qwen
-  model_base_url: http://127.0.0.1:8080/v1
-  mcp_tool_loop: native-openai-compatible
-  openai_compat_telemetry_adapter: llama-cpp
-  options:
-    temperature: 0
-```
-
-MLX example:
-
-```yaml
-model:
-  name: mlx-qwen
-  model: openai-compat/qwen
-  model_base_url: http://127.0.0.1:8080/v1
-  mcp_tool_loop: native-openai-compatible
-  openai_compat_telemetry_adapter: mlx-lm
-  options:
-    temperature: 0
-```
-
-OpenRouter-style example:
-
-```yaml
-model:
-  name: openrouter-qwen
-  model: openai-compat/qwen/qwen3-32b
-  model_base_url: https://openrouter.ai/api/v1
-  mcp_tool_loop: native-openai-compatible
-  openai_compat_telemetry_adapter: generic
-  options:
-    temperature: 0
-```
-
-Replace `qwen/qwen3-32b` with the exact OpenRouter model ID you want to run.
-
-Supported OpenAI-compatible telemetry adapters:
-
-```text
-auto
-generic
-llama-cpp
-mlx-lm
-vllm
-lm-studio
-```
-
-The native OpenAI-compatible loop captures standard usage fields, provider
-metadata when present, structured reasoning fields, and `<think>...</think>`
-blocks. Provider-specific telemetry is best-effort because OpenAI compatibility
-does not standardize runtime metrics.
+Provider fields and environment-variable names for the current workflow are
+documented in the [README](../README.md#model-configuration). The current
+`models.example.yaml` format is not a drop-in replacement for these legacy
+profiles; keep any Phase 4 config local and update it for your provider.
 
 ## Prompt Discovery
 

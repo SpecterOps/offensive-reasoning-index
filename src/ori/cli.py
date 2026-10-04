@@ -1265,7 +1265,18 @@ def compile_v2_command(
         "flag, run only artifact, capability, health, and live-graph gates."
     ),
 )
-def run_v2_command(config_path: str, execute: bool) -> None:
+@click.option(
+    "--verbose",
+    "verbose_output",
+    is_flag=True,
+    default=False,
+    help=(
+        "Opt-in bounded operator view: show each public question, mechanical "
+        "model/tool progress, terminal outcome, and a schema-only answer-shape "
+        "placeholder."
+    ),
+)
+def run_v2_command(config_path: str, execute: bool, verbose_output: bool) -> None:
     """Preflight or execute an explicit, candidate-certified V2 campaign."""
     import asyncio
 
@@ -1278,6 +1289,7 @@ def run_v2_command(config_path: str, execute: bool) -> None:
                 Path(config_path),
                 preflight_only=not execute,
                 progress=click.echo,
+                verbose=verbose_output,
             )
         )
     except ValueError as exc:

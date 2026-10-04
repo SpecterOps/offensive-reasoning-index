@@ -13,15 +13,10 @@ The current public benchmark products are:
 simple   small, fast, seeded AD smoke/triage benchmark
 complex  large, enterprise-style seeded AD benchmark with multihop reasoning tasks
 src/ori/                         Python package and CLI
-docs/phase4-v1-runbook.md        Phase 4 v1 operator runbook
+docs/phase4-v1-runbook.md        Historical Phase 4 v1 behavior and limits
 docs/benchmark-hardening-runbook.md
                                  Scoring/preflight/failure-taxonomy notes
-examples/inference/              Sanitized inference-provider config templates
-docs/openai-compatible-model-examples.yaml
-                                 Legacy disabled provider-profile examples
-run-config-phase4-v1.yaml        Current Phase 4 v1 config
-run-config-phase3-m4.yaml        Earlier M4 Phase 3 config
-models.yaml / models-m4.yaml     Local model lineups
+models.example.yaml              The sole public benchmark model-config example
 results/                         Local result artifacts; do not assume complete
 ```
 
@@ -33,9 +28,10 @@ uv run ori generate complex --seed 4401 --output datasets/benchmarks
 uv run ori run --config models.local.yaml
 ```
 
-Older Phase 3 / Phase 4 run configs remain in the repo for historical comparison
-and focused diagnostics. Prefer the `simple` and `complex` product workflow unless
-you are deliberately reproducing one of those older phase runs.
+Machine-specific model lists, run configs, and local-model `Modelfile`s are not
+shipped. Copy `models.example.yaml` to an ignored local filename and edit it for
+your environment. Historical Phase 3 / Phase 4 reproduction may require an
+operator-maintained config.
 
 ## Quick Start
 
@@ -115,11 +111,11 @@ mcp      model uses read-only BloodHound MCP tools, then ORI grades its evidence
 ```
 
 Run the commands from the repository root. MCP benchmark configs use an
-immutable `uvx_git` source pin. This workstation keeps the protected credential
-file outside the ORI repository at:
+immutable `uvx_git` source pin. Keep BloodHound credentials in a protected
+environment file outside the ORI repository, and set its path once:
 
-```text
-../Bloodhound-MCP/.env
+```bash
+export ORI_BH_ENV_FILE=/path/to/bloodhound.env
 ```
 
 The `.env` file supplies the BloodHound host and API credentials. Do not print
@@ -182,17 +178,19 @@ than assuming the cache never changes.
 
 ### 3. Confirm the dedicated BloodHound environment
 
-Check that the protected credential file exists and is not group/world readable:
+Check that the protected credential file exists and has owner-only permissions:
 
 ```bash
-test -f ../Bloodhound-MCP/.env
-test "$(stat -f '%Lp' ../Bloodhound-MCP/.env)" = "600"
+test -f "$ORI_BH_ENV_FILE"
 ```
+
+Set the file mode to `0600` using the command appropriate for your operating
+system.
 
 Then run the independent health gate:
 
 ```bash
-uv run --env-file ../Bloodhound-MCP/.env \
+uv run --env-file "$ORI_BH_ENV_FILE" \
   ori verify-bh-health
 ```
 
@@ -255,7 +253,7 @@ First check whether the dedicated BloodHound instance already matches the
 manifest:
 
 ```bash
-uv run --env-file ../Bloodhound-MCP/.env \
+uv run --env-file "$ORI_BH_ENV_FILE" \
   ori verify-ingest \
   --manifest datasets/benchmarks/complex-v1-seed-4401_manifest.json
 ```
@@ -373,7 +371,7 @@ runs representative read-only calls. Use a new readiness path for a new MCP
 revision:
 
 ```bash
-uv run --env-file ../Bloodhound-MCP/.env \
+uv run --env-file "$ORI_BH_ENV_FILE" \
   ori verify-mcp \
   --config results/models-gpt56sol-vs-gpt55.yaml \
   --manifest datasets/benchmarks/complex-v1-seed-4401_manifest.json \
@@ -388,10 +386,10 @@ tool response bodies.
 Re-run the health and ingest gates immediately before spending model usage:
 
 ```bash
-uv run --env-file ../Bloodhound-MCP/.env \
+uv run --env-file "$ORI_BH_ENV_FILE" \
   ori verify-bh-health
 
-uv run --env-file ../Bloodhound-MCP/.env \
+uv run --env-file "$ORI_BH_ENV_FILE" \
   ori verify-ingest \
   --manifest datasets/benchmarks/complex-v1-seed-4401_manifest.json
 ```
@@ -399,7 +397,7 @@ uv run --env-file ../Bloodhound-MCP/.env \
 Only after `INGEST CHECK: PASS`, launch both tracks:
 
 ```bash
-uv run --env-file ../Bloodhound-MCP/.env \
+uv run --env-file "$ORI_BH_ENV_FILE" \
   ori run \
   --config results/models-gpt56sol-vs-gpt55.yaml
 ```
@@ -495,11 +493,8 @@ docs/benchmark-products-runbook.md
                                  Current simple/complex setup and run workflow
 docs/benchmark-hardening-runbook.md
                                  Scoring, preflight, outcome taxonomy, reporting notes
-docs/phase4-v1-runbook.md        Historical/focused Phase 4 v1 operator runbook
-docs/openai-compatible-model-examples.yaml
-                                 Disabled example profiles for API providers
-models.example.yaml              Public-safe model matrix example
-run-config-phase4-v1.yaml        Older Phase 4 v1 config for focused diagnostics
+docs/phase4-v1-runbook.md        Historical Phase 4 v1 behavior and limits
+models.example.yaml              The only checked-in model configuration
 results/                         Local result artifacts; do not assume complete
 ```
 
@@ -758,7 +753,7 @@ uv run ori verify-ingest --manifest <manifest>
 Model grading proves model performance only if the earlier steps passed:
 
 ```bash
-uv run ori run --config <models.yaml> --manifest <manifest>
+uv run ori run --config models.local.yaml --manifest <manifest>
 ```
 
 Keep this separation in mind. A health pass is not an ingest pass, and a preflight
@@ -826,7 +821,7 @@ On a controlled BloodHound instance that already contains the exact matching
 archive, run the read-only live certification gate:
 
 ```bash
-uv run --env-file ../Bloodhound-MCP/.env \
+uv run --env-file "$ORI_BH_ENV_FILE" \
   ori certify-v2-live \
   --manifest datasets/benchmarks/complex-v1-seed-4401_manifest.json \
   --archive datasets/benchmarks/complex-v1-seed-4401.zip \
@@ -886,11 +881,51 @@ and tier metadata are normalized away, while known case-only ingest
 transformations are canonicalized identically in archive, live, and answer
 evidence.
 
-After both track artifacts have reached candidate state, start from the strict
-V2 model config:
+### Local V2 model config
 
-```bash
-cp models.v2.example.yaml models.v2.local.yaml
+After both track artifacts have reached candidate state, create a local V2
+campaign config using the schema below. Replace every `/path/to/...` value with
+the exact artifact or checkout path produced by your compile and certification
+commands. Save it as `models.v2.local.yaml`; ignore rules keep it out of Git.
+
+```yaml
+version: 2
+protocol: ori-eval-protocol-v2
+source:
+  manifest: /path/to/benchmark_manifest.json
+  archive: /path/to/benchmark.zip
+tracks:
+  direct:
+    public: /path/to/direct-public-v2.json
+    oracles: /path/to/direct-oracles-v2.private.json
+    candidates: /path/to/direct-candidates-v2.json
+    live_certification: /path/to/direct-live-certification.private.json
+  mcp:
+    public: /path/to/mcp-public-v2.json
+    oracles: /path/to/mcp-oracles-v2.private.json
+    candidates: /path/to/mcp-candidates-v2.json
+    live_certification: /path/to/mcp-live-certification.private.json
+modes: [direct, mcp]
+output_dir: results/benchmark-runs/v2-campaign
+defaults:
+  concurrency: 1
+  runs_per_model: 1
+  reasoning_effort: high
+  max_infra_retries: 2
+  infra_retry:
+    immediate_retries: 1
+    deferred_cooldown_seconds: 300
+  mcp:
+    mcp_dir: /path/to/pinned-bloodhound-mcp-checkout
+    max_steps: 16
+    resource_mode: "off"
+    tool_loop: native-openai-compatible
+models:
+  - name: codex-model
+    provider: codex
+    model: <available-codex-model-slug>
+    api_surface: auto
+    mcp_tool_loop: native-openai-compatible
 ```
 
 Keep the source archive, public tasks, sealed oracles, candidate catalogs, and
@@ -918,7 +953,7 @@ readiness receipt. Changing effort defines a new campaign and therefore
 requires a fresh `output_dir`.
 
 ```bash
-uv run --env-file ../Bloodhound-MCP/.env \
+uv run --env-file "$ORI_BH_ENV_FILE" \
   ori run-v2 \
   --config models.v2.local.yaml
 ```
@@ -950,7 +985,7 @@ cannot be derived from that public contract blocks certification.
 Only the following command spends provider usage:
 
 ```bash
-uv run --env-file ../Bloodhound-MCP/.env \
+uv run --env-file "$ORI_BH_ENV_FILE" \
   ori run-v2 \
   --config models.v2.local.yaml \
   --execute
@@ -1222,10 +1257,10 @@ with 17,088 canonical objects and 60,342 relationships at all three gates.
 Direct releases 42 representatives from 46 certified tasks; MCP releases 55
 from 70. The pinned MCP capability is
 `ori-mcp-92a37dd-bhce-9.1-cypher-v7`. Seven-model `high`-effort no-model
-readiness passed with zero provider calls using
-`results/v2/complex-seed-4401/models-v2-seven-models-high-v29-2026-08-12.yaml`.
-Use that file only after reviewing its machine-local paths, and add `--execute`
-only when intentionally launching a fresh paid V29 campaign.
+readiness passed with zero provider calls. Build a local V2 config using the
+schema above; the repository does not include operator model lists or readiness
+configs. Add `--execute` only when intentionally launching a fresh paid V29
+campaign.
 
 Complex generation now validates the completed SharpHound ZIP against every
 declared planted relationship before writing it. The current corpus must pass all
@@ -1270,9 +1305,9 @@ dataset.
 - [Offensive AI Con Talk Outline](docs/offensive-ai-con-talk-outline.md): timed
   narrative, public claim register, offline demo storyboard, and evidence-freeze
   checklist for the October 5 presentation.
-- [Offensive AI Con Readiness Report](docs/offensive-ai-con-readiness-plan.md):
-  project history, code/result/debt ledgers, definitions of finished, owners,
-  dated release/benchmark/conference schedule, and post-conference 100/100 lane.
+- [Offensive AI Con Readiness Snapshot](docs/offensive-ai-con-readiness-plan.md):
+  historical project and benchmark status as of 2026-08-30; later product
+  status should be checked against the current benchmark runbooks.
 - [Offensive AI Con Offline Demo](docs/offensive-ai-con-offline-demo.md):
   deterministic stage package, six static fallbacks, build/QA commands, and
   abort rules for a presentation that does not depend on live services.
@@ -1284,16 +1319,8 @@ dataset.
   external exclusive lock, fail-closed campaign status, and optional model-card
   generation after valid completion. See the supervisor contract for the
   required outside-root state path and budget headroom.
-- [Phase 4 v1 Runbook](docs/phase4-v1-runbook.md): older Phase 4 v1 workflow for
-  historical comparison and focused diagnostic profiles.
-- [Inference Config Examples](examples/inference/): sanitized templates for
-  Ollama, generic OpenAI-compatible endpoints, llama.cpp, vLLM, LM Studio,
-  OpenRouter, Nous Portal, NVIDIA NIM, and BloodHound MCP environment wiring. Copy these to
-  local run configs and replace placeholders; keep real inference endpoints,
-  private model aliases, API keys, and local paths out of public commits.
-- [OpenAI-Compatible Model Examples](docs/openai-compatible-model-examples.yaml):
-  legacy disabled profile examples for Ollama OpenAI compat, llama.cpp, MLX,
-  vLLM, LM Studio, OpenRouter, Nous Portal, and NVIDIA NIM.
+- [Phase 4 v1 Runbook](docs/phase4-v1-runbook.md): historical Phase 4 behavior;
+  its operator config is intentionally not distributed.
 
 ## Common Commands
 
@@ -1336,14 +1363,14 @@ uv run ori run --config models.local.yaml
 Preflight a candidate-certified V2 campaign without model calls:
 
 ```bash
-uv run --env-file ../Bloodhound-MCP/.env \
+uv run --env-file "$ORI_BH_ENV_FILE" \
   ori run-v2 --config models.v2.local.yaml
 ```
 
 Execute that exact V2 campaign only after readiness passes:
 
 ```bash
-uv run --env-file ../Bloodhound-MCP/.env \
+uv run --env-file "$ORI_BH_ENV_FILE" \
   ori run-v2 --config models.v2.local.yaml --execute
 ```
 
@@ -1363,11 +1390,10 @@ uv run ori score-answers \
   --output scorer_projection.json
 ```
 
-Run older phase configs when intentionally reproducing them:
+Run legacy phase profiles only when you supply a compatible local config:
 
 ```bash
-uv run ori run --config run-config-phase4-v1.yaml --profile phase4_v1
-uv run ori run --config run-config-phase4-v1.yaml --profile phase4_v1_full_mcp_best_stage3
+uv run ori run --config phase4-v1.local.yaml --profile phase4_v1
 ```
 
 ## Operating Rules
@@ -1399,12 +1425,9 @@ ORI is for controlled benchmark and evaluation work. Do not point evaluation run
 at production BloodHound environments or real customer data unless the environment
 owner has explicitly approved the scope, credentials, and reporting destination.
 
-Generated datasets/results may be useful evidence, but review size and sensitivity
-before committing them. Never commit local `.env`, generated secrets, auth tokens,
-private result dumps, or machine-specific operator logs.
-Do not commit local `.env`, generated secrets, inference
-routing configs, or machine-specific operator logs. Keep real provider endpoints,
-private model aliases, and local output paths in untracked local configs. The
-sanitized templates under `examples/inference/` are safe starting points for
-public documentation and user setup. Generated datasets/results may be useful
-evidence, but review size and sensitivity before committing them.
+Do not commit environment files, generated secrets, auth tokens, private result
+dumps, model lists, local-model `Modelfile`s, or machine-specific operator logs.
+Keep real provider endpoints, private model aliases, and local output paths in
+ignored local configs. `models.example.yaml` is the only checked-in model config;
+it uses placeholders and public endpoints. Review generated datasets and results
+for size and sensitivity before committing them.

@@ -89,6 +89,11 @@ from .schema import (
     Track,
 )
 from .scoring import SampleOutcomeCode, SampleResult, summarize_results
+from .verbose import (
+    answer_shape_line,
+    task_question_lines,
+    tool_activity_lines,
+)
 
 RUNNER_VERSION = "ori-v2-model-campaign-v15"
 RUN_STATE_SCHEMA_VERSION = "ori-v2-private-run-state-v7"
@@ -120,6 +125,7 @@ _RUNNER_IMPLEMENTATION_SOURCES = {
     "runtime": Path(__file__).with_name("runtime.py"),
     "schema": Path(__file__).with_name("schema.py"),
     "scoring": Path(__file__).with_name("scoring.py"),
+    "verbose": Path(__file__).with_name("verbose.py"),
 }
 RUNNER_IMPLEMENTATION_FINGERPRINT = canonical_sha256(
     {
@@ -1886,6 +1892,7 @@ async def _run_model(
     mcp_launcher_runtime: MCPLauncherRuntime | None = None,
     progress: ProgressReporter | None = None,
     lifecycle: _CampaignLifecycleController | None = None,
+    verbose: bool = False,
 ) -> tuple[ModelRunProvenanceV2, tuple[SampleResult, ...]]:
     provenance = _provenance(
         resolved=resolved,
@@ -2077,6 +2084,14 @@ async def _run_model(
                 + ")"
             ),
         )
+        if verbose:
+            question_lines = task_question_lines(
+                task,
+                position=task_positions[task_id],
+                total=len(prepared.task_ids),
+            )
+            for line in question_lines:
+                _emit_progress(progress, line)
         sample: SampleResult
         provider: ProviderRunRecord
         cancellation: V2ModelTaskCancelled | None = None
@@ -2218,6 +2233,13 @@ async def _run_model(
         )
         if cancellation is not None:
             raise cancellation
+        if verbose:
+            activity_lines = (
+                *tool_activity_lines(provider),
+                answer_shape_line(task),
+            )
+            for line in activity_lines:
+                _emit_progress(progress, line)
         _emit_progress(
             progress,
             _task_completion_progress(
@@ -2377,6 +2399,7 @@ async def _run_prepared_v2_campaign(
     preflight_only: bool,
     progress: ProgressReporter | None,
     lifecycle: _CampaignLifecycleController,
+    verbose: bool = False,
 ) -> CampaignReadinessV2:
     receipts_before: dict[Track, LiveGraphVerification] = {}
     shared_preflight: tuple[GraphSnapshot, LiveGraphVerification] | None = None
@@ -2470,6 +2493,7 @@ async def _run_prepared_v2_campaign(
                         mcp_launcher_runtime=(mcp_launcher_runtime if track is Track.MCP else None),
                         progress=progress,
                         lifecycle=lifecycle,
+                        verbose=verbose,
                     )
                     run_dir = (
                         resolved.output_dir / track.value / model.name / f"run-{run_index:03d}"
@@ -2544,6 +2568,7 @@ async def run_v2_campaign(
     *,
     preflight_only: bool = False,
     progress: ProgressReporter | None = None,
+    verbose: bool = False,
 ) -> CampaignReadinessV2:
     """Run exact V2 candidate catalogs, or stop after readiness when requested."""
 
@@ -2580,6 +2605,7 @@ async def run_v2_campaign(
                 preflight_only=preflight_only,
                 progress=progress,
                 lifecycle=lifecycle,
+                verbose=verbose,
             )
         except asyncio.CancelledError:
             lifecycle.interrupt(

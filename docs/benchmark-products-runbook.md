@@ -9,7 +9,10 @@ simple
 complex
 ```
 
-Use these names in generated artifacts, scripts, and result folders. Older Phase 3 / Phase 4 run configs still exist for historical comparison and focused diagnostics, but the normal public benchmark path should start with `ori generate simple` or `ori generate complex`.
+Use these names in generated artifacts, scripts, and result folders. Legacy
+Phase 3 / Phase 4 profiles remain available for historical reproduction, but
+their machine-specific configs are not shipped. The normal public workflow
+starts with `ori generate simple` or `ori generate complex`.
 
 ## Mental Model
 
@@ -235,7 +238,7 @@ models:
     mcp_tool_loop: native-openai-compatible
 ```
 
-ORI normally resolves `uv` and `uvx` from `PATH`. If Hermes, Dogwalker, cron,
+ORI normally resolves `uv` and `uvx` from `PATH`. If an agent supervisor, cron,
 or another non-interactive supervisor deliberately supplies a restricted
 `PATH`, declare the operator-approved absolute executables in that supervisor's
 environment:
@@ -478,28 +481,15 @@ uv run ori run --config models.local.yaml
 
 If step 4 fails, stop. Do not grade models against a mismatched graph; the scores will describe ingest drift, not reasoning quality.
 
-## Nous Portal Ox Alpha quick start
+## OpenAI-Compatible Providers
 
-The current Nous Portal catalog exposes Ox Alpha as `stealth/ox-alpha`. In a
-copy of `models.example.yaml`, use the `nous-ox-alpha` entry and set the key
-outside the repository:
+The single checked-in `models.example.yaml` includes generic examples for
+OpenAI-compatible providers. Copy it to `models.local.yaml`, edit the relevant
+model entry, and set credentials through environment variables. For Nous
+Portal, set `NOUS_API_KEY` or `NOUS_PORTAL_API_KEY` outside the repository:
 
 ```bash
+cp models.example.yaml models.local.yaml
 export NOUS_API_KEY="<your Nous Portal key>"
 uv run ori run --config models.local.yaml
-```
-
-The reusable legacy template also includes disabled direct and MCP profiles in
-[`examples/inference/nous.yaml`](../examples/inference/nous.yaml). Start with
-the direct profile; tool-enabled compatibility for this newly released model
-should be validated against the controlled target before an MCP run.
-
-To use the dedicated legacy profile instead:
-
-```bash
-cp examples/inference/nous.yaml run-config.nous.yaml
-export NOUS_API_KEY="<your Nous Portal key>"
-uv run ori run \
-  --config run-config.nous.yaml \
-  --profile eval_direct_nous_ox_alpha
 ```

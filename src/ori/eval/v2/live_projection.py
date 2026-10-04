@@ -524,7 +524,20 @@ def _mcp_fixture_query(
     max_hops = max(1, task.binding.bounds.max_hops)
     relationship = f"[*1..{max_hops}]"
 
-    if task.claim_kind in {"route", "absence", "decision"} and len(bound_entities) >= 2:
+    if task.claim_kind in {"route", "decision"} and len(bound_entities) >= 2:
+        required_mechanisms = tuple(task.acceptance_spec.required_mechanisms)
+        if task.acceptance_spec.mechanisms_are_ordered and required_mechanisms:
+            path_nodes = ["input0"] + [
+                f"hop{index}" for index in range(len(required_mechanisms) - 1)
+            ] + ["input1"]
+            path = path_nodes[0]
+            for index, mechanism in enumerate(required_mechanisms):
+                path += f")-[:{mechanism}]->({path_nodes[index + 1]}"
+            clauses.append(f"MATCH p=({path})")
+        else:
+            clauses.append(f"MATCH p=(input0)-{relationship}->(input1)")
+        result_expression = "p"
+    elif task.claim_kind == "absence" and len(bound_entities) >= 2:
         clauses.append(f"MATCH p=(input0)-{relationship}->(input1)")
         result_expression = "p"
     elif bound_entities and contract.result_kind == "entities":

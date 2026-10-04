@@ -7,7 +7,7 @@ const { Presentation, PresentationFile } = await import(artifactToolModule);
 const ROOT = path.resolve(import.meta.dirname, "..");
 const OUTPUT = path.join(
   ROOT,
-  "docs/assets/offensive-ai-con/ori-offensive-ai-con-working-deck.pptx",
+  ".tmp/offensive-ai-con-deck/ori-offensive-ai-con-working-deck.pptx",
 );
 const PREVIEW_DIR = path.join(ROOT, ".tmp/offensive-ai-con-deck");
 

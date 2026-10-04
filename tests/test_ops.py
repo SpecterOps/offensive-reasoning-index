@@ -998,12 +998,28 @@ models:
     }
 
 
-def test_death_star_models_file_uses_openai_compat_qwen_fast() -> None:
-    spec = _build_run_specs(models=(), models_file="models-death-star.yaml")[0]
+def test_models_file_uses_openai_compat_endpoint(tmp_path: Path) -> None:
+    models_file = tmp_path / "models.yaml"
+    models_file.write_text(
+        """
+defaults:
+  concurrency: 1
+models:
+  - name: qwen-fast-64k
+    model: openai-compat/qwen-fast
+    model_base_url: http://127.0.0.1:8080/v1
+    mcp_tool_loop: native-openai-compatible
+    openai_compat_telemetry_adapter: llama-cpp
+    mcp_ollama_read_timeout_seconds: 1800
+    options:
+      temperature: 0
+"""
+    )
+    spec = _build_run_specs(models=(), models_file=str(models_file))[0]
 
-    assert spec.run_name == "death-star-qwen-fast-64k"
+    assert spec.run_name == "qwen-fast-64k"
     assert spec.requested_model == "openai-compat/qwen-fast"
-    assert spec.model_base_url == "http://death-star:8080/v1"
+    assert spec.model_base_url == "http://127.0.0.1:8080/v1"
     assert spec.concurrency == 1
     assert spec.mcp_tool_loop == "native-openai-compatible"
     assert spec.openai_compat_telemetry_adapter == "llama-cpp"

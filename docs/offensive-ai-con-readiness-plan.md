@@ -1,6 +1,7 @@
-# ORI Offensive AI Con Readiness Plan
+# ORI Offensive AI Con Readiness Snapshot
 
-Date: 2026-08-30
+Snapshot date: 2026-08-30
+Status: historical snapshot; this document does not represent current release status.
 Scope: signed Release 1 branch plus the stacked campaign-operations and conference
 work, current V29 benchmark boundary, and the work needed to present ORI
 credibly by 2026-10-05.
@@ -16,10 +17,11 @@ controlled host with zero provider attempts and zero tokens.
 The final post-r3 delivery tree adds the deadline, status, output-budget, and
 model-card packaging fixes proven by the live campaign. It passes 974 tests,
 full Ruff, `git diff --check`, and a redacted 141-commit Gitleaks history scan
-with no leaks. The model-card supervisor replay also passed on Antonetta against
-the already-completed campaign without launching another provider call.
+with no leaks. The model-card supervisor replay also passed on an operator
+workstation against the already-completed campaign without launching another
+provider call.
 
-## Current state
+## State at snapshot time
 
 ### Release 1 provider hardening
 
@@ -187,8 +189,8 @@ zero tokens. The public-safe receipt is
 `docs/evidence/integrated-698dc52-laguna-v29-readiness.json`.
 
 The same exact runtime then passed a process-level readiness-recovery matrix on
-Antonetta without provider usage. The matrix proved the explicit paid approval
-gate, duplicate-supervisor exclusion, fail-closed missing-executable behavior,
+an operator workstation without provider usage. The matrix proved the explicit
+paid approval gate, duplicate-supervisor exclusion, fail-closed missing-executable behavior,
 graceful `SIGTERM` interruption and one-restart recovery, pre-lifecycle hard
 failure accounting, and post-lifecycle `stale_running` recovery. Every recovered
 root completed no-model readiness with zero provider attempts and zero tokens.
@@ -196,26 +198,25 @@ The production launcher now exports the qualified absolute `uv` and `uvx`
 executables so the supervised child inherits the same launcher boundary that
 readiness certified.
 
-Dogwalker's local ORI monitor and runbook now understand `ori run-v2`, consume
+The local ORI monitor and runbook now understand `ori run-v2`, consume
 only the redacted `ori-v2-campaign-status-v2` projection, keep Direct and MCP
 progress separate, and normalize legacy naive timestamps instead of crashing
 discovery. Its Hermes no-agent monitor is scheduled every five minutes. A
 forced scheduler run completed successfully while no campaign was active and
 therefore posted nothing to Discord. Rollback backups were retained. The
-public-safe process/monitoring receipt is
-`docs/evidence/integrated-698dc52-supervisor-dogwalker-acceptance.json`.
+supporting process/monitoring receipt is not included in this public source tree.
 
 ### Full Laguna qualification and runtime findings
 
 The first paid integrated attempt exposed two operational gaps before it could
-be treated as benchmark evidence. Dogwalker fell back to its legacy status
-projection when V29 status rejected a valid checkpoint whose compiled task
+be treated as benchmark evidence. The campaign supervisor fell back to its
+legacy status projection when V29 status rejected a valid checkpoint whose compiled task
 bindings were larger than its semantic release schedule. That fallback posted
 an `unknown model` / `unknown phase` milestone even though the ORI process still
 held the correct Laguna configuration. ORI also defaulted compatible-provider
 output to 2,048 tokens, causing otherwise typed Laguna answers to terminate at
 the harness ceiling. The status check now accepts the candidate-certified
-release subset while still rejecting durable results outside it, Dogwalker
+release subset while still rejecting durable results outside it. The supervisor
 suppresses V2 milestones when V2 status is unavailable, and the typed model
 configuration exposes a fingerprinted `max_output_tokens` value used by both
 Direct and MCP.
@@ -376,7 +377,7 @@ from collapsing into one misleading score series.
 | August 13-22 | V29 six-model, five-pass campaign | Direct 42 x 5 per model; MCP 55 x 5 planned | Direct completed 1,260 valid samples; MCP failed after Neo4j loss and circuit amplification | Direct historical development evidence is valid; MCP has no publishable ranking or completion receipt |
 | August 22-29 | Nous Ox Alpha / Laguna investigations | partial Direct/MCP attempts | Provider availability, nullable content, tool-schema, launcher, and recovery defects reproduced | diagnostic only; every pre-`d6ac198` root is stale and non-resumable |
 | August 30 | Release 1 exact-head Nous canaries | one Direct and one MCP task | both campaign-valid `OUTPUT_INVALID`; MCP completed 7 tools / 6 Cypher calls | current interoperability evidence for Nous at `d6ac198`; zero infra/harness failures; public-safe receipt in `docs/evidence/` |
-| August 30 | Integrated supervisor and Dogwalker acceptance | approval, duplicate-lock, executable failure, graceful/unclean recovery, V2 Discord monitor | all readiness recoveries passed with zero provider attempts/tokens; Hermes cron path passed | process-level readiness operations qualified at `698dc52`; paid execution/completion gates remain |
+| August 30 | Integrated supervisor acceptance | approval, duplicate-lock, executable failure, graceful/unclean recovery, V2 status monitor | all readiness recoveries passed with zero provider attempts/tokens; scheduled monitor path passed | process-level readiness operations qualified at `698dc52`; paid execution/completion gates remain |
 | Pending | OpenRouter exact-head canaries | one Direct and one MCP task | not run | fixture-covered only until live credential and canaries exist |
 | August 30-31 | Laguna S 2.1 full V29 r3 campaign | 42 Direct + 55 MCP, one pass | Direct 6/42; MCP 12/55; 97/97 checkpointed; 102 attempts; 6,014,148 observed tokens | both tracks campaign-valid with matching graph gates, zero infrastructure/harness/unexecuted failures, redacted receipt and model card published under `docs/` |
 
@@ -733,7 +734,7 @@ fill a denominator.
    OpenRouter Direct/MCP canaries from fresh roots.
 4. Merge the integrated changes to `master` after review, or merge Release 1
    first and restack operations if repository policy requires split PRs.
-5. Keep Dogwalker's redacted monitor active for future runs and retain the r3
+5. Keep the redacted campaign monitor active for future runs and retain the r3
    supervisor incident/replay as the production packaging regression proof.
 6. Complete the conference deck, source map, fallback video, second-machine QA,
    and timed rehearsals on the dated schedule below.
@@ -800,8 +801,8 @@ gate drift:
 - `docs/offensive-ai-con-offline-demo.md` and
   `docs/assets/offensive-ai-con/offline-demo/` — keyboard-navigable offline demo,
   six static stage fallbacks, and render receipts.
-- `docs/assets/offensive-ai-con/ori-offensive-ai-con-working-deck.pptx` — current
-  working deck; not final until organizer inputs and frozen evidence are bound.
+- `scripts/build_offensive_ai_con_deck.mjs` — generates a local working deck
+  under the ignored `.tmp/` directory; the generated deck is not tracked.
 - `docs/benchmark-v2-design-rationale.md` — canonical architecture, incidents,
   metrics, and V29 boundary.
 - `docs/benchmark-v2-certification-evidence.md` — offline/live certification
