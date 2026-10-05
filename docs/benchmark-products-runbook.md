@@ -235,9 +235,37 @@ models:
     mcp_tool_loop: native-openai-compatible
 ```
 
+ORI normally resolves `uv` and `uvx` from `PATH`. If Hermes, Dogwalker, cron,
+or another non-interactive supervisor deliberately supplies a restricted
+`PATH`, declare the operator-approved absolute executables in that supervisor's
+environment:
+
+```bash
+export ORI_UV_EXECUTABLE=/opt/homebrew/bin/uv
+export ORI_UVX_EXECUTABLE=/opt/homebrew/bin/uvx
+```
+
+Local-checkout runs need only `ORI_UV_EXECUTABLE`; `uvx_git` runs need both.
+Readiness fails before model usage when either required executable is missing or
+invalid. Private launcher provenance records the exact paths and `uv` version,
+and changing them invalidates resume state. ORI does not forward these settings
+to the BloodHound MCP child.
+
+For unattended V2 operation, use the read-only `ori campaign-status --json`
+projection and follow the
+[V2 Campaign Supervisor Contract](v2-campaign-supervisor-contract.md). External
+process managers own persistence, backoff, notifications, credential injection,
+and archival; ORI remains authoritative for locking, readiness, checkpoints,
+resume eligibility, graph gates, and completion.
+The V2 status projection reports `terminal_results` separately from durable
+`checkpointed_results`; monitors must use terminal results for completion and
+display deferred cooldown/retry phases rather than treating a full checkpoint
+count as 100 percent complete.
+
 For OpenRouter, set `OPENROUTER_API_KEY` in the environment and use the
-OpenAI-compatible provider. ORI checks compatible credentials in this order:
-`OPENAI_COMPAT_API_KEY`, `OPENROUTER_API_KEY`, then `OPENAI_API_KEY`. The key
+OpenAI-compatible provider. ORI uses `OPENAI_COMPAT_API_KEY` as the explicit
+override and selects `OPENROUTER_API_KEY` only for OpenRouter endpoints. It
+never falls back to a key belonging to another provider hostname. The key
 works for both direct and MCP inference; keep it out of YAML and other tracked
 files.
 
@@ -256,6 +284,28 @@ models:
 
 Replace `<openrouter-model-id>` with the exact model ID available from OpenRouter.
 
+For Nous Portal, set `NOUS_API_KEY` (or `NOUS_PORTAL_API_KEY`) and use the
+OpenAI-compatible inference endpoint. ORI selects the Nous-specific key when
+`model_base_url` points at `inference-api.nousresearch.com`:
+
+```bash
+export NOUS_API_KEY="<your Nous Portal key>"
+```
+
+```yaml
+models:
+  - name: nous-portal-model
+    model: openai-compat/<nous-model-id>
+    model_base_url: https://inference-api.nousresearch.com/v1
+    mcp_tool_loop: native-openai-compatible
+    openai_compat_telemetry_adapter: generic
+```
+
+Replace `<nous-model-id>` with the exact model ID shown in the [Nous Portal API
+Docs](https://portal.nousresearch.com/api-docs). Keep the key out of YAML and
+use a model that supports the OpenAI chat-completions/tool-calling surface for
+MCP runs.
+
 The top-level `manifest` and `output_dir` make the matrix self-contained.
 Relative paths are resolved from the config file's directory. Treat
 `output_dir` as the campaign name: copy the config and select a new value for
@@ -270,6 +320,18 @@ absolute-path `campaign-config.yaml`, preserves the untouched input as
 `campaign-provenance.yaml`. The generated config can resume that exact campaign.
 If any provenance record differs on a later invocation, ORI requires a new
 `output_dir`.
+
+Protocol V2 model entries also record `api_surface`. `auto` preserves current
+behavior: Codex OAuth uses Responses and OpenAI-compatible providers use Chat
+Completions. OpenRouter and Nous may set `api_surface: chat_completions`
+explicitly. Release 1 rejects official OpenAI Responses and other unsupported
+surface selections during no-model readiness. Requested/resolved surfaces,
+structured-output mode, endpoint family, and credential-source name are private
+fingerprinted provenance; secret values are never recorded.
+
+Do not resume a campaign produced by the pre-hardening provider runtime. Retain
+the failed Laguna S 2.1 artifacts for diagnosis and create a fresh output
+directory for every post-fix run.
 `runs_per_model` controls independent full benchmark passes against the same
 dataset and manifest. A model entry overrides the default. Each repetition has
 its own CSV and run metadata. `max_model_reruns_on_infra` remains reserved for
@@ -415,3 +477,29 @@ uv run ori run --config models.local.yaml
 ```
 
 If step 4 fails, stop. Do not grade models against a mismatched graph; the scores will describe ingest drift, not reasoning quality.
+
+## Nous Portal Ox Alpha quick start
+
+The current Nous Portal catalog exposes Ox Alpha as `stealth/ox-alpha`. In a
+copy of `models.example.yaml`, use the `nous-ox-alpha` entry and set the key
+outside the repository:
+
+```bash
+export NOUS_API_KEY="<your Nous Portal key>"
+uv run ori run --config models.local.yaml
+```
+
+The reusable legacy template also includes disabled direct and MCP profiles in
+[`examples/inference/nous.yaml`](../examples/inference/nous.yaml). Start with
+the direct profile; tool-enabled compatibility for this newly released model
+should be validated against the controlled target before an MCP run.
+
+To use the dedicated legacy profile instead:
+
+```bash
+cp examples/inference/nous.yaml run-config.nous.yaml
+export NOUS_API_KEY="<your Nous Portal key>"
+uv run ori run \
+  --config run-config.nous.yaml \
+  --profile eval_direct_nous_ox_alpha
+```

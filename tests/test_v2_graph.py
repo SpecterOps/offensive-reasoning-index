@@ -12,6 +12,7 @@ from ori.eval.v2.graph import (
     build_archive_snapshot,
     collect_live_snapshot,
     entity_property_fact_key,
+    graph_identity_resolver,
     require_live_graph_match,
 )
 from ori.eval.v2.schema import EdgeWitness
@@ -60,6 +61,28 @@ def test_archive_snapshot_is_deterministic_and_resolves_aliases() -> None:
     assert user.object_id in first.entity(user.object_id).object_id
     assert user.canonical_name
     assert user.aliases
+
+
+def test_archive_snapshot_reuses_identity_resolver_per_graph_fingerprint() -> None:
+    archive, manifest = _archive_and_manifest()
+    first = build_archive_snapshot(archive, manifest)
+    second = build_archive_snapshot(archive, manifest)
+
+    assert graph_identity_resolver(first) is graph_identity_resolver(first)
+    assert graph_identity_resolver(first) is graph_identity_resolver(second)
+
+
+def test_graph_indexes_evict_older_fingerprints() -> None:
+    snapshots = []
+    for seed in (1234, 1235, 1236):
+        archive, manifest = _archive_and_manifest(seed=seed)
+        snapshots.append(build_archive_snapshot(archive, manifest))
+
+    first_resolver = graph_identity_resolver(snapshots[0])
+    graph_identity_resolver(snapshots[1])
+    graph_identity_resolver(snapshots[2])
+
+    assert graph_identity_resolver(snapshots[0]) is not first_resolver
 
 
 def test_archive_snapshot_includes_ce_local_group_identity_and_edges() -> None:

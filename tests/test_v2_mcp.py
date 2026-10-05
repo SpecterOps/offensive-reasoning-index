@@ -95,7 +95,7 @@ def _task(
     binding = TrackBinding(
         track=Track.MCP,
         capability_profile_id=MCP_CAPABILITY_PROFILE_ID,
-        semantics=RelationshipSemantics.EFFECTIVE,
+        semantics=RelationshipSemantics.TRANSITIVE,
         bounds=_bounds(max_pages=max_pages),
         mcp_tool_loop=MCPToolLoop.NATIVE_OPENAI_COMPATIBLE.value,
         mcp_resource_mode="off",
@@ -113,7 +113,7 @@ def _task(
             relationships=("MemberOf",),
             reason_codes=(NegativeReasonCode.OBJECTIVE_UNREACHABLE,),
             max_hops=6,
-            semantics=RelationshipSemantics.EFFECTIVE,
+            semantics=RelationshipSemantics.TRANSITIVE,
             population_scope=PopulationScope.BENCHMARK_NAMESPACE,
         )
         if claim_kind == "absence"
@@ -122,7 +122,7 @@ def _task(
             claim_id="claim:route",
             source=EntitySelector(role="source", object_type="User"),
             target=EntitySelector(role="target", object_type="Group"),
-            semantics=RelationshipSemantics.EFFECTIVE,
+            semantics=RelationshipSemantics.TRANSITIVE,
             population_scope=PopulationScope.BENCHMARK_NAMESPACE,
             required_mechanisms=("MemberOf",),
             max_hops=6,
@@ -387,7 +387,7 @@ def test_raw_tool_observation_cannot_claim_completeness_without_total_count() ->
     assert not event.unlocks_finalization
 
 
-def test_event_classifier_demotes_non_capability_success_and_inconclusive_empty() -> None:
+def test_event_classifier_demotes_non_capability_success_and_preserves_conclusive_empty() -> None:
     task = _task()
     profile = build_mcp_capability_profile()
     useful = _useful_event(task)
@@ -409,14 +409,14 @@ def test_event_classifier_demotes_non_capability_success_and_inconclusive_empty(
         task,
         profile,
         kind=EvidenceEventKind.CONCLUSIVE_EMPTY,
-        tool_name="graph_analysis",
-        operation="edge_composition",
+        tool_name="cypher_query",
+        operation="run",
     )
 
     assert useful.kind is EvidenceEventKind.USEFUL_POSITIVE
     assert irrelevant.kind is EvidenceEventKind.IRRELEVANT
     assert unknown.kind is EvidenceEventKind.IRRELEVANT
-    assert empty.kind is EvidenceEventKind.INCONCLUSIVE_EMPTY
+    assert empty.kind is EvidenceEventKind.CONCLUSIVE_EMPTY
 
 
 def test_bounded_shortest_path_can_supply_valid_negative_and_conclusive_empty() -> None:

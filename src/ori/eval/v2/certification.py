@@ -15,7 +15,11 @@ from .compiler import (
     compiler_fingerprint,
 )
 from .fingerprint import canonical_sha256, certifier_fingerprint
-from .fixtures import OfflineCertification, offline_certify
+from .fixtures import (
+    OfflineCertification,
+    offline_certify,
+    validate_fixture_coverage_artifacts,
+)
 from .graph import GraphSnapshot, LiveGraphVerification
 from .live_projection import (
     ProjectionSource,
@@ -45,6 +49,53 @@ LIVE_CERTIFICATION_SCHEMA_VERSION = "ori-eval-live-certification-v4"
 
 class CertificationError(ValueError):
     """Raised when a task cannot be promoted through the v2 lifecycle."""
+
+
+def validate_semantic_equivalence_classes(corpus: CompiledCorpus) -> None:
+    """Require equivalent public tasks to bind one oracle and selector contract."""
+
+    tasks_by_semantics: dict[str, list[CompiledTask]] = {}
+    for task in corpus.tasks:
+        if (
+            task.public.binding.track is not corpus.track
+            or task.migration.track is not corpus.track
+        ):
+            raise CertificationError(
+                f"task {task.public.task_id} has contradictory selector metadata: track"
+            )
+        tasks_by_semantics.setdefault(
+            public_semantic_fingerprint(task.public), []
+        ).append(task)
+    for equivalent_tasks in tasks_by_semantics.values():
+        oracle_outcomes = {
+            _oracle_outcome_fingerprint(equivalent.oracle)
+            for equivalent in equivalent_tasks
+        }
+        if len(oracle_outcomes) != 1:
+            raise CertificationError(
+                "identical public semantics bind contradictory candidate oracles: "
+                + ", ".join(
+                    equivalent.public.task_id for equivalent in equivalent_tasks
+                )
+            )
+        selector_metadata = {
+            (
+                equivalent.migration.family,
+                equivalent.migration.tier,
+                equivalent.public.binding.track,
+                equivalent.migration.track,
+                equivalent.migration.cost_band,
+                equivalent.migration.path_concentration_key,
+            )
+            for equivalent in equivalent_tasks
+        }
+        if len(selector_metadata) != 1:
+            raise CertificationError(
+                "identical public semantics bind contradictory selector metadata: "
+                + ", ".join(
+                    equivalent.public.task_id for equivalent in equivalent_tasks
+                )
+            )
 
 
 class OfflineCertificationCatalog(StrictModel):
@@ -97,9 +148,11 @@ def build_offline_certification_catalog(
         raise CertificationError("offline certification graph fingerprint mismatch")
     if profile.track is not corpus.track:
         raise CertificationError("offline certification profile track mismatch")
+    validate_semantic_equivalence_classes(corpus)
     certifications = tuple(
         offline_certify(task, snapshot) for task in corpus.tasks
     )
+    validate_fixture_coverage_artifacts(certifications)
     payload = {
         "product": corpus.product,
         "track": corpus.track,
@@ -917,6 +970,7 @@ def build_catalog_release(
     """Publish an exact one-track candidate catalog for later selection."""
 
     validate_capability_profile(profile)
+    validate_semantic_equivalence_classes(corpus)
     task_ids = [task.public.task_id for task in corpus.tasks]
     if set(certifications) != set(task_ids):
         raise CertificationError(
@@ -952,17 +1006,6 @@ def build_catalog_release(
         key=lambda item: min(task.public.task_id for task in item[1]),
     ):
         equivalent_tasks.sort(key=lambda task: task.public.task_id)
-        oracle_outcomes = {
-            _oracle_outcome_fingerprint(equivalent.oracle)
-            for equivalent in equivalent_tasks
-        }
-        if len(oracle_outcomes) != 1:
-            raise CertificationError(
-                "identical public semantics bind contradictory candidate oracles: "
-                + ", ".join(
-                    equivalent.public.task_id for equivalent in equivalent_tasks
-                )
-            )
         task = equivalent_tasks[0]
         certification = certifications[task.public.task_id]
         entries.append(

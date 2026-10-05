@@ -31,7 +31,7 @@ from .scoring import (
 )
 
 CHECKPOINT_SCHEMA_VERSION = "ori-eval-checkpoint-v2"
-PUBLIC_REPORT_SCHEMA_VERSION = "ori-eval-public-report-v2"
+PUBLIC_REPORT_SCHEMA_VERSION = "ori-eval-public-report-v3"
 RUN_PROVENANCE_SCHEMA_VERSION = "ori-eval-run-provenance-v2"
 
 
@@ -123,12 +123,31 @@ class PublicResultRow(StrictModel):
     execution_class: ExecutionClass
     outcome: SampleOutcomeCode
     reasoning_correct: bool | None = Field(default=None, strict=True)
+    output_compliant: bool | None = Field(default=None, strict=True)
+    output_normalized: bool = Field(default=False, strict=True)
     verdict_reason: str | None = None
     certification_fingerprint: str | None = None
 
+    @model_validator(mode="after")
+    def outcome_dimensions_are_coherent(self) -> PublicResultRow:
+        if self.output_normalized and self.output_compliant is not True:
+            raise ValueError("normalized output must be compliant")
+        if self.execution_class is ExecutionClass.SUCCESS:
+            if self.outcome is not SampleOutcomeCode.COMPLETED:
+                raise ValueError("successful public rows must use COMPLETED")
+            if self.reasoning_correct is None:
+                raise ValueError("successful public rows require a reasoning verdict")
+            if self.output_compliant is not True:
+                raise ValueError("successful public rows require compliant output")
+        elif self.reasoning_correct is not None:
+            raise ValueError(
+                "only comparator-graded successful rows have reasoning verdicts"
+            )
+        return self
+
 
 class PublicReportV2(StrictModel):
-    schema_version: Literal["ori-eval-public-report-v2"] = PUBLIC_REPORT_SCHEMA_VERSION
+    schema_version: Literal["ori-eval-public-report-v3"] = PUBLIC_REPORT_SCHEMA_VERSION
     protocol_version: Literal["ori-eval-protocol-v2"] = PROTOCOL_VERSION
     product: str
     track: Track
@@ -147,6 +166,9 @@ class PublicReportV2(StrictModel):
             raise ValueError("public report contains duplicate task rows")
         if len(row_ids) != self.summary.scheduled:
             raise ValueError("public report row count does not match summary")
+        expected_summary = _summarize_public_rows(self.rows)
+        if self.summary != expected_summary:
+            raise ValueError("public report summary does not match its rows")
         expected = canonical_sha256(
             self,
             exclude_fields=("report_fingerprint",),
@@ -155,6 +177,52 @@ class PublicReportV2(StrictModel):
             raise ValueError("public report fingerprint mismatch")
         _assert_public_report(self.model_dump(mode="json"))
         return self
+
+
+def _summarize_public_rows(rows: Sequence[PublicResultRow]) -> CampaignSummary:
+    """Recompute every public summary dimension from redacted task rows."""
+
+    classes = Counter(row.execution_class for row in rows)
+    correct = sum(row.reasoning_correct is True for row in rows)
+    incorrect = sum(row.reasoning_correct is False for row in rows)
+    reasoning_denominator = correct + incorrect
+    output_compliant = sum(row.output_compliant is True for row in rows)
+    output_noncompliant = sum(row.output_compliant is False for row in rows)
+    output_normalized = sum(row.output_normalized for row in rows)
+    observed_outputs = output_compliant + output_noncompliant
+    infrastructure = classes[ExecutionClass.INFRA_FAILURE]
+    harness = classes[ExecutionClass.HARNESS_FAILURE]
+    unexecuted = classes[ExecutionClass.UNEXECUTED]
+    invalid_reasons: list[str] = []
+    if infrastructure:
+        invalid_reasons.append("UNRESOLVED_INFRASTRUCTURE")
+    if harness:
+        invalid_reasons.append("HARNESS_FAILURE")
+    if unexecuted:
+        invalid_reasons.append("UNEXECUTED_TASK")
+    return CampaignSummary(
+        scheduled=len(rows),
+        completed=classes[ExecutionClass.SUCCESS],
+        correct=correct,
+        incorrect=incorrect,
+        model_failures=classes[ExecutionClass.MODEL_FAILURE],
+        proof_failures=classes[ExecutionClass.PROOF_FAILURE],
+        infrastructure_failures=infrastructure,
+        harness_failures=harness,
+        unexecuted=unexecuted,
+        output_compliant=output_compliant,
+        output_noncompliant=output_noncompliant,
+        output_normalized=output_normalized,
+        reasoning_accuracy=(
+            correct / reasoning_denominator if reasoning_denominator else None
+        ),
+        effective_accuracy=(correct / len(rows) if rows else None),
+        output_compliance_rate=(
+            output_compliant / observed_outputs if observed_outputs else None
+        ),
+        campaign_valid=not invalid_reasons,
+        invalid_reasons=tuple(invalid_reasons),
+    )
 
 
 class RunProvenanceV2(StrictModel):
@@ -370,6 +438,8 @@ def build_public_report(
             execution_class=result.execution_class,
             outcome=result.outcome,
             reasoning_correct=result.reasoning_correct,
+            output_compliant=result.output_compliant,
+            output_normalized=result.output_normalized,
             verdict_reason=result.verdict.reason if result.verdict else None,
             certification_fingerprint=(
                 certifications[result.task_id].certification_fingerprint

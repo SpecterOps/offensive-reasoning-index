@@ -27,8 +27,9 @@ scenario roles to seed-specific `EntityRef` identities and compiles:
 - a scorer-only `OracleBundle`;
 - certified execution bounds.
 
-Route, set, count, decision, and absence claims declare their direct,
-transitive, or effective semantics. Human-authored question text is a validated
+Route, set, count, decision, and absence claims declare direct or bounded
+transitive semantics. `effective` is capability metadata only until a separately
+certified derivation is implemented. Human-authored question text is a validated
 template over claim roles and requested answer fields; it cannot add hidden
 grading requirements. `AcceptanceSpec` is the complete public grading contract:
 policy, mechanisms and ordering, context, properties, exclusions, truthful-extra
@@ -350,13 +351,16 @@ the sealed total or expected identities.
 Route and decision receipts prefer positive graph cardinality over auxiliary
 endpoint scalar literals, while zero/unknown graph shapes remain inconclusive.
 
-Complete MCP set claims use a fixed public capacity of 1,000 identities over
-500-row pages. The capacity is deliberately independent of the sealed expected
-set size, so it neither leaks the answer count nor turns one extra identity into
-an adapter failure. Its public task deadline remains capped at 600 seconds. A
-deterministic 500-row window receives 555 seconds; a complete set receives at
-most two pages and 600 seconds. These values are compiled into the task
-fingerprint and cannot be changed by runtime-only configuration.
+Direct tasks use a 180-second whole-task deadline. Complete MCP set claims use a
+fixed public capacity of 1,000 identities over 500-row pages. The capacity is
+deliberately independent of the sealed expected set size, so it neither leaks
+the answer count nor turns one extra identity into an adapter failure. MCP tasks
+receive a 600-second floor plus a capacity-derived set-serialization allowance,
+capped at 1,200 seconds; both a deterministic 500-row window and a complete
+1,000-identity set reach that cap. These values are compiled into the task
+fingerprint and cannot be changed by runtime-only configuration. The default
+MCP provider read sub-deadline is 240 seconds and remains separately
+fingerprinted in campaign readiness.
 
 The compiler publishes strict nested answer schemas for entities, edges,
 entity-property facts, and the generic bounded-negative reason vocabulary.
@@ -384,8 +388,12 @@ runtime implementation, and every provider attempt. Resume rejects incompatible
 provenance. Within compatible provenance, infrastructure and unexecuted samples
 are rescheduled, their prior terminal row is replaced, and provider attempt
 numbers remain contiguous. The configured infrastructure retry allowance is a
-lifetime per-task budget across resumes, not a fresh budget per process. Every
-attempt is written before the retry decision. Successful and
+lifetime per-task budget across resumes, not a fresh budget per process. The
+hybrid scheduler permits the configured immediate retries, completes the
+primary pass, and then revisits unresolved tasks in certified release order.
+Each deferred round waits until its persisted UTC `not_before` time and gives
+each eligible task at most one attempt. A restart waits only the remaining
+cooldown. Every attempt is written before the retry decision. Successful and
 model-attributable samples are not replayed. Private attempts retain direct
 query provenance or MCP cumulative token usage, partial messages, tool
 arguments and raw results, mechanical observations, evidence events, and policy
@@ -400,6 +408,32 @@ unclean prior process remain distinguishable. An interrupted provider attempt
 stays durably numbered but does not consume the next process's original
 infrastructure-retry allowance.
 
+Operational recovery counts are terminal-outcome based. A task is recovered
+only when an earlier retryable infrastructure attempt finishes with a
+non-infrastructure terminal result. `exhausted_infrastructure_tasks` includes
+every task whose final result is still infrastructure failure, including
+non-retryable authentication, configuration, capability, or protocol failures.
+
+The hybrid scheduler is bound to runner v15 and private run-state v7. Campaign
+roots created by earlier runner/run-state versions are intentionally
+incompatible: retain them as evidence, run fresh no-model readiness, and use a
+new output root before any later provider execution.
+
+Use `ori campaign-status --config <exact-v2-config>` to project lifecycle,
+checkpoint, report, and track-completion state without preparing the campaign
+or contacting models, MCP, BloodHound, or the graph. The command validates the
+stored fingerprints and accounting before reporting progress. Its terminal
+result count excludes retryable infrastructure work that is merely
+checkpointed; the status also exposes pending retries, scheduler phase, and
+recovery round. `--json` emits a redacted supervisor-safe document. A `running`
+lifecycle with a free campaign
+lock is surfaced as `stale_running`; interrupted or stale readiness is rerun
+without `--execute`, while interrupted or stale execution uses the same
+`run-v2 --config ... --execute` command. Corrupt, incompatible, or failed
+evidence stops for investigation.
+The complete external state/action boundary is documented in the
+[V2 Campaign Supervisor Contract](v2-campaign-supervisor-contract.md).
+
 No-model `run-v2` readiness performs one exact bounded live-graph projection
 and reuses that immutable receipt across the prepared tracks. This is sound
 because readiness cannot invoke a provider, MCP tool, model-authored query, or
@@ -409,14 +443,18 @@ The harness-owned `graph_page_size` can be increased up to its validated
 2,000-row ceiling to reduce readiness round trips without changing task,
 prompt, oracle, scorer, or model execution semantics.
 
-Only external availability failures—HTTP, transport, authentication, server,
+Only typed, retryable external availability failures—transport, server,
 rate-limit, provider-read timeouts, and native turn/no-progress watchdog
-timeouts—are retryable infrastructure. The private receipt retains the narrower
-`MCP_TURN_TIMEOUT` or `NO_PROGRESS_TIMEOUT` subtype.
-Provider and MCP-tool failures retry without probing or changing BloodHound's
-circuit. BloodHound-scoped failures alone require health recovery. An open
-direct circuit is checked before calling the model, and generic transport/server
-failures never poison the shared query deny cache.
+timeouts—enter infrastructure recovery. Authentication, capability, protocol,
+model, proof, output, whole-task timeout, and harness failures never do. Unknown
+infrastructure scopes fail closed instead of opting into retries from an
+untrusted metrics flag. The private receipt retains narrower subtypes such as
+`MCP_TURN_TIMEOUT` or `NO_PROGRESS_TIMEOUT`.
+Typed provider and MCP-tool availability failures retry without probing or
+changing BloodHound's circuit. BloodHound-scoped failures alone require health
+recovery before every retry, including after a restart or an interrupted
+attempt. An open direct circuit is checked before calling the model, and generic
+transport/server failures never poison the shared query deny cache.
 Exhausting the finite whole-task execution budget is model-attributable
 `TASK_TIMEOUT`; it is not retried after a BloodHound-only health probe. An
 internal projector, schema, adapter, or runner exception is `HARNESS_ERROR`; it
@@ -579,28 +617,39 @@ Pass `--valid-nodes valid_nodes.json` when you have a graph inventory dump; the 
 
 ## Reporting metrics
 
-V2 summaries separate reasoning quality, proof completion, and campaign
-reliability. Let `C` be comparator-correct samples, `W` comparator-incorrect
-completed samples, `M` model-attributable failures, `P` proof failures, `X`
-infrastructure failures, `H` harness failures, `U` unexecuted samples, and `S`
-scheduled tasks. Exact accounting requires:
+V2 summaries separate semantic reasoning, output delivery, proof completion,
+end-to-end effectiveness, and campaign reliability. Let `C` be
+comparator-correct samples, `W` comparator-incorrect completed samples, `M`
+model-attributable failures without a comparator verdict, `P` proof failures,
+`X` infrastructure failures, `H` harness failures, `U` unexecuted samples, and
+`S` scheduled tasks. Exact accounting requires:
 
 ```text
 S = C + W + M + P + X + H + U
-incorrect = W + M
-reasoning_accuracy = C / (C + W + M)
+incorrect = W
+reasoning_accuracy = C / (C + W)
 effective_accuracy = C / S
 campaign_valid = (X = 0) AND (H = 0) AND (U = 0)
 ```
 
-Model failures count as incorrect. `PROOF_INSUFFICIENT` has no reasoning
-verdict and lowers effective accuracy. Infrastructure, harness, and unexecuted
-samples have no reasoning verdict and invalidate the campaign. Historical V1
-summary columns may use older completed-sample terminology and must not be
-presented as the V2 formula.
+Only the shared comparator may assign `reasoning_correct=true|false`. Output
+invalidity, policy/query failure, and whole-task timeout remain model failures
+and lower effective accuracy, but they do not fabricate a semantic verdict.
+`PROOF_INSUFFICIENT` likewise has no reasoning verdict. Infrastructure,
+harness, and unexecuted samples invalidate the campaign.
+
+Output compliance is independently observed. A schema-valid final answer is
+compliant even if its graph facts are wrong or unsupported; a present but
+malformed or missing required final answer is noncompliant; and a task stopped
+by infrastructure, harness failure, or timeout can have no compliance
+observation. ORI reports compliant, noncompliant, normalized-wrapper counts,
+and `output_compliance_rate` over observed outputs only. Exactly one outer
+JSON Markdown fence with no other text may be normalized and is recorded as
+such; arbitrary prose, brace extraction, multiple values, and other fence forms
+are never salvaged.
 
 See [ORI V2 Design Rationale](benchmark-v2-design-rationale.md#campaign-accounting)
-for worked 70-task calculations and the reasons behind each denominator.
+for worked calculations and the reasons behind each denominator.
 
 ## BloodHound Cypher runtime guidance
 

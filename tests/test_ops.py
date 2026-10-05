@@ -517,7 +517,24 @@ def test_cli_eval_mcp_parses_ollama_options(tmp_path: Path, monkeypatch) -> None
         captured.update(kwargs)
 
     monkeypatch.setattr("ori.eval.runner.run_eval_mcp_cli", fake_run_eval_mcp_cli)
-    monkeypatch.setattr("ori.cli.detect_uv_version", lambda: "uv 0.test")
+    monkeypatch.setattr(
+        "ori.cli.resolve_mcp_launcher_runtime",
+        lambda launcher: type(
+            "Runtime",
+            (),
+            {
+                "provenance": lambda self, _launcher: {
+                    "mcp_launcher": launcher.launcher,
+                    "mcp_source": launcher.source,
+                    "mcp_revision": launcher.revision,
+                    "mcp_executable": "main.py",
+                    "uv_version": "uv 0.test",
+                    "uv_executable": "/opt/uv/bin/uv",
+                    "mcp_runtime_executable": "/opt/uv/bin/uv",
+                }
+            },
+        )(),
+    )
     runner = CliRunner()
     result = runner.invoke(
         main,
@@ -557,6 +574,8 @@ def test_cli_eval_mcp_parses_ollama_options(tmp_path: Path, monkeypatch) -> None
         "mcp_revision": None,
         "mcp_executable": "main.py",
         "uv_version": "uv 0.test",
+        "uv_executable": "/opt/uv/bin/uv",
+        "mcp_runtime_executable": "/opt/uv/bin/uv",
         "model": "ollama/gemma4:e4b",
         "options": {"num_ctx": 16384, "temperature": 0.2},
         "resource_mode": "on-demand",

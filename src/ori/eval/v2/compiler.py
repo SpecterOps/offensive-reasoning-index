@@ -17,11 +17,11 @@ from typing import Any, Literal
 
 from pydantic import Field, model_validator
 
-from ori.eval.tasks import Task, generate_mcp_tasks, generate_tasks
+from ori.eval.tasks import TASK_RECIPE_REGISTRY, Task, generate_mcp_tasks, generate_tasks
 from ori.relationships import canonical_relationship_kind
 
 from .fingerprint import canonical_sha256
-from .graph import GraphSnapshot, build_graph_fact_registry
+from .graph import GraphSnapshot, build_graph_fact_registry, graph_relationship_buckets
 from .schema import (
     DIRECT_QUERY_POLICY_VERSION,
     MANIFEST_SCHEMA_VERSION,
@@ -29,6 +29,7 @@ from .schema import (
     AbsenceClaim,
     AcceptanceSpec,
     AnswerPolicy,
+    AuthorableAnswerPolicy,
     BoundedNegativePolicy,
     ClaimSpec,
     ClosedRouteVariantsPolicy,
@@ -69,14 +70,20 @@ from .schema import (
     TrackBinding,
 )
 from .selection import evaluate_selection
+from .task_recipes import TaskRecipeRegistryError, validate_generated_recipe_coverage
 
-COMPILER_VERSION = "ori-claim-compiler-v2.11.0"
+COMPILER_VERSION = "ori-claim-compiler-v2.12.0"
 DIRECT_RESULT_CONTRACT_VERSION = "ori-direct-result-contract-v14"
 DIRECT_CAPABILITY_PROFILE = f"ori-direct-policy-v3-bhce-9.1-{DIRECT_RESULT_CONTRACT_VERSION}"
 MCP_CAPABILITY_PROFILE = "ori-mcp-92a37dd-bhce-9.1-cypher-v7"
 COMPLETE_SET_RESULT_CAPACITY = 1000
 MCP_SET_PAGE_SIZE = 500
 MCP_SERVER_REVISION = "92a37dd481ce675fe552f14c9957a31dbbcd212e"
+DIRECT_WHOLE_TASK_TIMEOUT_SECONDS = 180.0
+MCP_WHOLE_TASK_MIN_TIMEOUT_SECONDS = 600.0
+MCP_WHOLE_TASK_MAX_TIMEOUT_SECONDS = 1200.0
+MCP_TOOL_CALL_ALLOWANCE_SECONDS = 50.0
+MCP_SET_SERIALIZATION_SECONDS_PER_ENTITY = 1.2
 
 _FORBIDDEN_PUBLIC_KEYS = frozenset(
     {
@@ -224,7 +231,7 @@ class MigrationInventoryArtifact(StrictModel):
 class _ClaimDraft:
     legacy: Task
     claim: ClaimSpec
-    policy: AnswerPolicy
+    policy: AuthorableAnswerPolicy
     question_template: str
     resolved_roles: tuple[EntityRef, ...]
     expected_entities: tuple[EntityRef, ...] = ()
@@ -253,9 +260,15 @@ def compiler_fingerprint() -> str:
         Path(__file__),
         Path(__file__).with_name("schema.py"),
         Path(__file__).with_name("selection.py"),
+        Path(__file__).with_name("task_recipes.py"),
+        Path(__file__).parents[1] / "task_recipes.py",
+        Path(__file__).parents[1] / "tasks.py",
     )
     source_digests = {
-        path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in module_paths
+        str(path.relative_to(Path(__file__).parents[2])): hashlib.sha256(
+            path.read_bytes()
+        ).hexdigest()
+        for path in module_paths
     }
     return canonical_sha256(
         {
@@ -422,12 +435,14 @@ def _route_registry_for_sequence(
     """Return only edges that can occupy a position in a matching bounded route."""
 
     sequence = tuple(relationships)
+    buckets = graph_relationship_buckets(snapshot)
     forward: list[set[str]] = [{source_id}]
     for relationship in sequence:
+        edges = buckets.get(relationship, ())
         next_nodes = {
             edge.target_id
-            for edge in snapshot.relationships
-            if edge.relationship == relationship and edge.source_id in forward[-1]
+            for edge in edges
+            if edge.source_id in forward[-1]
         }
         forward.append(next_nodes)
 
@@ -435,18 +450,18 @@ def _route_registry_for_sequence(
     backward[-1] = {target_id}
     for index in range(len(sequence) - 1, -1, -1):
         relationship = sequence[index]
+        edges = buckets.get(relationship, ())
         backward[index] = {
             edge.source_id
-            for edge in snapshot.relationships
-            if edge.relationship == relationship and edge.target_id in backward[index + 1]
+            for edge in edges
+            if edge.target_id in backward[index + 1]
         }
 
     registry: dict[tuple[str, str, str], EdgeWitness] = {}
     for index, relationship in enumerate(sequence):
-        for edge in snapshot.relationships:
+        for edge in buckets.get(relationship, ()):
             if (
-                edge.relationship == relationship
-                and edge.source_id in forward[index]
+                edge.source_id in forward[index]
                 and edge.target_id in backward[index + 1]
             ):
                 registry[(edge.source_id, edge.relationship, edge.target_id)] = edge
@@ -569,7 +584,7 @@ def _route_draft(
     # for a single public source-to-target edge. Longer routes use the public
     # mechanism language and accept any graph-valid witness satisfying it.
     exact_route = len(path_edges) == 1
-    policy: AnswerPolicy = (
+    policy: AuthorableAnswerPolicy = (
         ExactRoutePolicy(kind="exact_route")
         if exact_route
         else MechanismValidRoutePolicy(kind="mechanism_valid_route")
@@ -1256,7 +1271,7 @@ def _selection_drafts(
                 f"limit {page_selection.limit}."
             )
         claim: ClaimSpec
-        policy: AnswerPolicy
+        policy: AuthorableAnswerPolicy
         if is_count:
             claim = CountClaim(
                 kind="count",
@@ -1753,7 +1768,7 @@ def _completeness_contract(
 
 def compile_acceptance_spec(
     claim: ClaimSpec,
-    policy: AnswerPolicy,
+    policy: AuthorableAnswerPolicy,
     binding: TrackBinding,
 ) -> AcceptanceSpec:
     """Compile the complete public grading contract without resolved witnesses."""
@@ -2188,7 +2203,7 @@ def _binding(
             max_output_bytes=524_288,
             max_transcript_bytes=1_048_576,
             max_tool_calls=0,
-            timeout_seconds=60.0,
+            timeout_seconds=DIRECT_WHOLE_TASK_TIMEOUT_SECONDS,
         )
         return TrackBinding(
             track=track,
@@ -2222,7 +2237,11 @@ def _binding(
         require_total_count = claim.kind == "count"
         require_stable_ordering = False
     max_tool_calls = max(12, max_pages + 4)
-    result_serialization_seconds = max_result_cardinality * 0.75 if claim.kind == "set" else 0.0
+    result_serialization_seconds = (
+        max_result_cardinality * MCP_SET_SERIALIZATION_SECONDS_PER_ENTITY
+        if claim.kind == "set"
+        else 0.0
+    )
     bounds = ExecutionBounds(
         max_hops=max_hops,
         max_result_cardinality=max_result_cardinality,
@@ -2235,12 +2254,13 @@ def _binding(
         max_transcript_bytes=2_097_152,
         max_tool_calls=max_tool_calls,
         timeout_seconds=max(
-            180.0,
+            MCP_WHOLE_TASK_MIN_TIMEOUT_SECONDS,
             min(
-                600.0,
+                MCP_WHOLE_TASK_MAX_TIMEOUT_SECONDS,
                 max(
-                    max_tool_calls * 25.0,
-                    180.0 + result_serialization_seconds,
+                    max_tool_calls * MCP_TOOL_CALL_ALLOWANCE_SECONDS,
+                    MCP_WHOLE_TASK_MIN_TIMEOUT_SECONDS
+                    + result_serialization_seconds,
                 ),
             ),
         ),
@@ -2262,7 +2282,7 @@ def _fingerprinted_task_bundle(
     task_id: str,
     product: str,
     claim: ClaimSpec,
-    policy: AnswerPolicy,
+    policy: AuthorableAnswerPolicy,
     binding: TrackBinding,
     input_entities: tuple[EntityRef, ...],
     question: str,
@@ -2451,20 +2471,39 @@ def compile_legacy_product(
     if str(manifest.get("domain")) != snapshot.domain:
         raise V2CompileError("source manifest domain does not match graph snapshot")
     paths = _paths_by_template(manifest)
-    legacy_tasks = (
-        generate_tasks(dict(manifest))
-        if track is Track.DIRECT
-        else generate_mcp_tasks(dict(manifest))
-    )
+    try:
+        legacy_tasks = (
+            generate_tasks(dict(manifest))
+            if track is Track.DIRECT
+            else generate_mcp_tasks(dict(manifest))
+        )
+    except TaskRecipeRegistryError as exc:
+        raise V2CompileError(f"task recipe coverage failed: {exc}") from exc
     graph_fact_registry = build_graph_fact_registry(snapshot)
 
     compiled: list[CompiledTask] = []
     for legacy in legacy_tasks:
+        try:
+            recipe = TASK_RECIPE_REGISTRY.recipe_for_task(
+                manifest, track.value, legacy.id
+            )
+        except TaskRecipeRegistryError as exc:
+            raise V2CompileError(f"task recipe coverage failed: {exc}") from exc
         drafts = _drafts_for_task(legacy, snapshot, paths)
         candidate_ids = tuple(
             _candidate_id(product, track, legacy.id, draft.claim) for draft in drafts
         )
         for candidate_id, draft in zip(candidate_ids, drafts, strict=True):
+            if draft.claim.kind != recipe.claim_kind:
+                raise V2CompileError(
+                    f"task {legacy.id!r} compiled as {draft.claim.kind!r}, but its recipe "
+                    f"declares {recipe.claim_kind!r}"
+                )
+            if draft.claim.semantics.value != recipe.semantics:
+                raise V2CompileError(
+                    f"task {legacy.id!r} compiled with {draft.claim.semantics.value!r} "
+                    f"semantics, but its recipe declares {recipe.semantics!r}"
+                )
             expected_cardinality = (
                 draft.expected_count
                 if draft.expected_count is not None
@@ -2506,10 +2545,10 @@ def compile_legacy_product(
                 legacy_task_id=legacy.id,
                 legacy_template_id=legacy.template_id,
                 legacy_grade_mode=legacy.grade_mode,
-                family=legacy.template_id,
-                tier=legacy.tier,
+                family=recipe.family,
+                tier=recipe.tier,
                 cost_band=_cost_band(binding),
-                path_concentration_key=f"legacy:{legacy.template_id}",
+                path_concentration_key=recipe.concentration_key,
                 candidate_task_ids=candidate_ids,
                 status=draft.status,
                 claim_kind=draft.claim.kind,
@@ -2550,6 +2589,16 @@ def compile_legacy_product(
             f"incomplete migration: missing={sorted(legacy_ids - migrated_ids)} "
             f"unknown={sorted(migrated_ids - legacy_ids)}"
         )
+    try:
+        validate_generated_recipe_coverage(
+            manifest,
+            TASK_RECIPE_REGISTRY,
+            track.value,
+            legacy_tasks,
+            corpus.tasks,
+        )
+    except TaskRecipeRegistryError as exc:
+        raise V2CompileError(f"task recipe coverage failed: {exc}") from exc
     return corpus
 
 

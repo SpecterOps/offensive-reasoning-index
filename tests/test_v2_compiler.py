@@ -44,7 +44,14 @@ from ori.eval.v2.compiler import (
 from ori.eval.v2.determinism import corpus_contract_shape_fingerprint
 from ori.eval.v2.evidence import _KNOWN_TOP_LEVEL_FIELDS
 from ori.eval.v2.fingerprint import canonical_sha256, certifier_fingerprint
-from ori.eval.v2.fixtures import REQUIRED_FIXTURES, offline_certify
+from ori.eval.v2.fixtures import (
+    POLICY_COVERAGE_REGISTRY_FINGERPRINT,
+    REQUIRED_FIXTURES,
+    TaskFixtureManifest,
+    offline_certify,
+    policy_coverage_artifacts,
+    validate_fixture_coverage_artifacts,
+)
 from ori.eval.v2.graph import LiveGraphVerification, build_archive_snapshot
 from ori.eval.v2.mcp import build_mcp_capability_profile, classify_mcp_binding
 from ori.eval.v2.profiles import capability_profile_for_track
@@ -183,6 +190,88 @@ def _by_legacy(corpus, legacy_task_id: str):
     return [task for task in corpus.tasks if task.migration.legacy_task_id == legacy_task_id]
 
 
+def test_seed_4401_set_and_count_oracles_retain_phase1_identity_digest(
+    complex_compiled,
+) -> None:
+    _, _, direct, mcp = complex_compiled
+    expected = {
+        Track.DIRECT: "54ab18792f9b440b70f630f5f56aaad2f34356fd2bedb6d46cd7317a9c6aee19",
+        Track.MCP: "15db3964e16fbd5db88e6ddf75ce3794e937bf104307cffd8c2b5f596d19ab17",
+    }
+    for track, corpus in ((Track.DIRECT, direct), (Track.MCP, mcp)):
+        rows = [
+            {
+                "task": task.public.task_id,
+                "legacy": task.migration.legacy_task_id,
+                "kind": task.oracle.claim.kind,
+                "ids": [entity.object_id for entity in task.oracle.expected_entities],
+                "count": task.oracle.expected_count,
+            }
+            for task in corpus.tasks
+            if task.oracle.claim.kind in {"set", "count"}
+        ]
+        assert canonical_sha256(rows) == expected[track]
+
+
+def test_fixture_exemption_registry_binds_executable_micrograph_artifacts(
+    complex_compiled,
+) -> None:
+    _, snapshot, direct, _ = complex_compiled
+    certifications = tuple(offline_certify(task, snapshot) for task in direct.tasks)
+    validate_fixture_coverage_artifacts(certifications)
+    assert {artifact["fixture_name"] for artifact in policy_coverage_artifacts()} == {
+        "alias",
+        "decoy",
+        "alternate_route",
+    }
+    fixture_manifest = offline_certify(direct.tasks[0], snapshot).fixtures
+    payload = fixture_manifest.model_dump(mode="python")
+    payload["coverage_registry_fingerprint"] = "0" * 64
+    with pytest.raises(ValueError, match="coverage registry is stale"):
+        TaskFixtureManifest.model_validate(payload)
+    assert (
+        fixture_manifest.coverage_registry_fingerprint
+        == POLICY_COVERAGE_REGISTRY_FINGERPRINT
+    )
+
+
+@pytest.mark.parametrize(
+    "migration_update",
+    (
+        {"family": "conflicting-family"},
+        {"tier": 6},
+        {"track": Track.DIRECT},
+        {"cost_band": "conflicting-cost"},
+        {"path_concentration_key": "conflicting:key"},
+    ),
+)
+def test_equivalent_candidates_must_agree_on_selector_metadata(
+    complex_compiled,
+    migration_update,
+) -> None:
+    _, _, _, mcp = complex_compiled
+    profile = capability_profile_for_track(Track.MCP)
+    by_semantics: dict[str, list[CompiledTask]] = {}
+    for task in mcp.tasks:
+        by_semantics.setdefault(public_semantic_fingerprint(task.public), []).append(task)
+    equivalent = next(tasks for tasks in by_semantics.values() if len(tasks) > 1)
+    changed_id = equivalent[-1].public.task_id
+    changed_tasks = tuple(
+        task.model_copy(
+            update={
+                "migration": task.migration.model_copy(update=migration_update)
+            }
+        )
+        if task.public.task_id == changed_id
+        else task
+        for task in mcp.tasks
+    )
+    changed_corpus = mcp.model_copy(update={"tasks": changed_tasks})
+    certifications = _candidate_certifications(changed_corpus, profile)
+    with pytest.raises(CertificationError, match="contradictory selector metadata"):
+        build_catalog_release(changed_corpus, certifications, profile)
+
+
 def _candidate_certifications(corpus, profile):
     candidates = {}
     for task in corpus.tasks:
@@ -219,6 +308,13 @@ def test_simple_corpus_is_completely_migrated(simple_compiled) -> None:
     assert len({task.migration.legacy_task_id for task in mcp.tasks}) == 40
     assert all(task.public.binding.track is Track.DIRECT for task in direct.tasks)
     assert all(task.public.binding.track is Track.MCP for task in mcp.tasks)
+    assert all(
+        task.public.binding.bounds.timeout_seconds == 180.0 for task in direct.tasks
+    )
+    assert all(
+        600.0 <= task.public.binding.bounds.timeout_seconds <= 1200.0
+        for task in mcp.tasks
+    )
 
 
 def test_complex_corpus_replaces_oversized_enumerations(complex_compiled) -> None:
@@ -254,7 +350,10 @@ def test_complex_corpus_replaces_oversized_enumerations(complex_compiled) -> Non
             for task in pages
         )
     assert all(not task.public.binding.bounds.require_total_count for task in native_mcp_pages)
-    assert all(task.public.binding.bounds.timeout_seconds == 555.0 for task in native_mcp_pages)
+    assert all(
+        task.public.binding.bounds.timeout_seconds == 1200.0
+        for task in native_mcp_pages
+    )
 
     page = native_mcp_pages[1]
     mismatched_binding = page.public.binding.model_copy(
@@ -433,10 +532,11 @@ def test_vertical_slice_claims_are_typed_and_correct(complex_compiled) -> None:
     assert mcp_da_members.public.binding.bounds.max_result_cardinality == 1000
     assert mcp_da_members.public.binding.bounds.require_total_count is True
     assert mcp_da_members.public.binding.bounds.require_stable_ordering is True
-    assert mcp_da_members.public.binding.bounds.timeout_seconds == 600.0
+    assert mcp_da_members.public.binding.bounds.timeout_seconds == 1200.0
 
     direct_members = _by_legacy(mcp, "mcp-global-da-direct-members")[0]
     direct_count = _by_legacy(mcp, "mcp-global-da-direct-member-count")[0]
+    assert direct_count.public.binding.bounds.timeout_seconds == 600.0
     privileged_groups = _by_legacy(mcp, "mcp-user-privileged-group-memberships")[0]
     active_sessions = _by_legacy(
         mcp,
@@ -1077,8 +1177,17 @@ def test_offline_scoring_uses_sealed_identity_catalog_and_shared_comparator(
     assert scoring.summary.scheduled == len(public.tasks)
     assert scoring.summary.correct == len(public.tasks)
     assert scoring.summary.incorrect == 0
+    assert scoring.summary.output_compliant == len(public.tasks)
+    assert scoring.summary.output_noncompliant == 0
+    assert scoring.summary.output_normalized == 0
+    assert scoring.summary.output_compliance_rate == 1.0
     assert scoring.summary.campaign_valid is True
-    assert all(result.verdict is not None for result in scoring.results)
+    assert all(
+        result.verdict is not None
+        and result.output_compliant is True
+        and result.output_normalized is False
+        for result in scoring.results
+    )
 
 
 def test_forged_answer_reference_data_cannot_affect_a_v2_verdict(
@@ -1098,9 +1207,16 @@ def test_forged_answer_reference_data_cannot_affect_a_v2_verdict(
     forged = next(result for result in scoring.results if result.task_id == first_task_id)
 
     assert forged.outcome.value == "OUTPUT_INVALID"
-    assert forged.reasoning_correct is False
+    assert forged.reasoning_correct is None
+    assert forged.output_compliant is False
     assert forged.verdict is None
-    assert scoring.summary.incorrect == 1
+    assert scoring.summary.incorrect == 0
+    assert scoring.summary.model_failures == 1
+    assert scoring.summary.output_noncompliant == 1
+    assert scoring.summary.reasoning_accuracy == 1.0
+    assert scoring.summary.effective_accuracy == (len(public.tasks) - 1) / len(
+        public.tasks
+    )
 
 
 def test_offline_scoring_treats_strict_schema_failure_as_output_invalid(
@@ -1121,8 +1237,36 @@ def test_offline_scoring_treats_strict_schema_failure_as_output_invalid(
 
     assert result.execution_class is ExecutionClass.MODEL_FAILURE
     assert result.outcome.value == "OUTPUT_INVALID"
-    assert result.reasoning_correct is False
+    assert result.reasoning_correct is None
+    assert result.output_compliant is False
     assert result.verdict is None
+    assert scoring.summary.incorrect == 0
+    assert scoring.summary.model_failures == 1
+    assert scoring.summary.output_noncompliant == 1
+
+
+@pytest.mark.parametrize("nonfinite", (float("nan"), float("inf"), float("-inf")))
+def test_offline_scoring_rejects_nonfinite_output_at_shared_boundary(
+    simple_compiled,
+    nonfinite: float,
+) -> None:
+    _, snapshot, _, mcp = simple_compiled
+    public, private = build_artifacts(
+        mcp,
+        identity_catalog=snapshot.entities,
+    )
+    raw_answers = _perfect_answers(mcp, snapshot)
+    count_task = next(task for task in public.tasks if task.claim_kind == "count")
+    raw_answers[count_task.task_id]["count"] = nonfinite
+    answers = build_answers_artifact(public, raw_answers)
+
+    scoring = score_answers_v2(public, private, answers)
+    result = next(item for item in scoring.results if item.task_id == count_task.task_id)
+
+    assert result.execution_class is ExecutionClass.MODEL_FAILURE
+    assert result.outcome.value == "OUTPUT_INVALID"
+    assert result.output_compliant is False
+    assert result.detail == "structured output contains a non-finite number"
 
 
 def test_offline_scoring_contains_unexpected_comparator_failure(
