@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import re
+import shutil
 import subprocess
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -18,6 +20,11 @@ CANONICAL_BLOODHOUND_MCP_EXECUTABLE = "bloodhound-mcp"
 _FULL_GIT_SOURCE_RE = re.compile(
     rf"\A{re.escape(CANONICAL_BLOODHOUND_MCP_GIT_PREFIX)}(?P<revision>[0-9a-f]{{40}})\Z"
 )
+_UV_TOOL_NAMES = frozenset({"uv", "uvx"})
+_UV_TOOL_OVERRIDE_ENV = {
+    "uv": "ORI_UV_EXECUTABLE",
+    "uvx": "ORI_UVX_EXECUTABLE",
+}
 
 
 @dataclass(frozen=True)
@@ -100,7 +107,13 @@ class MCPLauncherConfig:
             "executable": self.executable,
         }
 
-    def provenance(self, *, uv_version: str) -> dict[str, str | None]:
+    def provenance(
+        self,
+        *,
+        uv_version: str,
+        uv_executable: str,
+        mcp_runtime_executable: str,
+    ) -> dict[str, str | None]:
         return {
             "mcp_launcher": self.launcher,
             "mcp_source": self.source,
@@ -109,6 +122,8 @@ class MCPLauncherConfig:
                 self.executable if self.launcher == MCP_LAUNCHER_UVX_GIT else "main.py"
             ),
             "uv_version": uv_version,
+            "uv_executable": uv_executable,
+            "mcp_runtime_executable": mcp_runtime_executable,
         }
 
 
@@ -119,6 +134,50 @@ class MCPLaunchSpec:
     command: str
     args: tuple[str, ...]
     cwd: str | None
+
+
+@dataclass(frozen=True)
+class MCPLauncherRuntime:
+    """One resolved launcher runtime reused for provenance and process execution."""
+
+    launch_spec: MCPLaunchSpec
+    uv_executable: str
+    uv_version: str
+
+    def provenance(self, config: MCPLauncherConfig) -> dict[str, str | None]:
+        return config.provenance(
+            uv_version=self.uv_version,
+            uv_executable=self.uv_executable,
+            mcp_runtime_executable=self.launch_spec.command,
+        )
+
+
+def resolve_uv_tool(
+    tool: Literal["uv", "uvx"],
+    *,
+    environ: Mapping[str, str] | None = None,
+) -> str:
+    """Resolve a trusted uv tool from PATH or an explicit absolute override."""
+
+    if tool not in _UV_TOOL_NAMES:  # pragma: no cover - protected by the type boundary.
+        raise ValueError(f"Unsupported uv tool {tool!r}.")
+    effective_environ = os.environ if environ is None else environ
+    override_name = _UV_TOOL_OVERRIDE_ENV[tool]
+    override = effective_environ.get(override_name)
+    if override:
+        candidate = Path(override)
+        if not candidate.is_absolute():
+            raise RuntimeError(f"{override_name} must be an absolute executable path.")
+        if not candidate.is_file() or not os.access(candidate, os.X_OK):
+            raise RuntimeError(f"{override_name} does not reference an executable file.")
+        return str(candidate)
+    discovered = shutil.which(tool, path=effective_environ.get("PATH"))
+    if discovered:
+        return str(Path(discovered).absolute())
+    raise RuntimeError(
+        f"Unable to locate executable {tool!r}. Expose it through PATH or set "
+        f"{override_name} to an operator-approved absolute path."
+    )
 
 
 def resolve_mcp_launcher_config(
@@ -187,7 +246,7 @@ def build_mcp_launch_spec(config: MCPLauncherConfig) -> MCPLaunchSpec:
         if config.mcp_dir is None:
             raise ValueError("local_checkout launcher requires mcp_dir.")
         return MCPLaunchSpec(
-            command="uv",
+            command=resolve_uv_tool("uv"),
             args=("--directory", str(config.mcp_dir), "run", "main.py"),
             cwd=str(config.mcp_dir),
         )
@@ -195,19 +254,20 @@ def build_mcp_launch_spec(config: MCPLauncherConfig) -> MCPLaunchSpec:
         if not config.source or not config.executable:
             raise ValueError("uvx_git launcher requires source and executable.")
         return MCPLaunchSpec(
-            command="uvx",
+            command=resolve_uv_tool("uvx"),
             args=("--from", config.source, config.executable),
             cwd=None,
         )
     raise ValueError(f"Unsupported MCP launcher {config.launcher!r}.")
 
 
-def detect_uv_version() -> str:
+def detect_uv_version(uv_command: str | None = None) -> str:
     """Return the exact uv version string used for launcher provenance."""
 
+    command = uv_command or resolve_uv_tool("uv")
     try:
         completed = subprocess.run(
-            ["uv", "--version"],
+            [command, "--version"],
             text=True,
             capture_output=True,
             timeout=5.0,
@@ -220,3 +280,19 @@ def detect_uv_version() -> str:
         detail = completed.stderr.strip() or version or f"exit {completed.returncode}"
         raise RuntimeError(f"Unable to capture uv version: {detail}")
     return version
+
+
+def resolve_mcp_launcher_runtime(config: MCPLauncherConfig) -> MCPLauncherRuntime:
+    """Resolve and fingerprint the exact commands that will launch MCP."""
+
+    launch_spec = build_mcp_launch_spec(config)
+    uv_executable = (
+        launch_spec.command
+        if config.launcher == MCP_LAUNCHER_LOCAL_CHECKOUT
+        else resolve_uv_tool("uv")
+    )
+    return MCPLauncherRuntime(
+        launch_spec=launch_spec,
+        uv_executable=uv_executable,
+        uv_version=detect_uv_version(uv_executable),
+    )

@@ -27,6 +27,7 @@ from .mcp import (
     initial_finalization_state,
     reduce_finalization,
 )
+from .output_compliance import is_schema_compliant_json
 from .schema import (
     CapabilityProfile,
     EvidenceIR,
@@ -46,6 +47,13 @@ class MCPV2Outcome:
 
     finalization: FinalizationState
     sample: SampleResult
+
+
+def _schema_compliant_answer(
+    answer: Mapping[str, Any] | None,
+    task: TaskBundle,
+) -> bool | None:
+    return is_schema_compliant_json(answer, task.answer_schema)
 
 
 def _output_attempt(
@@ -116,6 +124,13 @@ def score_mcp_transcript_v2(
     retry_answer: Mapping[str, Any] | None = None,
     observed_identity_ids: Sequence[str] = (),
     graph_fact_registry: GraphFactRegistry | None = None,
+    final_output_normalized: bool = False,
+    retry_output_normalized: bool = False,
+    final_output_compliant: bool | None = None,
+    retry_output_compliant: bool | None = None,
+    final_receipt_attested: bool = True,
+    retry_receipt_attested: bool = True,
+    retry_contract_error: str | None = None,
 ) -> MCPV2Outcome:
     """Reduce one typed transcript and call the shared comparator exactly once."""
 
@@ -135,6 +150,11 @@ def score_mcp_transcript_v2(
     observed_ids = frozenset(
         value.casefold() for value in observed_identity_ids
     )
+    output_compliant = final_output_compliant
+    if output_compliant is None and final_answer is not None:
+        output_compliant = _schema_compliant_answer(final_answer, task)
+    output_normalized = final_output_normalized and output_compliant is True
+    receipt_attested = final_receipt_attested
     try:
         attempt, evidence, normalization_error = _output_attempt(
             final_answer,
@@ -188,6 +208,17 @@ def score_mcp_transcript_v2(
         state = reduce_finalization(state, retry_attempt)
         evidence = retry_evidence
         normalization_error = retry_error
+        output_compliant = retry_output_compliant
+        if retry_answer is not None:
+            output_compliant = (
+                retry_output_compliant
+                if retry_output_compliant is not None
+                else _schema_compliant_answer(retry_answer, task)
+            )
+            output_normalized = retry_output_normalized and output_compliant is True
+            receipt_attested = retry_receipt_attested
+        elif output_compliant is None:
+            output_compliant = False
 
     if state.phase is FinalizationPhase.INFRASTRUCTURE_FAILURE:
         return MCPV2Outcome(
@@ -216,8 +247,24 @@ def score_mcp_transcript_v2(
                 **base,
                 execution_class=ExecutionClass.MODEL_FAILURE,
                 outcome=SampleOutcomeCode.TASK_TIMEOUT,
-                reasoning_correct=False,
                 detail=state.terminal_reason,
+            ),
+        )
+    if retry_contract_error is not None:
+        state = state.model_copy(
+            update={
+                "phase": FinalizationPhase.OUTPUT_INVALID,
+                "terminal_reason": retry_contract_error,
+            }
+        )
+        return MCPV2Outcome(
+            finalization=state,
+            sample=SampleResult(
+                **base,
+                execution_class=ExecutionClass.MODEL_FAILURE,
+                outcome=SampleOutcomeCode.OUTPUT_INVALID,
+                output_compliant=False,
+                detail=retry_contract_error,
             ),
         )
     if state.phase is FinalizationPhase.EVIDENCE_INSUFFICIENT:
@@ -229,7 +276,8 @@ def score_mcp_transcript_v2(
                     **base,
                     execution_class=ExecutionClass.MODEL_FAILURE,
                     outcome=SampleOutcomeCode.POLICY_REJECTED,
-                    reasoning_correct=False,
+                    output_compliant=output_compliant,
+                    output_normalized=output_normalized,
                     detail="model-authored MCP query was rejected by policy",
                 ),
             )
@@ -240,7 +288,8 @@ def score_mcp_transcript_v2(
                     **base,
                     execution_class=ExecutionClass.MODEL_FAILURE,
                     outcome=SampleOutcomeCode.QUERY_TIMEOUT,
-                    reasoning_correct=False,
+                    output_compliant=output_compliant,
+                    output_normalized=output_normalized,
                     detail="model-authored MCP query exceeded the BloodHound query budget",
                 ),
             )
@@ -254,7 +303,8 @@ def score_mcp_transcript_v2(
                     **base,
                     execution_class=ExecutionClass.MODEL_FAILURE,
                     outcome=SampleOutcomeCode.QUERY_ERROR,
-                    reasoning_correct=False,
+                    output_compliant=output_compliant,
+                    output_normalized=output_normalized,
                     detail="model-authored MCP query or arguments were invalid",
                 ),
             )
@@ -264,6 +314,8 @@ def score_mcp_transcript_v2(
                 **base,
                 execution_class=ExecutionClass.PROOF_FAILURE,
                 outcome=SampleOutcomeCode.PROOF_INSUFFICIENT,
+                output_compliant=output_compliant,
+                output_normalized=output_normalized,
                 detail=state.terminal_reason,
             ),
         )
@@ -274,8 +326,28 @@ def score_mcp_transcript_v2(
                 **base,
                 execution_class=ExecutionClass.MODEL_FAILURE,
                 outcome=SampleOutcomeCode.OUTPUT_INVALID,
-                reasoning_correct=False,
+                output_compliant=(False if output_compliant is None else output_compliant),
+                output_normalized=output_normalized,
                 detail=normalization_error or state.terminal_reason,
+            ),
+        )
+
+    if not receipt_attested:
+        state = state.model_copy(
+            update={
+                "phase": FinalizationPhase.OUTPUT_INVALID,
+                "terminal_reason": "FINAL_ANSWER_NOT_ATTESTED_BY_TOOL_RECEIPTS",
+            }
+        )
+        return MCPV2Outcome(
+            finalization=state,
+            sample=SampleResult(
+                **base,
+                execution_class=ExecutionClass.MODEL_FAILURE,
+                outcome=SampleOutcomeCode.OUTPUT_INVALID,
+                output_compliant=True,
+                output_normalized=output_normalized,
+                detail="final answer contains facts not attested by claim-bound tool receipts",
             ),
         )
 
@@ -324,6 +396,8 @@ def score_mcp_transcript_v2(
             execution_class=ExecutionClass.SUCCESS,
             outcome=SampleOutcomeCode.COMPLETED,
             reasoning_correct=verdict.status is VerdictStatus.CORRECT,
+            output_compliant=True,
+            output_normalized=output_normalized,
             evidence=evidence,
             verdict=verdict,
         ),

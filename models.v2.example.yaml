@@ -30,7 +30,11 @@ defaults:
   # One explicit effort applies to every Codex model and both tracks. Readiness
   # fails if any selected model does not advertise this level locally.
   reasoning_effort: high
-  max_infra_retries: 1
+  # Two lifetime infrastructure retries: one immediate, then one deferred.
+  max_infra_retries: 2
+  infra_retry:
+    immediate_retries: 1
+    deferred_cooldown_seconds: 300
   graph_page_size: 500
   health:
     timeout_seconds: 60.0
@@ -43,18 +47,41 @@ defaults:
     telemetry_adapter: auto
     # Provider and tool sub-deadlines must remain below every task deadline so
     # stalls are classified as infrastructure instead of model task timeouts.
-    read_timeout_seconds: 120.0
+    read_timeout_seconds: 240.0
     tool_timeout_seconds: 60.0
 
 models:
   - name: gpt-5-6-sol
     provider: codex
     model: gpt-5.6-sol
+    # auto preserves the established Codex OAuth Responses path.
+    api_surface: auto
     mcp_tool_loop: native-openai-compatible
     options: {}
 
   - name: gpt-5-5
     provider: codex
     model: gpt-5.5
+    api_surface: auto
     mcp_tool_loop: native-openai-compatible
     options: {}
+
+  # OpenRouter and Nous Portal V2 entries use provider: openai-compat with
+  # api_surface: auto (or explicit chat_completions). Copy one of these shapes
+  # into a local config; do not add real keys to YAML.
+  #
+  # - name: openrouter-model
+  #   provider: openai-compat
+  #   model: <openrouter-model-id>
+  #   api_surface: auto
+  #   model_base_url: https://openrouter.ai/api/v1
+  #   mcp_tool_loop: native-openai-compatible
+  #   options: {}
+  #
+  # - name: nous-portal-model
+  #   provider: openai-compat
+  #   model: <nous-model-id>
+  #   api_surface: auto
+  #   model_base_url: https://inference-api.nousresearch.com/v1
+  #   mcp_tool_loop: native-openai-compatible
+  #   options: {}

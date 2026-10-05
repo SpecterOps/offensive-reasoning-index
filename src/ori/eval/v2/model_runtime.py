@@ -7,7 +7,7 @@ import json
 import re
 from collections import Counter
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from itertools import permutations
 from typing import Any, Literal
 
@@ -27,6 +27,15 @@ from ori.eval.mcp_runtime import (
     MCPToolInfrastructureError,
     _run_ollama_mcp_loop,
     _run_openai_compat_mcp_loop,
+)
+from ori.eval.provider_contract import (
+    ProviderApiSurface,
+    ProviderAuthenticationError,
+    ProviderCapabilityError,
+    ProviderContractError,
+    ProviderProtocolError,
+    resolve_api_surface,
+    validate_release1_api_surface,
 )
 from ori.relationships import canonical_relationship_kind, relationship_contract
 
@@ -51,6 +60,11 @@ from .mcp import (
     validate_certified_mcp_loop,
 )
 from .mcp_adapter import MCPV2Outcome
+from .output_compliance import (
+    OutputComplianceError,
+    is_schema_compliant_json,
+    require_finite_json,
+)
 from .public_surfaces import (
     PublicSurface,
     assert_solver_visible,
@@ -76,7 +90,7 @@ class V2ModelRuntimeError(ValueError):
     """Raised when a model-facing v2 contract is mixed, stale, or unsupported."""
 
 
-MCP_RESULT_CONTRACT_VERSION = "ori-mcp-result-contract-v22"
+MCP_RESULT_CONTRACT_VERSION = "ori-mcp-result-contract-v23"
 QuerySelector = tuple[Literal["objectid", "name"], str]
 
 
@@ -224,6 +238,15 @@ def _provider_infrastructure_details(
 ) -> tuple[str, bool] | None:
     """Return a stable provider subtype and retryability for SDK/HTTP failures."""
 
+    if isinstance(exc, ProviderAuthenticationError):
+        return "PROVIDER_AUTH", False
+    if isinstance(exc, ProviderCapabilityError):
+        return "PROVIDER_CAPABILITY", False
+    if isinstance(exc, ProviderProtocolError):
+        return "PROVIDER_PROTOCOL", False
+    if isinstance(exc, ProviderContractError):
+        return "PROVIDER_CONTRACT", False
+
     if isinstance(exc, httpx.TimeoutException):
         return "PROVIDER_TIMEOUT", True
     if isinstance(exc, httpx.HTTPStatusError):
@@ -236,7 +259,9 @@ def _provider_infrastructure_details(
             return "PROVIDER_RATE_LIMIT", True
         if status >= 500:
             return "PROVIDER_SERVER", True
-        return None
+        if status in {404, 405, 406, 415}:
+            return "PROVIDER_CAPABILITY", False
+        return "PROVIDER_PROTOCOL", False
     if isinstance(exc, httpx.RequestError):
         return "PROVIDER_TRANSPORT", True
 
@@ -263,7 +288,7 @@ def _provider_infrastructure_details(
 def _provider_response_infrastructure_details(
     response: ModelResponse,
 ) -> tuple[str, str, bool]:
-    """Recover provider scope, subtype, and retryability from a returned error."""
+    """Recover typed provider failure metadata without guessing from prose."""
 
     metrics = response.provider_metrics
     scope_value = metrics.get("infra_scope")
@@ -274,43 +299,10 @@ def _provider_response_infrastructure_details(
     retryable = retryable_value if isinstance(retryable_value, bool) else None
     if subtype is not None and retryable is not None:
         return scope, subtype, retryable
-
-    error = (response.error or "").casefold()
-    status_match = re.search(r"(?<!\d)(?P<status>[1-5]\d\d)(?!\d)", error)
-    status = int(status_match.group("status")) if status_match is not None else None
-    if status in {401, 403} or any(
-        marker in error
-        for marker in (
-            "authentication",
-            "invalid_api_key",
-            "permission denied",
-            "permission_denied",
-            "permission_error",
-            "insufficient permission",
-            "not authorized",
-            "unauthorized",
-            "forbidden",
-        )
-    ):
-        inferred = ("PROVIDER_AUTH", False)
-    elif status == 408 or "timed out" in error or "timeout" in error:
-        inferred = ("PROVIDER_TIMEOUT", True)
-    elif status == 429 or "rate limit" in error or "rate_limit" in error:
-        inferred = ("PROVIDER_RATE_LIMIT", True)
-    elif (status is not None and status >= 500) or "server error" in error:
-        inferred = ("PROVIDER_SERVER", True)
-    elif any(
-        marker in error
-        for marker in ("connection error", "connection refused", "transport")
-    ):
-        inferred = ("PROVIDER_TRANSPORT", True)
-    else:
-        inferred = ("PROVIDER_ERROR", True)
-    return (
-        scope,
-        subtype or inferred[0],
-        retryable if retryable is not None else inferred[1],
-    )
+    # A legacy or third-party adapter that returns only prose must not gain a
+    # retry policy by matching words in an error message. Fail closed until the
+    # adapter supplies the typed metadata above.
+    return scope, subtype or "PROVIDER_UNTYPED", False
 
 
 def _failure_response(
@@ -346,19 +338,50 @@ def _failure_response(
     )
 
 
-def _extract_json_object(text: str) -> Mapping[str, Any]:
+@dataclass(frozen=True, slots=True)
+class ParsedJsonObject:
+    payload: Mapping[str, Any]
+    raw_protocol_compliant: bool
+    format_normalized: bool
+
+
+_SINGLE_JSON_FENCE = re.compile(
+    r"\A\s*```json\s*\n(?P<payload>\{.*\})\s*\n```\s*\Z",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _parse_json_object(text: str) -> ParsedJsonObject:
     stripped = text.strip()
     if not stripped:
         raise V2ModelRuntimeError("model output did not contain one JSON object")
+    candidate = stripped
+    normalized = False
+    fence = _SINGLE_JSON_FENCE.fullmatch(text)
+    if fence is not None:
+        candidate = fence.group("payload").strip()
+        normalized = True
     try:
-        parsed = json.loads(stripped)
+        parsed = json.loads(candidate)
     except json.JSONDecodeError as exc:
         raise V2ModelRuntimeError(
-            "model output must be exactly one JSON object with no markdown or commentary"
+            "model output must be one JSON object or exactly one outer ```json fence"
         ) from exc
     if not isinstance(parsed, Mapping):
         raise V2ModelRuntimeError("model output must be exactly one JSON object")
-    return parsed
+    try:
+        require_finite_json(parsed)
+    except OutputComplianceError as exc:
+        raise V2ModelRuntimeError(str(exc)) from exc
+    return ParsedJsonObject(
+        payload=parsed,
+        raw_protocol_compliant=not normalized,
+        format_normalized=normalized,
+    )
+
+
+def _extract_json_object(text: str) -> Mapping[str, Any]:
+    return _parse_json_object(text).payload
 
 
 def _contains_object_candidate(text: str) -> bool:
@@ -439,8 +462,12 @@ def direct_submission_schema(task: TaskBundle) -> dict[str, Any]:
     }
 
 
-def parse_direct_submission(text: str, task: TaskBundle) -> DirectSubmissionV2:
-    payload = _extract_json_object(text)
+def _parse_direct_submission(
+    text: str,
+    task: TaskBundle,
+) -> tuple[DirectSubmissionV2, ParsedJsonObject]:
+    parsed = _parse_json_object(text)
+    payload = parsed.payload
     schema = direct_submission_schema(task)
     try:
         Draft202012Validator.check_schema(schema)
@@ -448,7 +475,11 @@ def parse_direct_submission(text: str, task: TaskBundle) -> DirectSubmissionV2:
     except (SchemaError, ValidationError) as exc:
         raise V2ModelRuntimeError(f"direct submission schema mismatch: {exc.message}") from exc
     assert_solver_visible(payload)
-    return DirectSubmissionV2.model_validate(payload)
+    return DirectSubmissionV2.model_validate(payload), parsed
+
+
+def parse_direct_submission(text: str, task: TaskBundle) -> DirectSubmissionV2:
+    return _parse_direct_submission(text, task)[0]
 
 
 def _provider_request(task: TaskBundle, *, direct: bool) -> dict[str, Any]:
@@ -728,7 +759,7 @@ def _model_output_invalid_sample(
         oracle_fingerprint=oracle.oracle_fingerprint,
         execution_class=ExecutionClass.MODEL_FAILURE,
         outcome=SampleOutcomeCode.OUTPUT_INVALID,
-        reasoning_correct=False,
+        output_compliant=False,
         detail=detail,
     )
 
@@ -746,6 +777,54 @@ def _interrupted_sample(
         outcome=SampleOutcomeCode.INTERRUPTED,
         detail=detail,
     )
+
+
+def _task_timeout_sample(
+    task: TaskBundle,
+    oracle: OracleBundle,
+    detail: str,
+) -> SampleResult:
+    return SampleResult(
+        task_id=task.task_id,
+        task_fingerprint=task.task_fingerprint,
+        oracle_fingerprint=oracle.oracle_fingerprint,
+        execution_class=ExecutionClass.MODEL_FAILURE,
+        outcome=SampleOutcomeCode.TASK_TIMEOUT,
+        detail=detail,
+    )
+
+
+def _task_timeout_provider_record(
+    provider: ProviderRunRecord,
+    *,
+    detail: str,
+    timeout_seconds: float,
+) -> ProviderRunRecord:
+    payload = provider.model_dump(mode="python")
+    metrics = {
+        key: value
+        for key, value in provider.provider_metrics.items()
+        if not key.startswith("infra_")
+    }
+    metrics.update(
+        {
+            "timeout_scope": "whole_task",
+            "task_timeout_seconds": timeout_seconds,
+        }
+    )
+    payload.update(
+        {
+            "elapsed_seconds": timeout_seconds,
+            "provider_error": detail,
+            "provider_metrics": metrics,
+            "record_fingerprint": "0" * 64,
+        }
+    )
+    payload["record_fingerprint"] = canonical_sha256(
+        payload,
+        exclude_fields=("record_fingerprint",),
+    )
+    return ProviderRunRecord.model_validate(payload)
 
 
 def contain_model_runtime_exception(
@@ -830,7 +909,21 @@ def unexecuted_model_record(
 TextTransport = Callable[..., Awaitable[ModelResponse]]
 
 
-async def run_direct_model_task_v2(
+def _json_schema_response_format(
+    schema: Mapping[str, Any],
+    *,
+    name: str,
+) -> dict[str, Any]:
+    """Return the provider-neutral strict JSON-Schema response descriptor."""
+
+    return {
+        "name": name,
+        "strict": True,
+        "schema": dict(schema),
+    }
+
+
+async def _run_direct_model_task_v2_unbounded(
     *,
     coordinator: Any,
     task: TaskBundle,
@@ -840,6 +933,8 @@ async def run_direct_model_task_v2(
     model_base_url: str | None = None,
     ollama_options: dict[str, Any] | None = None,
     max_tokens: int = 2048,
+    api_surface: ProviderApiSurface | str = ProviderApiSurface.AUTO,
+    structured_output_mode: str = "prompt_local_validation",
     transport: TextTransport = call_provider_text,
 ) -> tuple[DirectV2Outcome | None, SampleResult, ProviderRunRecord]:
     """Call one model with a public direct contract, then execute via policy v3."""
@@ -852,6 +947,16 @@ async def run_direct_model_task_v2(
             base_url=model_base_url,
             max_tokens=max_tokens,
             ollama_options=ollama_options,
+            api_surface=api_surface,
+            request_timeout_seconds=task.binding.bounds.timeout_seconds,
+            structured_output_schema=(
+                _json_schema_response_format(
+                    direct_submission_schema(task),
+                    name="ori_direct_submission",
+                )
+                if structured_output_mode == "json_schema"
+                else None
+            ),
         )
     except asyncio.CancelledError as exc:
         detail = "direct model request interrupted before completion"
@@ -918,7 +1023,7 @@ async def run_direct_model_task_v2(
             ),
         )
     try:
-        submission = parse_direct_submission(response.raw_text, task)
+        submission, parsed_submission = _parse_direct_submission(response.raw_text, task)
     except V2ModelRuntimeError as exc:
         sample = _model_output_invalid_sample(task, oracle, str(exc))
         return (
@@ -940,6 +1045,12 @@ async def run_direct_model_task_v2(
             oracle=oracle,
             resolver=resolver,
             answer_payload=submission.assertion,
+        )
+        sample = sample.model_copy(
+            update={
+                "output_compliant": True,
+                "output_normalized": parsed_submission.format_normalized,
+            }
         )
     except asyncio.CancelledError as exc:
         detail = "direct query execution interrupted before completion"
@@ -977,6 +1088,96 @@ async def run_direct_model_task_v2(
             direct_receipt=outcome.receipt,
         ),
     )
+
+
+async def run_direct_model_task_v2(
+    *,
+    coordinator: Any,
+    task: TaskBundle,
+    oracle: OracleBundle,
+    resolver: IdentityResolver,
+    model: str,
+    model_base_url: str | None = None,
+    ollama_options: dict[str, Any] | None = None,
+    max_tokens: int = 2048,
+    api_surface: ProviderApiSurface | str = ProviderApiSurface.AUTO,
+    structured_output_mode: str = "prompt_local_validation",
+    transport: TextTransport = call_provider_text,
+) -> tuple[DirectV2Outcome | None, SampleResult, ProviderRunRecord]:
+    """Run one Direct task inside its solver-visible whole-task deadline."""
+
+    timeout_seconds = task.binding.bounds.timeout_seconds
+    deadline = asyncio.timeout(timeout_seconds)
+    try:
+        async with deadline:
+            try:
+                return await _run_direct_model_task_v2_unbounded(
+                    coordinator=coordinator,
+                    task=task,
+                    oracle=oracle,
+                    resolver=resolver,
+                    model=model,
+                    model_base_url=model_base_url,
+                    ollama_options=ollama_options,
+                    max_tokens=max_tokens,
+                    api_surface=api_surface,
+                    structured_output_mode=structured_output_mode,
+                    transport=transport,
+                )
+            except V2ModelTaskCancelled as exc:
+                # Consume deadline-triggered cancellation before leaving the
+                # asyncio.timeout context. Python 3.14 otherwise converts the
+                # carried cancellation to TimeoutError and drops its receipt.
+                if not deadline.expired():
+                    raise
+                detail = "direct task execution budget exhausted"
+                return (
+                    None,
+                    _task_timeout_sample(task, oracle, detail),
+                    _task_timeout_provider_record(
+                        exc.provider,
+                        detail=detail,
+                        timeout_seconds=timeout_seconds,
+                    ),
+                )
+    except V2ModelTaskCancelled as exc:
+        if not deadline.expired():
+            raise
+        detail = "direct task execution budget exhausted"
+        return (
+            None,
+            _task_timeout_sample(task, oracle, detail),
+            _task_timeout_provider_record(
+                exc.provider,
+                detail=detail,
+                timeout_seconds=timeout_seconds,
+            ),
+        )
+    except TimeoutError:
+        if not deadline.expired():
+            raise
+        detail = "direct task execution budget exhausted"
+        response = _failure_response(
+            partial=None,
+            model=model,
+            parse_stage="direct_task_timeout",
+            error=detail,
+            elapsed_seconds=timeout_seconds,
+            metrics={
+                "timeout_scope": "whole_task",
+                "task_timeout_seconds": timeout_seconds,
+            },
+        )
+        return (
+            None,
+            _task_timeout_sample(task, oracle, detail),
+            _record(
+                task=task,
+                model=model,
+                surface=V2RuntimeSurface.DIRECT.value,
+                response=response,
+            ),
+        )
 
 
 def _tool_payload(text: str) -> Mapping[str, Any]:
@@ -4055,18 +4256,71 @@ async def _schema_only_retry(
     ollama_options: dict[str, Any] | None,
     transport: TextTransport,
     max_tokens: int,
+    api_surface: ProviderApiSurface | str,
+    request_timeout_seconds: float,
+    transcript: tuple[dict[str, Any], ...] = (),
+    structured_output_schema: dict[str, Any] | None = None,
 ) -> ModelResponse:
-    return await transport(
-        model=model,
-        messages=[
+    def provider_message(message: Mapping[str, Any]) -> dict[str, Any] | None:
+        role = message.get("role")
+        if role not in {"user", "assistant", "tool"}:
+            return None
+        projected: dict[str, Any] = {
+            "role": role,
+            "content": message.get("content") or "",
+        }
+        if role == "assistant" and isinstance(message.get("tool_calls"), list):
+            calls: list[dict[str, Any]] = []
+            for raw_call in message["tool_calls"]:
+                if not isinstance(raw_call, Mapping):
+                    continue
+                raw_function = raw_call.get("function")
+                if isinstance(raw_function, Mapping):
+                    name = raw_function.get("name")
+                    arguments = raw_function.get("arguments", "")
+                else:
+                    name = raw_function
+                    arguments = raw_call.get("arguments", {})
+                if not isinstance(name, str) or not name:
+                    continue
+                if not isinstance(arguments, str):
+                    arguments = json.dumps(arguments, sort_keys=True, separators=(",", ":"))
+                calls.append(
+                    {
+                        "id": str(raw_call.get("id") or ""),
+                        "type": "function",
+                        "function": {"name": name, "arguments": arguments},
+                    }
+                )
+            if calls:
+                projected["tool_calls"] = calls
+        if role == "tool":
+            tool_call_id = message.get("tool_call_id")
+            if not isinstance(tool_call_id, str) or not tool_call_id:
+                return None
+            projected["tool_call_id"] = tool_call_id
+        return projected
+
+    prior_messages = [
+        projected
+        for message in transcript
+        if (projected := provider_message(message)) is not None
+    ]
+    if not prior_messages:
+        prior_messages = [
             {"role": "user", "content": task.question},
             {"role": "assistant", "content": malformed_output},
-            {"role": "user", "content": SCHEMA_ONLY_RETRY_INSTRUCTION},
-        ],
+        ]
+    return await transport(
+        model=model,
+        messages=[*prior_messages, {"role": "user", "content": SCHEMA_ONLY_RETRY_INSTRUCTION}],
         system=mcp_system_prompt(task),
         base_url=model_base_url,
         max_tokens=max_tokens,
         ollama_options=ollama_options,
+        api_surface=api_surface,
+        request_timeout_seconds=request_timeout_seconds,
+        structured_output_schema=structured_output_schema,
     )
 
 
@@ -4081,16 +4335,23 @@ async def run_mcp_model_task_v2(
     model_base_url: str | None,
     tool_loop: MCPToolLoop | str,
     max_steps: int,
+    max_tokens: int = 2048,
     ollama_options: dict[str, Any] | None = None,
     telemetry_adapter: str = OPENAI_COMPAT_TELEMETRY_AUTO,
     read_timeout_seconds: float = DEFAULT_MCP_OLLAMA_READ_TIMEOUT_SECONDS,
     tool_timeout_seconds: float = 60.0,
     graph_fact_registry: GraphFactRegistry | None = None,
+    api_surface: ProviderApiSurface | str = ProviderApiSurface.AUTO,
+    structured_output_mode: str = "prompt_local_validation",
     transport: TextTransport = call_provider_text,
 ) -> tuple[MCPV2Outcome, ProviderRunRecord]:
     """Run one certified native MCP loop and finalize through the V2 reducer."""
 
     resolved_loop = validate_certified_mcp_loop(tool_loop)
+    provider_name = model.split("/", 1)[0]
+    requested_api_surface = ProviderApiSurface(api_surface)
+    resolved_api_surface = resolve_api_surface(provider_name, requested_api_surface)
+    validate_release1_api_surface(provider_name, resolved_api_surface)
     if task.binding.mcp_tool_loop != resolved_loop.value:
         raise V2ModelRuntimeError("runtime MCP loop does not match the task binding fingerprint")
     if task.binding.mcp_resource_mode != "off":
@@ -4111,6 +4372,7 @@ async def run_mcp_model_task_v2(
         "public_question": task.question,
         "model_name": model,
         "base_url": model_base_url,
+        "max_tokens": max_tokens,
         "tools": bundle.tools,
         "max_steps": bounded_steps,
         # The discovered BloodHound prompt describes a different, resource-first
@@ -4126,6 +4388,15 @@ async def run_mcp_model_task_v2(
         "tool_result_observer": projector.observe,
         "progress_observer": observe_progress,
         "tool_timeout_seconds": tool_timeout_seconds,
+        "finalization_schema": (
+            _json_schema_response_format(
+                task.answer_schema,
+                name="ori_mcp_submission",
+            )
+            if structured_output_mode == "json_schema"
+            and resolved_loop is MCPToolLoop.NATIVE_OPENAI_COMPATIBLE
+            else None
+        ),
     }
     surface = (
         V2RuntimeSurface.MCP_NATIVE_OPENAI_COMPATIBLE
@@ -4133,7 +4404,8 @@ async def run_mcp_model_task_v2(
         else V2RuntimeSurface.MCP_NATIVE_OLLAMA
     )
     task_started = asyncio.get_running_loop().time()
-    deadline = asyncio.timeout(task.binding.bounds.timeout_seconds)
+    task_deadline = task_started + task.binding.bounds.timeout_seconds
+    deadline = asyncio.timeout_at(task_deadline)
     try:
         async with deadline:
             if resolved_loop is MCPToolLoop.NATIVE_OPENAI_COMPATIBLE:
@@ -4153,6 +4425,14 @@ async def run_mcp_model_task_v2(
                 raise V2ModelRuntimeError(
                     "Inspect-backed model campaigns require an Inspect-bound task catalog"
                 )
+            response = replace(
+                response,
+                provider_metrics={
+                    **dict(response.provider_metrics),
+                    "requested_api_surface": requested_api_surface.value,
+                    "resolved_api_surface": resolved_api_surface.value,
+                },
+            )
     except asyncio.CancelledError as exc:
         response = _failure_response(
             partial=partial_response,
@@ -4306,12 +4586,16 @@ async def run_mcp_model_task_v2(
             )
         messages = partial_messages
 
+    parsed_final: ParsedJsonObject | None = None
     try:
-        final_answer = _extract_json_object(response.raw_text)
+        parsed_final = _parse_json_object(response.raw_text)
+        final_answer = parsed_final.payload
     except V2ModelRuntimeError:
         final_answer = None
     retry_response: ModelResponse | None = None
     retry_answer: Mapping[str, Any] | None = None
+    parsed_retry: ParsedJsonObject | None = None
+    retry_contract_error: str | None = None
     schema_retry_infrastructure: tuple[str, str, bool] | None = None
     terminal_runtime_failure = any(
         event.kind
@@ -4325,8 +4609,6 @@ async def run_mcp_model_task_v2(
     if (
         projector.finalization_ready
         and not terminal_runtime_failure
-        and response.error is None
-        and _contains_object_candidate(response.raw_text)
         and not _answer_schema_valid(
             task,
             final_answer,
@@ -4335,8 +4617,7 @@ async def run_mcp_model_task_v2(
     ):
         remaining_seconds = max(
             0.0,
-            task.binding.bounds.timeout_seconds
-            - (asyncio.get_running_loop().time() - task_started),
+            task_deadline - asyncio.get_running_loop().time(),
         )
         retry_max_tokens = min(
             32_768,
@@ -4346,6 +4627,8 @@ async def run_mcp_model_task_v2(
             ),
         )
         try:
+            if remaining_seconds <= 0.0:
+                raise TimeoutError
             retry_response = await asyncio.wait_for(
                 _schema_only_retry(
                     task=task,
@@ -4355,6 +4638,17 @@ async def run_mcp_model_task_v2(
                     ollama_options=ollama_options,
                     transport=transport,
                     max_tokens=retry_max_tokens,
+                    api_surface=requested_api_surface,
+                    request_timeout_seconds=remaining_seconds,
+                    transcript=_transcript_payload(messages),
+                    structured_output_schema=(
+                        _json_schema_response_format(
+                            task.answer_schema,
+                            name="ori_mcp_submission",
+                        )
+                        if structured_output_mode == "json_schema"
+                        else None
+                    ),
                 ),
                 timeout=remaining_seconds,
             )
@@ -4431,16 +4725,17 @@ async def run_mcp_model_task_v2(
             )
         elif retry_response is not None:
             try:
-                candidate_retry_answer = _extract_json_object(retry_response.raw_text)
+                parsed_retry = _parse_json_object(retry_response.raw_text)
+                candidate_retry_answer = parsed_retry.payload
+                if _retry_adds_answer_facts(
+                    response.raw_text,
+                    candidate_retry_answer,
+                ):
+                    retry_contract_error = "SCHEMA_RETRY_ADDED_NEW_FACTS"
+                    candidate_retry_answer = None
             except V2ModelRuntimeError:
                 candidate_retry_answer = None
-            if candidate_retry_answer is not None and not _retry_adds_answer_facts(
-                response.raw_text,
-                candidate_retry_answer,
-            ):
-                retry_answer = candidate_retry_answer
-            else:
-                retry_answer = None
+            retry_answer = candidate_retry_answer
 
     transcript_payload = list(_transcript_payload(messages))
     transcript_size = len(
@@ -4488,17 +4783,35 @@ async def run_mcp_model_task_v2(
     # answers can be materialized from complete identity pages so a 500-row
     # proof does not depend on the model echoing every ID; witness assertions
     # fail closed when unsupported edges or properties are asserted.
-    final_answer = _bind_final_answer_to_receipts(
+    final_output_compliant = is_schema_compliant_json(
+        final_answer,
+        task.answer_schema,
+    ) is True
+    retry_output_compliant = is_schema_compliant_json(
+        retry_answer,
+        task.answer_schema,
+    ) is True
+    submitted_final_answer = final_answer
+    bound_final_answer = _bind_final_answer_to_receipts(
         task,
         final_answer,
         projector=projector,
         resolver=resolver,
     )
-    retry_answer = _bind_final_answer_to_receipts(
+    final_receipt_attested = submitted_final_answer is None or bound_final_answer is not None
+    final_answer = (
+        bound_final_answer if bound_final_answer is not None else submitted_final_answer
+    )
+    submitted_retry_answer = retry_answer
+    bound_retry_answer = _bind_final_answer_to_receipts(
         task,
         retry_answer,
         projector=projector,
         resolver=resolver,
+    )
+    retry_receipt_attested = submitted_retry_answer is None or bound_retry_answer is not None
+    retry_answer = (
+        bound_retry_answer if bound_retry_answer is not None else submitted_retry_answer
     )
 
     outcome = run_mcp_task_v2(
@@ -4512,6 +4825,17 @@ async def run_mcp_model_task_v2(
         retry_answer=retry_answer,
         observed_identity_ids=tuple(sorted(projector.observed_identity_ids)),
         graph_fact_registry=graph_fact_registry,
+        final_output_normalized=(
+            parsed_final.format_normalized if parsed_final is not None else False
+        ),
+        retry_output_normalized=(
+            parsed_retry.format_normalized if parsed_retry is not None else False
+        ),
+        final_output_compliant=final_output_compliant,
+        retry_output_compliant=retry_output_compliant,
+        final_receipt_attested=final_receipt_attested,
+        retry_receipt_attested=retry_receipt_attested,
+        retry_contract_error=retry_contract_error,
     )
     combined_response = response
     if retry_response is not None:

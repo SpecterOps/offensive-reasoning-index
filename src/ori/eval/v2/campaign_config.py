@@ -20,6 +20,11 @@ ReasoningEffort = Literal[
     "max",
 ]
 
+StructuredOutputMode = Literal[
+    "prompt_local_validation",
+    "json_schema",
+]
+
 
 class V2TrackArtifactPaths(StrictModel):
     public: str
@@ -38,6 +43,11 @@ class V2HealthConfig(StrictModel):
     poll_interval: float = Field(default=5.0, strict=True, gt=0)
 
 
+class V2InfrastructureRetryConfig(StrictModel):
+    immediate_retries: int = Field(default=1, strict=True, ge=0, le=1)
+    deferred_cooldown_seconds: float = Field(default=300.0, strict=True, ge=300.0)
+
+
 class V2MCPConfig(StrictModel):
     mcp_dir: str
     max_steps: int = Field(default=16, strict=True, gt=0)
@@ -54,7 +64,7 @@ class V2MCPConfig(StrictModel):
         "vllm",
         "lm-studio",
     ] = "auto"
-    read_timeout_seconds: float = Field(default=120.0, strict=True, gt=0)
+    read_timeout_seconds: float = Field(default=240.0, strict=True, gt=0)
     tool_timeout_seconds: float = Field(default=60.0, strict=True, gt=0)
 
 
@@ -65,14 +75,19 @@ class V2Defaults(StrictModel):
     model_base_url: str | None = None
     reasoning_effort: ReasoningEffort | None = None
     max_infra_retries: int = Field(default=1, strict=True, ge=0)
+    infra_retry: V2InfrastructureRetryConfig = V2InfrastructureRetryConfig()
     graph_page_size: int = Field(default=500, strict=True, gt=0, le=2000)
     health: V2HealthConfig = V2HealthConfig()
-    mcp: V2MCPConfig
+    mcp: V2MCPConfig | None = None
 
     @model_validator(mode="after")
     def certified_concurrency_is_serial(self) -> V2Defaults:
         if self.concurrency != 1:
             raise ValueError("certified v2 campaigns currently require concurrency=1")
+        if self.infra_retry.immediate_retries > self.max_infra_retries:
+            raise ValueError(
+                "defaults.infra_retry.immediate_retries cannot exceed defaults.max_infra_retries"
+            )
         return self
 
 
@@ -87,6 +102,13 @@ class V2ModelEntry(StrictModel):
         "openai-compat",
     ]
     model: str
+    api_surface: Literal[
+        "auto",
+        "chat_completions",
+        "responses",
+    ] = "auto"
+    structured_output_mode: StructuredOutputMode = "prompt_local_validation"
+    max_output_tokens: int = Field(default=2048, strict=True, gt=0, le=32768)
     runs_per_model: int | None = Field(default=None, strict=True, gt=0)
     model_base_url: str | None = None
     mcp_tool_loop: (
@@ -110,6 +132,25 @@ class V2ModelEntry(StrictModel):
         if "reasoning_effort" in self.options:
             raise ValueError(
                 "set defaults.reasoning_effort instead of model options.reasoning_effort"
+            )
+        if "api_surface" in self.options:
+            raise ValueError("set model api_surface instead of model options.api_surface")
+        if "structured_output_mode" in self.options:
+            raise ValueError(
+                "set model structured_output_mode instead of model options.structured_output_mode"
+            )
+        if "max_output_tokens" in self.options or "max_tokens" in self.options:
+            raise ValueError(
+                "set model max_output_tokens instead of a free-form output-token option"
+            )
+        if self.structured_output_mode == "json_schema" and self.provider not in {
+            "openai",
+            "openai-compat",
+            "gemini",
+        }:
+            raise ValueError(
+                "structured_output_mode='json_schema' is currently supported only "
+                "by Chat Completions providers"
             )
         return self
 
@@ -150,6 +191,8 @@ class V2CampaignConfig(StrictModel):
         if len(names) != len(set(names)):
             raise ValueError("v2 model names must be unique")
         if "mcp" in self.modes:
+            if self.defaults.mcp is None:
+                raise ValueError("v2 MCP campaigns require defaults.mcp configuration")
             unsupported = sorted(
                 model.name
                 for model in self.models
@@ -184,7 +227,7 @@ class ResolvedV2CampaignConfig(StrictModel):
     archive: Path
     tracks: dict[Track, ResolvedV2TrackPaths]
     output_dir: Path
-    mcp_dir: Path
+    mcp_dir: Path | None
     config: V2CampaignConfig
     source_config_fingerprint: str
 
@@ -221,14 +264,15 @@ def load_v2_campaign_config(path: Path) -> ResolvedV2CampaignConfig:
         archive=_resolve(base, config.source.archive),
         tracks=resolved_tracks,
         output_dir=_resolve(base, config.output_dir),
-        mcp_dir=_resolve(base, config.defaults.mcp.mcp_dir),
+        mcp_dir=(
+            _resolve(base, config.defaults.mcp.mcp_dir) if config.defaults.mcp is not None else None
+        ),
         config=config,
         source_config_fingerprint=canonical_sha256(raw),
     )
     required = (
         resolved.source_manifest,
         resolved.archive,
-        resolved.mcp_dir,
         *(
             value
             for paths in resolved.tracks.values()
@@ -243,6 +287,8 @@ def load_v2_campaign_config(path: Path) -> ResolvedV2CampaignConfig:
     missing = [str(item) for item in required if not item.exists()]
     if missing:
         raise ValueError("v2 campaign config paths do not exist: " + ", ".join(missing))
-    if not resolved.mcp_dir.is_dir():
+    if resolved.mcp_dir is not None and not resolved.mcp_dir.exists():
+        raise ValueError("v2 campaign config paths do not exist: " + str(resolved.mcp_dir))
+    if resolved.mcp_dir is not None and not resolved.mcp_dir.is_dir():
         raise ValueError("v2 MCP path is not a directory")
     return resolved

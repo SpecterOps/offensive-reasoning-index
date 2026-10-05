@@ -38,8 +38,10 @@ from mcp.types import EmbeddedResource, PromptMessage, ResourceLink, TextContent
 
 from ori.mcp_launcher import (
     MCPLauncherConfig,
+    MCPLauncherRuntime,
+    MCPLaunchSpec,
     build_mcp_launch_spec,
-    detect_uv_version,
+    resolve_mcp_launcher_runtime,
 )
 
 from .adapter import ModelResponse
@@ -61,7 +63,19 @@ from .inspect_runtime import (
     _task_name_for_model,
     _task_to_dict,
 )
-from .provider_auth import openai_compat_api_key
+from .provider_auth import (
+    openai_compat_endpoint_is_local,
+    resolve_openai_compat_credential,
+)
+from .provider_contract import (
+    ProviderApiSurface,
+    ProviderAuthenticationError,
+    ProviderProtocolError,
+    ProviderRequest,
+    ToolArgumentParseStatus,
+    chat_completions_payload,
+    normalize_chat_completion,
+)
 from .tasks import Task
 
 RESOURCE_MODE_OFF = "off"
@@ -641,12 +655,16 @@ def _wrap_read_only_tool(
     return wrapped_tool()
 
 
-def _create_bloodhound_mcp_server(launcher: MCPLauncherConfig) -> Any:
-    launch_spec = build_mcp_launch_spec(launcher)
+def _create_bloodhound_mcp_server(
+    launcher: MCPLauncherConfig,
+    *,
+    launch_spec: MCPLaunchSpec | None = None,
+) -> Any:
+    resolved_spec = launch_spec or build_mcp_launch_spec(launcher)
     return mcp_server_stdio(
-        command=launch_spec.command,
-        args=list(launch_spec.args),
-        cwd=launch_spec.cwd,
+        command=resolved_spec.command,
+        args=list(resolved_spec.args),
+        cwd=resolved_spec.cwd,
         env=_mcp_subprocess_env(),
     )
 
@@ -820,9 +838,13 @@ async def _load_bloodhound_mcp_bundle(
     include_resources: bool,
     include_prompt: bool,
     cypher_executor: Callable[..., Any] | None = None,
+    launcher_runtime: MCPLauncherRuntime | None = None,
 ) -> MCPServerBundle:
-    uv_version = detect_uv_version()
-    server = _create_bloodhound_mcp_server(launcher)
+    runtime = launcher_runtime or resolve_mcp_launcher_runtime(launcher)
+    server = _create_bloodhound_mcp_server(
+        launcher,
+        launch_spec=runtime.launch_spec,
+    )
     raw_tools = await mcp_tools(server).tools()
     wrapped: list[Any] = []
     for raw_tool in raw_tools:
@@ -861,7 +883,7 @@ async def _load_bloodhound_mcp_bundle(
         prompt_discovery_status=prompt_discovery_status,
         available_resource_uris=available_resource_uris,
         resource_discovery_status=resource_discovery_status,
-        launcher_provenance=launcher.provenance(uv_version=uv_version),
+        launcher_provenance=runtime.provenance(launcher),
     )
 
 
@@ -1334,10 +1356,6 @@ def _openai_compat_chat_url(base_url: str | None, model_name: str) -> str:
     return f"{resolved}/v1/chat/completions"
 
 
-def _openai_compat_api_key() -> str:
-    return openai_compat_api_key() or "not-needed"
-
-
 def _normalize_openai_compat_telemetry_adapter(raw_adapter: str | None) -> str:
     adapter = raw_adapter or OPENAI_COMPAT_TELEMETRY_AUTO
     if adapter not in OPENAI_COMPAT_TELEMETRY_VALUES:
@@ -1491,7 +1509,10 @@ def _ollama_tool_spec(tool_obj: Any) -> tuple[dict[str, Any], Any]:
             "function": {
                 "name": canonical_name,
                 "description": info.description or "",
-                "parameters": info.parameters.model_dump(),
+                # Inspect's schema model serializes unset JSON-Schema keywords
+                # as explicit nulls by default. Several OpenAI-compatible
+                # gateways reject those otherwise-valid tool definitions.
+                "parameters": info.parameters.model_dump(exclude_none=True),
             },
         },
         executor,
@@ -1592,22 +1613,32 @@ async def _openai_compat_chat_turn(
     model_name: str,
     messages: list[dict[str, Any]],
     tools: list[dict[str, Any]],
+    max_tokens: int = 2048,
     extra_body: dict[str, Any] | None = None,
     telemetry_adapter: str = OPENAI_COMPAT_TELEMETRY_GENERIC,
     read_timeout_seconds: float = DEFAULT_MCP_OLLAMA_READ_TIMEOUT_SECONDS,
     event_progress_observer: Callable[[str], None] | None = None,
+    structured_output_schema: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    payload: dict[str, Any] = {
-        "model": _openai_compat_model_name(model_name),
-        "messages": messages,
-        "tools": tools,
-        "tool_choice": "auto",
-        "stream": False,
-    }
+    request = ProviderRequest(
+        messages=tuple(messages),
+        api_surface=ProviderApiSurface.CHAT_COMPLETIONS,
+        tools=tuple(tools),
+        tool_choice="auto" if tools else None,
+        output_limit=max_tokens,
+        structured_output_schema=structured_output_schema,
+    )
+    payload = chat_completions_payload(
+        request,
+        model=_openai_compat_model_name(model_name),
+    )
+    payload["stream"] = False
     if extra_body:
         payload.update(dict(extra_body))
 
     timeout = httpx.Timeout(connect=10.0, read=read_timeout_seconds, write=30.0, pool=30.0)
+    endpoint_family = "codex"
+    credential_source = "CODEX_OAUTH"
     if model_name.startswith("codex/"):
         import openai
 
@@ -1641,25 +1672,43 @@ async def _openai_compat_chat_turn(
         finally:
             await client.close()
     else:
-        headers = {"Authorization": f"Bearer {_openai_compat_api_key()}"}
+        credential = resolve_openai_compat_credential(url)
+        endpoint_family = credential.endpoint_family
+        credential_source = credential.credential_source
+        if credential.api_key is None and not openai_compat_endpoint_is_local(url):
+            raise ProviderAuthenticationError(
+                "OpenAI-compatible remote endpoint requires a credential scoped to endpoint family "
+                f"{credential.endpoint_family!r}"
+            )
+        headers = (
+            {"Authorization": f"Bearer {credential.api_key}"}
+            if credential.api_key is not None
+            else {}
+        )
         async with httpx.AsyncClient(timeout=timeout) as client:
             resp = await client.post(url, json=payload, headers=headers)
             resp.raise_for_status()
-            data = resp.json()
+            try:
+                data = resp.json()
+            except (TypeError, ValueError) as exc:
+                raise ProviderProtocolError(
+                    "Chat Completions response body is not valid JSON"
+                ) from exc
 
-    choices = list(data.get("choices") or [])
-    choice = choices[0] if choices else {}
-    message = dict(choice.get("message") or {})
-    usage = dict(data.get("usage") or {})
-    content = message.get("content") or ""
-    content, think_block = _split_thinking_from_content(content)
-    thinking = _string_field(
-        message.get("reasoning"),
-        message.get("reasoning_content"),
-        message.get("thinking"),
-        data.get("reasoning"),
-        think_block,
+    turn = normalize_chat_completion(
+        data,
+        provider="codex" if model_name.startswith("codex/") else endpoint_family,
+        endpoint=url,
+        fallback_model=_openai_compat_model_name(model_name),
     )
+    if not isinstance(data, dict):
+        raise ProviderProtocolError("Chat Completions response envelope must be an object")
+    choice = dict(data["choices"][0])
+    message = dict(choice["message"])
+    usage = dict(data.get("usage") or {})
+    content = turn.text
+    content, think_block = _split_thinking_from_content(content)
+    thinking = turn.reasoning or think_block
     provider_metrics = _openai_compat_provider_metrics(
         data=data,
         choice=choice,
@@ -1669,30 +1718,84 @@ async def _openai_compat_chat_turn(
     )
     if think_block and "reasoning_source" not in provider_metrics:
         provider_metrics["reasoning_source"] = "think_block"
+    provider_metrics.update(
+        {
+            "refusal": turn.refusal,
+            "status": turn.status.value,
+            "usage_reported": turn.usage.usage_reported,
+            "usage_complete": turn.usage.usage_complete,
+            "response_id": turn.response_id,
+            "api_surface": (
+                ProviderApiSurface.RESPONSES.value
+                if model_name.startswith("codex/")
+                else ProviderApiSurface.CHAT_COMPLETIONS.value
+            ),
+            "endpoint_family": endpoint_family,
+            "credential_source": credential_source,
+        }
+    )
+    terminal_output_subtype = {
+        "truncated": "TRUNCATED",
+        "content_filtered": "CONTENT_FILTERED",
+    }.get(turn.status.value)
+    if terminal_output_subtype is not None:
+        content = ""
+        provider_metrics["model_output_error"] = True
+        provider_metrics["model_output_subtype"] = terminal_output_subtype
+        tool_calls_for_execution = ()
+    else:
+        tool_calls_for_execution = turn.tool_calls
+    normalized_tool_calls = [
+        {
+            "id": call.id,
+            "type": "function",
+            "function": {
+                "name": call.name,
+                "arguments": call.raw_arguments,
+            },
+            "parsed_arguments": call.parsed_arguments,
+            "argument_parse_status": call.argument_parse_status.value,
+            "argument_parse_error": call.argument_parse_error,
+        }
+        for call in tool_calls_for_execution
+    ]
     return {
-        "model": data.get("model") or _openai_compat_model_name(model_name),
+        "model": turn.model,
         "content": content,
         "thinking": thinking,
-        "tool_calls": message.get("tool_calls") or [],
-        "prompt_tokens": int(usage.get("prompt_tokens") or 0),
-        "completion_tokens": int(usage.get("completion_tokens") or 0),
-        "total_tokens": int(usage.get("total_tokens") or 0),
-        "finish_reason": choice.get("finish_reason") or "",
+        "tool_calls": normalized_tool_calls,
+        "prompt_tokens": turn.usage.input_tokens or 0,
+        "completion_tokens": turn.usage.output_tokens or 0,
+        "total_tokens": turn.usage.total_tokens or 0,
+        "finish_reason": turn.finish_reason,
         "provider_metrics": provider_metrics,
     }
 
 
-def _tool_call_arguments(raw_arguments: Any) -> dict[str, Any]:
+def _tool_call_arguments(
+    raw_arguments: Any,
+) -> tuple[dict[str, Any], ToolArgumentParseStatus, str | None]:
     if isinstance(raw_arguments, dict):
-        return raw_arguments
-    if isinstance(raw_arguments, str) and raw_arguments.strip():
+        return raw_arguments, ToolArgumentParseStatus.VALID, None
+    if raw_arguments is None or raw_arguments == "":
+        return {}, ToolArgumentParseStatus.EMPTY, None
+    if isinstance(raw_arguments, str):
         try:
             parsed = json.loads(raw_arguments)
             if isinstance(parsed, dict):
-                return parsed
-        except json.JSONDecodeError:
-            return {}
-    return {}
+                return parsed, ToolArgumentParseStatus.VALID, None
+            return (
+                {},
+                ToolArgumentParseStatus.NON_OBJECT,
+                "tool arguments JSON must decode to an object",
+            )
+        except json.JSONDecodeError as exc:
+            return {}, ToolArgumentParseStatus.MALFORMED, str(exc)
+    return (
+        {},
+        ToolArgumentParseStatus.MALFORMED,
+        f"tool arguments must be a JSON object or string, got {type(raw_arguments).__name__}",
+    )
 
 
 def _env_flag(name: str, default: bool = False) -> bool:
@@ -1761,6 +1864,7 @@ async def _run_ollama_mcp_loop(
     ) = None,
     progress_observer: Callable[[ModelResponse, list[Any]], None] | None = None,
     tool_timeout_seconds: float | None = None,
+    finalization_schema: dict[str, Any] | None = None,
 ) -> tuple[ModelResponse, MCPRunMetadata, list[Any]]:
     question = public_question or (task.question if task is not None else "")
     if not question:
@@ -2025,6 +2129,7 @@ async def _run_openai_compat_mcp_loop(
     public_question: str | None = None,
     model_name: str,
     base_url: str | None,
+    max_tokens: int = 2048,
     extra_body: dict[str, Any] | None,
     tools: list[Any],
     max_steps: int,
@@ -2041,6 +2146,7 @@ async def _run_openai_compat_mcp_loop(
     ) = None,
     progress_observer: Callable[[ModelResponse, list[Any]], None] | None = None,
     tool_timeout_seconds: float | None = None,
+    finalization_schema: dict[str, Any] | None = None,
 ) -> tuple[ModelResponse, MCPRunMetadata, list[Any]]:
     question = public_question or (task.question if task is not None else "")
     if not question:
@@ -2141,10 +2247,14 @@ async def _run_openai_compat_mcp_loop(
             model_name=model_name,
             messages=messages_payload,
             tools=[] if use_finalization_guard else tool_specs,
+            max_tokens=max_tokens,
             extra_body=extra_body,
             telemetry_adapter=resolved_telemetry_adapter,
             read_timeout_seconds=read_timeout_seconds,
             event_progress_observer=observe_stream_progress,
+            structured_output_schema=(
+                finalization_schema if use_finalization_guard else None
+            ),
         )
         total_prompt_tokens += int(turn["prompt_tokens"])
         total_completion_tokens += int(turn["completion_tokens"])
@@ -2161,16 +2271,52 @@ async def _run_openai_compat_mcp_loop(
 
         inspect_tool_calls: list[ToolCall] = []
         normalized_tool_calls: list[dict[str, Any]] = []
+        tool_argument_errors: dict[str, str] = {}
         for idx, call in enumerate(raw_tool_calls):
             function = dict(call.get("function") or {})
             name = str(function.get("name") or "")
-            arguments = _tool_call_arguments(function.get("arguments"))
             call_id = str(call.get("id") or f"openai-compat-call-{step + 1}-{idx + 1}")
+            parse_status_raw = call.get("argument_parse_status")
+            parsed_arguments = call.get("parsed_arguments")
+            parse_error = call.get("argument_parse_error")
+            try:
+                parse_status = (
+                    ToolArgumentParseStatus(parse_status_raw)
+                    if parse_status_raw is not None
+                    else None
+                )
+            except ValueError:
+                parse_status = ToolArgumentParseStatus.MALFORMED
+                parse_error = f"unknown argument parse status: {parse_status_raw!r}"
+            if parse_status is None:
+                arguments, parse_status, parse_error = _tool_call_arguments(
+                    function.get("arguments")
+                )
+            elif parse_status is ToolArgumentParseStatus.VALID:
+                if isinstance(parsed_arguments, dict):
+                    arguments = parsed_arguments
+                else:
+                    arguments = {}
+                    parse_status = ToolArgumentParseStatus.MALFORMED
+                    parse_error = "normalized tool arguments are missing their parsed object"
+            elif parse_status is ToolArgumentParseStatus.EMPTY:
+                arguments = {}
+            else:
+                arguments = {}
+                parse_error = str(parse_error or "tool arguments are not a JSON object")
+            if parse_status in {
+                ToolArgumentParseStatus.MALFORMED,
+                ToolArgumentParseStatus.NON_OBJECT,
+            }:
+                tool_argument_errors[call_id] = str(parse_error)
             normalized_tool_calls.append(
                 {
                     "id": call_id,
                     "type": "function",
-                    "function": {"name": name, "arguments": json.dumps(arguments)},
+                    "function": {
+                        "name": name,
+                        "arguments": function.get("arguments") or "",
+                    },
                 }
             )
             inspect_tool_calls.append(ToolCall(id=call_id, function=name, arguments=arguments))
@@ -2220,7 +2366,18 @@ async def _run_openai_compat_mcp_loop(
             result_text = ""
             tool_error: ToolCallError | None = None
             infrastructure_error: MCPToolInfrastructureError | None = None
-            if executed_tool_calls >= max_steps:
+            argument_error = tool_argument_errors.get(tool_call.id)
+            if argument_error is not None:
+                executed_tool_calls += 1
+                result_text = json.dumps(
+                    {
+                        "success": False,
+                        "error": argument_error,
+                        "error_type": "invalid_tool_arguments",
+                    }
+                )
+                tool_error = ToolCallError(type="parsing", message=argument_error)
+            elif executed_tool_calls >= max_steps:
                 result_text = json.dumps(
                     {
                         "success": False,

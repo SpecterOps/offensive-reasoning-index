@@ -72,7 +72,7 @@ def _direct_pairs(
 ) -> set[tuple[str, str]]:
     pairs: set[tuple[str, str]] = set()
     for edge in snapshot.relationships:
-        if edge.relationship.casefold() != pattern.relationship.casefold():
+        if edge.relationship != pattern.relationship:
             continue
         if pattern.direction is EdgeDirection.OUTBOUND:
             pairs.add((edge.source_id, edge.target_id))
@@ -157,6 +157,11 @@ def _role_domains(
             if object_id not in all_ids:
                 raise SelectionEvaluationError(
                     f"role {role!r} resolves to unknown object {object_id!r}"
+                )
+            expected_type = expected_types.get(role)
+            if not type_matches(type_by_id[object_id], expected_type):
+                raise SelectionEvaluationError(
+                    f"role {role!r} resolves to object {object_id!r} with incompatible type"
                 )
             domains[role] = {object_id}
             continue

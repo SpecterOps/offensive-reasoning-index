@@ -7,7 +7,25 @@ import re
 import time
 from dataclasses import dataclass, field
 
-from .provider_auth import openai_compat_api_key
+from .provider_auth import (
+    official_openai_endpoint_is_secure,
+    openai_compat_endpoint_is_local,
+    resolve_openai_compat_credential,
+    sanitized_provider_endpoint,
+)
+from .provider_contract import (
+    ProviderApiSurface,
+    ProviderAuthenticationError,
+    ProviderCapabilityError,
+    ProviderContractError,
+    ProviderRequest,
+    ProviderTurn,
+    ProviderTurnStatus,
+    chat_completions_payload,
+    normalize_chat_completion,
+    resolve_api_surface,
+    validate_release1_api_surface,
+)
 from .tasks import Task
 
 # BH CE Cypher constraints injected into system prompt
@@ -222,6 +240,9 @@ async def call_provider_text(
     base_url: str | None = None,
     max_tokens: int = 1024,
     ollama_options: dict | None = None,
+    api_surface: ProviderApiSurface | str = ProviderApiSurface.AUTO,
+    request_timeout_seconds: float | None = None,
+    structured_output_schema: dict[str, object] | None = None,
 ) -> ModelResponse:
     """Call a provider without imposing a legacy task or Cypher parse contract.
 
@@ -231,7 +252,11 @@ async def call_provider_text(
     """
 
     started = time.monotonic()
+    requested_surface = ProviderApiSurface(api_surface)
+    provider = model.split("/", 1)[0]
+    resolved_surface = resolve_api_surface(provider, requested_surface)
     try:
+        validate_release1_api_surface(provider, resolved_surface)
         text, tokens_in, tokens_out, thinking, provider_metrics = await _call_provider(
             model=model,
             messages=messages,
@@ -239,9 +264,17 @@ async def call_provider_text(
             max_tokens=max_tokens,
             base_url=base_url,
             ollama_options=ollama_options,
+            api_surface=resolved_surface,
+            request_timeout_seconds=request_timeout_seconds,
+            structured_output_schema=structured_output_schema,
         )
+        provider_metrics = {
+            **provider_metrics,
+            "requested_api_surface": requested_surface.value,
+            "resolved_api_surface": resolved_surface.value,
+        }
         return ModelResponse(
-            raw_text=text,
+            raw_text=text if isinstance(text, str) else "",
             cypher=None,
             parse_stage="raw_text",
             tokens_input=tokens_in,
@@ -251,7 +284,26 @@ async def call_provider_text(
             thinking=thinking,
             provider_metrics=provider_metrics,
         )
+    except ProviderContractError as exc:
+        return ModelResponse(
+            raw_text="",
+            cypher=None,
+            parse_stage="provider_contract_error",
+            tokens_input=0,
+            tokens_output=0,
+            elapsed_seconds=time.monotonic() - started,
+            model=model,
+            error=str(exc),
+            provider_metrics={
+                "requested_api_surface": requested_surface.value,
+                "resolved_api_surface": resolved_surface.value,
+                "infra_scope": "provider",
+                "infra_error_subtype": exc.code,
+                "infra_retryable": exc.retryable,
+            },
+        )
     except Exception as exc:
+        provider_error_metrics = _provider_exception_metrics(exc)
         return ModelResponse(
             raw_text="",
             cypher=None,
@@ -261,6 +313,11 @@ async def call_provider_text(
             elapsed_seconds=time.monotonic() - started,
             model=model,
             error=str(exc),
+            provider_metrics={
+                "requested_api_surface": requested_surface.value,
+                "resolved_api_surface": resolved_surface.value,
+                **provider_error_metrics,
+            },
         )
 
 
@@ -271,6 +328,9 @@ async def _call_provider(
     max_tokens: int,
     base_url: str | None,
     ollama_options: dict | None = None,
+    api_surface: ProviderApiSurface = ProviderApiSurface.CHAT_COMPLETIONS,
+    request_timeout_seconds: float | None = None,
+    structured_output_schema: dict[str, object] | None = None,
 ) -> tuple[str, int, int, str, dict[str, object]]:
     """Dispatch to the correct provider SDK.
 
@@ -364,26 +424,101 @@ async def _call_provider(
         resolved_base = {
             "gemini": "https://generativelanguage.googleapis.com/v1beta/openai/",
         }.get(provider, base_url)
-        api_key = openai_compat_api_key() if provider == "openai-compat" else None
-
         # handle "modelname@http://custom-url" for openai-compat
         if "@" in name and provider == "openai-compat":
             name, resolved_base = name.split("@", 1)
 
         client_kwargs = {"base_url": resolved_base}
-        if api_key:
+        credential = None
+        if provider == "openai-compat":
+            if not resolved_base:
+                raise ProviderCapabilityError(
+                    "provider='openai-compat' requires an explicit model_base_url "
+                    "or model@URL endpoint"
+                )
+            credential = resolve_openai_compat_credential(resolved_base)
+            # Supplying an explicit placeholder prevents the OpenAI SDK from
+            # silently borrowing OPENAI_API_KEY for an unrelated compatible
+            # endpoint. Authenticated provider families are rejected when their
+            # scoped credential is absent; generic/local servers may ignore the
+            # placeholder.
+            if credential.api_key is None and not openai_compat_endpoint_is_local(
+                resolved_base
+            ):
+                raise ProviderAuthenticationError(
+                    f"OpenAI-compatible {credential.endpoint_family} endpoint "
+                    "requires its scoped API credential"
+                )
+            client_kwargs["api_key"] = credential.api_key or "not-needed"
+        elif provider == "openai":
+            official_base = resolved_base or "https://api.openai.com/v1"
+            if not official_openai_endpoint_is_secure(official_base):
+                raise ProviderCapabilityError(
+                    "provider='openai' requires the official HTTPS api.openai.com origin; "
+                    "use provider='openai-compat' for custom endpoints"
+                )
+            api_key = os.getenv("OPENAI_API_KEY")
+            if not api_key:
+                raise ProviderAuthenticationError(
+                    "Official OpenAI requires OPENAI_API_KEY"
+                )
+            client_kwargs["base_url"] = official_base
             client_kwargs["api_key"] = api_key
+            resolved_base = official_base
+        else:
+            api_key = os.getenv("GEMINI_API_KEY")
+            if not api_key:
+                raise ProviderAuthenticationError("Gemini requires GEMINI_API_KEY")
+            client_kwargs["api_key"] = api_key
+        if request_timeout_seconds is not None:
+            client_kwargs["timeout"] = request_timeout_seconds
         client = openai.AsyncOpenAI(**client_kwargs)
         # Inject system prompt as first message for OpenAI-compat providers
         full_messages = [{"role": "system", "content": system}] + messages
-        resp = await client.chat.completions.create(
-            model=name,
-            max_tokens=max_tokens,
-            messages=full_messages,
+        request = ProviderRequest(
+            messages=tuple(full_messages),
+            api_surface=ProviderApiSurface.CHAT_COMPLETIONS,
+            output_limit=max_tokens,
+            structured_output_schema=structured_output_schema,
         )
-        m = resp.choices[0].message
-        usage = resp.usage
-        return m.content, usage.prompt_tokens, usage.completion_tokens, "", {}
+        resp = await client.chat.completions.create(
+            **chat_completions_payload(request, model=name)
+        )
+        turn = normalize_chat_completion(
+            resp,
+            provider=provider,
+            endpoint=resolved_base or "https://api.openai.com/v1",
+            fallback_model=name,
+        )
+        metrics = _provider_turn_metrics(turn)
+        if credential is not None:
+            metrics.update(
+                {
+                    "endpoint_family": credential.endpoint_family,
+                    "credential_source": credential.credential_source,
+                }
+            )
+        elif provider == "openai":
+            metrics.update(
+                {
+                    "endpoint_family": "openai",
+                    "credential_source": "OPENAI_API_KEY",
+                }
+            )
+        elif provider == "gemini":
+            metrics.update(
+                {
+                    "endpoint_family": "gemini",
+                    "credential_source": "GEMINI_API_KEY",
+                }
+            )
+        return (
+            _direct_text_projection(turn, metrics),
+            turn.usage.input_tokens or 0,
+            turn.usage.output_tokens or 0,
+            turn.reasoning,
+            metrics,
+        )
 
     elif provider == "codex":
         import openai
@@ -410,10 +545,13 @@ async def _call_provider(
         params = chat_request_to_codex_responses_params(body)
         thread_id = str(params.get("prompt_cache_key") or "")
         headers = codex_headers(thread_id=thread_id)
-        client = openai.AsyncOpenAI(
-            api_key=headers["Authorization"].removeprefix("Bearer "),
-            base_url=resolved_base,
-        )
+        client_kwargs = {
+            "api_key": headers["Authorization"].removeprefix("Bearer "),
+            "base_url": resolved_base,
+        }
+        if request_timeout_seconds is not None:
+            client_kwargs["timeout"] = request_timeout_seconds
+        client = openai.AsyncOpenAI(**client_kwargs)
         try:
             events = await client.responses.create(**params, stream=True, extra_headers=headers)
             data = codex_responses_events_to_chat_completion(
@@ -433,6 +571,8 @@ async def _call_provider(
                 "provider": "codex_oauth",
                 "response_id": data.get("id", ""),
                 "reasoning_effort": reasoning_effort or "native_default",
+                "provider_turn_status": "completed",
+                "finish_reason": choice.get("finish_reason") or "",
             },
         )
 
@@ -441,3 +581,90 @@ async def _call_provider(
             f"Unknown provider: {provider!r}. "
             "Supported: anthropic, openai, ollama, openai-compat, gemini, codex"
         )
+
+
+def _provider_turn_metrics(turn: ProviderTurn) -> dict[str, object]:
+    """Private, secret-free metadata retained with a normalized provider turn."""
+
+    return {
+        "provider": turn.provider,
+        "provider_model": turn.model,
+        "provider_endpoint": sanitized_provider_endpoint(turn.endpoint),
+        "provider_turn_status": turn.status.value,
+        "finish_reason": turn.finish_reason,
+        "response_id": turn.response_id,
+        "refusal": turn.refusal,
+        "reasoning": turn.reasoning,
+        "tool_call_count": len(turn.tool_calls),
+        "tool_argument_parse_statuses": [
+            call.argument_parse_status.value for call in turn.tool_calls
+        ],
+        "usage_reported": turn.usage.usage_reported,
+        "usage_complete": turn.usage.usage_complete,
+        "usage": {
+            "input_tokens": turn.usage.input_tokens,
+            "output_tokens": turn.usage.output_tokens,
+            "total_tokens": turn.usage.total_tokens,
+        },
+        "api_surface": turn.api_surface.value,
+    }
+
+
+def _provider_exception_metrics(exc: Exception) -> dict[str, object]:
+    """Classify SDK/HTTP failures without parsing provider error strings."""
+
+    import httpx
+
+    subtype = "PROVIDER_ERROR"
+    retryable = True
+    status = getattr(exc, "status_code", None)
+    if isinstance(exc, httpx.TimeoutException) or type(exc).__name__ == "APITimeoutError":
+        subtype = "PROVIDER_TIMEOUT"
+    elif isinstance(exc, httpx.RequestError) or type(exc).__name__ == "APIConnectionError":
+        subtype = "PROVIDER_TRANSPORT"
+    elif type(exc).__name__ in {"AuthenticationError", "PermissionDeniedError"} or status in {
+        401,
+        403,
+    }:
+        subtype = "PROVIDER_AUTH"
+        retryable = False
+    elif type(exc).__name__ == "RateLimitError" or status == 429:
+        subtype = "PROVIDER_RATE_LIMIT"
+    elif status == 408:
+        subtype = "PROVIDER_TIMEOUT"
+    elif type(exc).__name__ == "InternalServerError" or (
+        isinstance(status, int) and status >= 500
+    ):
+        subtype = "PROVIDER_SERVER"
+    elif isinstance(status, int) and 400 <= status < 500:
+        subtype = "PROVIDER_REQUEST"
+        retryable = False
+    return {
+        "infra_scope": "provider",
+        "infra_error_subtype": subtype,
+        "infra_retryable": retryable,
+    }
+
+
+def _direct_text_projection(turn: ProviderTurn, metrics: dict[str, object]) -> str:
+    """Project direct final text while retaining typed model-output failures.
+
+    Direct inference cannot consume tool calls or incomplete terminal states.
+    Returning an empty string lets the existing V2 JSON boundary classify these
+    as OUTPUT_INVALID without mislabeling them as provider infrastructure.
+    """
+
+    failure_subtypes = {
+        ProviderTurnStatus.TOOL_CALLS: "TOOL_CALL_ONLY",
+        ProviderTurnStatus.REFUSED: "REFUSAL",
+        ProviderTurnStatus.REASONING_ONLY: "REASONING_ONLY",
+        ProviderTurnStatus.TRUNCATED: "TRUNCATED",
+        ProviderTurnStatus.CONTENT_FILTERED: "CONTENT_FILTERED",
+        ProviderTurnStatus.EMPTY: "EMPTY_OUTPUT",
+    }
+    subtype = failure_subtypes.get(turn.status)
+    if subtype is None:
+        return turn.text
+    metrics["model_output_error"] = True
+    metrics["model_output_subtype"] = subtype
+    return ""

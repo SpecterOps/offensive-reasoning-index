@@ -6,6 +6,7 @@ import asyncio
 import fcntl
 import hashlib
 import json
+import math
 import os
 import signal
 import subprocess
@@ -14,7 +15,7 @@ import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
 
@@ -27,6 +28,17 @@ from ori.eval.direct_query_safety import (
     QueryDenyCache,
 )
 from ori.eval.mcp_runtime import _load_bloodhound_mcp_bundle
+from ori.eval.provider_auth import (
+    official_openai_endpoint_is_secure,
+    openai_compat_endpoint_is_local,
+    resolve_openai_compat_credential,
+)
+from ori.eval.provider_contract import ProviderApiSurface, resolve_api_surface
+from ori.mcp_launcher import (
+    MCPLauncherConfig,
+    MCPLauncherRuntime,
+    resolve_mcp_launcher_runtime,
+)
 
 from .campaign import (
     CheckpointV2,
@@ -41,6 +53,7 @@ from .campaign import (
 from .campaign_config import (
     ReasoningEffort,
     ResolvedV2CampaignConfig,
+    StructuredOutputMode,
     V2ModelEntry,
     load_v2_campaign_config,
 )
@@ -54,7 +67,7 @@ from .graph import (
     require_live_graph_match,
 )
 from .identity import IdentityResolver
-from .mcp import MCPToolLoop
+from .mcp import EvidenceEventKind, MCPToolLoop
 from .model_runtime import (
     ProviderRunRecord,
     V2ModelTaskCancelled,
@@ -75,13 +88,19 @@ from .schema import (
     TaskCertification,
     Track,
 )
-from .scoring import SampleResult, summarize_results
+from .scoring import SampleOutcomeCode, SampleResult, summarize_results
+from .verbose import (
+    answer_shape_line,
+    task_question_lines,
+    tool_activity_lines,
+)
 
-RUNNER_VERSION = "ori-v2-model-campaign-v12"
-RUN_STATE_SCHEMA_VERSION = "ori-v2-private-run-state-v5"
-MODEL_REPORT_SCHEMA_VERSION = "ori-v2-model-report-v2"
-READINESS_SCHEMA_VERSION = "ori-v2-run-readiness-v8"
-CAMPAIGN_LIFECYCLE_SCHEMA_VERSION = "ori-v2-campaign-lifecycle-v1"
+RUNNER_VERSION = "ori-v2-model-campaign-v15"
+RUN_STATE_SCHEMA_VERSION = "ori-v2-private-run-state-v7"
+RUN_STATE_NAME = "run-state-v7.private.json"
+MODEL_REPORT_SCHEMA_VERSION = "ori-v2-model-report-v4"
+READINESS_SCHEMA_VERSION = "ori-v2-run-readiness-v11"
+CAMPAIGN_LIFECYCLE_SCHEMA_VERSION = "ori-v2-campaign-lifecycle-v2"
 TRACK_COMPLETION_SCHEMA_VERSION = "ori-v2-track-completion-v1"
 _RUNNER_IMPLEMENTATION_SOURCES = {
     "adapter": Path(__file__).parent.parent / "adapter.py",
@@ -95,13 +114,18 @@ _RUNNER_IMPLEMENTATION_SOURCES = {
     "evidence": Path(__file__).with_name("evidence.py"),
     "identity": Path(__file__).with_name("identity.py"),
     "mcp_adapter": Path(__file__).with_name("mcp_adapter.py"),
+    "mcp_launcher": Path(__file__).parent.parent.parent / "mcp_launcher.py",
     "mcp_state_machine": Path(__file__).with_name("mcp.py"),
     "model_runtime": Path(__file__).with_name("model_runtime.py"),
+    "output_compliance": Path(__file__).with_name("output_compliance.py"),
     "query_contract": Path(__file__).with_name("query_contract.py"),
+    "provider_auth": Path(__file__).parent.parent / "provider_auth.py",
+    "provider_contract": Path(__file__).parent.parent / "provider_contract.py",
     "provider_loops": Path(__file__).parent.parent / "mcp_runtime.py",
     "runtime": Path(__file__).with_name("runtime.py"),
     "schema": Path(__file__).with_name("schema.py"),
     "scoring": Path(__file__).with_name("scoring.py"),
+    "verbose": Path(__file__).with_name("verbose.py"),
 }
 RUNNER_IMPLEMENTATION_FINGERPRINT = canonical_sha256(
     {
@@ -206,7 +230,7 @@ def _infrastructure_attempt_progress(
 
 
 class ModelRunProvenanceV2(StrictModel):
-    schema_version: Literal["ori-v2-model-campaign-v12"] = RUNNER_VERSION
+    schema_version: Literal["ori-v2-model-campaign-v15"] = RUNNER_VERSION
     protocol_version: Literal["ori-eval-protocol-v2"] = PROTOCOL_VERSION
     base: RunProvenanceV2
     run_identity: RunIdentity
@@ -217,6 +241,12 @@ class ModelRunProvenanceV2(StrictModel):
     containment_config_fingerprint: str
     runtime_implementation_fingerprint: str
     runtime_config_fingerprint: str
+    requested_api_surface: ProviderApiSurface
+    resolved_api_surface: ProviderApiSurface
+    structured_output_mode: StructuredOutputMode
+    endpoint_family: str
+    credential_source: str | None = None
+    mcp_launcher_provenance: dict[str, str | None] | None = None
     provenance_fingerprint: str
 
     @model_validator(mode="after")
@@ -233,6 +263,10 @@ class ModelRunProvenanceV2(StrictModel):
 class ProviderAttemptV2(StrictModel):
     task_id: str
     attempt: int = Field(strict=True, ge=1)
+    scheduler_phase: Literal["initial", "immediate_retry", "deferred_retry"]
+    recovery_round: int = Field(default=0, strict=True, ge=0)
+    started_at_utc: str
+    completed_at_utc: str
     sample: SampleResult
     provider: ProviderRunRecord
     attempt_fingerprint: str
@@ -241,6 +275,16 @@ class ProviderAttemptV2(StrictModel):
     def attempt_is_exact(self) -> ProviderAttemptV2:
         if self.task_id != self.sample.task_id or self.task_id != self.provider.task_id:
             raise ValueError("provider attempt task IDs do not match")
+        if self.scheduler_phase == "deferred_retry" and self.recovery_round < 1:
+            raise ValueError("deferred attempts require a positive recovery round")
+        if self.scheduler_phase != "deferred_retry" and self.recovery_round != 0:
+            raise ValueError("non-deferred attempts cannot name a recovery round")
+        started = datetime.fromisoformat(self.started_at_utc)
+        completed = datetime.fromisoformat(self.completed_at_utc)
+        if started.tzinfo is None or completed.tzinfo is None or completed < started:
+            raise ValueError("provider attempt timestamps are invalid")
+        if started.utcoffset() != timedelta(0) or completed.utcoffset() != timedelta(0):
+            raise ValueError("provider attempt timestamps must use UTC")
         expected = canonical_sha256(
             self,
             exclude_fields=("attempt_fingerprint",),
@@ -250,12 +294,41 @@ class ProviderAttemptV2(StrictModel):
         return self
 
 
+class RetrySchedulerStateV2(StrictModel):
+    phase: Literal["primary", "deferred_cooldown", "deferred_retry", "complete"] = "primary"
+    recovery_round: int = Field(default=0, strict=True, ge=0)
+    pending_task_ids: tuple[str, ...] = ()
+    deferred_not_before_utc: str | None = None
+
+    @model_validator(mode="after")
+    def phase_is_coherent(self) -> RetrySchedulerStateV2:
+        if len(self.pending_task_ids) != len(set(self.pending_task_ids)):
+            raise ValueError("retry scheduler contains duplicate pending task IDs")
+        deferred = self.phase in {"deferred_cooldown", "deferred_retry"}
+        if deferred != (self.recovery_round > 0):
+            raise ValueError("retry scheduler recovery round does not match its phase")
+        if deferred and not self.pending_task_ids:
+            raise ValueError("deferred retry phases require pending tasks")
+        if self.phase == "deferred_cooldown":
+            if self.deferred_not_before_utc is None:
+                raise ValueError("deferred cooldown requires a not-before time")
+            not_before = datetime.fromisoformat(self.deferred_not_before_utc)
+            if not_before.tzinfo is None or not_before.utcoffset() != timedelta(0):
+                raise ValueError("deferred cooldown not-before time must include a timezone")
+        elif self.deferred_not_before_utc is not None:
+            raise ValueError("only deferred cooldown may retain a not-before time")
+        if self.phase in {"primary", "complete"} and self.pending_task_ids:
+            raise ValueError("primary and complete scheduler phases cannot retain pending tasks")
+        return self
+
+
 class PrivateRunStateV2(StrictModel):
-    schema_version: Literal["ori-v2-private-run-state-v5"] = RUN_STATE_SCHEMA_VERSION
+    schema_version: Literal["ori-v2-private-run-state-v7"] = RUN_STATE_SCHEMA_VERSION
     protocol_version: Literal["ori-eval-protocol-v2"] = PROTOCOL_VERSION
     provenance_fingerprint: str
     checkpoint: CheckpointV2
     attempts: tuple[ProviderAttemptV2, ...]
+    scheduler: RetrySchedulerStateV2 = Field(default_factory=RetrySchedulerStateV2)
     state_fingerprint: str
 
     @model_validator(mode="after")
@@ -271,6 +344,8 @@ class PrivateRunStateV2(StrictModel):
         result_by_task = {result.task_id: result for result in self.checkpoint.results}
         if set(final_by_task) != set(result_by_task):
             raise ValueError("private trace and checkpoint task sets differ")
+        if not set(self.scheduler.pending_task_ids).issubset(final_by_task):
+            raise ValueError("retry scheduler contains tasks without durable attempts")
         for task_id, result in result_by_task.items():
             if final_by_task[task_id].sample != result:
                 raise ValueError(f"final provider attempt for {task_id} is stale")
@@ -283,19 +358,70 @@ class PrivateRunStateV2(StrictModel):
         return self
 
 
+class RunOperationalMetricsV2(StrictModel):
+    resource_mode: Literal["off", "not_applicable"]
+    attempts_total: int = Field(strict=True, ge=0)
+    retries_total: int = Field(strict=True, ge=0)
+    immediate_retries_total: int = Field(strict=True, ge=0)
+    deferred_retries_total: int = Field(strict=True, ge=0)
+    recovered_infrastructure_tasks: int = Field(strict=True, ge=0)
+    exhausted_infrastructure_tasks: int = Field(strict=True, ge=0)
+    completed_recovery_rounds: int = Field(strict=True, ge=0)
+    tokens_input_total: int = Field(strict=True, ge=0)
+    tokens_output_total: int = Field(strict=True, ge=0)
+    total_tokens_total: int = Field(strict=True, ge=0)
+    elapsed_seconds_total: float = Field(strict=True, ge=0)
+    mcp_tool_calls_total: int = Field(strict=True, ge=0)
+    cypher_query_calls_total: int = Field(strict=True, ge=0)
+    non_cypher_tool_calls_total: int = Field(strict=True, ge=0)
+    failed_tool_calls_total: int = Field(strict=True, ge=0)
+    resource_read_calls_total: int = Field(strict=True, ge=0)
+
+    @model_validator(mode="after")
+    def totals_are_coherent(self) -> RunOperationalMetricsV2:
+        if self.retries_total < (self.immediate_retries_total + self.deferred_retries_total):
+            raise ValueError("operational retry phase accounting exceeds total retries")
+        if self.total_tokens_total != self.tokens_input_total + self.tokens_output_total:
+            raise ValueError("operational total token accounting mismatch")
+        if self.non_cypher_tool_calls_total != (
+            self.mcp_tool_calls_total - self.cypher_query_calls_total
+        ):
+            raise ValueError("operational MCP tool accounting mismatch")
+        if not math.isfinite(self.elapsed_seconds_total):
+            raise ValueError("operational elapsed time must be finite")
+        if self.resource_read_calls_total != 0:
+            raise ValueError("certified resource_mode=off cannot report resource reads")
+        return self
+
+
 class ModelPublicReportV2(StrictModel):
-    schema_version: Literal["ori-v2-model-report-v2"] = MODEL_REPORT_SCHEMA_VERSION
+    schema_version: Literal["ori-v2-model-report-v4"] = MODEL_REPORT_SCHEMA_VERSION
     protocol_version: Literal["ori-eval-protocol-v2"] = PROTOCOL_VERSION
     run_identity: RunIdentity
     candidate_release_fingerprint: str
     live_certification_fingerprint: str
     graph_verification_before_fingerprint: str
     graph_verification_after_fingerprint: str
+    operational_metrics: RunOperationalMetricsV2
     report: PublicReportV2
     artifact_fingerprint: str
 
     @model_validator(mode="after")
     def fingerprint_matches(self) -> ModelPublicReportV2:
+        scheduled = self.report.summary.scheduled
+        if self.operational_metrics.attempts_total < scheduled:
+            raise ValueError("operational attempts cannot be below scheduled tasks")
+        if self.operational_metrics.retries_total != (
+            self.operational_metrics.attempts_total - scheduled
+        ):
+            raise ValueError("operational retries do not match attempts minus tasks")
+        if self.run_identity.tool_loop is None:
+            if self.operational_metrics.resource_mode != "not_applicable":
+                raise ValueError("Direct operational metrics require not_applicable resources")
+            if self.operational_metrics.mcp_tool_calls_total != 0:
+                raise ValueError("Direct operational metrics cannot contain MCP tool calls")
+        elif self.operational_metrics.resource_mode != "off":
+            raise ValueError("certified MCP operational metrics require resource_mode=off")
         expected = canonical_sha256(
             self,
             exclude_fields=("artifact_fingerprint",),
@@ -303,6 +429,76 @@ class ModelPublicReportV2(StrictModel):
         if self.artifact_fingerprint != expected:
             raise ValueError("model public report fingerprint mismatch")
         return self
+
+
+def _run_operational_metrics(state: PrivateRunStateV2) -> RunOperationalMetricsV2:
+    attempts = tuple(state.attempts)
+    mcp_tool_calls = sum(len(attempt.provider.mcp_tool_receipts) for attempt in attempts)
+    cypher_query_calls = sum(
+        sum(receipt.tool_name == "cypher_query" for receipt in attempt.provider.mcp_tool_receipts)
+        for attempt in attempts
+    )
+    failed_tool_calls = sum(
+        sum(
+            receipt.tool_error is not None or not receipt.observation.succeeded
+            for receipt in attempt.provider.mcp_tool_receipts
+        )
+        for attempt in attempts
+    )
+    resource_read_calls = sum(
+        sum(event.kind == EvidenceEventKind.RESOURCE_READ for event in attempt.provider.mcp_events)
+        for attempt in attempts
+    )
+    tokens_input = sum(attempt.provider.tokens_input for attempt in attempts)
+    tokens_output = sum(attempt.provider.tokens_output for attempt in attempts)
+    total_tokens = tokens_input + tokens_output
+    elapsed_seconds = sum(attempt.provider.elapsed_seconds for attempt in attempts)
+    retries_total = max(0, len(attempts) - len(state.checkpoint.results))
+    attempts_by_task: dict[str, list[ProviderAttemptV2]] = {}
+    for attempt in attempts:
+        attempts_by_task.setdefault(attempt.task_id, []).append(attempt)
+
+    def retryable_infrastructure(attempt: ProviderAttemptV2) -> bool:
+        policy = _infrastructure_retry_policy(attempt.sample, attempt.provider)
+        return policy is not None and policy[1]
+
+    recovered_infrastructure_tasks = sum(
+        any(retryable_infrastructure(item) for item in rows[:-1])
+        and rows[-1].sample.execution_class is not ExecutionClass.INFRA_FAILURE
+        for rows in attempts_by_task.values()
+    )
+    exhausted_infrastructure_tasks = sum(
+        rows[-1].sample.execution_class is ExecutionClass.INFRA_FAILURE
+        for rows in attempts_by_task.values()
+    )
+    return RunOperationalMetricsV2(
+        resource_mode=(
+            "off" if state.checkpoint.run_identity.tool_loop is not None else "not_applicable"
+        ),
+        attempts_total=len(attempts),
+        retries_total=retries_total,
+        immediate_retries_total=sum(
+            attempt.scheduler_phase == "immediate_retry" for attempt in attempts
+        ),
+        deferred_retries_total=sum(
+            attempt.scheduler_phase == "deferred_retry" for attempt in attempts
+        ),
+        recovered_infrastructure_tasks=recovered_infrastructure_tasks,
+        exhausted_infrastructure_tasks=exhausted_infrastructure_tasks,
+        completed_recovery_rounds=max(
+            (attempt.recovery_round for attempt in attempts),
+            default=0,
+        ),
+        tokens_input_total=tokens_input,
+        tokens_output_total=tokens_output,
+        total_tokens_total=total_tokens,
+        elapsed_seconds_total=elapsed_seconds,
+        mcp_tool_calls_total=mcp_tool_calls,
+        cypher_query_calls_total=cypher_query_calls,
+        non_cypher_tool_calls_total=mcp_tool_calls - cypher_query_calls,
+        failed_tool_calls_total=failed_tool_calls,
+        resource_read_calls_total=resource_read_calls,
+    )
 
 
 class ReadinessTrackV2(StrictModel):
@@ -322,19 +518,25 @@ class ModelReadinessV2(StrictModel):
     model: str
     credential_check: str
     capability_check: str
+    requested_api_surface: ProviderApiSurface
+    resolved_api_surface: ProviderApiSurface
+    structured_output_mode: StructuredOutputMode
+    endpoint_family: str
+    credential_source: str | None = None
     reasoning_effort: ReasoningEffort | None = None
 
 
 class CampaignReadinessV2(StrictModel):
-    schema_version: Literal["ori-v2-run-readiness-v8"] = READINESS_SCHEMA_VERSION
+    schema_version: Literal["ori-v2-run-readiness-v11"] = READINESS_SCHEMA_VERSION
     protocol_version: Literal["ori-eval-protocol-v2"] = PROTOCOL_VERSION
-    runner_version: Literal["ori-v2-model-campaign-v12"] = RUNNER_VERSION
+    runner_version: Literal["ori-v2-model-campaign-v15"] = RUNNER_VERSION
     source_config_fingerprint: str
     source_manifest_sha256: str
     archive_sha256: str
     graph_fingerprint: str
     target_fingerprint: str
     mcp_server_revision: str
+    mcp_launcher_provenance: dict[str, str | None] | None = None
     tracks: tuple[ReadinessTrackV2, ...]
     models: tuple[ModelReadinessV2, ...]
     model_count: int = Field(strict=True, gt=0)
@@ -370,9 +572,9 @@ class CampaignCompletedTrackV2(StrictModel):
 
 
 class CampaignLifecycleV2(StrictModel):
-    schema_version: Literal["ori-v2-campaign-lifecycle-v1"] = CAMPAIGN_LIFECYCLE_SCHEMA_VERSION
+    schema_version: Literal["ori-v2-campaign-lifecycle-v2"] = CAMPAIGN_LIFECYCLE_SCHEMA_VERSION
     protocol_version: Literal["ori-eval-protocol-v2"] = PROTOCOL_VERSION
-    runner_version: Literal["ori-v2-model-campaign-v12"] = RUNNER_VERSION
+    runner_version: Literal["ori-v2-model-campaign-v15"] = RUNNER_VERSION
     source_config_fingerprint: str
     mode: Literal["readiness", "execution"]
     status: Literal["running", "interrupted", "failed", "completed"]
@@ -416,7 +618,7 @@ class TrackRunCompletionV2(StrictModel):
 class TrackCompletionV2(StrictModel):
     schema_version: Literal["ori-v2-track-completion-v1"] = TRACK_COMPLETION_SCHEMA_VERSION
     protocol_version: Literal["ori-eval-protocol-v2"] = PROTOCOL_VERSION
-    runner_version: Literal["ori-v2-model-campaign-v12"] = RUNNER_VERSION
+    runner_version: Literal["ori-v2-model-campaign-v15"] = RUNNER_VERSION
     source_config_fingerprint: str
     track: Track
     candidate_release_fingerprint: str
@@ -559,7 +761,7 @@ def _campaign_lifecycle(payload: Mapping[str, Any]) -> CampaignLifecycleV2:
 
 def _checkpoint_counts(output_dir: Path) -> dict[str, int]:
     counts: dict[str, int] = {}
-    for state_path in output_dir.glob("*/*/run-*/run-state-v5.private.json"):
+    for state_path in output_dir.glob(f"*/*/run-*/{RUN_STATE_NAME}"):
         try:
             payload = json.loads(state_path.read_text())
             results = payload["checkpoint"]["results"]
@@ -883,6 +1085,89 @@ def _git_revision(path: Path) -> str:
     return revision
 
 
+@dataclass(frozen=True)
+class _ProviderIdentityV2:
+    requested_api_surface: ProviderApiSurface
+    resolved_api_surface: ProviderApiSurface
+    structured_output_mode: StructuredOutputMode
+    endpoint_family: str
+    credential_source: str | None
+
+
+def _model_base_url(
+    model: V2ModelEntry,
+    resolved: ResolvedV2CampaignConfig,
+) -> str | None:
+    base_url = model.model_base_url or resolved.config.defaults.model_base_url
+    if not base_url and "@" in model.model:
+        base_url = model.model.rsplit("@", 1)[1]
+    if not base_url and model.provider == "openai-compat":
+        base_url = os.getenv("OPENAI_COMPAT_BASE_URL")
+    if not base_url and model.provider == "openai":
+        base_url = "https://api.openai.com/v1"
+    return base_url
+
+
+def _provider_endpoint_fingerprint(
+    model: V2ModelEntry,
+    resolved: ResolvedV2CampaignConfig,
+) -> str:
+    """Hash the exact effective endpoint into the resume identity."""
+
+    return canonical_sha256({"endpoint": _model_base_url(model, resolved) or ""})
+
+
+def _provider_identity(
+    model: V2ModelEntry,
+    resolved: ResolvedV2CampaignConfig,
+) -> _ProviderIdentityV2:
+    requested = ProviderApiSurface(model.api_surface)
+    selected = resolve_api_surface(model.provider, requested)
+    if model.provider == "codex" and selected is not ProviderApiSurface.RESPONSES:
+        raise V2CampaignRunError(
+            f"model {model.name} cannot use api_surface={selected.value!r}; "
+            "Release 1 Codex requires Responses"
+        )
+    if model.provider != "codex" and selected is not ProviderApiSurface.CHAT_COMPLETIONS:
+        raise V2CampaignRunError(
+            f"model {model.name} cannot use api_surface={selected.value!r}; "
+            "Release 1 enables Responses only for Codex"
+        )
+
+    credential_source: str | None = None
+    endpoint_family = model.provider
+    if model.provider == "openai":
+        base_url = _model_base_url(model, resolved)
+        if not official_openai_endpoint_is_secure(base_url):
+            raise V2CampaignRunError(
+                f"model {model.name} provider='openai' requires the official "
+                "HTTPS api.openai.com origin; "
+                "use provider='openai-compat' for custom endpoints"
+            )
+        endpoint_family = "openai"
+        credential_source = "OPENAI_API_KEY" if os.getenv("OPENAI_API_KEY") else None
+    elif model.provider == "openai-compat":
+        base_url = _model_base_url(model, resolved)
+        credential = resolve_openai_compat_credential(base_url)
+        endpoint_family = credential.endpoint_family
+        credential_source = credential.credential_source
+    elif model.provider == "codex":
+        endpoint_family = "codex_oauth"
+        credential_source = "codex-login-status"
+    elif model.provider == "anthropic":
+        credential_source = "ANTHROPIC_API_KEY" if os.getenv("ANTHROPIC_API_KEY") else None
+    elif model.provider == "gemini":
+        credential_source = "GEMINI_API_KEY" if os.getenv("GEMINI_API_KEY") else None
+
+    return _ProviderIdentityV2(
+        requested_api_surface=requested,
+        resolved_api_surface=selected,
+        structured_output_mode=model.structured_output_mode,
+        endpoint_family=endpoint_family,
+        credential_source=credential_source,
+    )
+
+
 def _codex_model_slug(model: V2ModelEntry) -> str:
     slug = model.model.split("/", 1)[1] if model.model.startswith("codex/") else model.model
     return slug.split("@", 1)[0]
@@ -897,6 +1182,7 @@ def _model_readiness(
     codex_status_checked = False
     codex_capabilities: dict[str, set[str]] | None = None
     for model in resolved.config.models:
+        identity = _provider_identity(model, resolved)
         if model.provider == "codex":
             if not codex_status_checked:
                 try:
@@ -939,10 +1225,7 @@ def _model_readiness(
                     f"Codex model {slug!r} is absent from ~/.codex/models_cache.json"
                 )
             reasoning_effort = resolved.config.defaults.reasoning_effort
-            if (
-                reasoning_effort is not None
-                and reasoning_effort not in codex_capabilities[slug]
-            ):
+            if reasoning_effort is not None and reasoning_effort not in codex_capabilities[slug]:
                 raise V2CampaignRunError(
                     f"Codex model {slug!r} does not advertise reasoning effort "
                     f"{reasoning_effort!r} in ~/.codex/models_cache.json"
@@ -958,6 +1241,11 @@ def _model_readiness(
                         if reasoning_effort is not None
                         else "codex-model-cache"
                     ),
+                    requested_api_surface=identity.requested_api_surface,
+                    resolved_api_surface=identity.resolved_api_surface,
+                    structured_output_mode=identity.structured_output_mode,
+                    endpoint_family=identity.endpoint_family,
+                    credential_source=identity.credential_source,
                     reasoning_effort=reasoning_effort,
                 )
             )
@@ -968,25 +1256,30 @@ def _model_readiness(
             "gemini": "GEMINI_API_KEY",
             "openai": "OPENAI_API_KEY",
         }.get(model.provider)
-        if required_key is not None and not os.getenv(required_key):
-            raise V2CampaignRunError(f"model {model.name} requires {required_key}")
         if model.provider == "openai-compat":
-            base_url = (
-                model.model_base_url
-                or resolved.config.defaults.model_base_url
-                or os.getenv("OPENAI_COMPAT_BASE_URL")
-            )
-            if not base_url and "@" not in model.model:
+            base_url = _model_base_url(model, resolved)
+            if not base_url:
                 raise V2CampaignRunError(
                     f"model {model.name} requires an OpenAI-compatible base URL"
                 )
+            if identity.credential_source is None and not openai_compat_endpoint_is_local(base_url):
+                raise V2CampaignRunError(
+                    f"model {model.name} has no credential for {identity.endpoint_family} endpoint"
+                )
+        if required_key is not None and identity.credential_source is None:
+            raise V2CampaignRunError(f"model {model.name} requires {required_key}")
         receipts.append(
             ModelReadinessV2(
                 name=model.name,
                 provider=model.provider,
                 model=model.model,
-                credential_check=(required_key or "provider-does-not-require-a-key"),
+                credential_check=(identity.credential_source or "provider-does-not-require-a-key"),
                 capability_check="configured-not-probed",
+                requested_api_surface=identity.requested_api_surface,
+                resolved_api_surface=identity.resolved_api_surface,
+                structured_output_mode=identity.structured_output_mode,
+                endpoint_family=identity.endpoint_family,
+                credential_source=identity.credential_source,
             )
         )
     return tuple(receipts)
@@ -996,7 +1289,10 @@ def _model_loop(
     model: V2ModelEntry,
     resolved: ResolvedV2CampaignConfig,
 ) -> MCPToolLoop:
-    raw = model.mcp_tool_loop or resolved.config.defaults.mcp.tool_loop
+    configured = resolved.config.defaults.mcp
+    if configured is None:
+        raise V2CampaignRunError("MCP model loop requested without defaults.mcp")
+    raw = model.mcp_tool_loop or configured.tool_loop
     loop = MCPToolLoop(raw)
     if loop is MCPToolLoop.AUTO:
         raise V2CampaignRunError("certified v2 campaigns forbid MCP tool_loop=auto")
@@ -1054,6 +1350,8 @@ def _validate_runtime_bounds(
     required_steps = max(task.binding.bounds.max_tool_calls for task in tasks)
     minimum_task_timeout = min(task.binding.bounds.timeout_seconds for task in tasks)
     configured = resolved.config.defaults.mcp
+    if configured is None:
+        raise V2CampaignRunError("MCP runtime bounds requested without defaults.mcp")
     if configured.max_steps < required_steps:
         raise V2CampaignRunError(
             "configured MCP max_steps is below the certified task budget: "
@@ -1100,8 +1398,11 @@ def prepare_v2_campaign(
     _validate_model_bindings(resolved, prepared)
     _validate_runtime_bounds(resolved, prepared)
     model_readiness = _model_readiness(resolved)
-    mcp_revision = _git_revision(resolved.mcp_dir)
+    mcp_revision = "not-applicable"
     if Track.MCP in prepared:
+        if resolved.mcp_dir is None:
+            raise V2CampaignRunError("MCP campaign is missing its resolved MCP checkout")
+        mcp_revision = _git_revision(resolved.mcp_dir)
         expected_revision = prepared[Track.MCP].profile.mcp_server_revision
         if mcp_revision != expected_revision:
             raise V2CampaignRunError(
@@ -1158,6 +1459,7 @@ def _readiness(
     prepared: Mapping[Track, PreparedTrack],
     receipts: Mapping[Track, LiveGraphVerification],
     mcp_revision: str,
+    mcp_launcher_provenance: dict[str, str | None] | None,
     model_readiness: tuple[ModelReadinessV2, ...],
 ) -> CampaignReadinessV2:
     payload = {
@@ -1169,6 +1471,7 @@ def _readiness(
             resolve_bhce_target(resolved.config.defaults.bhce_url)
         ),
         "mcp_server_revision": mcp_revision,
+        "mcp_launcher_provenance": mcp_launcher_provenance,
         "tracks": tuple(
             ReadinessTrackV2(
                 track=track,
@@ -1211,7 +1514,9 @@ def _provenance(
     model: V2ModelEntry,
     run_index: int,
     loop: MCPToolLoop | None,
+    mcp_launcher_provenance: dict[str, str | None] | None = None,
 ) -> ModelRunProvenanceV2:
+    provider_identity = _provider_identity(model, resolved)
     run_identity = RunIdentity(
         provider=model.provider,
         model=model.model,
@@ -1229,6 +1534,12 @@ def _provenance(
         "live_certification_fingerprint": prepared.live.artifact_fingerprint,
         "containment_config_fingerprint": canonical_sha256(direct_config.to_jsonable()),
         "runtime_implementation_fingerprint": (RUNNER_IMPLEMENTATION_FINGERPRINT),
+        "requested_api_surface": provider_identity.requested_api_surface,
+        "resolved_api_surface": provider_identity.resolved_api_surface,
+        "structured_output_mode": provider_identity.structured_output_mode,
+        "endpoint_family": provider_identity.endpoint_family,
+        "credential_source": provider_identity.credential_source,
+        "mcp_launcher_provenance": mcp_launcher_provenance,
         "runtime_config_fingerprint": canonical_sha256(
             {
                 "runner_version": RUNNER_VERSION,
@@ -1236,6 +1547,13 @@ def _provenance(
                 "model": model.model_dump(mode="json"),
                 "track": prepared.track,
                 "loop": loop,
+                "requested_api_surface": provider_identity.requested_api_surface,
+                "resolved_api_surface": provider_identity.resolved_api_surface,
+                "structured_output_mode": provider_identity.structured_output_mode,
+                "endpoint_family": provider_identity.endpoint_family,
+                "credential_source": provider_identity.credential_source,
+                "resolved_endpoint_fingerprint": _provider_endpoint_fingerprint(model, resolved),
+                "mcp_launcher_provenance": mcp_launcher_provenance,
             }
         ),
         "provenance_fingerprint": "0" * 64,
@@ -1270,10 +1588,20 @@ def _attempt(
     number: int,
     sample: SampleResult,
     provider: ProviderRunRecord,
+    *,
+    scheduler_phase: Literal["initial", "immediate_retry", "deferred_retry"] = "initial",
+    recovery_round: int = 0,
+    started_at_utc: str | None = None,
+    completed_at_utc: str | None = None,
 ) -> ProviderAttemptV2:
+    completed_at_utc = completed_at_utc or _utc_now()
     payload = {
         "task_id": task_id,
         "attempt": number,
+        "scheduler_phase": scheduler_phase,
+        "recovery_round": recovery_round,
+        "started_at_utc": started_at_utc or completed_at_utc,
+        "completed_at_utc": completed_at_utc,
         "sample": sample,
         "provider": provider,
         "attempt_fingerprint": "0" * 64,
@@ -1303,16 +1631,42 @@ def _attempt_consumes_retry_budget(attempt: ProviderAttemptV2) -> bool:
     )
 
 
+def _attempt_is_terminal_on_resume(attempt: ProviderAttemptV2) -> bool:
+    """Keep typed non-retryable failures terminal across process restarts."""
+
+    sample = attempt.sample
+    if sample.outcome is SampleOutcomeCode.INTERRUPTED:
+        return False
+    policy = _infrastructure_retry_policy(sample, attempt.provider)
+    return policy is not None and policy[1] is False
+
+
+def _attempt_is_retry_eligible(
+    attempt: ProviderAttemptV2,
+    *,
+    consumed_attempts: int,
+    max_attempts: int,
+) -> bool:
+    if consumed_attempts >= max_attempts:
+        return False
+    if attempt.sample.outcome is SampleOutcomeCode.INTERRUPTED:
+        return True
+    policy = _infrastructure_retry_policy(attempt.sample, attempt.provider)
+    return policy is not None and policy[1]
+
+
 def _state(
     *,
     provenance: ModelRunProvenanceV2,
     checkpoint: CheckpointV2,
     attempts: Sequence[ProviderAttemptV2],
+    scheduler: RetrySchedulerStateV2 | None = None,
 ) -> PrivateRunStateV2:
     payload = {
         "provenance_fingerprint": provenance.provenance_fingerprint,
         "checkpoint": checkpoint,
         "attempts": tuple(attempts),
+        "scheduler": scheduler or RetrySchedulerStateV2(),
         "state_fingerprint": "0" * 64,
     }
     payload["state_fingerprint"] = canonical_sha256(
@@ -1351,10 +1705,21 @@ def _model_report(
     provenance: ModelRunProvenanceV2,
     prepared: PreparedTrack,
     results: Sequence[SampleResult],
+    run_dir: Path,
     before: LiveGraphVerification,
     after: LiveGraphVerification,
 ) -> ModelPublicReportV2:
     summary = summarize_results(prepared.task_ids, results)
+    state = _load_state(
+        run_dir / RUN_STATE_NAME,
+        provenance=provenance,
+        prepared=prepared,
+    )
+    if state is None:
+        raise V2CampaignRunError("missing private run state for completed run")
+    if state.scheduler.phase != "complete":
+        raise V2CampaignRunError("cannot publish a run with pending retry scheduler work")
+    operational_metrics = _run_operational_metrics(state)
     report = build_public_report(
         prepared.pair,
         prepared.profile,
@@ -1369,6 +1734,7 @@ def _model_report(
         "live_certification_fingerprint": prepared.live.artifact_fingerprint,
         "graph_verification_before_fingerprint": before.verification_fingerprint,
         "graph_verification_after_fingerprint": after.verification_fingerprint,
+        "operational_metrics": operational_metrics,
         "report": report,
         "artifact_fingerprint": "0" * 64,
     }
@@ -1435,6 +1801,7 @@ def _publish_track_completion(
             provenance=provenance,
             prepared=prepared,
             results=results,
+            run_dir=run_dir,
             before=before,
             after=after,
         )
@@ -1483,7 +1850,12 @@ def _infrastructure_retry_policy(
     scope = provider.provider_metrics.get("infra_scope")
     retryable = provider.provider_metrics.get("infra_retryable")
     if isinstance(scope, str) and isinstance(retryable, bool):
-        return scope, retryable
+        if scope in {"bloodhound", "provider", "mcp_tool"}:
+            return scope, retryable
+        # Operator cancellation has separate resume semantics above.  Unknown
+        # scopes must never acquire retries solely because an adapter supplied
+        # a truthy flag in an otherwise untyped metrics mapping.
+        return scope, False
     receipt = provider.direct_receipt
     if receipt is not None:
         return (
@@ -1497,6 +1869,16 @@ def _infrastructure_retry_policy(
     return "unknown", False
 
 
+def _remaining_cooldown_seconds(
+    not_before_utc: str,
+    *,
+    now: datetime | None = None,
+) -> float:
+    not_before = datetime.fromisoformat(not_before_utc)
+    current = now or datetime.now(UTC)
+    return max(0.0, (not_before - current).total_seconds())
+
+
 async def _run_model(
     *,
     resolved: ResolvedV2CampaignConfig,
@@ -1507,8 +1889,10 @@ async def _run_model(
     coordinator: DirectQueryCoordinator,
     loop: MCPToolLoop | None,
     runs_total: int,
+    mcp_launcher_runtime: MCPLauncherRuntime | None = None,
     progress: ProgressReporter | None = None,
     lifecycle: _CampaignLifecycleController | None = None,
+    verbose: bool = False,
 ) -> tuple[ModelRunProvenanceV2, tuple[SampleResult, ...]]:
     provenance = _provenance(
         resolved=resolved,
@@ -1516,10 +1900,15 @@ async def _run_model(
         model=model,
         run_index=run_index,
         loop=loop,
+        mcp_launcher_provenance=(
+            mcp_launcher_runtime.provenance(MCPLauncherConfig.local_checkout(resolved.mcp_dir))
+            if mcp_launcher_runtime is not None and resolved.mcp_dir is not None
+            else None
+        ),
     )
     run_dir = resolved.output_dir / prepared.track.value / model.name / f"run-{run_index:03d}"
     _guard_run_dir(run_dir, provenance)
-    state_path = run_dir / "run-state-v5.private.json"
+    state_path = run_dir / RUN_STATE_NAME
     state = _load_state(
         state_path,
         provenance=provenance,
@@ -1534,15 +1923,20 @@ async def _run_model(
             run_index=run_index,
             result_count=len(results),
         )
-    retryable_execution_classes = {
-        ExecutionClass.INFRA_FAILURE,
-        ExecutionClass.UNEXECUTED,
-    }
+    retryable_execution_classes = {ExecutionClass.INFRA_FAILURE, ExecutionClass.UNEXECUTED}
+    latest_attempts: dict[str, ProviderAttemptV2] = {}
+    for attempt in attempts:
+        latest_attempts[attempt.task_id] = attempt
     completed = {
         result.task_id
         for result in results
         if result.execution_class not in retryable_execution_classes
     }
+    completed.update(
+        task_id
+        for task_id, attempt in latest_attempts.items()
+        if _attempt_is_terminal_on_resume(attempt)
+    )
     _emit_progress(
         progress,
         (
@@ -1554,11 +1948,14 @@ async def _run_model(
 
     bundle = None
     if prepared.track is Track.MCP:
+        if resolved.mcp_dir is None:
+            raise V2CampaignRunError("MCP run is missing its resolved MCP checkout")
         bundle = await _load_bloodhound_mcp_bundle(
-            resolved.mcp_dir,
+            MCPLauncherConfig.local_checkout(resolved.mcp_dir),
             include_resources=False,
             include_prompt=True,
             cypher_executor=coordinator.execute,
+            launcher_runtime=mcp_launcher_runtime,
         )
 
     task_by_id = {task.task_id: task for task in prepared.pair.public.tasks}
@@ -1568,96 +1965,221 @@ async def _run_model(
         model,
         resolved.config.defaults.reasoning_effort,
     )
-    for task_index, task_id in enumerate(prepared.task_ids, start=1):
-        if task_id in completed:
-            continue
+    scheduler = (
+        getattr(state, "scheduler", RetrySchedulerStateV2())
+        if state is not None
+        else RetrySchedulerStateV2()
+    )
+    max_attempts = resolved.config.defaults.max_infra_retries + 1
+    retry_config = getattr(resolved.config.defaults, "infra_retry", None)
+    immediate_retries = getattr(retry_config, "immediate_retries", 1)
+    deferred_cooldown_seconds = getattr(
+        retry_config,
+        "deferred_cooldown_seconds",
+        300.0,
+    )
+    primary_attempt_limit = min(
+        max_attempts,
+        1 + immediate_retries,
+    )
+    task_positions = {task_id: index for index, task_id in enumerate(prepared.task_ids, 1)}
+
+    def _task_attempts(task_id: str) -> tuple[ProviderAttemptV2, ...]:
+        return tuple(attempt for attempt in attempts if attempt.task_id == task_id)
+
+    def _consumed_attempts(task_id: str) -> int:
+        return sum(_attempt_consumes_retry_budget(attempt) for attempt in _task_attempts(task_id))
+
+    def _latest_attempt(task_id: str) -> ProviderAttemptV2 | None:
+        rows = _task_attempts(task_id)
+        return rows[-1] if rows else None
+
+    def _eligible_for_retry(task_id: str) -> bool:
+        latest = _latest_attempt(task_id)
+        if latest is None:
+            return False
+        return _attempt_is_retry_eligible(
+            latest,
+            consumed_attempts=_consumed_attempts(task_id),
+            max_attempts=max_attempts,
+        )
+
+    def _persist(scheduler_state: RetrySchedulerStateV2) -> None:
+        checkpoint = build_checkpoint(
+            prepared.pair,
+            prepared.profile,
+            provenance.run_identity,
+            results=results,
+        )
+        _write_model(
+            state_path,
+            _state(
+                provenance=provenance,
+                checkpoint=checkpoint,
+                attempts=attempts,
+                scheduler=scheduler_state,
+            ),
+        )
+        if lifecycle is not None:
+            lifecycle.record_checkpoint(
+                track=prepared.track,
+                model_name=model.name,
+                run_index=run_index,
+                result_count=len(results),
+            )
+
+    def _record_attempt(
+        *,
+        task_id: str,
+        sample: SampleResult,
+        provider: ProviderRunRecord,
+        phase: Literal["initial", "immediate_retry", "deferred_retry"],
+        recovery_round: int,
+        started_at_utc: str,
+        scheduler_state: RetrySchedulerStateV2,
+    ) -> None:
+        nonlocal results
+        attempt_number = (
+            max(
+                (attempt.attempt for attempt in _task_attempts(task_id)),
+                default=0,
+            )
+            + 1
+        )
+        attempts.append(
+            _attempt(
+                task_id,
+                attempt_number,
+                sample,
+                provider,
+                scheduler_phase=phase,
+                recovery_round=recovery_round,
+                started_at_utc=started_at_utc,
+                completed_at_utc=_utc_now(),
+            )
+        )
+        results = [result for result in results if result.task_id != task_id]
+        results.append(sample)
+        results.sort(key=lambda result: task_positions[result.task_id])
+        _persist(scheduler_state)
+
+    async def _execute_attempt(
+        task_id: str,
+        *,
+        phase: Literal["initial", "immediate_retry", "deferred_retry"],
+        recovery_round: int = 0,
+        scheduler_state: RetrySchedulerStateV2,
+        completed_scheduler_state: RetrySchedulerStateV2 | None = None,
+    ) -> tuple[SampleResult, ProviderRunRecord]:
         task = task_by_id[task_id]
         oracle = registry.for_task(task_id)
-        existing_result = next(
-            (result for result in results if result.task_id == task_id),
-            None,
-        )
-        prior_task_attempts = tuple(
-            attempt for attempt in attempts if attempt.task_id == task_id
-        )
-        previous_attempt_number = max(
-            (attempt.attempt for attempt in prior_task_attempts),
-            default=0,
-        )
-        consumed_attempts = sum(
-            _attempt_consumes_retry_budget(attempt)
-            for attempt in prior_task_attempts
-        )
-        max_attempts = resolved.config.defaults.max_infra_retries + 1
-        if consumed_attempts >= max_attempts:
-            if existing_result is None:
-                raise V2CampaignRunError(
-                    f"{task_id} exhausted its lifetime retry budget without a result"
-                )
-            _emit_progress(
-                progress,
-                (
-                    f"  [{task_index}/{len(prepared.task_ids)}] {task.task_id} "
-                    "retry budget already exhausted; no provider call made"
-                ),
-            )
-            continue
-        results = [result for result in results if result.task_id != task_id]
         task_started = time.monotonic()
+        started_at_utc = _utc_now()
         _emit_progress(
             progress,
             (
-                f"  [{task_index}/{len(prepared.task_ids)}] {task.task_id} "
-                f"({task.claim_kind}, {task.answer_policy.kind})"
+                f"  [{task_positions[task_id]}/{len(prepared.task_ids)}] {task.task_id} "
+                f"({task.claim_kind}, {task.answer_policy.kind}; phase={phase}"
+                + (f", recovery_round={recovery_round}" if recovery_round else "")
+                + ")"
             ),
         )
-        last_sample: SampleResult | None = None
-        last_provider: ProviderRunRecord | None = None
-        remaining_attempts = max_attempts - consumed_attempts
-        for attempt_index in range(1, remaining_attempts + 1):
-            attempt_number = previous_attempt_number + attempt_index
+        if verbose:
+            question_lines = task_question_lines(
+                task,
+                position=task_positions[task_id],
+                total=len(prepared.task_ids),
+            )
+            for line in question_lines:
+                _emit_progress(progress, line)
+        sample: SampleResult
+        provider: ProviderRunRecord
+        cancellation: V2ModelTaskCancelled | None = None
+        direct_preflight_blocked = False
+        mcp_preflight_blocked = False
+        # Operator interruptions are auditable attempts but do not consume the
+        # lifetime retry budget and must not hide the durable infrastructure
+        # scope that caused this retry to be scheduled.
+        prior_attempt = next(
+            (
+                attempt
+                for attempt in reversed(_task_attempts(task_id))
+                if _attempt_consumes_retry_budget(attempt)
+            ),
+            None,
+        )
+        prior_retry_policy = (
+            _infrastructure_retry_policy(prior_attempt.sample, prior_attempt.provider)
+            if prior_attempt is not None
+            else None
+        )
+        bloodhound_retry = phase != "initial" and prior_retry_policy is not None and (
+            prior_retry_policy[0] == "bloodhound"
+        )
+        model_base_url = _model_base_url(model, resolved)
+        try:
             sample: SampleResult
             provider: ProviderRunRecord
-            direct_preflight_blocked = False
-            cancellation: V2ModelTaskCancelled | None = None
-            model_base_url = (
-                model.model_base_url
-                if model.model_base_url is not None
-                else resolved.config.defaults.model_base_url
-            )
-            try:
-                if prepared.track is Track.DIRECT:
-                    if coordinator.circuit_open:
-                        health = await bhce.wait_until_healthy(
-                            timeout_seconds=(resolved.config.defaults.health.timeout_seconds),
-                            poll_interval=(resolved.config.defaults.health.poll_interval),
-                        )
-                        if health.ok:
-                            coordinator.close_circuit()
-                        else:
-                            direct_preflight_blocked = True
-                            sample, provider = unexecuted_model_record(
-                                task=task,
-                                oracle=oracle,
-                                model=model.requested_model,
-                                surface=prepared.track.value,
-                                detail=(
-                                    "BloodHound circuit remained open before provider execution"
-                                ),
-                            )
-                    if not direct_preflight_blocked:
-                        _outcome, sample, provider = await run_direct_model_task_v2(
-                            coordinator=coordinator,
+            if prepared.track is Track.DIRECT:
+                # The circuit is process-local.  A resumed deferred retry must
+                # therefore derive the health gate from its durable preceding
+                # attempt as well as the current in-memory circuit state.
+                if coordinator.circuit_open or bloodhound_retry:
+                    health = await bhce.wait_until_healthy(
+                        timeout_seconds=(resolved.config.defaults.health.timeout_seconds),
+                        poll_interval=(resolved.config.defaults.health.poll_interval),
+                    )
+                    if health.ok:
+                        coordinator.close_circuit()
+                    else:
+                        direct_preflight_blocked = True
+                        sample, provider = unexecuted_model_record(
                             task=task,
                             oracle=oracle,
-                            resolver=resolver,
                             model=model.requested_model,
-                            model_base_url=model_base_url,
-                            ollama_options=provider_options,
+                            surface=prepared.track.value,
+                            detail=("BloodHound circuit remained open before provider execution"),
                         )
-                else:
-                    if bundle is None or loop is None:
-                        raise AssertionError("MCP model run is missing its runtime bundle")
+                if not direct_preflight_blocked:
+                    _outcome, sample, provider = await run_direct_model_task_v2(
+                        coordinator=coordinator,
+                        task=task,
+                        oracle=oracle,
+                        resolver=resolver,
+                        model=model.requested_model,
+                        model_base_url=model_base_url,
+                        max_tokens=getattr(model, "max_output_tokens", 2048),
+                        api_surface=getattr(model, "api_surface", "auto"),
+                        structured_output_mode=getattr(
+                            model,
+                            "structured_output_mode",
+                            "prompt_local_validation",
+                        ),
+                        ollama_options=provider_options,
+                    )
+            else:
+                if bundle is None or loop is None:
+                    raise AssertionError("MCP model run is missing its runtime bundle")
+                if coordinator.circuit_open or bloodhound_retry:
+                    health = await bhce.wait_until_healthy(
+                        timeout_seconds=(resolved.config.defaults.health.timeout_seconds),
+                        poll_interval=(resolved.config.defaults.health.poll_interval),
+                    )
+                    if health.ok:
+                        coordinator.close_circuit()
+                    else:
+                        mcp_preflight_blocked = True
+                        sample, provider = unexecuted_model_record(
+                            task=task,
+                            oracle=oracle,
+                            model=model.requested_model,
+                            surface=prepared.track.value,
+                            detail=("BloodHound circuit remained open before provider execution"),
+                        )
+                if not mcp_preflight_blocked:
+                    configured_mcp = resolved.config.defaults.mcp
+                    if configured_mcp is None:
+                        raise V2CampaignRunError("MCP run is missing defaults.mcp configuration")
                     outcome, provider = await run_mcp_model_task_v2(
                         task=task,
                         oracle=oracle,
@@ -1666,93 +2188,188 @@ async def _run_model(
                         bundle=bundle,
                         model=model.requested_model,
                         model_base_url=model_base_url,
-                        tool_loop=loop,
-                        max_steps=resolved.config.defaults.mcp.max_steps,
-                        ollama_options=provider_options,
-                        telemetry_adapter=(resolved.config.defaults.mcp.telemetry_adapter),
-                        read_timeout_seconds=(resolved.config.defaults.mcp.read_timeout_seconds),
-                        tool_timeout_seconds=(resolved.config.defaults.mcp.tool_timeout_seconds),
-                        graph_fact_registry=(
-                            prepared.pair.private.graph_fact_registry
+                        max_tokens=getattr(model, "max_output_tokens", 2048),
+                        api_surface=getattr(model, "api_surface", "auto"),
+                        structured_output_mode=getattr(
+                            model,
+                            "structured_output_mode",
+                            "prompt_local_validation",
                         ),
+                        tool_loop=loop,
+                        max_steps=configured_mcp.max_steps,
+                        ollama_options=provider_options,
+                        telemetry_adapter=(configured_mcp.telemetry_adapter),
+                        read_timeout_seconds=(configured_mcp.read_timeout_seconds),
+                        tool_timeout_seconds=(configured_mcp.tool_timeout_seconds),
+                        graph_fact_registry=(prepared.pair.private.graph_fact_registry),
                     )
                     sample = outcome.sample
-            except V2ModelTaskCancelled as exc:
-                sample = exc.sample
-                provider = exc.provider
-                cancellation = exc
-            except Exception as exc:
-                sample, provider = contain_model_runtime_exception(
-                    task=task,
-                    oracle=oracle,
-                    model=model.requested_model,
-                    surface=prepared.track.value,
-                    error=exc,
-                )
-            attempts.append(_attempt(task_id, attempt_number, sample, provider))
-            last_sample = sample
-            last_provider = provider
-            results = [result for result in results if result.task_id != task_id]
-            results.append(sample)
-            checkpoint = build_checkpoint(
-                prepared.pair,
-                prepared.profile,
-                provenance.run_identity,
-                results=results,
+        except V2ModelTaskCancelled as exc:
+            sample = exc.sample
+            provider = exc.provider
+            cancellation = exc
+        except Exception as exc:
+            sample, provider = contain_model_runtime_exception(
+                task=task,
+                oracle=oracle,
+                model=model.requested_model,
+                surface=prepared.track.value,
+                error=exc,
             )
-            current_state = _state(
-                provenance=provenance,
-                checkpoint=checkpoint,
-                attempts=attempts,
+        _record_attempt(
+            task_id=task_id,
+            sample=sample,
+            provider=provider,
+            phase=phase,
+            recovery_round=recovery_round,
+            started_at_utc=started_at_utc,
+            scheduler_state=(
+                scheduler_state
+                if cancellation is not None
+                else completed_scheduler_state
+                if completed_scheduler_state is not None
+                else scheduler_state
+            ),
+        )
+        if cancellation is not None:
+            raise cancellation
+        if verbose:
+            activity_lines = (
+                *tool_activity_lines(provider),
+                answer_shape_line(task),
             )
-            _write_model(state_path, current_state)
-            if lifecycle is not None:
-                lifecycle.record_checkpoint(
-                    track=prepared.track,
-                    model_name=model.name,
-                    run_index=run_index,
-                    result_count=len(results),
-                )
-            if cancellation is not None:
-                raise cancellation
-
-            retry_policy = _infrastructure_retry_policy(sample, provider)
-            if retry_policy is None:
-                break
-            scope, retryable = retry_policy
-            if not retryable or attempt_index >= remaining_attempts:
-                break
-            if scope == "bloodhound":
-                health = await bhce.wait_until_healthy(
-                    timeout_seconds=resolved.config.defaults.health.timeout_seconds,
-                    poll_interval=resolved.config.defaults.health.poll_interval,
-                )
-                if not health.ok:
-                    break
-                coordinator.close_circuit()
-            elif scope not in {"provider", "mcp_tool"}:
-                break
-            _emit_progress(
-                progress,
-                _infrastructure_attempt_progress(
-                    sample=sample,
-                    attempt_number=attempt_number,
-                    attempt_index=attempt_index,
-                    max_infra_retries=(resolved.config.defaults.max_infra_retries),
-                ),
-            )
-
-        if last_sample is None or last_provider is None:
-            raise AssertionError("v2 task loop produced no terminal attempt")
+            for line in activity_lines:
+                _emit_progress(progress, line)
         _emit_progress(
             progress,
             _task_completion_progress(
-                sample=last_sample,
-                provider=last_provider,
+                sample=sample,
+                provider=provider,
                 task_elapsed_seconds=time.monotonic() - task_started,
                 results=results,
             ),
         )
+        return sample, provider
+
+    if scheduler.phase == "primary":
+        for task_id in prepared.task_ids:
+            if task_id in completed:
+                continue
+            latest = _latest_attempt(task_id)
+            if latest is not None:
+                policy = _infrastructure_retry_policy(latest.sample, latest.provider)
+                if latest.sample.outcome is not SampleOutcomeCode.INTERRUPTED and (
+                    policy is None or not policy[1]
+                ):
+                    continue
+            consumed = _consumed_attempts(task_id)
+            if consumed >= max_attempts:
+                _emit_progress(
+                    progress,
+                    f"  {task_id} retry budget already exhausted; no provider call made",
+                )
+                continue
+            while consumed < primary_attempt_limit:
+                phase = "initial" if consumed == 0 else "immediate_retry"
+                sample, provider = await _execute_attempt(
+                    task_id,
+                    phase=phase,
+                    scheduler_state=RetrySchedulerStateV2(),
+                )
+                policy = _infrastructure_retry_policy(sample, provider)
+                if policy is None or not policy[1]:
+                    break
+                consumed = _consumed_attempts(task_id)
+                if consumed >= primary_attempt_limit or consumed >= max_attempts:
+                    break
+                scope, _retryable = policy
+                if scope not in {"bloodhound", "provider", "mcp_tool"}:
+                    break
+                _emit_progress(
+                    progress,
+                    f"           ↻ {sample.outcome.value}; retrying infrastructure immediately",
+                )
+
+    while True:
+        eligible = tuple(task_id for task_id in prepared.task_ids if _eligible_for_retry(task_id))
+        if not eligible:
+            scheduler = RetrySchedulerStateV2(phase="complete")
+            _persist(scheduler)
+            break
+
+        if scheduler.phase in {"deferred_cooldown", "deferred_retry"}:
+            recovery_round = scheduler.recovery_round
+            round_tasks = tuple(
+                task_id for task_id in scheduler.pending_task_ids if task_id in eligible
+            )
+            if not round_tasks:
+                scheduler = RetrySchedulerStateV2()
+                continue
+        else:
+            recovery_round = (
+                max(
+                    (attempt.recovery_round for attempt in attempts),
+                    default=0,
+                )
+                + 1
+            )
+            round_tasks = eligible
+            not_before = datetime.now(UTC) + timedelta(seconds=deferred_cooldown_seconds)
+            scheduler = RetrySchedulerStateV2(
+                phase="deferred_cooldown",
+                recovery_round=recovery_round,
+                pending_task_ids=round_tasks,
+                deferred_not_before_utc=not_before.isoformat(),
+            )
+            _persist(scheduler)
+
+        if scheduler.phase == "deferred_cooldown":
+            delay = _remaining_cooldown_seconds(scheduler.deferred_not_before_utc or "")
+            _emit_progress(
+                progress,
+                (
+                    f"[{prepared.track.value}] deferred infrastructure recovery round "
+                    f"{recovery_round}: {len(round_tasks)} task(s), cooldown={delay:.1f}s"
+                ),
+            )
+            if delay:
+                await asyncio.sleep(delay)
+            scheduler = RetrySchedulerStateV2(
+                phase="deferred_retry",
+                recovery_round=recovery_round,
+                pending_task_ids=round_tasks,
+            )
+            _persist(scheduler)
+
+        for index, task_id in enumerate(round_tasks):
+            if not _eligible_for_retry(task_id):
+                continue
+            remaining = round_tasks[index:]
+            scheduler = RetrySchedulerStateV2(
+                phase="deferred_retry",
+                recovery_round=recovery_round,
+                pending_task_ids=remaining,
+            )
+            _persist(scheduler)
+            remaining_after_attempt = round_tasks[index + 1 :]
+            completed_scheduler = (
+                RetrySchedulerStateV2(
+                    phase="deferred_retry",
+                    recovery_round=recovery_round,
+                    pending_task_ids=remaining_after_attempt,
+                )
+                if remaining_after_attempt
+                else RetrySchedulerStateV2()
+            )
+            await _execute_attempt(
+                task_id,
+                phase="deferred_retry",
+                recovery_round=recovery_round,
+                scheduler_state=scheduler,
+                completed_scheduler_state=completed_scheduler,
+            )
+        scheduler = RetrySchedulerStateV2()
+        _persist(scheduler)
 
     summary = summarize_results(prepared.task_ids, results)
     _write_model(
@@ -1782,10 +2399,24 @@ async def _run_prepared_v2_campaign(
     preflight_only: bool,
     progress: ProgressReporter | None,
     lifecycle: _CampaignLifecycleController,
+    verbose: bool = False,
 ) -> CampaignReadinessV2:
     receipts_before: dict[Track, LiveGraphVerification] = {}
     shared_preflight: tuple[GraphSnapshot, LiveGraphVerification] | None = None
     invalid_campaigns: list[str] = []
+    mcp_launcher = None
+    if Track.MCP in resolved.config.track_modes:
+        if resolved.mcp_dir is None:
+            raise V2CampaignRunError("MCP campaign is missing its resolved MCP checkout")
+        mcp_launcher = MCPLauncherConfig.local_checkout(resolved.mcp_dir)
+    mcp_launcher_runtime = (
+        resolve_mcp_launcher_runtime(mcp_launcher) if mcp_launcher is not None else None
+    )
+    mcp_launcher_provenance = (
+        mcp_launcher_runtime.provenance(mcp_launcher)
+        if mcp_launcher_runtime is not None and mcp_launcher is not None
+        else None
+    )
 
     async with BHCEClient(**parse_bhce_url(resolved.config.defaults.bhce_url)) as bhce:
         direct_config = DirectQuerySafetyConfig()
@@ -1859,8 +2490,10 @@ async def _run_prepared_v2_campaign(
                         coordinator=coordinator,
                         loop=loop,
                         runs_total=runs,
+                        mcp_launcher_runtime=(mcp_launcher_runtime if track is Track.MCP else None),
                         progress=progress,
                         lifecycle=lifecycle,
+                        verbose=verbose,
                     )
                     run_dir = (
                         resolved.output_dir / track.value / model.name / f"run-{run_index:03d}"
@@ -1910,6 +2543,7 @@ async def _run_prepared_v2_campaign(
         prepared=prepared,
         receipts=receipts_before,
         mcp_revision=mcp_revision,
+        mcp_launcher_provenance=mcp_launcher_provenance,
         model_readiness=model_readiness,
     )
     _write_model(
@@ -1934,6 +2568,7 @@ async def run_v2_campaign(
     *,
     preflight_only: bool = False,
     progress: ProgressReporter | None = None,
+    verbose: bool = False,
 ) -> CampaignReadinessV2:
     """Run exact V2 candidate catalogs, or stop after readiness when requested."""
 
@@ -1970,6 +2605,7 @@ async def run_v2_campaign(
                 preflight_only=preflight_only,
                 progress=progress,
                 lifecycle=lifecycle,
+                verbose=verbose,
             )
         except asyncio.CancelledError:
             lifecycle.interrupt(

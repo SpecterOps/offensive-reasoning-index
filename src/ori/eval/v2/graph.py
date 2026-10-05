@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import zipfile
-from collections import Counter
+from collections import Counter, OrderedDict
 from collections.abc import Iterable, Mapping, Sequence
 from io import BytesIO
 from pathlib import Path
@@ -20,6 +20,7 @@ from pydantic import Field, model_validator
 from ori.relationships import canonical_ace_kind, canonical_relationship_kind
 
 from .fingerprint import canonical_sha256
+from .identity import IdentityResolver
 from .schema import (
     EdgeWitness,
     EntityRef,
@@ -176,13 +177,44 @@ class GraphSnapshot(StrictModel):
         )
 
     def entity(self, object_id: str) -> EntityRef:
-        for item in self.objects:
-            if item.entity.object_id == object_id:
-                return item.entity
-        raise KeyError(f"graph object not found: {object_id}")
+        try:
+            return graph_entity_index(self)[object_id]
+        except KeyError as exc:
+            raise KeyError(f"graph object not found: {object_id}") from exc
 
 
 _GRAPH_FACT_REGISTRY_CACHE: dict[str, GraphFactRegistry] = {}
+_IDENTITY_RESOLVER_CACHE: dict[str, IdentityResolver] = {}
+_ENTITY_INDEX_CACHE: dict[str, dict[str, EntityRef]] = {}
+_OBJECT_INDEX_CACHE: dict[str, dict[str, GraphObject]] = {}
+_RELATIONSHIP_BUCKETS_CACHE: dict[str, dict[str, tuple[EdgeWitness, ...]]] = {}
+_OBJECT_ID_SET_CACHE: dict[str, frozenset[str]] = {}
+_EDGE_KEY_BUCKETS_CACHE: dict[
+    str, dict[tuple[str, str, str], tuple[EdgeWitness, ...]]
+] = {}
+_ENTITY_PROPERTY_INDEX_CACHE: dict[str, frozenset[tuple[str, str, Any]]] = {}
+_GRAPH_CACHE_FINGERPRINT_LIMIT = 2
+_GRAPH_CACHE_ORDER: OrderedDict[str, None] = OrderedDict()
+
+
+def _touch_graph_cache(graph_fingerprint: str) -> None:
+    """Bound process-wide derived graph state to the two most recent graphs."""
+
+    _GRAPH_CACHE_ORDER[graph_fingerprint] = None
+    _GRAPH_CACHE_ORDER.move_to_end(graph_fingerprint)
+    while len(_GRAPH_CACHE_ORDER) > _GRAPH_CACHE_FINGERPRINT_LIMIT:
+        expired, _ = _GRAPH_CACHE_ORDER.popitem(last=False)
+        for cache in (
+            _GRAPH_FACT_REGISTRY_CACHE,
+            _IDENTITY_RESOLVER_CACHE,
+            _ENTITY_INDEX_CACHE,
+            _OBJECT_INDEX_CACHE,
+            _RELATIONSHIP_BUCKETS_CACHE,
+            _OBJECT_ID_SET_CACHE,
+            _EDGE_KEY_BUCKETS_CACHE,
+            _ENTITY_PROPERTY_INDEX_CACHE,
+        ):
+            cache.pop(expired, None)
 
 
 def _fact_key(*values: Any) -> str:
@@ -237,6 +269,7 @@ def entity_property_fact_key(
 def build_graph_fact_registry(snapshot: GraphSnapshot) -> GraphFactRegistry:
     """Build one corpus-wide sealed fact registry without per-task duplication."""
 
+    _touch_graph_cache(snapshot.graph_fingerprint)
     cached = _GRAPH_FACT_REGISTRY_CACHE.get(snapshot.graph_fingerprint)
     if cached is not None:
         return cached
@@ -278,6 +311,100 @@ def build_graph_fact_registry(snapshot: GraphSnapshot) -> GraphFactRegistry:
     registry = GraphFactRegistry.model_validate(payload)
     _GRAPH_FACT_REGISTRY_CACHE[snapshot.graph_fingerprint] = registry
     return registry
+
+
+def graph_identity_resolver(snapshot: GraphSnapshot) -> IdentityResolver:
+    """Reuse one typed identity index per immutable graph snapshot."""
+
+    _touch_graph_cache(snapshot.graph_fingerprint)
+    cached = _IDENTITY_RESOLVER_CACHE.get(snapshot.graph_fingerprint)
+    if cached is None:
+        cached = IdentityResolver(snapshot.entities)
+        _IDENTITY_RESOLVER_CACHE[snapshot.graph_fingerprint] = cached
+    return cached
+
+
+def graph_entity_index(snapshot: GraphSnapshot) -> dict[str, EntityRef]:
+    """Reuse direct object-id lookups for one immutable graph snapshot."""
+
+    _touch_graph_cache(snapshot.graph_fingerprint)
+    cached = _ENTITY_INDEX_CACHE.get(snapshot.graph_fingerprint)
+    if cached is None:
+        cached = {item.entity.object_id: item.entity for item in snapshot.objects}
+        _ENTITY_INDEX_CACHE[snapshot.graph_fingerprint] = cached
+    return cached
+
+
+def graph_object_index(snapshot: GraphSnapshot) -> dict[str, GraphObject]:
+    """Reuse object-id to graph-object lookups for one immutable graph snapshot."""
+
+    _touch_graph_cache(snapshot.graph_fingerprint)
+    cached = _OBJECT_INDEX_CACHE.get(snapshot.graph_fingerprint)
+    if cached is None:
+        cached = {item.entity.object_id: item for item in snapshot.objects}
+        _OBJECT_INDEX_CACHE[snapshot.graph_fingerprint] = cached
+    return cached
+
+
+def graph_relationship_buckets(
+    snapshot: GraphSnapshot,
+) -> dict[str, tuple[EdgeWitness, ...]]:
+    """Reuse per-relationship edge buckets for route compilation and replay."""
+
+    _touch_graph_cache(snapshot.graph_fingerprint)
+    cached = _RELATIONSHIP_BUCKETS_CACHE.get(snapshot.graph_fingerprint)
+    if cached is None:
+        buckets: dict[str, list[EdgeWitness]] = {}
+        for edge in snapshot.relationships:
+            buckets.setdefault(edge.relationship, []).append(edge)
+        cached = {
+            relationship: tuple(edges) for relationship, edges in buckets.items()
+        }
+        _RELATIONSHIP_BUCKETS_CACHE[snapshot.graph_fingerprint] = cached
+    return cached
+
+
+def graph_object_id_set(snapshot: GraphSnapshot) -> frozenset[str]:
+    """Reuse the exact object-id membership set for one immutable graph."""
+
+    _touch_graph_cache(snapshot.graph_fingerprint)
+    cached = _OBJECT_ID_SET_CACHE.get(snapshot.graph_fingerprint)
+    if cached is None:
+        cached = frozenset(item.entity.object_id for item in snapshot.objects)
+        _OBJECT_ID_SET_CACHE[snapshot.graph_fingerprint] = cached
+    return cached
+
+
+def graph_edge_key_buckets(
+    snapshot: GraphSnapshot,
+) -> dict[tuple[str, str, str], tuple[EdgeWitness, ...]]:
+    """Reuse exact edge-key lookups for one immutable graph snapshot."""
+
+    _touch_graph_cache(snapshot.graph_fingerprint)
+    cached = _EDGE_KEY_BUCKETS_CACHE.get(snapshot.graph_fingerprint)
+    if cached is None:
+        buckets: dict[tuple[str, str, str], list[EdgeWitness]] = {}
+        for edge in snapshot.relationships:
+            key = (edge.source_id, edge.relationship, edge.target_id)
+            buckets.setdefault(key, []).append(edge)
+        cached = {key: tuple(edges) for key, edges in buckets.items()}
+        _EDGE_KEY_BUCKETS_CACHE[snapshot.graph_fingerprint] = cached
+    return cached
+
+
+def graph_entity_property_index(snapshot: GraphSnapshot) -> frozenset[tuple[str, str, Any]]:
+    """Reuse normalized entity property membership checks for one immutable graph."""
+
+    _touch_graph_cache(snapshot.graph_fingerprint)
+    cached = _ENTITY_PROPERTY_INDEX_CACHE.get(snapshot.graph_fingerprint)
+    if cached is None:
+        cached = frozenset(
+            (item.entity.object_id, fact.key.casefold(), fact.value)
+            for item in snapshot.objects
+            for fact in item.properties
+        )
+        _ENTITY_PROPERTY_INDEX_CACHE[snapshot.graph_fingerprint] = cached
+    return cached
 
 
 class LiveGraphVerification(StrictModel):

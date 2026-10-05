@@ -14,6 +14,8 @@ from pydantic import (
     model_validator,
 )
 
+from ori.relationships import canonical_relationship_kind
+
 from .fingerprint import canonical_sha256
 
 PROTOCOL_VERSION = "ori-eval-protocol-v2"
@@ -43,6 +45,12 @@ class RelationshipSemantics(StrEnum):
     DIRECT = "direct"
     TRANSITIVE = "transitive"
     EFFECTIVE = "effective"
+
+
+AuthorableRelationshipSemantics = Literal[
+    RelationshipSemantics.DIRECT,
+    RelationshipSemantics.TRANSITIVE,
+]
 
 
 class PopulationScope(StrEnum):
@@ -206,14 +214,31 @@ class RelationshipPattern(StrictModel):
     relationship: NonEmptyStr
     target_role: NonEmptyStr
     direction: EdgeDirection = EdgeDirection.OUTBOUND
-    semantics: RelationshipSemantics = RelationshipSemantics.DIRECT
-    min_hops: int = Field(default=1, strict=True, ge=0)
+    semantics: AuthorableRelationshipSemantics = RelationshipSemantics.DIRECT
+    min_hops: int = Field(default=1, strict=True, ge=1)
     max_hops: int = Field(default=1, strict=True, ge=1)
     source_type: NonEmptyStr | None = None
     target_type: NonEmptyStr | None = None
 
     @model_validator(mode="after")
     def hop_bounds_match_semantics(self) -> RelationshipPattern:
+        try:
+            canonical_relationship = canonical_relationship_kind(self.relationship)
+        except ValueError as exc:
+            raise ValueError(
+                "relationship must be an exact canonical BloodHound identifier: "
+                f"{self.relationship!r}"
+            ) from exc
+        if canonical_relationship != self.relationship:
+            raise ValueError(
+                f"relationship must use canonical identifier {canonical_relationship!r}, "
+                f"not {self.relationship!r}"
+            )
+        if self.semantics is RelationshipSemantics.EFFECTIVE:
+            raise ValueError(
+                "effective relationship semantics are not authorable without a "
+                "separately certified derivation"
+            )
         if self.min_hops > self.max_hops:
             raise ValueError("relationship min_hops cannot exceed max_hops")
         if self.semantics is RelationshipSemantics.DIRECT and (
@@ -241,9 +266,26 @@ class SelectionExpression(StrictModel):
     @model_validator(mode="after")
     def declared_roles_are_connected(self) -> SelectionExpression:
         roles = {selector.role for selector in self.anchors}
+        role_types: dict[str, str] = {self.projection_role: self.projection_type}
+
+        def register_type(role: str, object_type: str | None) -> None:
+            if object_type is None:
+                return
+            previous = role_types.get(role)
+            if previous is not None and previous != object_type:
+                raise ValueError(
+                    f"selection role {role!r} has conflicting object types: "
+                    f"{previous!r} and {object_type!r}"
+                )
+            role_types[role] = object_type
+
+        for selector in self.anchors:
+            register_type(selector.role, selector.object_type)
         for relationship in self.relationships:
             roles.add(relationship.source_role)
             roles.add(relationship.target_role)
+            register_type(relationship.source_role, relationship.source_type)
+            register_type(relationship.target_role, relationship.target_type)
         if self.projection_role not in roles and (self.relationships or self.anchors):
             raise ValueError("projection_role is not declared by the selection")
         unknown_predicates = sorted(
@@ -257,6 +299,45 @@ class SelectionExpression(StrictModel):
             raise ValueError(
                 f"property predicates reference undeclared roles: {unknown_predicates}"
             )
+        adjacency: dict[str, set[str]] = {role: set() for role in roles}
+        undirected_edges: set[frozenset[str]] = set()
+        expansion_complexity = 1
+        if len(self.relationships) > 16:
+            raise ValueError("selection relationship-role graph exceeds 16 edges")
+        for relationship in self.relationships:
+            if relationship.source_role == relationship.target_role:
+                raise ValueError("selection relationship-role graph must be acyclic")
+            edge = frozenset((relationship.source_role, relationship.target_role))
+            if edge in undirected_edges:
+                raise ValueError(
+                    "selection relationship-role graph must be a simple tree; "
+                    "parallel role relationships are unsupported"
+                )
+            undirected_edges.add(edge)
+            adjacency[relationship.source_role].add(relationship.target_role)
+            adjacency[relationship.target_role].add(relationship.source_role)
+            expansion_complexity *= relationship.max_hops
+            if expansion_complexity > 256:
+                raise ValueError("selection transitive expansion complexity exceeds 256")
+        if roles:
+            reachable = {self.projection_role}
+            frontier = [self.projection_role]
+            while frontier:
+                role = frontier.pop()
+                for neighbor in sorted(adjacency.get(role, ())):
+                    if neighbor not in reachable:
+                        reachable.add(neighbor)
+                        frontier.append(neighbor)
+            disconnected = sorted(roles - reachable)
+            if disconnected:
+                raise ValueError(
+                    "selection roles must connect to projection_role; disconnected roles: "
+                    f"{disconnected}"
+                )
+            if self.relationships and len(undirected_edges) != len(roles) - 1:
+                raise ValueError(
+                    "selection relationship-role graph must be acyclic and tree-shaped"
+                )
         return self
 
 
@@ -265,7 +346,7 @@ class RouteClaim(StrictModel):
     claim_id: NonEmptyStr
     source: EntitySelector
     target: EntitySelector
-    semantics: RelationshipSemantics
+    semantics: AuthorableRelationshipSemantics
     population_scope: PopulationScope
     required_mechanisms: tuple[NonEmptyStr, ...] = ()
     required_context: tuple[RelationshipPattern, ...] = ()
@@ -275,12 +356,28 @@ class RouteClaim(StrictModel):
     mechanisms_are_ordered: bool = True
     max_hops: int = Field(strict=True, gt=0)
 
+    @field_validator("required_mechanisms", "excluded_mechanisms")
+    @classmethod
+    def mechanisms_are_canonical(cls, values: tuple[str, ...]) -> tuple[str, ...]:
+        for value in values:
+            try:
+                canonical = canonical_relationship_kind(value)
+            except ValueError as exc:
+                raise ValueError(
+                    f"route mechanisms must use exact canonical relationship identifiers: {value!r}"
+                ) from exc
+            if canonical != value:
+                raise ValueError(
+                    f"route mechanism must use canonical identifier {canonical!r}, not {value!r}"
+                )
+        return values
+
 
 class SetClaim(StrictModel):
     kind: Literal["set"]
     claim_id: NonEmptyStr
     selection: SelectionExpression
-    semantics: RelationshipSemantics
+    semantics: AuthorableRelationshipSemantics
     population_scope: PopulationScope
 
 
@@ -288,7 +385,7 @@ class CountClaim(StrictModel):
     kind: Literal["count"]
     claim_id: NonEmptyStr
     selection: SelectionExpression
-    semantics: RelationshipSemantics
+    semantics: AuthorableRelationshipSemantics
     population_scope: PopulationScope
 
 
@@ -299,7 +396,7 @@ class DecisionClaim(StrictModel):
     required_relationships: tuple[RelationshipPattern, ...] = ()
     required_properties: tuple[PropertyPredicate, ...] = ()
     required_route: tuple[RelationshipPattern, ...] = ()
-    semantics: RelationshipSemantics
+    semantics: AuthorableRelationshipSemantics
     population_scope: PopulationScope
 
     @model_validator(mode="after")
@@ -319,8 +416,26 @@ class AbsenceClaim(StrictModel):
     blocking_properties: tuple[PropertyPredicate, ...] = ()
     reason_codes: tuple[NegativeReasonCode, ...]
     max_hops: int = Field(strict=True, gt=0)
-    semantics: RelationshipSemantics
+    semantics: AuthorableRelationshipSemantics
     population_scope: PopulationScope
+
+    @field_validator("relationships")
+    @classmethod
+    def relationships_are_canonical(cls, values: tuple[str, ...]) -> tuple[str, ...]:
+        for value in values:
+            try:
+                canonical = canonical_relationship_kind(value)
+            except ValueError as exc:
+                raise ValueError(
+                    "absence relationships must use exact canonical relationship "
+                    f"identifiers: {value!r}"
+                ) from exc
+            if canonical != value:
+                raise ValueError(
+                    f"absence relationship must use canonical identifier {canonical!r}, "
+                    f"not {value!r}"
+                )
+        return values
 
 
 ClaimSpec = Annotated[
@@ -355,6 +470,8 @@ class MechanismValidRoutePolicy(StrictModel):
 
 
 class ClosedRouteVariantsPolicy(StrictModel):
+    """Read-compatibility shape; not accepted by the task authoring compiler."""
+
     kind: Literal["closed_route_variants"]
     require_ordered_edges: bool = True
     forbid_cycles: bool = True
@@ -385,6 +502,16 @@ AnswerPolicy = Annotated[
     | ExactRoutePolicy
     | MechanismValidRoutePolicy
     | ClosedRouteVariantsPolicy
+    | BoundedNegativePolicy
+    | DecisionPolicy,
+    Field(discriminator="kind"),
+]
+
+AuthorableAnswerPolicy = Annotated[
+    ExactSetPolicy
+    | ExactCountPolicy
+    | ExactRoutePolicy
+    | MechanismValidRoutePolicy
     | BoundedNegativePolicy
     | DecisionPolicy,
     Field(discriminator="kind"),
@@ -455,7 +582,7 @@ class AcceptanceSpec(StrictModel):
 
     claim_kind: Literal["route", "set", "count", "decision", "absence"]
     answer_policy: AnswerPolicy
-    semantics: RelationshipSemantics
+    semantics: AuthorableRelationshipSemantics
     population_scope: PopulationScope
     source_role: NonEmptyStr | None = None
     target_role: NonEmptyStr | None = None
@@ -564,7 +691,7 @@ class MCPClaimEvidenceContract(StrictModel):
 class TrackBinding(StrictModel):
     track: Track
     capability_profile_id: NonEmptyStr
-    semantics: RelationshipSemantics
+    semantics: AuthorableRelationshipSemantics
     bounds: ExecutionBounds
     direct_query_policy_version: NonEmptyStr | None = None
     mcp_tool_loop: NonEmptyStr | None = None

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import stat
 from pathlib import Path
 
 import pytest
@@ -24,15 +25,24 @@ from ori.mcp_launcher import (
     CANONICAL_BLOODHOUND_MCP_EXECUTABLE,
     CANONICAL_BLOODHOUND_MCP_GIT_PREFIX,
     MCPLauncherConfig,
+    MCPLauncherRuntime,
+    MCPLaunchSpec,
     build_mcp_launch_spec,
+    detect_uv_version,
     resolve_mcp_launcher_config,
+    resolve_mcp_launcher_runtime,
+    resolve_uv_tool,
 )
 
 PIN = "cdb17097e761c8a8622cb93bc3ba49a9e150bb6e"
 SOURCE = f"{CANONICAL_BLOODHOUND_MCP_GIT_PREFIX}{PIN}"
 
 
-def test_uvx_git_builds_exact_shell_free_argv() -> None:
+def test_uvx_git_builds_exact_shell_free_argv(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "ori.mcp_launcher.resolve_uv_tool",
+        lambda tool: f"/opt/uv/bin/{tool}",
+    )
     launcher = MCPLauncherConfig.uvx_git(
         source=SOURCE,
         executable=CANONICAL_BLOODHOUND_MCP_EXECUTABLE,
@@ -40,20 +50,128 @@ def test_uvx_git_builds_exact_shell_free_argv() -> None:
 
     spec = build_mcp_launch_spec(launcher)
 
-    assert spec.command == "uvx"
+    assert spec.command == "/opt/uv/bin/uvx"
     assert list(spec.args) == ["--from", SOURCE, "bloodhound-mcp"]
     assert spec.cwd is None
     assert launcher.revision == PIN
 
 
-def test_local_checkout_preserves_exact_legacy_uv_invocation(tmp_path: Path) -> None:
+def test_local_checkout_preserves_exact_legacy_uv_invocation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(
+        "ori.mcp_launcher.resolve_uv_tool",
+        lambda tool: f"/opt/uv/bin/{tool}",
+    )
     launcher = MCPLauncherConfig.local_checkout(tmp_path)
 
     spec = build_mcp_launch_spec(launcher)
 
-    assert spec.command == "uv"
+    assert spec.command == "/opt/uv/bin/uv"
     assert list(spec.args) == ["--directory", str(tmp_path.resolve()), "run", "main.py"]
     assert spec.cwd == str(tmp_path.resolve())
+
+
+def test_uv_tool_resolution_uses_explicit_override_when_supervisor_path_omits_uv(
+    tmp_path: Path,
+) -> None:
+    uv = tmp_path / "uv"
+    uv.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    uv.chmod(uv.stat().st_mode | stat.S_IXUSR)
+
+    resolved = resolve_uv_tool(
+        "uv",
+        environ={"PATH": "", "ORI_UV_EXECUTABLE": str(uv)},
+    )
+
+    assert resolved == str(uv)
+
+
+def test_local_launch_spec_survives_supervisor_path_without_uv(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    install_dir = tmp_path / "uv-bin"
+    install_dir.mkdir()
+    uv = install_dir / "uv"
+    uv.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    uv.chmod(uv.stat().st_mode | stat.S_IXUSR)
+    checkout = tmp_path / "bloodhound-mcp"
+    checkout.mkdir()
+    monkeypatch.setenv("PATH", "")
+    monkeypatch.setenv("ORI_UV_EXECUTABLE", str(uv))
+
+    spec = build_mcp_launch_spec(MCPLauncherConfig.local_checkout(checkout))
+
+    assert spec.command == str(uv)
+    assert spec.cwd == str(checkout.resolve())
+
+
+def test_uv_tool_resolution_fails_closed_without_executable(tmp_path: Path) -> None:
+    with pytest.raises(RuntimeError, match="Unable to locate executable 'uvx'"):
+        resolve_uv_tool(
+            "uvx",
+            environ={"PATH": ""},
+        )
+
+
+def test_uv_tool_resolution_rejects_relative_override() -> None:
+    with pytest.raises(RuntimeError, match="ORI_UV_EXECUTABLE must be an absolute"):
+        resolve_uv_tool(
+            "uv",
+            environ={"PATH": "", "ORI_UV_EXECUTABLE": "bin/uv"},
+        )
+
+
+def test_uv_version_uses_resolved_absolute_command(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run(command, **kwargs):
+        captured["command"] = command
+        captured["kwargs"] = kwargs
+        return type("Completed", (), {"returncode": 0, "stdout": "uv 0.test\n", "stderr": ""})()
+
+    monkeypatch.setattr("ori.mcp_launcher.subprocess.run", fake_run)
+
+    assert detect_uv_version("/opt/uv/bin/uv") == "uv 0.test"
+    assert captured["command"] == ["/opt/uv/bin/uv", "--version"]
+
+
+def test_launcher_runtime_provenance_binds_exact_resolved_commands(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    uv = tmp_path / "uv"
+    uvx = tmp_path / "uvx"
+    uv.write_text("#!/bin/sh\nprintf 'uv 0.test\\n'\n", encoding="utf-8")
+    uvx.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    uv.chmod(uv.stat().st_mode | stat.S_IXUSR)
+    uvx.chmod(uvx.stat().st_mode | stat.S_IXUSR)
+    monkeypatch.setenv("PATH", "")
+    monkeypatch.setenv("ORI_UV_EXECUTABLE", str(uv))
+    monkeypatch.setenv("ORI_UVX_EXECUTABLE", str(uvx))
+    launcher = MCPLauncherConfig.uvx_git(
+        source=SOURCE,
+        executable=CANONICAL_BLOODHOUND_MCP_EXECUTABLE,
+    )
+
+    runtime = resolve_mcp_launcher_runtime(launcher)
+
+    assert runtime.launch_spec.command == str(uvx)
+    assert runtime.uv_executable == str(uv)
+    assert runtime.uv_version == "uv 0.test"
+    assert runtime.provenance(launcher) == {
+        "mcp_launcher": "uvx_git",
+        "mcp_source": SOURCE,
+        "mcp_revision": PIN,
+        "mcp_executable": "bloodhound-mcp",
+        "uv_version": "uv 0.test",
+        "uv_executable": str(uv),
+        "mcp_runtime_executable": str(uvx),
+    }
 
 
 @pytest.mark.parametrize(
@@ -126,7 +244,11 @@ profiles:
         launcher_provenance=MCPLauncherConfig.uvx_git(
             source=SOURCE,
             executable="bloodhound-mcp",
-        ).provenance(uv_version="uv 0.test"),
+        ).provenance(
+            uv_version="uv 0.test",
+            uv_executable="/opt/uv/bin/uv",
+            mcp_runtime_executable="/opt/uv/bin/uvx",
+        ),
         prompt_discovery_status="selected",
         available_prompt_names=["bloodhound_assistant"],
         resource_discovery_status="listed",
@@ -201,12 +323,16 @@ def test_server_factory_passes_exact_argv_and_only_allowlisted_environment(
     monkeypatch.setenv("BLOODHOUND_TOKEN_ID", "credential-id-sentinel")
     monkeypatch.setenv("UNRELATED_SECRET", "never-forward-this")
     monkeypatch.setattr("ori.eval.mcp_runtime.mcp_server_stdio", fake_server_stdio)
+    monkeypatch.setattr(
+        "ori.mcp_launcher.resolve_uv_tool",
+        lambda tool: f"/opt/uv/bin/{tool}",
+    )
     launcher = MCPLauncherConfig.uvx_git(source=SOURCE, executable="bloodhound-mcp")
 
     _create_bloodhound_mcp_server(launcher)
 
     assert captured == {
-        "command": "uvx",
+        "command": "/opt/uv/bin/uvx",
         "args": ["--from", SOURCE, "bloodhound-mcp"],
         "cwd": None,
         "env": {
@@ -260,8 +386,19 @@ def test_bundle_keeps_read_only_tools_and_filters_mutation_tools(
     async def fake_resource_discovery(server):
         return [], "listed"
 
-    monkeypatch.setattr("ori.eval.mcp_runtime.detect_uv_version", lambda: "uv 0.test")
-    monkeypatch.setattr("ori.eval.mcp_runtime._create_bloodhound_mcp_server", lambda _: object())
+    runtime = MCPLauncherRuntime(
+        launch_spec=MCPLaunchSpec(
+            command="/opt/uv/bin/uv",
+            args=("--directory", str(tmp_path), "run", "main.py"),
+            cwd=str(tmp_path),
+        ),
+        uv_executable="/opt/uv/bin/uv",
+        uv_version="uv 0.test",
+    )
+    monkeypatch.setattr(
+        "ori.eval.mcp_runtime._create_bloodhound_mcp_server",
+        lambda _, **__: object(),
+    )
     monkeypatch.setattr("ori.eval.mcp_runtime.mcp_tools", lambda _: FakeMCPTools())
     monkeypatch.setattr(
         "ori.eval.mcp_runtime._discover_bloodhound_mcp_resources",
@@ -273,6 +410,7 @@ def test_bundle_keeps_read_only_tools_and_filters_mutation_tools(
             MCPLauncherConfig.local_checkout(tmp_path),
             include_resources=False,
             include_prompt=False,
+            launcher_runtime=runtime,
         )
     )
 

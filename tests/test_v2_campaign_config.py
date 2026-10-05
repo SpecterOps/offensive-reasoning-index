@@ -70,8 +70,32 @@ def test_v2_config_is_strict_and_resolves_paths_from_config(
     assert resolved.output_dir == tmp_path / "campaign"
     assert set(resolved.tracks) == {Track.DIRECT}
     assert resolved.config.models[0].requested_model == "codex/gpt-test"
-    assert resolved.config.defaults.mcp.read_timeout_seconds == 120.0
+    assert resolved.config.models[0].max_output_tokens == 2048
+    assert resolved.config.defaults.mcp.read_timeout_seconds == 240.0
     assert resolved.config.defaults.mcp.tool_timeout_seconds == 60.0
+
+
+def test_v2_config_accepts_typed_model_output_limit(tmp_path: Path) -> None:
+    path, payload = _config(tmp_path)
+    payload["models"][0]["max_output_tokens"] = 8192
+    path.write_text(yaml.safe_dump(payload, sort_keys=False))
+
+    resolved = load_v2_campaign_config(path)
+
+    assert resolved.config.models[0].max_output_tokens == 8192
+
+
+@pytest.mark.parametrize("option_name", ("max_tokens", "max_output_tokens"))
+def test_v2_config_rejects_output_limit_hidden_in_options(
+    tmp_path: Path,
+    option_name: str,
+) -> None:
+    path, payload = _config(tmp_path)
+    payload["models"][0]["options"] = {option_name: 8192}
+    path.write_text(yaml.safe_dump(payload, sort_keys=False))
+
+    with pytest.raises(ValueError, match="model max_output_tokens"):
+        load_v2_campaign_config(path)
 
 
 def test_v2_config_accepts_one_codex_reasoning_effort_for_all_models(

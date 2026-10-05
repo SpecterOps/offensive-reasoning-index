@@ -17,8 +17,15 @@ from .direct_adapter import (
 from .evidence import EvidenceNormalizationError, validate_and_normalize_evidence
 from .fingerprint import canonical_sha256
 from .fixtures import FixtureCase
-from .graph import GraphSnapshot, build_graph_fact_registry
-from .identity import IdentityResolver
+from .graph import (
+    GraphSnapshot,
+    build_graph_fact_registry,
+    graph_edge_key_buckets,
+    graph_entity_property_index,
+    graph_identity_resolver,
+    graph_object_id_set,
+    graph_object_index,
+)
 from .mcp import MCPToolLoop
 from .mcp_adapter import score_mcp_transcript_v2
 from .model_runtime import MCPTranscriptProjector
@@ -60,7 +67,7 @@ def semantic_evidence_fingerprint(evidence: EvidenceIR) -> str:
 
 
 def _snapshot_objects(snapshot: GraphSnapshot) -> dict[str, Any]:
-    return {item.entity.object_id: item for item in snapshot.objects}
+    return graph_object_index(snapshot)
 
 
 def _evidence_ids(evidence: EvidenceIR) -> tuple[str, ...]:
@@ -80,18 +87,12 @@ def _evidence_ids(evidence: EvidenceIR) -> tuple[str, ...]:
 
 
 def _edge_matches_snapshot(edge: EdgeWitness, snapshot: GraphSnapshot) -> bool:
-    for candidate in snapshot.relationships:
-        if (
-            candidate.source_id,
-            candidate.relationship,
-            candidate.target_id,
-            candidate.direction,
-        ) != (
-            edge.source_id,
-            edge.relationship,
-            edge.target_id,
-            edge.direction,
-        ):
+    candidates = graph_edge_key_buckets(snapshot).get(
+        (edge.source_id, edge.relationship, edge.target_id),
+        (),
+    )
+    for candidate in candidates:
+        if candidate.direction != edge.direction:
             continue
         candidate_properties = {
             fact.key.casefold(): fact.value for fact in candidate.properties
@@ -109,12 +110,8 @@ def _projection_source(
 ) -> ProjectionSource:
     if case.evidence is None:
         return "malformed_replay"
-    known_ids = {entity.object_id for entity in snapshot.entities}
-    properties = {
-        (item.entity.object_id, fact.key.casefold(), fact.value)
-        for item in snapshot.objects
-        for fact in item.properties
-    }
+    known_ids = graph_object_id_set(snapshot)
+    properties = graph_entity_property_index(snapshot)
     evidence = case.evidence
     if not set(_evidence_ids(evidence)).issubset(known_ids):
         return "adversarial_replay"
@@ -205,7 +202,7 @@ def project_direct_fixture(
 
     if case.answer_payload is None:
         raise ValueError("applicable direct fixture has no answer payload")
-    resolver = IdentityResolver(snapshot.entities)
+    resolver = graph_identity_resolver(snapshot)
     source = _projection_source(case, snapshot)
     if case.evidence is None:
         try:
@@ -527,7 +524,20 @@ def _mcp_fixture_query(
     max_hops = max(1, task.binding.bounds.max_hops)
     relationship = f"[*1..{max_hops}]"
 
-    if task.claim_kind in {"route", "absence", "decision"} and len(bound_entities) >= 2:
+    if task.claim_kind in {"route", "decision"} and len(bound_entities) >= 2:
+        required_mechanisms = tuple(task.acceptance_spec.required_mechanisms)
+        if task.acceptance_spec.mechanisms_are_ordered and required_mechanisms:
+            path_nodes = ["input0"] + [
+                f"hop{index}" for index in range(len(required_mechanisms) - 1)
+            ] + ["input1"]
+            path = path_nodes[0]
+            for index, mechanism in enumerate(required_mechanisms):
+                path += f")-[:{mechanism}]->({path_nodes[index + 1]}"
+            clauses.append(f"MATCH p=({path})")
+        else:
+            clauses.append(f"MATCH p=(input0)-{relationship}->(input1)")
+        result_expression = "p"
+    elif task.claim_kind == "absence" and len(bound_entities) >= 2:
         clauses.append(f"MATCH p=(input0)-{relationship}->(input1)")
         result_expression = "p"
     elif bound_entities and contract.result_kind == "entities":
@@ -713,7 +723,7 @@ def project_mcp_fixture(
 
     if case.answer_payload is None:
         raise ValueError("applicable MCP fixture has no answer payload")
-    resolver = IdentityResolver(snapshot.entities)
+    resolver = graph_identity_resolver(snapshot)
     projector = MCPTranscriptProjector(task, profile)
     calls = _observe_mcp_unlock(
         projector,

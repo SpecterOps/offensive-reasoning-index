@@ -12,6 +12,7 @@ build/
 
 # pytest
 .pytest_cache/
+pytest-of-*/
 .coverage
 
 # Generated datasets (too large for repo; regenerate with `ori generate`)

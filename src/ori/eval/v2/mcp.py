@@ -43,6 +43,7 @@ _MCP_FINALIZATION_SOURCES = {
     "mcp_state_machine": Path(__file__),
     "mcp_adapter": Path(__file__).with_name("mcp_adapter.py"),
     "model_runtime": Path(__file__).with_name("model_runtime.py"),
+    "output_compliance": Path(__file__).with_name("output_compliance.py"),
     "provider_loops": Path(__file__).parent.parent / "mcp_runtime.py",
     "query_contract": Path(__file__).with_name("query_contract.py"),
     "relationships": Path(__file__).parent.parent.parent / "relationships.py",

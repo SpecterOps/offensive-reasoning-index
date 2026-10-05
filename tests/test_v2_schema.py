@@ -8,6 +8,7 @@ from pydantic import TypeAdapter, ValidationError
 from ori.eval.v2 import (
     MANIFEST_SCHEMA_VERSION,
     PROTOCOL_VERSION,
+    AuthorableAnswerPolicy,
     ClaimSpec,
     EdgeWitness,
     EntityRef,
@@ -17,8 +18,10 @@ from ori.eval.v2 import (
     MechanismValidRoutePolicy,
     PopulationScope,
     PropertyFact,
+    RelationshipPattern,
     RelationshipSemantics,
     RouteClaim,
+    SelectionExpression,
     TaskBundle,
     Track,
     TrackBinding,
@@ -49,7 +52,7 @@ def _route_claim() -> RouteClaim:
         claim_id="claim-1",
         source={"role": "source_user", "object_type": "User"},
         target={"role": "domain_admins", "object_type": "Group"},
-        semantics=RelationshipSemantics.EFFECTIVE,
+        semantics=RelationshipSemantics.TRANSITIVE,
         population_scope=PopulationScope.BENCHMARK_NAMESPACE,
         required_mechanisms=("MemberOf", "AdminTo"),
         max_hops=2,
@@ -76,7 +79,7 @@ def _task_bundle() -> TaskBundle:
     binding = TrackBinding(
         track=Track.DIRECT,
         capability_profile_id="direct-policy-v3",
-        semantics=RelationshipSemantics.EFFECTIVE,
+        semantics=RelationshipSemantics.TRANSITIVE,
         bounds=_bounds(),
         direct_query_policy_version="bloodhound-cysql-direct-v3",
     )
@@ -118,6 +121,148 @@ def test_models_reject_unknown_fields_and_are_frozen() -> None:
     entity = _entity()
     with pytest.raises(ValidationError, match="Instance is frozen"):
         entity.object_id = "S-2"  # type: ignore[misc]
+
+
+def test_selection_requires_every_role_to_connect_to_projection() -> None:
+    with pytest.raises(ValidationError, match="disconnected roles"):
+        SelectionExpression(
+            anchors=(
+                {"role": "result", "object_type": "User"},
+                {"role": "island", "object_type": "Group"},
+            ),
+            projection_role="result",
+            projection_type="User",
+        )
+
+
+def test_selection_relationship_roles_must_form_a_simple_tree() -> None:
+    relationships = (
+        RelationshipPattern(
+            source_role="result", relationship="MemberOf", target_role="group"
+        ),
+        RelationshipPattern(
+            source_role="group", relationship="AdminTo", target_role="computer"
+        ),
+        RelationshipPattern(
+            source_role="computer", relationship="HasSession", target_role="result"
+        ),
+    )
+    with pytest.raises(ValidationError, match="acyclic and tree-shaped"):
+        SelectionExpression(
+            relationships=relationships,
+            projection_role="result",
+            projection_type="User",
+        )
+
+
+@pytest.mark.parametrize("relationship", ["memberOF", "WriteDACL"])
+def test_relationship_patterns_require_exact_canonical_identifiers(
+    relationship: str,
+) -> None:
+    with pytest.raises(ValidationError, match="canonical"):
+        RelationshipPattern(
+            source_role="source",
+            relationship=relationship,
+            target_role="target",
+        )
+
+
+def test_effective_selection_relationships_are_not_authorable() -> None:
+    with pytest.raises(ValidationError, match="DIRECT.*TRANSITIVE"):
+        RelationshipPattern(
+            source_role="source",
+            relationship="MemberOf",
+            target_role="target",
+            semantics=RelationshipSemantics.EFFECTIVE,
+            max_hops=2,
+        )
+
+
+def test_selection_transitive_complexity_is_deterministically_bounded() -> None:
+    with pytest.raises(ValidationError, match="complexity exceeds 256"):
+        SelectionExpression(
+            relationships=(
+                RelationshipPattern(
+                    source_role="result",
+                    relationship="MemberOf",
+                    target_role="group",
+                    semantics=RelationshipSemantics.TRANSITIVE,
+                    max_hops=17,
+                ),
+                RelationshipPattern(
+                    source_role="group",
+                    relationship="AdminTo",
+                    target_role="computer",
+                    semantics=RelationshipSemantics.TRANSITIVE,
+                    max_hops=17,
+                ),
+            ),
+            projection_role="result",
+            projection_type="User",
+        )
+
+
+def test_connected_tree_selection_retains_declared_bounds() -> None:
+    selection = SelectionExpression(
+        relationships=(
+            RelationshipPattern(
+                source_role="result",
+                relationship="MemberOf",
+                target_role="group",
+                semantics=RelationshipSemantics.TRANSITIVE,
+                min_hops=1,
+                max_hops=4,
+            ),
+            RelationshipPattern(
+                source_role="group",
+                relationship="AdminTo",
+                target_role="computer",
+            ),
+        ),
+        projection_role="result",
+        projection_type="User",
+    )
+    assert selection.relationships[0].min_hops == 1
+    assert selection.relationships[0].max_hops == 4
+
+
+def test_selection_rejects_zero_hop_and_conflicting_role_types() -> None:
+    with pytest.raises(ValidationError, match="greater than or equal to 1"):
+        RelationshipPattern(
+            source_role="source",
+            relationship="MemberOf",
+            target_role="target",
+            semantics=RelationshipSemantics.TRANSITIVE,
+            min_hops=0,
+            max_hops=2,
+        )
+
+    with pytest.raises(ValidationError, match="conflicting object types"):
+        SelectionExpression(
+            anchors=({"role": "result", "object_type": "Group"},),
+            projection_role="result",
+            projection_type="User",
+        )
+
+
+def test_claim_relationship_vocabulary_is_canonical() -> None:
+    with pytest.raises(ValidationError, match="canonical"):
+        RouteClaim(
+            kind="route",
+            claim_id="claim-case",
+            source={"role": "source", "object_type": "User"},
+            target={"role": "target", "object_type": "Group"},
+            semantics=RelationshipSemantics.DIRECT,
+            population_scope=PopulationScope.BENCHMARK_NAMESPACE,
+            required_mechanisms=("memberOF",),
+            max_hops=1,
+        )
+
+
+def test_closed_route_variants_are_not_an_authorable_policy() -> None:
+    adapter = TypeAdapter(AuthorableAnswerPolicy)
+    with pytest.raises(ValidationError, match="does not match any of the expected tags"):
+        adapter.validate_python({"kind": "closed_route_variants"})
 
 
 @pytest.mark.parametrize(

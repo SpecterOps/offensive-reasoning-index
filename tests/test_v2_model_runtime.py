@@ -23,6 +23,7 @@ from ori.eval.mcp_runtime import (
     _tool_result_to_text,
     _wrap_read_only_tool,
 )
+from ori.eval.provider_contract import ProviderProtocolError
 from ori.eval.v2 import campaign_runner, model_runtime
 from ori.eval.v2.compiler import compile_acceptance_spec
 from ori.eval.v2.graph import entity_property_fact_key
@@ -49,6 +50,7 @@ from ori.eval.v2.schema import (
     DecisionPolicy,
     EntityRef,
     EntitySelector,
+    EvidenceIR,
     ExactCountPolicy,
     ExactSetPolicy,
     ExecutionClass,
@@ -62,7 +64,10 @@ from ori.eval.v2.schema import (
     RouteAcceptanceKind,
     SelectionExpression,
     SetClaim,
+    TaskBundle,
     Track,
+    Verdict,
+    VerdictStatus,
 )
 from ori.eval.v2.scoring import SampleOutcomeCode, SampleResult
 
@@ -95,7 +100,12 @@ from .test_v2_mcp_adapter import (
 )
 
 
-def _response(text: str, *, error: str | None = None) -> ModelResponse:
+def _response(
+    text: str,
+    *,
+    error: str | None = None,
+    provider_metrics: dict[str, object] | None = None,
+) -> ModelResponse:
     return ModelResponse(
         raw_text=text,
         cypher=None,
@@ -105,6 +115,7 @@ def _response(text: str, *, error: str | None = None) -> ModelResponse:
         elapsed_seconds=0.01,
         model="codex/gpt-test",
         error=error,
+        provider_metrics=provider_metrics or {},
     )
 
 
@@ -124,14 +135,12 @@ def _public_selection_task(selection: SelectionExpression):
     required_roles = tuple(anchor.role for anchor in selection.anchors)
     binding = MCP_TASK.binding.model_copy(
         update={
-            "bounds": MCP_TASK.binding.bounds.model_copy(
-                update={"require_total_count": True}
-            ),
+            "bounds": MCP_TASK.binding.bounds.model_copy(update={"require_total_count": True}),
             "mcp_evidence_contract": MCPClaimEvidenceContract(
                 result_kind="entities",
                 required_input_roles=required_roles,
                 projection_types=(selection.projection_type,),
-            )
+            ),
         }
     )
     policy = ExactSetPolicy(kind="exact_set")
@@ -208,9 +217,7 @@ def test_direct_public_request_includes_bounds_without_oracle_material() -> None
     }
 
 
-def test_direct_prompt_preserves_v1_cysql_contract_and_separates_answer_schema() -> (
-    None
-):
+def test_direct_prompt_preserves_v1_cysql_contract_and_separates_answer_schema() -> None:
     route_prompt = direct_system_prompt(DIRECT_TASK)
     set_prompt = direct_system_prompt(DIRECT_SET_TASK)
 
@@ -280,9 +287,7 @@ def test_mcp_negative_proof_query_must_cover_public_route_scope() -> None:
     )
     binding = MCP_TASK.binding.model_copy(
         update={
-            "bounds": MCP_TASK.binding.bounds.model_copy(
-                update={"max_hops": 12}
-            ),
+            "bounds": MCP_TASK.binding.bounds.model_copy(update={"max_hops": 12}),
             "mcp_evidence_contract": MCPClaimEvidenceContract(
                 result_kind="scalar_count",
                 required_input_roles=("source", "target"),
@@ -302,9 +307,7 @@ def test_mcp_negative_proof_query_must_cover_public_route_scope() -> None:
             "binding": binding,
         }
     )
-    prefix = (
-        "MATCH p=(a {objectid:'USER-A'})"
-    )
+    prefix = "MATCH p=(a {objectid:'USER-A'})"
     target = "(b {objectid:'GROUP-B'})"
 
     assert model_runtime._query_matches_public_claim(
@@ -319,10 +322,7 @@ def test_mcp_negative_proof_query_must_cover_public_route_scope() -> None:
     )
     assert model_runtime._query_matches_public_claim(
         task,
-        (
-            f"{prefix}-[:MemberOf|Enroll|PublishedTo*1..12]->"
-            f"{target} RETURN count(p) AS count"
-        ),
+        (f"{prefix}-[:MemberOf|Enroll|PublishedTo*1..12]->{target} RETURN count(p) AS count"),
         is_count=True,
     )
     assert model_runtime._query_matches_public_claim(
@@ -489,10 +489,7 @@ def test_mcp_negative_proof_query_must_cover_public_route_scope() -> None:
     )
     assert not model_runtime._query_matches_public_claim(
         task,
-        (
-            f"{prefix}-[:MemberOf|Enroll|PublishedTo*1..12]->"
-            f"{target} RETURN count(P) AS count"
-        ),
+        (f"{prefix}-[:MemberOf|Enroll|PublishedTo*1..12]->{target} RETURN count(P) AS count"),
         is_count=True,
     )
     assert not model_runtime._query_matches_public_claim(
@@ -516,10 +513,7 @@ def test_mcp_negative_proof_query_must_cover_public_route_scope() -> None:
     )
     assert not model_runtime._query_matches_public_claim(
         task,
-        (
-            f"{prefix}<-[:MemberOf|Enroll|PublishedTo*1..12]-"
-            f"{target} RETURN count(p) AS count"
-        ),
+        (f"{prefix}<-[:MemberOf|Enroll|PublishedTo*1..12]-{target} RETURN count(p) AS count"),
         is_count=True,
     )
     assert not model_runtime._query_matches_public_claim(
@@ -669,10 +663,7 @@ def test_mcp_negative_proof_query_must_cover_public_route_scope() -> None:
     )
     assert model_runtime._query_matches_public_claim(
         narrow_task,
-        (
-            f"{prefix}-[:MemberOf|Enroll|PublishedTo]->"
-            f"{target} RETURN count(p) AS count"
-        ),
+        (f"{prefix}-[:MemberOf|Enroll|PublishedTo]->{target} RETURN count(p) AS count"),
         is_count=True,
     )
     assert model_runtime._query_matches_public_claim(
@@ -696,8 +687,7 @@ def test_mcp_negative_proof_query_must_cover_public_route_scope() -> None:
             {
                 "info_type": "run",
                 "query": (
-                    f"{prefix}-[:MemberOf|Enroll|PublishedTo]->"
-                    f"{target} RETURN count(p) AS count"
+                    f"{prefix}-[:MemberOf|Enroll|PublishedTo]->{target} RETURN count(p) AS count"
                 ),
             },
             json.dumps(
@@ -764,10 +754,7 @@ def test_mcp_negative_proof_query_must_cover_public_route_scope() -> None:
         )
         is False
     )
-    assert (
-        contradictory_selector.events[-1].kind
-        is EvidenceEventKind.IRRELEVANT
-    )
+    assert contradictory_selector.events[-1].kind is EvidenceEventKind.IRRELEVANT
 
     non_endpoint_selector = MCPTranscriptProjector(task, PROFILE)
     assert (
@@ -881,10 +868,7 @@ def test_public_selection_requires_the_declared_relationship() -> None:
 
 
 def test_returned_path_must_bind_the_public_endpoint_selectors() -> None:
-    bound = (
-        "MATCH p=(a {objectid:'USER-A'})-[:MemberOf]->"
-        "(b {objectid:'GROUP-B'}) RETURN p"
-    )
+    bound = "MATCH p=(a {objectid:'USER-A'})-[:MemberOf]->(b {objectid:'GROUP-B'}) RETURN p"
     separately_bound = (
         "MATCH (a {objectid:'USER-A'}), (b {objectid:'GROUP-B'}) "
         "MATCH p=(a)-[:MemberOf]->(b) RETURN p"
@@ -895,8 +879,7 @@ def test_returned_path_must_bind_the_public_endpoint_selectors() -> None:
         "RETURN p"
     )
     detached_in_same_clause = (
-        "MATCH p=(a {objectid:'USER-A'})-[:MemberOf]->(x), "
-        "(b {objectid:'GROUP-B'}) RETURN p"
+        "MATCH p=(a {objectid:'USER-A'})-[:MemberOf]->(x), (b {objectid:'GROUP-B'}) RETURN p"
     )
     aliased_passthrough = (
         "MATCH p=(a {objectid:'USER-A'})-[:MemberOf]->"
@@ -978,43 +961,27 @@ def test_returned_path_must_bind_the_public_endpoint_selectors() -> None:
 
 
 def test_query_selectors_use_live_identity_properties_not_answer_aliases() -> None:
-    source = MCP_TASK.input_entities[0].model_copy(
-        update={"aliases": ("ALICE",)}
-    )
-    task = MCP_TASK.model_copy(
-        update={"input_entities": (source, MCP_TASK.input_entities[1])}
-    )
+    source = MCP_TASK.input_entities[0].model_copy(update={"aliases": ("ALICE",)})
+    task = MCP_TASK.model_copy(update={"input_entities": (source, MCP_TASK.input_entities[1])})
 
     assert model_runtime._query_matches_public_claim(
         task,
-        (
-            "MATCH p=(a {name:'ALICE@EXAMPLE.LOCAL'})-[:MemberOf]->"
-            "(b {objectid:'GROUP-B'}) RETURN p"
-        ),
+        ("MATCH p=(a {name:'ALICE@EXAMPLE.LOCAL'})-[:MemberOf]->(b {objectid:'GROUP-B'}) RETURN p"),
         is_count=False,
     )
     assert not model_runtime._query_matches_public_claim(
         task,
-        (
-            "MATCH p=(a {name:'ALICE'})-[:MemberOf]->"
-            "(b {objectid:'GROUP-B'}) RETURN p"
-        ),
+        ("MATCH p=(a {name:'ALICE'})-[:MemberOf]->(b {objectid:'GROUP-B'}) RETURN p"),
         is_count=False,
     )
     assert not model_runtime._query_matches_public_claim(
         task,
-        (
-            "MATCH p=(a {name:'USER-A'})-[:MemberOf]->"
-            "(b {objectid:'GROUP-B'}) RETURN p"
-        ),
+        ("MATCH p=(a {name:'USER-A'})-[:MemberOf]->(b {objectid:'GROUP-B'}) RETURN p"),
         is_count=False,
     )
     assert not model_runtime._query_matches_public_claim(
         task,
-        (
-            "MATCH p=(a {OBJECTID:'USER-A'})-[:MemberOf]->"
-            "(b {objectid:'GROUP-B'}) RETURN p"
-        ),
+        ("MATCH p=(a {OBJECTID:'USER-A'})-[:MemberOf]->(b {objectid:'GROUP-B'}) RETURN p"),
         is_count=False,
     )
 
@@ -1074,8 +1041,7 @@ def test_public_selection_rejects_undeclared_population_filters() -> None:
     )
     task = _public_selection_task(selection)
     declared = (
-        "MATCH (u:User) WHERE u.hasspn = true "
-        "RETURN u.objectid AS object_id ORDER BY u.objectid"
+        "MATCH (u:User) WHERE u.hasspn = true RETURN u.objectid AS object_id ORDER BY u.objectid"
     )
     coalesced = (
         "MATCH (u:User) WHERE coalesce(u.hasspn, false) = true "
@@ -1127,12 +1093,8 @@ def test_public_selection_uses_exact_bloodhound_schema_identifiers() -> None:
         projection_type="User",
     )
     base_task = _public_selection_task(selection)
-    target = base_task.input_entities[1].model_copy(
-        update={"aliases": ("DOMAIN ADMINS",)}
-    )
-    task = base_task.model_copy(
-        update={"input_entities": (base_task.input_entities[0], target)}
-    )
+    target = base_task.input_entities[1].model_copy(update={"aliases": ("DOMAIN ADMINS",)})
+    task = base_task.model_copy(update={"input_entities": (base_task.input_entities[0], target)})
     valid = (
         "MATCH (g:Group {objectid:'GROUP-B'}) "
         "MATCH (u:User)-[:MemberOf]->(g) WHERE u.hasspn = true "
@@ -1222,6 +1184,71 @@ def test_selection_fixture_query_realizes_the_public_contract() -> None:
     )
 
 
+def test_ordered_route_fixture_query_matches_single_and_multiple_mechanisms() -> None:
+    single_query = _mcp_fixture_query(MCP_TASK, count=False)
+    assert "MATCH p=(input0)-[:MemberOf]->(input1)" in single_query
+    assert model_runtime._query_matches_public_claim(
+        MCP_TASK,
+        single_query,
+        is_count=False,
+    )
+
+    multiple_task = MCP_TASK.model_copy(
+        update={
+            "binding": MCP_TASK.binding.model_copy(
+                update={
+                    "bounds": MCP_TASK.binding.bounds.model_copy(
+                        update={"max_hops": 2}
+                    )
+                }
+            ),
+            "acceptance_spec": MCP_TASK.acceptance_spec.model_copy(
+                update={
+                    "required_mechanisms": ("GenericAll", "MemberOf"),
+                    "mechanisms_are_ordered": True,
+                }
+            ),
+        }
+    )
+    multiple_query = _mcp_fixture_query(multiple_task, count=False)
+
+    assert "MATCH p=(input0)-[:GenericAll]->(hop0)-[:MemberOf]->(input1)" in multiple_query
+    assert model_runtime._query_matches_public_claim(
+        multiple_task,
+        multiple_query,
+        is_count=False,
+    )
+
+
+def test_unordered_route_fixture_query_keeps_bounded_wildcard_fallback() -> None:
+    unordered_task = MCP_TASK.model_copy(
+        update={
+            "binding": MCP_TASK.binding.model_copy(
+                update={
+                    "bounds": MCP_TASK.binding.bounds.model_copy(
+                        update={"max_hops": 2}
+                    )
+                }
+            ),
+            "acceptance_spec": MCP_TASK.acceptance_spec.model_copy(
+                update={
+                    "route_acceptance": RouteAcceptanceKind.ANY_GRAPH_VALID,
+                    "required_mechanisms": (),
+                    "mechanisms_are_ordered": False,
+                }
+            ),
+        }
+    )
+    query = _mcp_fixture_query(unordered_task, count=False)
+
+    assert "MATCH p=(input0)-[*1..2]->(input1)" in query
+    assert model_runtime._query_matches_public_claim(
+        unordered_task,
+        query,
+        is_count=False,
+    )
+
+
 def test_direct_model_runtime_executes_exactly_once_through_coordinator() -> None:
     query = "MATCH p=(a)-[:MemberOf]->(b) RETURN p LIMIT 1"
     provider_request: dict[str, Any] = {}
@@ -1251,6 +1278,7 @@ def test_direct_model_runtime_executes_exactly_once_through_coordinator() -> Non
             oracle=DIRECT_ORACLE,
             resolver=DIRECT_RESOLVER,
             model="codex/gpt-test",
+            max_tokens=8192,
             transport=transport,
         )
     )
@@ -1261,10 +1289,48 @@ def test_direct_model_runtime_executes_exactly_once_through_coordinator() -> Non
     assert sample.reasoning_correct is True
     assert record.direct_query_digest is not None
     assert record.direct_receipt is not None
-    assert provider_request["messages"] == [
-        {"role": "user", "content": DIRECT_TASK.question}
-    ]
+    assert provider_request["messages"] == [{"role": "user", "content": DIRECT_TASK.question}]
+    assert provider_request["max_tokens"] == 8192
+    assert provider_request["request_timeout_seconds"] == (
+        DIRECT_TASK.binding.bounds.timeout_seconds
+    )
     assert DIRECT_TASK.question not in provider_request["system"]
+
+
+def test_direct_json_schema_mode_sends_exact_public_submission_schema() -> None:
+    request: dict[str, Any] = {}
+    query = "MATCH p=(a)-[:MemberOf]->(b) RETURN p LIMIT 1"
+
+    async def transport(**kwargs: Any) -> ModelResponse:
+        request.update(kwargs)
+        return _response(json.dumps({"query": query, "assertion": {}}))
+
+    coordinator = FakeCoordinator(
+        CypherResult(
+            success=True,
+            raw=_raw_route(),
+            query_executed=True,
+            execution_attempts=1,
+        )
+    )
+    _outcome, sample, _record = asyncio.run(
+        run_direct_model_task_v2(
+            coordinator=coordinator,
+            task=DIRECT_TASK,
+            oracle=DIRECT_ORACLE,
+            resolver=DIRECT_RESOLVER,
+            model="openai-compat/test",
+            structured_output_mode="json_schema",
+            transport=transport,
+        )
+    )
+
+    assert sample.reasoning_correct is True
+    assert request["structured_output_schema"] == {
+        "name": "ori_direct_submission",
+        "strict": True,
+        "schema": model_runtime.direct_submission_schema(DIRECT_TASK),
+    }
 
 
 def test_invalid_direct_output_never_reaches_bloodhound() -> None:
@@ -1290,19 +1356,195 @@ def test_invalid_direct_output_never_reaches_bloodhound() -> None:
     assert record.direct_receipt is None
 
 
-@pytest.mark.parametrize(
-    "error",
-    (
-        "HTTP 403 Forbidden",
-        "permission_denied",
-        "permission_error",
-        "insufficient permissions",
-        "not authorized to access model",
-    ),
-)
-def test_direct_provider_auth_error_response_is_not_retryable(error: str) -> None:
+def test_laguna_nullable_content_projection_is_output_invalid_not_harness_error() -> None:
     async def transport(**_kwargs: Any) -> ModelResponse:
-        return _response("", error=error)
+        return replace(
+            _response(""),
+            provider_metrics={
+                "provider_turn_status": "tool_calls",
+                "model_output_error": True,
+                "model_output_subtype": "TOOL_CALL_ONLY",
+            },
+        )
+
+    outcome, sample, record = asyncio.run(
+        run_direct_model_task_v2(
+            coordinator=FakeCoordinator(CypherResult(success=True, raw={})),
+            task=DIRECT_TASK,
+            oracle=DIRECT_ORACLE,
+            resolver=DIRECT_RESOLVER,
+            model="openai-compat/poolside/laguna-s-2.1",
+            transport=transport,
+        )
+    )
+
+    assert outcome is None
+    assert sample.execution_class is ExecutionClass.MODEL_FAILURE
+    assert sample.outcome is SampleOutcomeCode.OUTPUT_INVALID
+    assert sample.outcome is not SampleOutcomeCode.HARNESS_ERROR
+    assert record.provider_metrics["model_output_subtype"] == "TOOL_CALL_ONLY"
+
+
+def test_provider_protocol_error_is_nonretryable_infrastructure() -> None:
+    assert model_runtime._provider_infrastructure_details(
+        ProviderProtocolError("missing choices")
+    ) == ("PROVIDER_PROTOCOL", False)
+
+
+@pytest.mark.parametrize("status_code", (301, 307, 400))
+def test_mcp_http_status_is_nonretryable_provider_protocol_not_harness_error(
+    monkeypatch: pytest.MonkeyPatch,
+    status_code: int,
+) -> None:
+    async def rejected_loop(**_kwargs: Any):
+        request = httpx.Request(
+            "POST",
+            "https://inference-api.nousresearch.com/v1/chat/completions",
+        )
+        response = httpx.Response(status_code, request=request)
+        raise httpx.HTTPStatusError(
+            "provider rejected request",
+            request=request,
+            response=response,
+        )
+
+    monkeypatch.setattr(
+        model_runtime,
+        "_run_openai_compat_mcp_loop",
+        rejected_loop,
+    )
+    outcome, record = asyncio.run(
+        run_mcp_model_task_v2(
+            task=MCP_TASK,
+            oracle=MCP_ORACLE,
+            resolver=MCP_RESOLVER,
+            profile=PROFILE,
+            bundle=MCPServerBundle(tools=[]),
+            model="openai-compat/poolside/laguna-s-2.1",
+            model_base_url="https://inference-api.nousresearch.com/v1",
+            tool_loop=MCPToolLoop.NATIVE_OPENAI_COMPATIBLE,
+            max_steps=4,
+        )
+    )
+
+    assert outcome.sample.execution_class is ExecutionClass.INFRA_FAILURE
+    assert outcome.sample.outcome is SampleOutcomeCode.INFRA_ERROR
+    assert outcome.sample.outcome is not SampleOutcomeCode.HARNESS_ERROR
+    assert record.provider_metrics["infra_scope"] == "provider"
+    assert record.provider_metrics["infra_error_subtype"] == "PROVIDER_PROTOCOL"
+    assert record.provider_metrics["infra_retryable"] is False
+
+
+def test_nonretryable_provider_attempt_is_terminal_on_resume() -> None:
+    sample = SampleResult(
+        task_id=DIRECT_TASK.task_id,
+        task_fingerprint=DIRECT_TASK.task_fingerprint,
+        oracle_fingerprint=DIRECT_ORACLE.oracle_fingerprint,
+        execution_class=ExecutionClass.INFRA_FAILURE,
+        outcome=SampleOutcomeCode.INFRA_ERROR,
+        reasoning_correct=None,
+        detail="provider protocol mismatch",
+    )
+    provider = model_runtime._record(
+        task=DIRECT_TASK,
+        model="openai-compat/test",
+        surface="direct",
+        response=replace(
+            _response("", error="missing choices"),
+            provider_metrics={
+                "infra_scope": "provider",
+                "infra_error_subtype": "PROVIDER_PROTOCOL",
+                "infra_retryable": False,
+            },
+        ),
+    )
+    attempt = campaign_runner._attempt(
+        task_id=DIRECT_TASK.task_id,
+        number=1,
+        sample=sample,
+        provider=provider,
+    )
+
+    assert campaign_runner._attempt_is_terminal_on_resume(attempt) is True
+
+
+def test_unknown_infrastructure_scope_cannot_opt_into_retries() -> None:
+    sample = SampleResult(
+        task_id=DIRECT_TASK.task_id,
+        task_fingerprint=DIRECT_TASK.task_fingerprint,
+        oracle_fingerprint=DIRECT_ORACLE.oracle_fingerprint,
+        execution_class=ExecutionClass.INFRA_FAILURE,
+        outcome=SampleOutcomeCode.INFRA_ERROR,
+        detail="adapter supplied an unknown retry scope",
+    )
+    provider = model_runtime._record(
+        task=DIRECT_TASK,
+        model="openai-compat/test",
+        surface="direct",
+        response=replace(
+            _response("", error="unknown adapter failure"),
+            provider_metrics={
+                "infra_scope": "future_unknown_scope",
+                "infra_retryable": True,
+            },
+        ),
+    )
+    attempt = campaign_runner._attempt(
+        task_id=DIRECT_TASK.task_id,
+        number=1,
+        sample=sample,
+        provider=provider,
+    )
+
+    assert campaign_runner._infrastructure_retry_policy(sample, provider) == (
+        "future_unknown_scope",
+        False,
+    )
+    assert campaign_runner._attempt_is_terminal_on_resume(attempt) is True
+
+
+def test_operator_interruption_is_not_terminal_on_resume() -> None:
+    sample = SampleResult(
+        task_id=DIRECT_TASK.task_id,
+        task_fingerprint=DIRECT_TASK.task_fingerprint,
+        oracle_fingerprint=DIRECT_ORACLE.oracle_fingerprint,
+        execution_class=ExecutionClass.UNEXECUTED,
+        outcome=SampleOutcomeCode.INTERRUPTED,
+        reasoning_correct=None,
+        detail="interrupted",
+    )
+    provider = model_runtime._record(
+        task=DIRECT_TASK,
+        model="codex/gpt-test",
+        surface="direct",
+        response=replace(
+            _response("", error="interrupted"),
+            provider_metrics={
+                "infra_scope": "operator",
+                "infra_error_subtype": "INTERRUPTED",
+                "infra_retryable": False,
+            },
+        ),
+    )
+    attempt = campaign_runner._attempt(
+        task_id=DIRECT_TASK.task_id,
+        number=1,
+        sample=sample,
+        provider=provider,
+    )
+
+    assert campaign_runner._attempt_is_terminal_on_resume(attempt) is False
+    assert campaign_runner._attempt_consumes_retry_budget(attempt) is False
+    assert campaign_runner._attempt_is_retry_eligible(
+        attempt,
+        consumed_attempts=0,
+        max_attempts=3,
+    ) is True
+
+
+def test_untyped_provider_error_response_fails_closed_without_string_inference() -> None:
+    async def transport(**_kwargs: Any) -> ModelResponse:
+        return _response("", error="HTTP 403 Forbidden permission_denied")
 
     coordinator = FakeCoordinator(CypherResult(success=True, raw={}))
     outcome, sample, record = asyncio.run(
@@ -1320,7 +1562,7 @@ def test_direct_provider_auth_error_response_is_not_retryable(error: str) -> Non
     assert coordinator.queries == []
     assert sample.execution_class is ExecutionClass.INFRA_FAILURE
     assert record.provider_metrics["infra_scope"] == "provider"
-    assert record.provider_metrics["infra_error_subtype"] == "PROVIDER_AUTH"
+    assert record.provider_metrics["infra_error_subtype"] == "PROVIDER_UNTYPED"
     assert record.provider_metrics["infra_retryable"] is False
 
 
@@ -1393,6 +1635,78 @@ def test_direct_execution_cancellation_preserves_model_query() -> None:
     assert coordinator.queries == [query]
 
 
+def _direct_task_with_timeout(timeout_seconds: float) -> TaskBundle:
+    bounds = DIRECT_TASK.binding.bounds.model_copy(update={"timeout_seconds": timeout_seconds})
+    return DIRECT_TASK.model_copy(
+        update={
+            "binding": DIRECT_TASK.binding.model_copy(update={"bounds": bounds}),
+            "acceptance_spec": DIRECT_TASK.acceptance_spec.model_copy(update={"bounds": bounds}),
+        }
+    )
+
+
+def test_direct_provider_stall_becomes_typed_whole_task_timeout() -> None:
+    async def stalled_transport(**_kwargs: Any) -> ModelResponse:
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    task = _direct_task_with_timeout(0.01)
+    outcome, sample, provider = asyncio.run(
+        run_direct_model_task_v2(
+            coordinator=FakeCoordinator(CypherResult(success=True, raw={})),
+            task=task,
+            oracle=DIRECT_ORACLE,
+            resolver=DIRECT_RESOLVER,
+            model="openai-compat/test",
+            transport=stalled_transport,
+        )
+    )
+
+    assert outcome is None
+    assert sample.execution_class is ExecutionClass.MODEL_FAILURE
+    assert sample.outcome is SampleOutcomeCode.TASK_TIMEOUT
+    assert provider.provider_error == "direct task execution budget exhausted"
+    assert provider.provider_metrics["timeout_scope"] == "whole_task"
+    assert provider.provider_metrics["task_timeout_seconds"] == 0.01
+    assert "infra_scope" not in provider.provider_metrics
+    assert provider.direct_query_digest is None
+
+
+def test_direct_query_stall_becomes_timeout_and_preserves_query_digest() -> None:
+    query = "MATCH p=(a)-[:MemberOf]->(b) RETURN p LIMIT 1"
+
+    async def transport(**_kwargs: Any) -> ModelResponse:
+        return _response(json.dumps({"query": query, "assertion": {}}))
+
+    class StalledCoordinator(FakeCoordinator):
+        async def execute(self, submitted_query: str) -> CypherResult:
+            self.queries.append(submitted_query)
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+    # Leave enough time for provider parsing to finish on slower/newer Python
+    # runtimes; the coordinator itself is the deterministic stalled boundary.
+    task = _direct_task_with_timeout(10.0)
+    coordinator = StalledCoordinator(CypherResult(success=True, raw={}))
+    outcome, sample, provider = asyncio.run(
+        run_direct_model_task_v2(
+            coordinator=coordinator,
+            task=task,
+            oracle=DIRECT_ORACLE,
+            resolver=DIRECT_RESOLVER,
+            model="openai-compat/test",
+            transport=transport,
+        )
+    )
+
+    assert outcome is None
+    assert sample.execution_class is ExecutionClass.MODEL_FAILURE
+    assert sample.outcome is SampleOutcomeCode.TASK_TIMEOUT
+    assert provider.provider_error == "direct task execution budget exhausted"
+    assert provider.direct_query_digest is not None
+    assert coordinator.queries == [query]
+
+
 def test_claim_bound_cypher_route_is_positive_evidence() -> None:
     projector = MCPTranscriptProjector(MCP_TASK, PROFILE)
     _observe_route_evidence(projector.observe)
@@ -1433,8 +1747,7 @@ def test_projector_records_only_successful_cypher_node_object_ids() -> None:
         {
             "info_type": "run",
             "query": (
-                "MATCH p=(a {objectid:'USER-A'})-[:MemberOf]->"
-                "(b {objectid:'GROUP-B'}) RETURN p"
+                "MATCH p=(a {objectid:'USER-A'})-[:MemberOf]->(b {objectid:'GROUP-B'}) RETURN p"
             ),
         },
         json.dumps(
@@ -1498,8 +1811,7 @@ def test_projector_records_successful_literal_row_object_ids() -> None:
         {
             "info_type": "run",
             "query": (
-                "MATCH (u:User) RETURN u.objectid AS object_id "
-                "ORDER BY u.objectid SKIP 0 LIMIT 1"
+                "MATCH (u:User) RETURN u.objectid AS object_id ORDER BY u.objectid SKIP 0 LIMIT 1"
             ),
         },
         json.dumps(
@@ -1604,8 +1916,7 @@ def test_claim_bound_route_with_only_unknown_literals_remains_inconclusive() -> 
         {
             "info_type": "run",
             "query": (
-                "MATCH p=(a {objectid:'USER-A'})-[:MemberOf]->"
-                "(b {objectid:'GROUP-B'}) RETURN p"
+                "MATCH p=(a {objectid:'USER-A'})-[:MemberOf]->(b {objectid:'GROUP-B'}) RETURN p"
             ),
         },
         json.dumps(
@@ -1639,8 +1950,7 @@ def test_claim_bound_route_with_node_only_result_cannot_unlock() -> None:
         {
             "info_type": "run",
             "query": (
-                "MATCH p=(a {objectid:'USER-A'})-[:MemberOf]->"
-                "(b {objectid:'GROUP-B'}) RETURN p"
+                "MATCH p=(a {objectid:'USER-A'})-[:MemberOf]->(b {objectid:'GROUP-B'}) RETURN p"
             ),
         },
         json.dumps(
@@ -1897,8 +2207,7 @@ def test_exact_set_companion_count_can_arrive_after_the_complete_page() -> None:
             {
                 "info_type": "run",
                 "query": (
-                    "MATCH (n:User) RETURN n.objectid AS object_id "
-                    "ORDER BY n.objectid LIMIT 2"
+                    "MATCH (n:User) RETURN n.objectid AS object_id ORDER BY n.objectid LIMIT 2"
                 ),
             },
             json.dumps(
@@ -1972,10 +2281,7 @@ def test_truncated_set_receipts_cannot_supply_later_completeness_state() -> None
             ),
         }
     )
-    page_query = (
-        "MATCH (n:User) RETURN n.objectid AS object_id "
-        "ORDER BY n.objectid LIMIT 2"
-    )
+    page_query = "MATCH (n:User) RETURN n.objectid AS object_id ORDER BY n.objectid LIMIT 2"
     count_query = "MATCH (n:User) RETURN count(n) AS count"
     page_payload = json.dumps(
         {
@@ -2064,10 +2370,7 @@ def test_failed_set_receipts_cannot_supply_later_completeness_state() -> None:
             ),
         }
     )
-    page_query = (
-        "MATCH (n:User) RETURN n.objectid AS object_id "
-        "ORDER BY n.objectid LIMIT 2"
-    )
+    page_query = "MATCH (n:User) RETURN n.objectid AS object_id ORDER BY n.objectid LIMIT 2"
     count_query = "MATCH (n:User) RETURN count(n) AS count"
     page_data = {
         "data": {
@@ -2134,9 +2437,7 @@ def test_failed_set_receipts_cannot_supply_later_completeness_state() -> None:
 
 
 def test_certification_companion_count_matches_distinct_set_window() -> None:
-    bounds = MCP_TASK.binding.bounds.model_copy(
-        update={"require_total_count": True}
-    )
+    bounds = MCP_TASK.binding.bounds.model_copy(update={"require_total_count": True})
     set_task = MCP_TASK.model_copy(
         update={
             "claim_kind": "set",
@@ -2154,9 +2455,7 @@ def test_certification_companion_count_matches_distinct_set_window() -> None:
 
 
 def test_count_projection_accepts_one_unambiguous_scalar_alias() -> None:
-    bounds = MCP_TASK.binding.bounds.model_copy(
-        update={"require_total_count": True}
-    )
+    bounds = MCP_TASK.binding.bounds.model_copy(update={"require_total_count": True})
     task = MCP_TASK.model_copy(
         update={
             "claim_kind": "set",
@@ -2164,7 +2463,7 @@ def test_count_projection_accepts_one_unambiguous_scalar_alias() -> None:
             "binding": _cypher_set_binding(
                 bounds=bounds,
                 projection_type="User",
-            )
+            ),
         }
     )
     projector = MCPTranscriptProjector(task, PROFILE)
@@ -2252,8 +2551,7 @@ def test_count_star_accepts_one_selector_bound_typed_population() -> None:
         {
             "info_type": "run",
             "query": (
-                f"MATCH (u:User {{objectid: '{source.object_id}'}}) "
-                "RETURN count(*) AS count"
+                f"MATCH (u:User {{objectid: '{source.object_id}'}}) RETURN count(*) AS count"
             ),
         },
         json.dumps(
@@ -2365,10 +2663,7 @@ def test_count_star_rejects_fanout_row_populations() -> None:
         "cypher_query",
         {
             "info_type": "run",
-            "query": (
-                "MATCH (u:User)-[:MemberOf]->(g:Group) "
-                "RETURN count(*) AS count"
-            ),
+            "query": ("MATCH (u:User)-[:MemberOf]->(g:Group) RETURN count(*) AS count"),
         },
         json.dumps(
             {
@@ -2691,10 +2986,7 @@ def test_exact_set_population_key_preserves_post_with_filters() -> None:
         "cypher_query",
         {
             "info_type": "run",
-            "query": (
-                "MATCH (n:User) WITH n WHERE n.enabled = true "
-                "RETURN count(*) AS count"
-            ),
+            "query": ("MATCH (n:User) WITH n WHERE n.enabled = true RETURN count(*) AS count"),
         },
         json.dumps(
             {
@@ -2750,8 +3042,7 @@ def test_exact_set_population_key_accepts_multiline_distinct_aliases() -> None:
         {
             "info_type": "run",
             "query": (
-                "MATCH (u:User)-[:MemberOf]->(:Group)\n"
-                "RETURN count(DISTINCT u.objectid) AS count"
+                "MATCH (u:User)-[:MemberOf]->(:Group)\nRETURN count(DISTINCT u.objectid) AS count"
             ),
         },
         json.dumps(
@@ -2794,9 +3085,8 @@ def test_exact_set_population_key_rejects_distinctness_mismatch() -> None:
         "ORDER BY entity.objectid LIMIT 3"
     )
 
-    assert (
-        model_runtime._query_population_key(count_query)
-        != model_runtime._query_population_key(distinct_page)
+    assert model_runtime._query_population_key(count_query) != model_runtime._query_population_key(
+        distinct_page
     )
     assert (
         model_runtime._count_population_matches_page(
@@ -2806,10 +3096,7 @@ def test_exact_set_population_key_rejects_distinctness_mismatch() -> None:
         is False
     )
 
-    distinct_count = (
-        "MATCH (u:User)-[:MemberOf]->(:Group) "
-        "RETURN count(DISTINCT u) AS count"
-    )
+    distinct_count = "MATCH (u:User)-[:MemberOf]->(:Group) RETURN count(DISTINCT u) AS count"
     row_page = (
         "MATCH (member:User)-[:MemberOf]->(:Group) "
         "RETURN member.objectid AS object_id "
@@ -2825,19 +3112,13 @@ def test_exact_set_population_key_rejects_distinctness_mismatch() -> None:
 
 
 def test_exact_set_population_key_does_not_strip_population_changing_with() -> None:
-    count_query = (
-        "MATCH (u:User) WITH u ORDER BY u.name LIMIT 2 "
-        "RETURN count(*) AS count"
-    )
+    count_query = "MATCH (u:User) WITH u ORDER BY u.name LIMIT 2 RETURN count(*) AS count"
     page_query = (
-        "MATCH (member:User) "
-        "RETURN member.objectid AS object_id "
-        "ORDER BY member.objectid LIMIT 3"
+        "MATCH (member:User) RETURN member.objectid AS object_id ORDER BY member.objectid LIMIT 3"
     )
 
-    assert (
-        model_runtime._query_population_key(count_query)
-        != model_runtime._query_population_key(page_query)
+    assert model_runtime._query_population_key(count_query) != model_runtime._query_population_key(
+        page_query
     )
 
 
@@ -3141,7 +3422,7 @@ def test_mcp_prompt_declares_mechanical_result_contract() -> None:
     prompt = mcp_system_prompt(MCP_TASK)
     request = json.loads(prompt.split("\n\n", maxsplit=1)[1])
 
-    assert '"version": "ori-mcp-result-contract-v22"' in prompt
+    assert '"version": "ori-mcp-result-contract-v23"' in prompt
     assert "evidence_result_contract" in prompt
     assert "include_properties=false" in prompt
     assert "mechanically materializes the final entities" in mcp_system_prompt(
@@ -3353,12 +3634,223 @@ def test_schema_only_retry_runs_once_after_useful_evidence(
     assert len(retry_calls) == 1
     assert retry_calls[0]["messages"][-1]["content"].startswith("Return only one JSON object")
     assert retry_calls[0]["max_tokens"] == 16_384
+    assert (
+        0.0 < retry_calls[0]["request_timeout_seconds"] <= (MCP_TASK.binding.bounds.timeout_seconds)
+    )
     assert outcome.sample.execution_class is ExecutionClass.SUCCESS
     assert outcome.sample.reasoning_correct is True
     assert record.mcp_finalization is not None
     assert record.mcp_finalization["schema_retry_count"] == 1
     assert len(record.mcp_tool_receipts) == 1
     assert record.mcp_tool_receipts[0].event.kind is EvidenceEventKind.USEFUL_POSITIVE
+
+
+def test_nonfinite_initial_mcp_output_requires_schema_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    retry_calls: list[dict[str, Any]] = []
+
+    async def fake_loop(**kwargs: Any):
+        _observe_route_evidence(kwargs["tool_result_observer"])
+        nonfinite = json.dumps(_answer())[:-1] + ', "risk": NaN}'
+        return _response(nonfinite), object(), []
+
+    async def retry_transport(**kwargs: Any) -> ModelResponse:
+        retry_calls.append(kwargs)
+        return _response(json.dumps(_answer()))
+
+    monkeypatch.setattr(model_runtime, "_run_openai_compat_mcp_loop", fake_loop)
+    outcome, record = asyncio.run(
+        run_mcp_model_task_v2(
+            task=MCP_TASK,
+            oracle=MCP_ORACLE,
+            resolver=MCP_RESOLVER,
+            profile=PROFILE,
+            bundle=MCPServerBundle(tools=[]),
+            model="codex/gpt-test",
+            model_base_url=None,
+            tool_loop=MCPToolLoop.NATIVE_OPENAI_COMPATIBLE,
+            max_steps=4,
+            transport=retry_transport,
+        )
+    )
+
+    assert len(retry_calls) == 1
+    assert outcome.sample.execution_class is ExecutionClass.SUCCESS
+    assert outcome.sample.output_compliant is True
+    assert record.mcp_finalization is not None
+    assert record.mcp_finalization["schema_retry_count"] == 1
+
+
+def test_nonfinite_schema_retry_output_is_output_invalid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_loop(**kwargs: Any):
+        _observe_route_evidence(kwargs["tool_result_observer"])
+        return _response("commentary " + json.dumps(_answer())), object(), []
+
+    async def retry_transport(**_kwargs: Any) -> ModelResponse:
+        nonfinite = json.dumps(_answer())[:-1] + ', "risk": Infinity}'
+        return _response(nonfinite)
+
+    monkeypatch.setattr(model_runtime, "_run_openai_compat_mcp_loop", fake_loop)
+    outcome, record = asyncio.run(
+        run_mcp_model_task_v2(
+            task=MCP_TASK,
+            oracle=MCP_ORACLE,
+            resolver=MCP_RESOLVER,
+            profile=PROFILE,
+            bundle=MCPServerBundle(tools=[]),
+            model="codex/gpt-test",
+            model_base_url=None,
+            tool_loop=MCPToolLoop.NATIVE_OPENAI_COMPATIBLE,
+            max_steps=4,
+            transport=retry_transport,
+        )
+    )
+
+    assert outcome.sample.execution_class is ExecutionClass.MODEL_FAILURE
+    assert outcome.sample.outcome is SampleOutcomeCode.OUTPUT_INVALID
+    assert outcome.sample.output_compliant is False
+    assert record.mcp_finalization is not None
+    assert record.mcp_finalization["schema_retry_count"] == 1
+
+
+def test_schema_retry_deadline_propagates_timeout_and_waits_for_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    timed_bounds = MCP_TASK.binding.bounds.model_copy(update={"timeout_seconds": 0.03})
+    timed_task = MCP_TASK.model_copy(
+        update={
+            "binding": MCP_TASK.binding.model_copy(update={"bounds": timed_bounds}),
+            "acceptance_spec": MCP_TASK.acceptance_spec.model_copy(update={"bounds": timed_bounds}),
+        }
+    )
+
+    async def scenario() -> tuple[Any, Any, float, list[float]]:
+        observed_timeouts: list[float] = []
+        cleanup_finished = False
+
+        async def fake_loop(**kwargs: Any):
+            _observe_route_evidence(kwargs["tool_result_observer"])
+            malformed = "commentary " + json.dumps(_answer())
+            return _response(malformed), object(), []
+
+        async def bounded_retry(**kwargs: Any) -> ModelResponse:
+            nonlocal cleanup_finished
+            observed_timeouts.append(kwargs["request_timeout_seconds"])
+            try:
+                await asyncio.sleep(60)
+            except asyncio.CancelledError:
+                await asyncio.sleep(0.01)
+                cleanup_finished = True
+                raise
+
+        monkeypatch.setattr(model_runtime, "_run_openai_compat_mcp_loop", fake_loop)
+        started = asyncio.get_running_loop().time()
+        outcome, record = await run_mcp_model_task_v2(
+            task=timed_task,
+            oracle=MCP_ORACLE,
+            resolver=MCP_RESOLVER,
+            profile=PROFILE,
+            bundle=MCPServerBundle(tools=[]),
+            model="openai-compat/test",
+            model_base_url=None,
+            tool_loop=MCPToolLoop.NATIVE_OPENAI_COMPATIBLE,
+            max_steps=4,
+            transport=bounded_retry,
+        )
+        elapsed = asyncio.get_running_loop().time() - started
+        return outcome, record, elapsed, observed_timeouts, cleanup_finished
+
+    outcome, record, elapsed, observed_timeouts, cleanup_finished = asyncio.run(scenario())
+
+    assert elapsed < 0.15
+    assert observed_timeouts and 0.0 < observed_timeouts[0] <= 0.03
+    assert cleanup_finished is True
+    assert outcome.finalization.phase is FinalizationPhase.TASK_TIMEOUT
+    assert outcome.sample.outcome is SampleOutcomeCode.TASK_TIMEOUT
+    assert outcome.sample.reasoning_correct is None
+    assert record.mcp_finalization is not None
+    assert record.mcp_finalization["schema_retry_count"] == 0
+
+
+def test_mcp_json_schema_retry_preserves_transcript_and_disables_tools(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loop_arguments: dict[str, Any] = {}
+    retry_arguments: dict[str, Any] = {}
+
+    async def fake_loop(**kwargs: Any):
+        loop_arguments.update(kwargs)
+        _observe_route_evidence(kwargs["tool_result_observer"])
+        malformed = "commentary " + json.dumps(_answer())
+        return (
+            _response(malformed),
+            object(),
+            [
+                {"role": "system", "content": "authoritative"},
+                {"role": "user", "content": MCP_TASK.question},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "id": "private-message-id",
+                    "metadata": {"private": True},
+                    "tool_calls": [
+                        {
+                            "id": "call-1",
+                            "type": "function",
+                            "function": "cypher_query",
+                            "arguments": {"info_type": "run"},
+                        }
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "call-1",
+                    "content": "claim-bound-result",
+                },
+                {"role": "assistant", "content": malformed},
+            ],
+        )
+
+    async def retry_transport(**kwargs: Any) -> ModelResponse:
+        retry_arguments.update(kwargs)
+        return _response(json.dumps(_answer()))
+
+    monkeypatch.setattr(model_runtime, "_run_openai_compat_mcp_loop", fake_loop)
+    outcome, _record = asyncio.run(
+        run_mcp_model_task_v2(
+            task=MCP_TASK,
+            oracle=MCP_ORACLE,
+            resolver=MCP_RESOLVER,
+            profile=PROFILE,
+            bundle=MCPServerBundle(tools=[]),
+            model="openai-compat/test",
+            model_base_url=None,
+            tool_loop=MCPToolLoop.NATIVE_OPENAI_COMPATIBLE,
+            max_steps=4,
+            structured_output_mode="json_schema",
+            transport=retry_transport,
+        )
+    )
+
+    expected_schema = {
+        "name": "ori_mcp_submission",
+        "strict": True,
+        "schema": MCP_TASK.answer_schema,
+    }
+    assert loop_arguments["finalization_schema"] == expected_schema
+    assert retry_arguments["structured_output_schema"] == expected_schema
+    assert retry_arguments["messages"][1]["role"] == "assistant"
+    assert set(retry_arguments["messages"][1]) == {"role", "content", "tool_calls"}
+    assert retry_arguments["messages"][1]["tool_calls"][0]["function"] == {
+        "name": "cypher_query",
+        "arguments": '{"info_type":"run"}',
+    }
+    assert retry_arguments["messages"][2]["role"] == "tool"
+    assert retry_arguments["messages"][2]["content"] == "claim-bound-result"
+    assert outcome.sample.reasoning_correct is True
 
 
 def test_certified_mcp_loop_suppresses_contradictory_discovered_server_prompt(
@@ -3502,7 +3994,7 @@ def test_unknown_final_identity_uses_successful_cypher_receipt_for_classificatio
         }
 
 
-def test_schema_only_retry_uses_schema_and_normalization_boundary(
+def test_schema_only_retry_rejects_facts_absent_from_malformed_output(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     retry_calls: list[dict[str, Any]] = []
@@ -3537,12 +4029,15 @@ def test_schema_only_retry_uses_schema_and_normalization_boundary(
 
     assert len(retry_calls) == 1
     assert outcome.sample.execution_class is ExecutionClass.MODEL_FAILURE
-    assert outcome.sample.reasoning_correct is False
+    assert outcome.sample.outcome is SampleOutcomeCode.OUTPUT_INVALID
+    assert outcome.sample.reasoning_correct is None
+    assert outcome.sample.output_compliant is False
+    assert outcome.sample.detail == "SCHEMA_RETRY_ADDED_NEW_FACTS"
     assert record.mcp_finalization is not None
     assert record.mcp_finalization["schema_retry_count"] == 1
 
 
-def test_schema_retry_provider_failure_is_retryable_infrastructure(
+def test_schema_retry_untyped_provider_failure_fails_closed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def fake_loop(**kwargs: Any):
@@ -3577,12 +4072,12 @@ def test_schema_retry_provider_failure_is_retryable_infrastructure(
     assert outcome.sample.reasoning_correct is None
     assert outcome.sample.outcome is SampleOutcomeCode.INFRA_ERROR
     assert record.provider_metrics["infra_scope"] == "provider"
-    assert record.provider_metrics["infra_error_subtype"] == "PROVIDER_ERROR"
-    assert record.provider_metrics["infra_retryable"] is True
+    assert record.provider_metrics["infra_error_subtype"] == "PROVIDER_UNTYPED"
+    assert record.provider_metrics["infra_retryable"] is False
     assert campaign_runner._infrastructure_retry_policy(
         outcome.sample,
         record,
-    ) == ("provider", True)
+    ) == ("provider", False)
 
 
 def test_schema_retry_provider_auth_failure_is_not_retryable(
@@ -3597,6 +4092,11 @@ def test_schema_retry_provider_auth_failure_is_not_retryable(
         return _response(
             "",
             error="Error code: 401 - invalid_api_key",
+            provider_metrics={
+                "infra_scope": "provider",
+                "infra_error_subtype": "PROVIDER_AUTH",
+                "infra_retryable": False,
+            },
         )
 
     monkeypatch.setattr(
@@ -3901,7 +4401,7 @@ def test_schema_retry_cancellation_carries_initial_attempt(
     assert cancellation.provider.mcp_tool_receipts
 
 
-def test_loop_exhaustion_cannot_use_schema_retry_as_a_fresh_solver_turn(
+def test_loop_exhaustion_uses_one_transcript_preserving_schema_retry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     retry_calls: list[dict[str, Any]] = []
@@ -3934,37 +4434,56 @@ def test_loop_exhaustion_cannot_use_schema_retry_as_a_fresh_solver_turn(
         )
     )
 
-    assert retry_calls == []
+    assert len(retry_calls) == 1
     assert outcome.sample.execution_class is ExecutionClass.MODEL_FAILURE
     assert outcome.sample.outcome is SampleOutcomeCode.OUTPUT_INVALID
+    assert outcome.sample.detail == "SCHEMA_RETRY_ADDED_NEW_FACTS"
+
+
+def test_mcp_output_parser_rejects_surrounding_commentary() -> None:
+    with pytest.raises(V2ModelRuntimeError, match="one JSON object"):
+        model_runtime._extract_json_object('commentary {"count": 1} after')
+
+
+def test_mcp_output_parser_normalizes_exactly_one_json_fence() -> None:
+    parsed = model_runtime._parse_json_object('```json\n{"count": 1}\n```')
+    assert parsed.payload == {"count": 1}
+    assert parsed.raw_protocol_compliant is False
+    assert parsed.format_normalized is True
+
+
+@pytest.mark.parametrize("constant", ("NaN", "Infinity", "-Infinity"))
+def test_mcp_output_parser_rejects_nonfinite_json_numbers(constant: str) -> None:
+    with pytest.raises(V2ModelRuntimeError, match="non-finite"):
+        model_runtime._parse_json_object(f'{{"count": {constant}}}')
 
 
 @pytest.mark.parametrize(
     "raw",
     (
-        'commentary {"count": 1} after',
-        '```json\n{"count": 1}\n```',
+        '```\n{"count": 1}\n```',
+        '```javascript\n{"count": 1}\n```',
+        '```json\n{"count": 1}\n``` trailing',
+        '```json\n{"count": 1}\n```\n```json\n{"count": 2}\n```',
+        '{"count": 1} {"count": 2}',
+        '[{"count": 1}]',
+        "1",
+        '{"count":',
     ),
 )
-def test_mcp_output_parser_requires_exact_json_object(raw: str) -> None:
-    with pytest.raises(V2ModelRuntimeError, match="exactly one JSON object"):
-        model_runtime._extract_json_object(raw)
+def test_mcp_output_parser_rejects_every_other_salvage_shape(raw: str) -> None:
+    with pytest.raises(V2ModelRuntimeError):
+        model_runtime._parse_json_object(raw)
 
 
 def test_whole_task_timeout_is_model_failure_and_preserves_partial_audit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    timed_bounds = MCP_TASK.binding.bounds.model_copy(
-        update={"timeout_seconds": 0.01}
-    )
+    timed_bounds = MCP_TASK.binding.bounds.model_copy(update={"timeout_seconds": 0.01})
     timed_task = MCP_TASK.model_copy(
         update={
-            "binding": MCP_TASK.binding.model_copy(
-                update={"bounds": timed_bounds}
-            ),
-            "acceptance_spec": MCP_TASK.acceptance_spec.model_copy(
-                update={"bounds": timed_bounds}
-            ),
+            "binding": MCP_TASK.binding.model_copy(update={"bounds": timed_bounds}),
+            "acceptance_spec": MCP_TASK.acceptance_spec.model_copy(update={"bounds": timed_bounds}),
         }
     )
 
@@ -4099,14 +4618,10 @@ def test_unknown_complete_response_shape_fails_closed_without_crashing() -> None
 def test_transcript_bound_overrun_invalidates_prior_useful_evidence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    transcript_bounds = MCP_TASK.binding.bounds.model_copy(
-        update={"max_transcript_bytes": 1}
-    )
+    transcript_bounds = MCP_TASK.binding.bounds.model_copy(update={"max_transcript_bytes": 1})
     bounded_task = MCP_TASK.model_copy(
         update={
-            "binding": MCP_TASK.binding.model_copy(
-                update={"bounds": transcript_bounds}
-            ),
+            "binding": MCP_TASK.binding.model_copy(update={"bounds": transcript_bounds}),
             "acceptance_spec": MCP_TASK.acceptance_spec.model_copy(
                 update={"bounds": transcript_bounds}
             ),
@@ -4168,6 +4683,10 @@ def test_v2_model_runtime_has_no_legacy_grader_or_template_dispatch() -> None:
     assert 'run_dir / "direct-query-deny-cache' not in source
     assert "progress=progress" in source
     assert "_emit_progress" in source
+    assert "MCPLauncherConfig.local_checkout(resolved.mcp_dir)" in source
+    assert campaign_runner._RUNNER_IMPLEMENTATION_SOURCES["mcp_launcher"].name == (
+        "mcp_launcher.py"
+    )
 
 
 def test_v2_campaign_progress_is_model_blind_and_non_fatal() -> None:
@@ -4195,7 +4714,7 @@ def test_v2_campaign_progress_is_model_blind_and_non_fatal() -> None:
         oracle_fingerprint=DIRECT_ORACLE.oracle_fingerprint,
         execution_class=ExecutionClass.MODEL_FAILURE,
         outcome=SampleOutcomeCode.QUERY_TIMEOUT,
-        reasoning_correct=False,
+        output_compliant=True,
         detail="query rejected as too complex",
     )
     provider = model_runtime._record(
@@ -4218,9 +4737,9 @@ def test_v2_campaign_progress_is_model_blind_and_non_fatal() -> None:
     )
 
     assert "QUERY_TIMEOUT" in line
-    assert "score=0.0" in line
+    assert "score=n/a" in line
     assert "elapsed=12.5s" in line
-    assert "running_correct=0/1" in line
+    assert "running_correct=0/0" in line
     assert DIRECT_ORACLE.oracle_id not in line
     assert "reference_cypher" not in line
 
@@ -4315,7 +4834,7 @@ def test_v2_run_model_emits_task_retry_completion_and_resume_progress(
         oracle_fingerprint=DIRECT_ORACLE.oracle_fingerprint,
         execution_class=ExecutionClass.MODEL_FAILURE,
         outcome=SampleOutcomeCode.QUERY_TIMEOUT,
-        reasoning_correct=False,
+        output_compliant=True,
         detail="query too complex",
     )
     provider = model_runtime._record(
@@ -4380,6 +4899,7 @@ def test_v2_run_model_emits_task_retry_completion_and_resume_progress(
     model = SimpleNamespace(
         name="gpt-test",
         provider="codex",
+        model="gpt-test",
         requested_model="codex/gpt-test",
         model_base_url=None,
         options={},
@@ -4438,7 +4958,7 @@ def test_v2_run_model_emits_task_retry_completion_and_resume_progress(
     assert any("[1/1]" in message and DIRECT_TASK.task_id in message for message in progress)
     assert any("INFRA_ERROR" in message and "retrying" in message for message in progress)
     assert any(
-        "QUERY_TIMEOUT" in message and "running_correct=0/1" in message for message in progress
+        "QUERY_TIMEOUT" in message and "running_correct=0/0" in message for message in progress
     )
     assert any("run 1/1 complete" in message for message in progress)
 
@@ -4467,14 +4987,24 @@ def test_v2_run_model_emits_task_retry_completion_and_resume_progress(
     state_holder["value"] = SimpleNamespace(
         checkpoint=SimpleNamespace(results=(infrastructure,)),
         attempts=(
-            SimpleNamespace(task_id=DIRECT_TASK.task_id, attempt=1),
-            SimpleNamespace(task_id=DIRECT_TASK.task_id, attempt=2),
+            SimpleNamespace(
+                task_id=DIRECT_TASK.task_id,
+                attempt=1,
+                sample=infrastructure,
+                provider=provider,
+            ),
+            SimpleNamespace(
+                task_id=DIRECT_TASK.task_id,
+                attempt=2,
+                sample=infrastructure,
+                provider=provider,
+            ),
         ),
     )
     resumed_infrastructure: list[str] = []
     resumed_attempt_numbers: list[int] = []
 
-    def resumed_attempt(task_id, number, sample, provider):
+    def resumed_attempt(task_id, number, sample, provider, **_kwargs):
         resumed_attempt_numbers.append(number)
         return SimpleNamespace(
             task_id=task_id,
@@ -4506,6 +5036,46 @@ def test_v2_run_model_emits_task_retry_completion_and_resume_progress(
         for message in resumed_infrastructure
     )
 
+    nonretryable_provider = provider.model_copy(
+        update={
+            "provider_metrics": {
+                "infra_scope": "provider",
+                "infra_error_subtype": "PROVIDER_AUTH",
+                "infra_retryable": False,
+            }
+        }
+    )
+    state_holder["value"] = SimpleNamespace(
+        checkpoint=SimpleNamespace(results=(infrastructure,)),
+        attempts=(
+            SimpleNamespace(
+                task_id=DIRECT_TASK.task_id,
+                attempt=1,
+                sample=infrastructure,
+                provider=nonretryable_provider,
+            ),
+        ),
+    )
+    resumed_nonretryable: list[str] = []
+    _provenance, nonretryable_results = asyncio.run(
+        campaign_runner._run_model(
+            resolved=resolved,
+            prepared=prepared,
+            model=model,
+            run_index=1,
+            bhce=HealthyBHCE(),
+            coordinator=coordinator,
+            loop=None,
+            runs_total=1,
+            progress=resumed_nonretryable.append,
+        )
+    )
+
+    assert nonretryable_results == (infrastructure,)
+    assert resumed_attempt_numbers == []
+    assert any("1 resumed" in message for message in resumed_nonretryable)
+    assert not any("[1/1]" in message for message in resumed_nonretryable)
+
     async def exploding_direct_run(**_kwargs: Any):
         raise AttributeError("future adapter schema drift")
 
@@ -4536,6 +5106,940 @@ def test_v2_run_model_emits_task_retry_completion_and_resume_progress(
     assert contained_results[0].reasoning_correct is None
     assert contained_results[0].detail == ("AttributeError: future adapter schema drift")
     assert any("HARNESS_ERROR" in message for message in contained_progress)
+
+
+def test_v2_run_model_runs_ordered_multi_round_recovery_and_removes_terminal_tasks(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    first_task = DIRECT_TASK
+    second_task = DIRECT_TASK.model_copy(
+        update={"task_id": "simple.direct.second-route@2", "task_fingerprint": "b" * 64}
+    )
+    third_task = DIRECT_TASK.model_copy(
+        update={"task_id": "simple.direct.third-route@2", "task_fingerprint": "c" * 64}
+    )
+    call_order: list[str] = []
+    task_calls: dict[str, int] = {}
+    captured_attempts: list[campaign_runner.ProviderAttemptV2] = []
+    persisted_schedulers: list[campaign_runner.RetrySchedulerStateV2] = []
+
+    async def fake_direct_run(**kwargs: Any):
+        task = kwargs["task"]
+        call_order.append(task.task_id)
+        task_calls[task.task_id] = task_calls.get(task.task_id, 0) + 1
+        call = task_calls[task.task_id]
+        retryable = (
+            (task.task_id == first_task.task_id and call <= 3)
+            or task.task_id == third_task.task_id
+            or (task.task_id == second_task.task_id and call <= 2)
+        )
+        nonretryable_infrastructure = task.task_id == second_task.task_id and call == 3
+        infrastructure = retryable or nonretryable_infrastructure
+        evidence = EvidenceIR(task_id=task.task_id, raw_digest="d" * 64)
+        verdict = Verdict(
+            task_id=task.task_id,
+            status=VerdictStatus.CORRECT,
+            reason="synthetic terminal success",
+            task_fingerprint=task.task_fingerprint,
+            oracle_fingerprint=DIRECT_ORACLE.oracle_fingerprint,
+            evidence_fingerprint="d" * 64,
+            comparator_fingerprint="e" * 64,
+        )
+        sample = SampleResult(
+            task_id=task.task_id,
+            task_fingerprint=task.task_fingerprint,
+            oracle_fingerprint=DIRECT_ORACLE.oracle_fingerprint,
+            execution_class=(
+                ExecutionClass.INFRA_FAILURE if infrastructure else ExecutionClass.SUCCESS
+            ),
+            outcome=(
+                SampleOutcomeCode.INFRA_ERROR if infrastructure else SampleOutcomeCode.COMPLETED
+            ),
+            reasoning_correct=True if not infrastructure else None,
+            output_compliant=True if not infrastructure else None,
+            evidence=evidence if not infrastructure else None,
+            verdict=verdict if not infrastructure else None,
+            detail="provider unavailable" if infrastructure else None,
+        )
+        provider = model_runtime._record(
+            task=task,
+            model="codex/gpt-test",
+            surface="direct",
+            response=replace(
+                _response("{}"),
+                provider_metrics=(
+                    {
+                        "infra_scope": "provider",
+                        "infra_retryable": retryable,
+                    }
+                    if infrastructure
+                    else {}
+                ),
+            ),
+        )
+        return None, sample, provider
+
+    class HealthyBHCE:
+        async def wait_until_healthy(self, **_kwargs: Any):
+            return SimpleNamespace(ok=True)
+
+    class Coordinator:
+        circuit_open = False
+
+        def close_circuit(self) -> None:
+            self.circuit_open = False
+
+    prepared = campaign_runner.PreparedTrack(
+        track=Track.DIRECT,
+        pair=SimpleNamespace(
+            public=SimpleNamespace(tasks=(first_task, second_task, third_task)),
+            private=SimpleNamespace(identity_catalog=DIRECT_ORACLE.resolved_roles),
+        ),
+        profile=SimpleNamespace(),
+        release=SimpleNamespace(
+            entries=tuple(
+                SimpleNamespace(task_id=task.task_id)
+                for task in (first_task, second_task, third_task)
+            )
+        ),
+        live=SimpleNamespace(),
+        certifications={},
+    )
+    resolved = SimpleNamespace(
+        output_dir=tmp_path,
+        config=SimpleNamespace(
+            defaults=SimpleNamespace(
+                max_infra_retries=3,
+                infra_retry=SimpleNamespace(
+                    immediate_retries=1,
+                    deferred_cooldown_seconds=0.0,
+                ),
+                model_base_url=None,
+                reasoning_effort=None,
+                health=SimpleNamespace(timeout_seconds=1.0, poll_interval=0.01),
+            )
+        ),
+    )
+    model = SimpleNamespace(
+        name="gpt-test",
+        provider="codex",
+        model="gpt-test",
+        requested_model="codex/gpt-test",
+        model_base_url=None,
+        options={},
+    )
+    original_attempt = campaign_runner._attempt
+
+    def capture_attempt(*args: Any, **kwargs: Any):
+        attempt = original_attempt(*args, **kwargs)
+        captured_attempts.append(attempt)
+        return attempt
+
+    monkeypatch.setattr(
+        campaign_runner,
+        "_provenance",
+        lambda **_kwargs: SimpleNamespace(run_identity=object()),
+    )
+    monkeypatch.setattr(campaign_runner, "_guard_run_dir", lambda *_args: None)
+    monkeypatch.setattr(campaign_runner, "_load_state", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        campaign_runner,
+        "build_checkpoint",
+        lambda *_args, results, **_kwargs: SimpleNamespace(results=tuple(results)),
+    )
+    monkeypatch.setattr(campaign_runner, "_state", lambda **kwargs: kwargs["scheduler"])
+    monkeypatch.setattr(
+        campaign_runner,
+        "_write_model",
+        lambda _path, scheduler: (
+            persisted_schedulers.append(scheduler)
+            if isinstance(scheduler, campaign_runner.RetrySchedulerStateV2)
+            else None
+        ),
+    )
+    monkeypatch.setattr(campaign_runner, "_attempt", capture_attempt)
+    monkeypatch.setattr(
+        campaign_runner,
+        "OracleRegistry",
+        lambda _private: SimpleNamespace(for_task=lambda _task_id: DIRECT_ORACLE),
+    )
+    monkeypatch.setattr(campaign_runner, "run_direct_model_task_v2", fake_direct_run)
+    progress: list[str] = []
+
+    _provenance, results = asyncio.run(
+        campaign_runner._run_model(
+            resolved=resolved,
+            prepared=prepared,
+            model=model,
+            run_index=1,
+            bhce=HealthyBHCE(),
+            coordinator=Coordinator(),
+            loop=None,
+            runs_total=1,
+            progress=progress.append,
+        )
+    )
+
+    assert call_order == [
+        first_task.task_id,
+        first_task.task_id,
+        second_task.task_id,
+        second_task.task_id,
+        third_task.task_id,
+        third_task.task_id,
+        first_task.task_id,
+        second_task.task_id,
+        third_task.task_id,
+        first_task.task_id,
+        third_task.task_id,
+    ]
+    assert [attempt.scheduler_phase for attempt in captured_attempts] == [
+        "initial",
+        "immediate_retry",
+        "initial",
+        "immediate_retry",
+        "initial",
+        "immediate_retry",
+        "deferred_retry",
+        "deferred_retry",
+        "deferred_retry",
+        "deferred_retry",
+        "deferred_retry",
+    ]
+    assert [attempt.recovery_round for attempt in captured_attempts[-5:]] == [1, 1, 1, 2, 2]
+    assert [result.task_id for result in results] == [
+        first_task.task_id,
+        second_task.task_id,
+        third_task.task_id,
+    ]
+    assert results[0].outcome is SampleOutcomeCode.COMPLETED
+    assert results[1].outcome is SampleOutcomeCode.INFRA_ERROR
+    assert results[1].execution_class is ExecutionClass.INFRA_FAILURE
+    assert results[2].outcome is SampleOutcomeCode.INFRA_ERROR
+    assert [state.phase for state in persisted_schedulers[-3:]] == [
+        "primary",
+        "primary",
+        "complete",
+    ]
+    metrics = campaign_runner._run_operational_metrics(
+        SimpleNamespace(
+            attempts=tuple(captured_attempts),
+            checkpoint=SimpleNamespace(
+                results=results,
+                run_identity=SimpleNamespace(tool_loop=None),
+            ),
+        )
+    )
+    assert metrics.attempts_total == 11
+    assert metrics.retries_total == 8
+    assert metrics.immediate_retries_total == 3
+    assert metrics.deferred_retries_total == 5
+    assert metrics.recovered_infrastructure_tasks == 1
+    assert metrics.exhausted_infrastructure_tasks == 2
+    assert metrics.completed_recovery_rounds == 2
+    assert any("recovery round 1" in message for message in progress)
+    assert any("recovery round 2" in message for message in progress)
+
+
+def test_resumed_deferred_bloodhound_retry_rechecks_health_before_provider(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    infrastructure = SampleResult(
+        task_id=DIRECT_TASK.task_id,
+        task_fingerprint=DIRECT_TASK.task_fingerprint,
+        oracle_fingerprint=DIRECT_ORACLE.oracle_fingerprint,
+        execution_class=ExecutionClass.INFRA_FAILURE,
+        outcome=SampleOutcomeCode.INFRA_ERROR,
+        detail="BloodHound transport unavailable",
+    )
+    provider = model_runtime._record(
+        task=DIRECT_TASK,
+        model="codex/gpt-test",
+        surface="direct",
+        response=replace(
+            _response("{}"),
+            provider_metrics={
+                "infra_scope": "bloodhound",
+                "infra_retryable": True,
+            },
+        ),
+    )
+    prior_attempt = SimpleNamespace(
+        task_id=DIRECT_TASK.task_id,
+        attempt=1,
+        sample=infrastructure,
+        provider=provider,
+    )
+    loaded_state = SimpleNamespace(
+        checkpoint=SimpleNamespace(results=(infrastructure,)),
+        attempts=(prior_attempt,),
+        scheduler=campaign_runner.RetrySchedulerStateV2(
+            phase="deferred_retry",
+            recovery_round=1,
+            pending_task_ids=(DIRECT_TASK.task_id,),
+        ),
+    )
+    prepared = campaign_runner.PreparedTrack(
+        track=Track.DIRECT,
+        pair=SimpleNamespace(
+            public=SimpleNamespace(tasks=(DIRECT_TASK,)),
+            private=SimpleNamespace(identity_catalog=DIRECT_ORACLE.resolved_roles),
+        ),
+        profile=SimpleNamespace(),
+        release=SimpleNamespace(entries=(SimpleNamespace(task_id=DIRECT_TASK.task_id),)),
+        live=SimpleNamespace(),
+        certifications={},
+    )
+    resolved = SimpleNamespace(
+        output_dir=tmp_path,
+        config=SimpleNamespace(
+            defaults=SimpleNamespace(
+                max_infra_retries=1,
+                infra_retry=SimpleNamespace(
+                    immediate_retries=1,
+                    deferred_cooldown_seconds=0.0,
+                ),
+                model_base_url=None,
+                reasoning_effort=None,
+                health=SimpleNamespace(timeout_seconds=1.0, poll_interval=0.01),
+            )
+        ),
+    )
+    model = SimpleNamespace(
+        name="gpt-test",
+        provider="codex",
+        model="gpt-test",
+        requested_model="codex/gpt-test",
+        model_base_url=None,
+        options={},
+    )
+
+    class UnhealthyBHCE:
+        calls = 0
+
+        async def wait_until_healthy(self, **_kwargs: Any):
+            self.calls += 1
+            return SimpleNamespace(ok=False)
+
+    class FreshCoordinator:
+        circuit_open = False
+        closed = 0
+
+        def close_circuit(self) -> None:
+            self.closed += 1
+
+    provider_calls = 0
+
+    async def provider_must_not_run(**_kwargs: Any):
+        nonlocal provider_calls
+        provider_calls += 1
+        raise AssertionError("provider must not run before resumed BloodHound health passes")
+
+    captured_attempts: list[campaign_runner.ProviderAttemptV2] = []
+    original_attempt = campaign_runner._attempt
+
+    def capture_attempt(*args: Any, **kwargs: Any):
+        attempt = original_attempt(*args, **kwargs)
+        captured_attempts.append(attempt)
+        return attempt
+
+    monkeypatch.setattr(
+        campaign_runner,
+        "_provenance",
+        lambda **_kwargs: SimpleNamespace(run_identity=object()),
+    )
+    monkeypatch.setattr(campaign_runner, "_guard_run_dir", lambda *_args: None)
+    monkeypatch.setattr(campaign_runner, "_load_state", lambda *_args, **_kwargs: loaded_state)
+    monkeypatch.setattr(
+        campaign_runner,
+        "build_checkpoint",
+        lambda *_args, results, **_kwargs: SimpleNamespace(results=tuple(results)),
+    )
+    monkeypatch.setattr(campaign_runner, "_state", lambda **kwargs: kwargs["scheduler"])
+    monkeypatch.setattr(campaign_runner, "_write_model", lambda *_args: None)
+    monkeypatch.setattr(campaign_runner, "_attempt", capture_attempt)
+    monkeypatch.setattr(
+        campaign_runner,
+        "OracleRegistry",
+        lambda _private: SimpleNamespace(for_task=lambda _task_id: DIRECT_ORACLE),
+    )
+    monkeypatch.setattr(campaign_runner, "run_direct_model_task_v2", provider_must_not_run)
+
+    bhce = UnhealthyBHCE()
+    coordinator = FreshCoordinator()
+    _provenance, results = asyncio.run(
+        campaign_runner._run_model(
+            resolved=resolved,
+            prepared=prepared,
+            model=model,
+            run_index=1,
+            bhce=bhce,
+            coordinator=coordinator,
+            loop=None,
+            runs_total=1,
+        )
+    )
+
+    assert bhce.calls == 1
+    assert provider_calls == 0
+    assert coordinator.closed == 0
+    assert len(captured_attempts) == 1
+    assert captured_attempts[0].attempt == 2
+    assert captured_attempts[0].scheduler_phase == "deferred_retry"
+    assert captured_attempts[0].recovery_round == 1
+    assert results[0].execution_class is ExecutionClass.UNEXECUTED
+    assert results[0].outcome is SampleOutcomeCode.CIRCUIT_OPEN
+
+
+def test_interrupted_cooldown_and_deferred_attempt_resume_without_resetting_budget_or_round(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    infrastructure = SampleResult(
+        task_id=DIRECT_TASK.task_id,
+        task_fingerprint=DIRECT_TASK.task_fingerprint,
+        oracle_fingerprint=DIRECT_ORACLE.oracle_fingerprint,
+        execution_class=ExecutionClass.INFRA_FAILURE,
+        outcome=SampleOutcomeCode.INFRA_ERROR,
+        detail="provider unavailable",
+    )
+    interrupted = SampleResult(
+        task_id=DIRECT_TASK.task_id,
+        task_fingerprint=DIRECT_TASK.task_fingerprint,
+        oracle_fingerprint=DIRECT_ORACLE.oracle_fingerprint,
+        execution_class=ExecutionClass.UNEXECUTED,
+        outcome=SampleOutcomeCode.INTERRUPTED,
+        detail="operator interruption",
+    )
+    evidence = EvidenceIR(task_id=DIRECT_TASK.task_id, raw_digest="d" * 64)
+    verdict = Verdict(
+        task_id=DIRECT_TASK.task_id,
+        status=VerdictStatus.CORRECT,
+        reason="synthetic terminal success",
+        task_fingerprint=DIRECT_TASK.task_fingerprint,
+        oracle_fingerprint=DIRECT_ORACLE.oracle_fingerprint,
+        evidence_fingerprint="d" * 64,
+        comparator_fingerprint="e" * 64,
+    )
+    completed = SampleResult(
+        task_id=DIRECT_TASK.task_id,
+        task_fingerprint=DIRECT_TASK.task_fingerprint,
+        oracle_fingerprint=DIRECT_ORACLE.oracle_fingerprint,
+        execution_class=ExecutionClass.SUCCESS,
+        outcome=SampleOutcomeCode.COMPLETED,
+        reasoning_correct=True,
+        output_compliant=True,
+        evidence=evidence,
+        verdict=verdict,
+    )
+
+    def provider_for(sample: SampleResult, metrics: dict[str, object]):
+        return model_runtime._record(
+            task=DIRECT_TASK,
+            model="codex/gpt-test",
+            surface="direct",
+            response=replace(_response("{}"), provider_metrics=metrics),
+        )
+
+    infrastructure_provider = provider_for(
+        infrastructure,
+        {"infra_scope": "bloodhound", "infra_retryable": True},
+    )
+    interrupted_provider = provider_for(
+        interrupted,
+        {
+            "infra_scope": "operator",
+            "infra_error_subtype": "INTERRUPTED",
+            "infra_retryable": False,
+        },
+    )
+    completed_provider = provider_for(completed, {})
+    prior_attempt = campaign_runner._attempt(
+        DIRECT_TASK.task_id,
+        1,
+        infrastructure,
+        infrastructure_provider,
+    )
+    not_before = "2026-09-04T03:05:00+00:00"
+    state_holder = {
+        "value": SimpleNamespace(
+            checkpoint=SimpleNamespace(results=(infrastructure,)),
+            attempts=(prior_attempt,),
+            scheduler=campaign_runner.RetrySchedulerStateV2(
+                phase="deferred_cooldown",
+                recovery_round=1,
+                pending_task_ids=(DIRECT_TASK.task_id,),
+                deferred_not_before_utc=not_before,
+            ),
+        )
+    }
+    prepared = campaign_runner.PreparedTrack(
+        track=Track.DIRECT,
+        pair=SimpleNamespace(
+            public=SimpleNamespace(tasks=(DIRECT_TASK,)),
+            private=SimpleNamespace(identity_catalog=DIRECT_ORACLE.resolved_roles),
+        ),
+        profile=SimpleNamespace(),
+        release=SimpleNamespace(entries=(SimpleNamespace(task_id=DIRECT_TASK.task_id),)),
+        live=SimpleNamespace(),
+        certifications={},
+    )
+    resolved = SimpleNamespace(
+        output_dir=tmp_path,
+        config=SimpleNamespace(
+            defaults=SimpleNamespace(
+                max_infra_retries=2,
+                infra_retry=SimpleNamespace(
+                    immediate_retries=1,
+                    deferred_cooldown_seconds=0.0,
+                ),
+                model_base_url=None,
+                reasoning_effort=None,
+                health=SimpleNamespace(timeout_seconds=1.0, poll_interval=0.01),
+            )
+        ),
+    )
+    model = SimpleNamespace(
+        name="gpt-test",
+        provider="codex",
+        model="gpt-test",
+        requested_model="codex/gpt-test",
+        model_base_url=None,
+        options={},
+    )
+    calls = 0
+    sleep_delays: list[float] = []
+    remaining_delays = iter((120.0, 45.0))
+
+    class HealthyBHCE:
+        calls = 0
+
+        async def wait_until_healthy(self, **_kwargs: Any):
+            self.calls += 1
+            return SimpleNamespace(ok=True)
+
+    class FreshCoordinator:
+        circuit_open = False
+        closed = 0
+
+        def close_circuit(self) -> None:
+            self.closed += 1
+
+    async def interrupt_then_finish_cooldown(delay: float) -> None:
+        sleep_delays.append(delay)
+        if len(sleep_delays) == 1:
+            raise asyncio.CancelledError
+
+    async def interrupted_then_completed(**_kwargs: Any):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise V2ModelTaskCancelled(interrupted, interrupted_provider)
+        return None, completed, completed_provider
+
+    monkeypatch.setattr(
+        campaign_runner,
+        "_provenance",
+        lambda **_kwargs: SimpleNamespace(run_identity=object()),
+    )
+    monkeypatch.setattr(campaign_runner, "_guard_run_dir", lambda *_args: None)
+    monkeypatch.setattr(
+        campaign_runner,
+        "_load_state",
+        lambda *_args, **_kwargs: state_holder["value"],
+    )
+    monkeypatch.setattr(
+        campaign_runner,
+        "build_checkpoint",
+        lambda *_args, results, **_kwargs: SimpleNamespace(results=tuple(results)),
+    )
+    monkeypatch.setattr(
+        campaign_runner,
+        "_state",
+        lambda *, checkpoint, attempts, scheduler, **_kwargs: SimpleNamespace(
+            checkpoint=checkpoint,
+            attempts=tuple(attempts),
+            scheduler=scheduler,
+        ),
+    )
+
+    def capture_state(path, value):
+        if path.name == campaign_runner.RUN_STATE_NAME:
+            state_holder["value"] = value
+
+    monkeypatch.setattr(campaign_runner, "_write_model", capture_state)
+    monkeypatch.setattr(
+        campaign_runner,
+        "OracleRegistry",
+        lambda _private: SimpleNamespace(for_task=lambda _task_id: DIRECT_ORACLE),
+    )
+    monkeypatch.setattr(
+        campaign_runner,
+        "run_direct_model_task_v2",
+        interrupted_then_completed,
+    )
+    monkeypatch.setattr(
+        campaign_runner,
+        "_remaining_cooldown_seconds",
+        lambda *_args, **_kwargs: next(remaining_delays),
+    )
+    monkeypatch.setattr(campaign_runner.asyncio, "sleep", interrupt_then_finish_cooldown)
+
+    bhce = HealthyBHCE()
+    coordinator = FreshCoordinator()
+    runner_args = {
+        "resolved": resolved,
+        "prepared": prepared,
+        "model": model,
+        "run_index": 1,
+        "bhce": bhce,
+        "coordinator": coordinator,
+        "loop": None,
+        "runs_total": 1,
+    }
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(campaign_runner._run_model(**runner_args))
+
+    cooldown_state = state_holder["value"]
+    assert calls == 0
+    assert sleep_delays == [120.0]
+    assert cooldown_state.scheduler.phase == "deferred_cooldown"
+    assert cooldown_state.scheduler.deferred_not_before_utc == not_before
+    assert [attempt.attempt for attempt in cooldown_state.attempts] == [1]
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(campaign_runner._run_model(**runner_args))
+
+    interrupted_state = state_holder["value"]
+    assert sleep_delays == [120.0, 45.0]
+    assert interrupted_state.scheduler.phase == "deferred_retry"
+    assert interrupted_state.scheduler.recovery_round == 1
+    assert interrupted_state.scheduler.pending_task_ids == (DIRECT_TASK.task_id,)
+    assert [attempt.attempt for attempt in interrupted_state.attempts] == [1, 2]
+    assert interrupted_state.attempts[-1].sample.outcome is SampleOutcomeCode.INTERRUPTED
+    assert bhce.calls == 1
+
+    _provenance, results = asyncio.run(campaign_runner._run_model(**runner_args))
+
+    completed_state = state_holder["value"]
+    assert calls == 2
+    assert [attempt.attempt for attempt in completed_state.attempts] == [1, 2, 3]
+    assert completed_state.attempts[-1].scheduler_phase == "deferred_retry"
+    assert completed_state.attempts[-1].recovery_round == 1
+    assert completed_state.scheduler.phase == "complete"
+    assert bhce.calls == 2
+    assert coordinator.closed == 2
+    assert results == (completed,)
+
+
+def test_interrupted_primary_attempt_resumes_with_monotonic_attempt_number(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    interrupted = SampleResult(
+        task_id=DIRECT_TASK.task_id,
+        task_fingerprint=DIRECT_TASK.task_fingerprint,
+        oracle_fingerprint=DIRECT_ORACLE.oracle_fingerprint,
+        execution_class=ExecutionClass.UNEXECUTED,
+        outcome=SampleOutcomeCode.INTERRUPTED,
+        detail="operator interruption",
+    )
+    evidence = EvidenceIR(task_id=DIRECT_TASK.task_id, raw_digest="d" * 64)
+    verdict = Verdict(
+        task_id=DIRECT_TASK.task_id,
+        status=VerdictStatus.CORRECT,
+        reason="synthetic terminal success",
+        task_fingerprint=DIRECT_TASK.task_fingerprint,
+        oracle_fingerprint=DIRECT_ORACLE.oracle_fingerprint,
+        evidence_fingerprint="d" * 64,
+        comparator_fingerprint="e" * 64,
+    )
+    completed = SampleResult(
+        task_id=DIRECT_TASK.task_id,
+        task_fingerprint=DIRECT_TASK.task_fingerprint,
+        oracle_fingerprint=DIRECT_ORACLE.oracle_fingerprint,
+        execution_class=ExecutionClass.SUCCESS,
+        outcome=SampleOutcomeCode.COMPLETED,
+        reasoning_correct=True,
+        output_compliant=True,
+        evidence=evidence,
+        verdict=verdict,
+    )
+    interrupted_provider = model_runtime._record(
+        task=DIRECT_TASK,
+        model="codex/gpt-test",
+        surface="direct",
+        response=replace(
+            _response("{}"),
+            provider_metrics={
+                "infra_scope": "operator",
+                "infra_error_subtype": "INTERRUPTED",
+                "infra_retryable": False,
+            },
+        ),
+    )
+    completed_provider = model_runtime._record(
+        task=DIRECT_TASK,
+        model="codex/gpt-test",
+        surface="direct",
+        response=_response("{}"),
+    )
+    state_holder: dict[str, Any] = {"value": None}
+    calls = 0
+
+    async def interrupted_then_completed(**_kwargs: Any):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise V2ModelTaskCancelled(interrupted, interrupted_provider)
+        return None, completed, completed_provider
+
+    prepared = campaign_runner.PreparedTrack(
+        track=Track.DIRECT,
+        pair=SimpleNamespace(
+            public=SimpleNamespace(tasks=(DIRECT_TASK,)),
+            private=SimpleNamespace(identity_catalog=DIRECT_ORACLE.resolved_roles),
+        ),
+        profile=SimpleNamespace(),
+        release=SimpleNamespace(entries=(SimpleNamespace(task_id=DIRECT_TASK.task_id),)),
+        live=SimpleNamespace(),
+        certifications={},
+    )
+    resolved = SimpleNamespace(
+        output_dir=tmp_path,
+        config=SimpleNamespace(
+            defaults=SimpleNamespace(
+                max_infra_retries=0,
+                infra_retry=SimpleNamespace(
+                    immediate_retries=0,
+                    deferred_cooldown_seconds=0.0,
+                ),
+                model_base_url=None,
+                reasoning_effort=None,
+                health=SimpleNamespace(timeout_seconds=1.0, poll_interval=0.01),
+            )
+        ),
+    )
+    model = SimpleNamespace(
+        name="gpt-test",
+        provider="codex",
+        model="gpt-test",
+        requested_model="codex/gpt-test",
+        model_base_url=None,
+        options={},
+    )
+    monkeypatch.setattr(
+        campaign_runner,
+        "_provenance",
+        lambda **_kwargs: SimpleNamespace(run_identity=object()),
+    )
+    monkeypatch.setattr(campaign_runner, "_guard_run_dir", lambda *_args: None)
+    monkeypatch.setattr(
+        campaign_runner,
+        "_load_state",
+        lambda *_args, **_kwargs: state_holder["value"],
+    )
+    monkeypatch.setattr(
+        campaign_runner,
+        "build_checkpoint",
+        lambda *_args, results, **_kwargs: SimpleNamespace(results=tuple(results)),
+    )
+    monkeypatch.setattr(
+        campaign_runner,
+        "_state",
+        lambda *, checkpoint, attempts, scheduler, **_kwargs: SimpleNamespace(
+            checkpoint=checkpoint,
+            attempts=tuple(attempts),
+            scheduler=scheduler,
+        ),
+    )
+
+    def capture_state(path, value):
+        if path.name == campaign_runner.RUN_STATE_NAME:
+            state_holder["value"] = value
+
+    monkeypatch.setattr(campaign_runner, "_write_model", capture_state)
+    monkeypatch.setattr(
+        campaign_runner,
+        "OracleRegistry",
+        lambda _private: SimpleNamespace(for_task=lambda _task_id: DIRECT_ORACLE),
+    )
+    monkeypatch.setattr(
+        campaign_runner,
+        "run_direct_model_task_v2",
+        interrupted_then_completed,
+    )
+    runner_args = {
+        "resolved": resolved,
+        "prepared": prepared,
+        "model": model,
+        "run_index": 1,
+        "bhce": SimpleNamespace(),
+        "coordinator": SimpleNamespace(circuit_open=False),
+        "loop": None,
+        "runs_total": 1,
+    }
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(campaign_runner._run_model(**runner_args))
+
+    interrupted_state = state_holder["value"]
+    assert interrupted_state.scheduler.phase == "primary"
+    assert [attempt.attempt for attempt in interrupted_state.attempts] == [1]
+    assert interrupted_state.attempts[0].scheduler_phase == "initial"
+
+    _provenance, results = asyncio.run(campaign_runner._run_model(**runner_args))
+
+    completed_state = state_holder["value"]
+    assert calls == 2
+    assert [attempt.attempt for attempt in completed_state.attempts] == [1, 2]
+    assert [attempt.scheduler_phase for attempt in completed_state.attempts] == [
+        "initial",
+        "initial",
+    ]
+    assert completed_state.scheduler.phase == "complete"
+    assert results == (completed,)
+
+
+def test_mcp_run_checks_open_circuit_before_provider(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    provider_calls = 0
+    captured_providers = []
+
+    async def fake_bundle(*_args: Any, **_kwargs: Any):
+        return SimpleNamespace()
+
+    async def fake_mcp_run(**_kwargs: Any):
+        nonlocal provider_calls
+        provider_calls += 1
+        raise AssertionError("provider must not run while BloodHound circuit is open")
+
+    class UnhealthyBHCE:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def wait_until_healthy(self, **_kwargs: Any):
+            self.calls += 1
+            return SimpleNamespace(ok=False)
+
+    class Coordinator:
+        def __init__(self) -> None:
+            self.circuit_open = True
+            self.closed = 0
+
+        def close_circuit(self) -> None:
+            self.closed += 1
+            self.circuit_open = False
+
+        async def execute(self, *_args: Any, **_kwargs: Any):
+            raise AssertionError("MCP tool execution must remain unreachable")
+
+    pair = SimpleNamespace(
+        public=SimpleNamespace(tasks=(MCP_TASK,)),
+        private=SimpleNamespace(
+            identity_catalog=MCP_ORACLE.resolved_roles,
+            graph_fact_registry=(),
+        ),
+    )
+    prepared = campaign_runner.PreparedTrack(
+        track=Track.MCP,
+        pair=pair,
+        profile=PROFILE,
+        release=SimpleNamespace(
+            entries=(SimpleNamespace(task_id=MCP_TASK.task_id),),
+        ),
+        live=SimpleNamespace(),
+        certifications={},
+    )
+    resolved = SimpleNamespace(
+        output_dir=tmp_path,
+        mcp_dir=tmp_path,
+        config=SimpleNamespace(
+            defaults=SimpleNamespace(
+                max_infra_retries=0,
+                model_base_url=None,
+                reasoning_effort=None,
+                health=SimpleNamespace(
+                    timeout_seconds=1.0,
+                    poll_interval=0.01,
+                ),
+                mcp=SimpleNamespace(
+                    max_steps=1,
+                    telemetry_adapter="generic",
+                    read_timeout_seconds=1.0,
+                    tool_timeout_seconds=1.0,
+                ),
+            )
+        ),
+    )
+    model = SimpleNamespace(
+        name="mcp-test",
+        provider="openai-compat",
+        model="test/model",
+        requested_model="openai-compat/test/model",
+        model_base_url="https://example.invalid/v1",
+        api_surface="chat_completions",
+        options={},
+    )
+
+    def capture_attempt(task_id, number, sample, provider, **_kwargs):
+        captured_providers.append(provider)
+        return SimpleNamespace(
+            task_id=task_id,
+            attempt=number,
+            sample=sample,
+            provider=provider,
+        )
+
+    monkeypatch.setattr(
+        campaign_runner,
+        "_provenance",
+        lambda **_kwargs: SimpleNamespace(run_identity=object()),
+    )
+    monkeypatch.setattr(campaign_runner, "_guard_run_dir", lambda *_args: None)
+    monkeypatch.setattr(campaign_runner, "_load_state", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        campaign_runner,
+        "build_checkpoint",
+        lambda *_args, results, **_kwargs: SimpleNamespace(results=tuple(results)),
+    )
+    monkeypatch.setattr(campaign_runner, "_state", lambda **_kwargs: object())
+    monkeypatch.setattr(campaign_runner, "_write_model", lambda *_args: None)
+    monkeypatch.setattr(campaign_runner, "_attempt", capture_attempt)
+    monkeypatch.setattr(
+        campaign_runner,
+        "OracleRegistry",
+        lambda _private: SimpleNamespace(for_task=lambda _task_id: MCP_ORACLE),
+    )
+    monkeypatch.setattr(campaign_runner, "_load_bloodhound_mcp_bundle", fake_bundle)
+    monkeypatch.setattr(campaign_runner, "run_mcp_model_task_v2", fake_mcp_run)
+
+    bhce = UnhealthyBHCE()
+    coordinator = Coordinator()
+    _provenance, results = asyncio.run(
+        campaign_runner._run_model(
+            resolved=resolved,
+            prepared=prepared,
+            model=model,
+            run_index=1,
+            bhce=bhce,
+            coordinator=coordinator,
+            loop=SimpleNamespace(),
+            runs_total=1,
+        )
+    )
+
+    assert provider_calls == 0
+    assert bhce.calls == 1
+    assert coordinator.closed == 0
+    assert len(results) == 1
+    assert results[0].execution_class is ExecutionClass.UNEXECUTED
+    assert results[0].outcome is SampleOutcomeCode.CIRCUIT_OPEN
+    assert captured_providers[0].provider_metrics["provider_called"] is False
 
 
 @pytest.mark.parametrize(
@@ -4728,7 +6232,8 @@ def test_final_route_facts_are_projected_from_claim_bound_receipt(
         )
     )
 
-    assert outcome.sample.reasoning_correct is False
+    assert outcome.sample.reasoning_correct is None
+    assert outcome.sample.output_compliant is True
     assert outcome.sample.outcome is SampleOutcomeCode.OUTPUT_INVALID
     assert outcome.sample.verdict is None
     assert outcome.sample.evidence is None
@@ -4764,9 +6269,7 @@ def test_receipt_property_facts_use_canonical_case_insensitive_keys() -> None:
         },
     )
 
-    assert properties == frozenset(
-        {entity_property_fact_key("USER-A", "hasspn", True)}
-    )
+    assert properties == frozenset({entity_property_fact_key("USER-A", "hasspn", True)})
 
 
 def test_complete_500_identity_receipt_materializes_set_after_empty_schema_retry(
@@ -4855,8 +6358,7 @@ def test_complete_500_identity_receipt_materializes_set_after_empty_schema_retry
                         "nodes": {},
                         "edges": [],
                         "literals": [
-                            {"key": "object_id", "value": entity.object_id}
-                            for entity in expected
+                            {"key": "object_id", "value": entity.object_id} for entity in expected
                         ],
                     },
                     "node_count": 0,
