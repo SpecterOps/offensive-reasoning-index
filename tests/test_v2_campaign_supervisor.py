@@ -482,7 +482,7 @@ def test_valid_completion_builds_packaged_model_card_without_scripts_import(
         ori_executable="/approved/ori",
         model_card_output=tmp_path / "public-card",
         model="provider-model",
-        display_name="Poolside Laguna S 2.1",
+        display_name="Example Model",
         inspector=_Inspector(_status("completed", mode="execution", tokens=10)),
         launcher=_Launcher(),
         sleeper=lambda _seconds: None,
@@ -497,7 +497,7 @@ def test_valid_completion_builds_packaged_model_card_without_scripts_import(
             (tmp_path / "campaign").resolve(),
             tmp_path / "public-card",
             "provider-model",
-            "Poolside Laguna S 2.1",
+            "Example Model",
         )
     ]
     assert supervisor.store.load().model_card_generated is True

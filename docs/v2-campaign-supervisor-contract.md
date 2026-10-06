@@ -169,8 +169,8 @@ uv run --env-file <protected-env-file> \
   --max-restarts 1 \
   --poll-interval-seconds 5 \
   --execute-approved \
-  --model poolside/laguna-s-2.1 \
-  --display-name "Poolside: Laguna S 2.1" \
+  --model example-provider/example-model \
+  --display-name "Example Model" \
   --model-card-output <public-evidence-output>
 ```
 

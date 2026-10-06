@@ -185,7 +185,7 @@ noncanonical ACE rights fail archive validation instead of silently disappearing
 ingest. `verify-ingest` reports both the manifest kind and the live kind queried when
 an exact source/kind/target relationship is absent.
 
-## Model Configs
+## Protocol V1 Model Config
 
 Use `models.example.yaml` as the public-safe template:
 
@@ -254,6 +254,67 @@ invalid. Private launcher provenance records the exact paths and `uv` version,
 and changing them invalidates resume state. ORI does not forward these settings
 to the BloodHound MCP child.
 
+## Local V2 Campaign Config
+
+V2 uses a separate strict campaign schema. Keep one machine-local file at
+`results/models.v2.local.yaml`; paths below are relative to that file. The
+artifact names match the `compile-v2` and `certify-v2-live` commands in the
+[V2 compile and certification runbook](benchmark-hardening-runbook.md#v2-compile-and-certification-commands).
+Replace the MCP checkout path and model slug with values available in your
+environment. The candidate, oracle, and certification files are private; keep
+all generated V2 artifacts under the ignored `results/` directory.
+
+```yaml
+version: 2
+protocol: ori-eval-protocol-v2
+
+source:
+  manifest: ../datasets/benchmarks/complex-v1-seed-4401_manifest.json
+  archive: ../datasets/benchmarks/complex-v1-seed-4401.zip
+
+tracks:
+  direct:
+    public: v2/complex-seed-4401/complex-direct-seed-4401-public-v2.json
+    oracles: v2/complex-seed-4401/complex-direct-seed-4401-oracles-v2.private.json
+    candidates: v2/complex-seed-4401/live/complex-seed-4401-direct-candidates-v2.json
+    live_certification: v2/complex-seed-4401/live/complex-seed-4401-direct-live-certification-v4.private.json
+  mcp:
+    public: v2/complex-seed-4401/complex-mcp-seed-4401-public-v2.json
+    oracles: v2/complex-seed-4401/complex-mcp-seed-4401-oracles-v2.private.json
+    candidates: v2/complex-seed-4401/live/complex-seed-4401-mcp-candidates-v2.json
+    live_certification: v2/complex-seed-4401/live/complex-seed-4401-mcp-live-certification-v4.private.json
+
+modes: [direct, mcp]
+output_dir: benchmark-runs/complex-seed-4401-v2
+
+defaults:
+  concurrency: 1
+  runs_per_model: 1
+  max_infra_retries: 2
+  infra_retry:
+    immediate_retries: 1
+    deferred_cooldown_seconds: 300
+  mcp:
+    mcp_dir: /path/to/pinned/BloodHound-MCP
+    max_steps: 16
+    resource_mode: "off"
+    tool_loop: native-openai-compatible
+
+models:
+  - name: codex-model
+    provider: codex
+    model: <available-codex-model-slug>
+    api_surface: auto
+    mcp_tool_loop: native-openai-compatible
+    options: {}
+```
+
+For OpenAI-compatible V2 providers such as Nous Portal, use
+`provider: openai-compat`, the provider's model ID and `model_base_url`, and
+`api_surface: auto`. Store its key in the matching environment variable, not
+in this file. Run V2 readiness first; add `--execute` only after readiness
+passes and you intend to spend provider usage.
+
 For unattended V2 operation, use the read-only `ori campaign-status --json`
 projection and follow the
 [V2 Campaign Supervisor Contract](v2-campaign-supervisor-contract.md). External
@@ -314,8 +375,9 @@ Relative paths are resolved from the config file's directory. Treat
 `output_dir` as the campaign name: copy the config and select a new value for
 each fresh campaign so checkpoints and policy-scoped deny-cache state are never
 silently reused. `--manifest` and `--output-dir` remain explicit CLI overrides.
-See [`models.example.yaml`](../models.example.yaml) for every supported
-model-matrix option and per-model override.
+See [`models.example.yaml`](../models.example.yaml) for the canonical Protocol V1
+baseline config. This runbook shows provider-specific entries and the available
+campaign overrides.
 
 Unknown model-matrix settings are errors. ORI writes a directly runnable,
 absolute-path `campaign-config.yaml`, preserves the untouched input as
@@ -332,9 +394,8 @@ surface selections during no-model readiness. Requested/resolved surfaces,
 structured-output mode, endpoint family, and credential-source name are private
 fingerprinted provenance; secret values are never recorded.
 
-Do not resume a campaign produced by the pre-hardening provider runtime. Retain
-the failed Laguna S 2.1 artifacts for diagnosis and create a fresh output
-directory for every post-fix run.
+Do not resume a campaign produced by an incompatible provider runtime. Create
+a fresh output directory after a runtime change.
 `runs_per_model` controls independent full benchmark passes against the same
 dataset and manifest. A model entry overrides the default. Each repetition has
 its own CSV and run metadata. `max_model_reruns_on_infra` remains reserved for
@@ -359,7 +420,7 @@ ORI can use the Codex auth file at:
 ~/.codex/auth.json
 ```
 
-Never print or commit the auth file. A safe readiness check is to report only whether a token exists and its length, not the token value.
+Never print or commit the auth file. Check login status with `codex login status`.
 
 Before model grading, start the exact pinned MCP package and exercise prompt,
 resource, tool, and credential startup paths without calling a model:
@@ -425,34 +486,12 @@ Preserve these outputs:
 - the exact manifest used for the run,
 - the model config with secrets removed.
 
-## Current Task Counts
+## V1 Development Task Counts
 
-The product metadata now declares two official tracks over the same generated dataset:
-
-```text
-complex-direct official: 100 grading tasks
-complex-mcp official:    100 grading tasks
-
-complex-direct diagnostic: 24 grading tasks
-complex-mcp diagnostic:    24 grading tasks
-```
-
-Do not split one 100-task score into 50 direct and 50 MCP tasks. Direct and MCP
-are separate scoring surfaces: direct tests query synthesis and schema knowledge;
-MCP tests tool use, lookup planning, evidence gathering, and synthesis. They can
-share the same graph and manifest, but they should have separate scores and, if
-needed, an optional derived composite.
-
-The current generated complex corpus is not yet enforcing the official 100-task selector per track. It currently exposes the generated task corpus from the planted paths. At the time of this runbook, a complex seed with the current Tier 6 implementation produces roughly:
-
-```text
-planted paths: 30
-Direct/Cypher grading tasks: 42
-MCP grading tasks: 62
-Tier 6 planted paths/tasks: 19
-```
-
-That is good enough for development sweeps, but not the final published official distribution. The next product-hardening step is to add a suite selector that chooses exactly 100 direct tasks and 100 MCP tasks with intentional tier distribution from the same dataset.
+The generated complex V1 development corpus currently exposes 42 Direct tasks
+and 62 MCP tasks. These are not final 100-task official selectors. Keep Direct
+and MCP scores separate; they use the same graph but measure different
+capabilities.
 
 ## Recommended Operator Sequence
 

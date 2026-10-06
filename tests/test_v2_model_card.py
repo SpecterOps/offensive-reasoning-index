@@ -455,13 +455,13 @@ def test_build_model_card_is_deterministic_separate_and_public_safe(
         campaign,
         first,
         model=_MODEL,
-        display_name="Poolside: Laguna S 2.1",
+        display_name="Example Model",
     )
     build_model_card(
         campaign,
         second,
         model=_MODEL,
-        display_name="Poolside: Laguna S 2.1",
+        display_name="Example Model",
     )
 
     assert card["campaign_valid"] is True

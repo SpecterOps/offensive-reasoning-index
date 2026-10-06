@@ -909,8 +909,8 @@ benchmark says exactly what has and has not been proven.
 
 ## Source map
 
-- [Complex V1 Development Campaign Freeze](complex-v1-development-freeze.md)
-  preserves the original evidence and eight frozen defects.
+- [Benchmark Hardening Runbook](benchmark-hardening-runbook.md) summarizes the
+  V1 failure taxonomy and the V2 scoring boundaries.
 - [V2 Task Authoring and Certification](benchmark-v2-task-authoring.md)
   documents the current task implementation and certification contract.
 - [V2 Certification Evidence](benchmark-v2-certification-evidence.md) records

@@ -224,7 +224,7 @@ prior certification stale.
 ### Model-backed V2 campaigns
 
 `ori run-v2` is the only model-backed V2 entry point. It accepts the strict V2
-campaign-config shape shown in the [README](../README.md#local-v2-model-config)
+campaign-config shape shown in the [Benchmark Products Runbook](benchmark-products-runbook.md#local-v2-campaign-config)
 and rejects unknown fields, V1 protocol values,
 mixed track sets, `resource_mode` other than `off`, implicit/automatic tool
 loops, concurrency above one, and provider/loop combinations unsupported by
@@ -483,9 +483,8 @@ non-fatal and cannot change execution or scoring.
 
 ## V2 compile and certification commands
 
-Set `ORI_BH_ENV_FILE` to your protected BloodHound environment file as described
-in the [README](../README.md#first-full-campaign-gpt-56-sol-vs-gpt-55) before
-running the live commands below.
+Set `ORI_BH_ENV_FILE` to the path of your protected BloodHound environment
+file before running the live commands below. Keep the file outside the repo.
 
 Compile and offline-certify one product track:
 
@@ -512,7 +511,8 @@ uv run --env-file "$ORI_BH_ENV_FILE" \
 This command is read-only. A graph mismatch is a stop condition, not permission
 to upload or replace data.
 
-Create an ignored machine-local campaign config using the README example, then
+Create an ignored machine-local campaign config using the
+[V2 config example](benchmark-products-runbook.md#local-v2-campaign-config), then
 run readiness without providers:
 
 ```bash

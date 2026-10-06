@@ -1,42 +1,17 @@
-# Complete model-matrix example for:
-#   uv run ori run --config models.local.yaml
-#
-# Copy this file, choose a new output_dir for every campaign, and keep private
-# endpoints or machine-specific paths in the untracked copy. Relative paths are
-# resolved from the directory containing the config file.
+# Protocol V1 model-matrix template.
+# Copy this file to an ignored local config and edit the manifest, provider,
+# model ID, endpoint, and output_dir for your campaign.
+# Paths are resolved from the config file's directory.
 
 version: 1
-
-# May be overridden with `ori run --manifest ...`.
 manifest: datasets/benchmarks/complex-v1-seed-4401_manifest.json
-
-# Supported values: direct, mcp. Use one or both.
 modes: [direct, mcp]
-
-# This is the campaign name and artifact root. Change it for every fresh run.
-# Existing directories may contain resumable checkpoints and deny-cache state.
 output_dir: results/benchmark-runs/change-me
 
 defaults:
-  # Direct samples are serialized even when a larger value is requested.
   concurrency: 1
-
-  # Independent complete passes per model. This is not an infrastructure retry.
   runs_per_model: 1
-
-  # null uses BLOODHOUND_* environment variables or the provider/runtime default.
-  bhce_url: null
-  model_base_url: null
-
-  # Full-run recovery attempts after infrastructure-attributable failures.
   max_model_reruns_on_infra: 1
-
-  health:
-    timeout_seconds: 60
-    poll_interval: 5
-
-  # Model-blind guard for direct Cypher only. Rejected queries receive
-  # QUERY_TOO_EXPENSIVE without being sent to BloodHound.
   direct_query_safety:
     enabled: true
     policy_version: bloodhound-cysql-direct-v3
@@ -46,79 +21,29 @@ defaults:
     max_result_rows: 1000
     max_query_characters: 16384
     max_recursive_patterns: 2
-    # Sum of recursive upper-hop-bound × relationship alternatives.
     max_recursive_expansion_complexity: 256
-
   mcp:
-    # Benchmark default: immutable upstream source plus the packaged console entry point.
     launcher: uvx_git
     source: git+https://github.com/mwnickerson/bloodhound_mcp@cdb17097e761c8a8622cb93bc3ba49a9e150bb6e
     executable: bloodhound-mcp
     max_steps: 16
-    # Supported values: "off", "on-demand". Quote "off" for YAML portability.
     resource_mode: "off"
-    # Supported values: auto, inspect, native-ollama, native-openai-compatible.
     tool_loop: auto
-    # Supported values: auto, generic, llama-cpp, mlx-lm, vllm, lm-studio.
-    openai_compat_telemetry_adapter: auto
-    ollama_read_timeout_seconds: 900
-
   telemetry:
     enabled: true
 
 models:
-  # This entry demonstrates every supported per-model override.
-  - name: local-qwen-fast
+  - name: example-model
     provider: openai-compat
-    model: qwen-fast
-    concurrency: 1
-    runs_per_model: 1
-    model_base_url: http://127.0.0.1:8080/v1
-    max_steps: 24
-    mcp_tool_loop: native-openai-compatible
-    openai_compat_telemetry_adapter: llama-cpp
-    mcp_ollama_read_timeout_seconds: 1800
-    options:
-      temperature: 0
-      num_ctx: 65536
-
-  # OpenRouter uses the OPENROUTER_API_KEY environment variable.
-  # Replace the model ID with one currently available from OpenRouter.
-  - name: openrouter-model
-    model: openai-compat/<openrouter-model-id>
-    model_base_url: https://openrouter.ai/api/v1
+    model: <provider-model-id>
+    model_base_url: https://provider.example/v1
     mcp_tool_loop: native-openai-compatible
     openai_compat_telemetry_adapter: generic
     options:
       temperature: 0
 
-  # Nous Portal uses NOUS_API_KEY (or NOUS_PORTAL_API_KEY).
-  # Replace the model ID with one currently available from Nous Portal.
-  - name: nous-portal-model
-    model: openai-compat/<nous-model-id>
-    model_base_url: https://inference-api.nousresearch.com/v1
-    mcp_tool_loop: native-openai-compatible
-    openai_compat_telemetry_adapter: generic
-    options:
-      temperature: 0
-
-  - name: codex-gpt-5-5
-    provider: codex
-    model: gpt-5.5
-    mcp_tool_loop: native-openai-compatible
-    options:
-      temperature: 0
-
-  - name: anthropic-sonnet
-    provider: anthropic
-    model: claude-sonnet-4-5
-    options:
-      temperature: 0
-
-  - name: ollama-qwen
-    provider: ollama
-    model: qwen3:14b
-    mcp_tool_loop: native-ollama
-    options:
-      num_ctx: 65536
-      temperature: 0
+# For Codex OAuth, replace the model entry above with:
+#   - name: codex-model
+#     provider: codex
+#     model: <available-codex-model-slug>
+#     mcp_tool_loop: native-openai-compatible
